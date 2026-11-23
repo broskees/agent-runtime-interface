@@ -33,13 +33,15 @@ export interface Validator<T> {
   parse(value: unknown): T;
 }
 
-const VENDOR = "ari";
-
 const TARGET_URIS: { readonly [target: string]: string } = {
   "draft-2020-12": "https://json-schema.org/draft/2020-12/schema",
   "draft-07": "http://json-schema.org/draft-07/schema#",
 };
 
+// `createValidator` runs while generated modules load, possibly before this
+// module's own top-level constants exist (see the import cycle note in
+// src/ari-error.ts). It must therefore read no module-level `const`, `let` or
+// class until a validator is used; everything it captures is created inside.
 export function createValidator<T>(
   name: string,
   documentId: string,
@@ -69,7 +71,7 @@ export function createValidator<T>(
   return {
     "~standard": {
       version: 1,
-      vendor: VENDOR,
+      vendor: "ari",
       validate: (value: unknown): StandardSchemaV1.Result<T> => {
         const issues = collectIssues(value);
         if (issues.length === 0) return { value: value as T };

@@ -76,6 +76,25 @@ describe("call errors", () => {
     assert.equal(isCallError("unsupported"), false);
   });
 
+  test("a driver_unavailable error must name a package or a binary, in its type and at runtime", () => {
+    // @ts-expect-error the type requires `package` or `binary`, as the schema does
+    const incomplete: CallError = { code: "driver_unavailable", message: "Driver unavailable" };
+    assert.throws(() => new AriError(incomplete), /Invalid call error.*package/);
+    const withBinary: CallError = { code: "driver_unavailable", message: "Install pi", binary: "pi" };
+    assert.equal(isCallError(JSON.parse(JSON.stringify(new AriError(withBinary))), "driver_unavailable"), true);
+  });
+
+  test("the AriError constructor refuses any payload that would fail its own round trip", () => {
+    const fractionalPath = { code: "validation", message: "bad", issues: [{ message: "x", path: [1.5] }] } as CallError;
+    assert.throws(() => new AriError(fractionalPath), /Invalid call error at issues\.0\.path\.0/);
+    const missingCapability = { code: "unsupported", message: "no capability named" } as unknown as CallError;
+    assert.throws(() => new AriError(missingCapability), /Invalid call error at capability/);
+    const unknownCode = { code: "teapot", message: "short and stout" } as unknown as CallError;
+    assert.throws(() => new AriError(unknownCode), TypeError);
+    const extension: CallError = { code: "x:vendor.quota", message: "Vendor quota", data: { left: 0 } };
+    assert.deepEqual(JSON.parse(JSON.stringify(new AriError(extension))), extension);
+  });
+
   test("an AriError converts back to data, and toCallError accepts both forms", () => {
     const error = callErrors.unsupported("turns.steer");
     assert.equal(isAriError(error, "unsupported"), true);

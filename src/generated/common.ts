@@ -68,7 +68,7 @@ export type ImageContent = {
   data?: string;
   url?: string;
   attachmentRef?: string;
-};
+} & ({ data: string } | { url: string } | { attachmentRef: string });
 
 /** A file the host stores. The driver resolves `attachmentRef` through the host's `attachments` service. A path in a prompt grants no access by itself. */
 export type FileContent = {

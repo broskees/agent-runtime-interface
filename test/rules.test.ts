@@ -133,9 +133,15 @@ describe("repository rules", () => {
     write(bare, "dist/helper.js", 'import pad from "left-pad";\nexport const helper = (value) => pad(value.trim(), 4);\n');
     only(check(bare), "dist-imports", "dist/helper.js");
 
+    // dist/helper.js is outside every Node-only subpath and also reachable from the root's shipped default,
+    // so both rules apply to it.
     const builtinInCore = cleanFixture();
     write(builtinInCore, "dist/helper.js", 'import { readFileSync } from "node:fs";\nexport const helper = (file) => readFileSync(file, "utf8");\n');
-    only(check(builtinInCore), "dist-imports", "dist/helper.js");
+    const violations = check(builtinInCore);
+    assert.deepEqual(violations.map((violation) => `${violation.file} ${violation.rule}`).sort(), [
+      "dist/helper.js browser-safe-entries",
+      "dist/helper.js dist-imports",
+    ]);
 
     const staticPeer = cleanFixture();
     write(staticPeer, "dist/drivers/sample/index.js", 'import { Agent } from "@cursor/sdk";\nexport const load = async () => Agent;\n');
@@ -144,6 +150,106 @@ describe("repository rules", () => {
     const undeclaredDynamic = cleanFixture();
     write(undeclaredDynamic, "dist/drivers/sample/index.js", 'export async function load() {\n  return import("some-other-sdk");\n}\n');
     only(check(undeclaredDynamic), "dist-imports", "dist/drivers/sample/index.js");
+  });
+
+  test("(c) a browser-safe subpath whose shipped default target reaches a Node built-in fails", () => {
+    const root = cleanFixture();
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+    pkg.exports["./host"] = { development: "./src/host/index.ts", types: "./dist/host/index.d.ts", default: "./dist/node/host.js" };
+    write(root, "package.json", JSON.stringify(pkg));
+    write(root, "src/host/index.ts", "export const ready = true;\n");
+    write(root, "dist/node/host.js", 'export { existsSync } from "node:fs";\n');
+    only(check(root), "browser-safe-entries", "dist/node/host.js");
+
+    const throughRelative = cleanFixture();
+    write(throughRelative, "dist/helper.js", 'export { helper } from "./node/index.js";\n');
+    only(check(throughRelative), "browser-safe-entries", "dist/node/index.js");
+  });
+
+  test("(d) a static vendor import from a .mts or .cts source fails", () => {
+    const mts = cleanFixture();
+    write(mts, "src/drivers/sample/index.mts", 'import { Agent } from "@cursor/sdk";\nexport const agent = Agent;\n');
+    only(check(mts), "no-static-optional-imports", "src/drivers/sample/index.mts");
+
+    const cts = cleanFixture();
+    write(cts, "src/drivers/sample/load.cts", 'const sdk = require("@cursor/sdk");\nexport = sdk;\n');
+    only(check(cts), "no-static-optional-imports", "src/drivers/sample/load.cts");
+  });
+
+  test("(e) a static vendor import in an emitted .mjs or .cjs file fails", () => {
+    const mjs = cleanFixture();
+    write(mjs, "dist/drivers/sample/index.mjs", 'import { Agent } from "@cursor/sdk";\nexport const agent = Agent;\n');
+    only(check(mjs), "dist-imports", "dist/drivers/sample/index.mjs");
+
+    const cjs = cleanFixture();
+    write(cjs, "dist/drivers/sample/index.cjs", 'module.exports = require("@cursor/sdk");\n');
+    only(check(cjs), "dist-imports", "dist/drivers/sample/index.cjs");
+  });
+
+  test("(e) a dynamic import whose specifier is not a literal is refused unless it provably resolves or carries a reviewed marker", () => {
+    const constBound = cleanFixture();
+    write(constBound, "dist/node/index.js", 'const httpClientPackage = "undici";\nexport async function load() {\n  return import(httpClientPackage);\n}\n');
+    only(check(constBound), "dist-imports", "dist/node/index.js");
+
+    const runtimeChosen = cleanFixture();
+    write(runtimeChosen, "dist/drivers/sample/index.js", "export async function load(name) {\n  return import(name);\n}\n");
+    only(check(runtimeChosen), "dist-imports", "dist/drivers/sample/index.js");
+
+    const wrappedParameter = cleanFixture();
+    write(wrappedParameter, "dist/drivers/sample/index.js", "export async function load(name) {\n  return import(__rewriteRelativeImportExtension(name));\n}\n");
+    only(check(wrappedParameter), "dist-imports", "dist/drivers/sample/index.js");
+
+    const computed = cleanFixture();
+    write(computed, "dist/drivers/sample/index.js", 'export async function load() {\n  return import("@cursor/" + "sdk");\n}\n');
+    only(check(computed), "dist-imports", "dist/drivers/sample/index.js");
+
+    const markerInCore = cleanFixture();
+    write(markerInCore, "dist/helper.js", "export async function load(name) {\n  // ari-allow-dynamic-import: loads a host-chosen plugin\n  return import(name);\n}\n");
+    only(check(markerInCore), "dist-imports", "dist/helper.js");
+
+    const markerWithoutReason = cleanFixture();
+    write(markerWithoutReason, "dist/node/index.js", "export async function load(name) {\n  // ari-allow-dynamic-import:\n  return import(name);\n}\n");
+    only(check(markerWithoutReason), "dist-imports", "dist/node/index.js");
+  });
+
+  test("(e) dynamic imports that provably stay inside the rules pass", () => {
+    const root = cleanFixture();
+    write(
+      root,
+      "dist/drivers/sample/index.js",
+      [
+        'const sdkPackage = "@cursor/sdk";',
+        "export async function load(name) {",
+        "  await import(sdkPackage);",
+        "  await import(__rewriteRelativeImportExtension(sdkPackage));",
+        "  await import(`../${name}/index.js`);",
+        '  return import("node:fs");',
+        "}",
+      ].join("\n"),
+    );
+    write(
+      root,
+      "dist/node/index.js",
+      [
+        "export async function loadModule(modulePath) {",
+        "  // ari-allow-dynamic-import: the runner loads a driver module the host names on its command line",
+        "  return import(modulePath);",
+        "}",
+        "export async function loadInline(modulePath) {",
+        "  return import(/* ari-allow-dynamic-import: same, written inline */ modulePath);",
+        "}",
+        "export async function loadAsEmitted(modulePath) {",
+        "  return import(__rewriteRelativeImportExtension(/* ari-allow-dynamic-import: as tsc emits the inline form */ modulePath));",
+        "}",
+      ].join("\n"),
+    );
+    const waivers: string[] = [];
+    assert.deepEqual(checkRepository({ root, tarballFiles: SHIPPED, onWaiver: (note) => waivers.push(`${note.file}:${note.line} ${note.reason}`) }), []);
+    assert.deepEqual(waivers, [
+      "dist/node/index.js:3 the runner loads a driver module the host names on its command line",
+      "dist/node/index.js:6 same, written inline",
+      "dist/node/index.js:9 as tsc emits the inline form",
+    ]);
   });
 
   test("the command line exits non-zero and names the file and rule", () => {

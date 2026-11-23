@@ -112,7 +112,7 @@ export type DriverUnavailableError = {
   package?: string;
   binary?: string;
   installHint?: string;
-};
+} & ({ package: string } | { binary: string });
 
 /** An error code defined by an extension. */
 export type ExtensionCallError = {

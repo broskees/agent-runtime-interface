@@ -349,7 +349,30 @@ function objectType(ctx: ModuleContext, node: SchemaObject, indent: string): str
     const optional = required.has(name) ? "" : "?";
     return `${doc}${inner}${propertyKey(name)}${optional}: ${typeExpression(ctx, schema, inner)};`;
   });
-  return `{\n${lines.join("\n")}\n${indent}}`;
+  const base = `{\n${lines.join("\n")}\n${indent}}`;
+  const alternatives = requiredAlternatives(ctx, node, properties, indent);
+  return alternatives === undefined ? base : `${base} & (${alternatives})`;
+}
+
+// An `anyOf` whose branches only list `required` fields ("at least one of
+// these") becomes a union of objects that each require their fields, so the
+// TypeScript type rejects exactly what the schema rejects, for example a
+// `driver_unavailable` error that names neither a package nor a binary.
+function requiredAlternatives(ctx: ModuleContext, node: SchemaObject, properties: SchemaObject, indent: string): string | undefined {
+  const union = Array.isArray(node.anyOf) ? node.anyOf : Array.isArray(node.oneOf) ? node.oneOf : undefined;
+  if (union === undefined || !isRequiredOnlyUnion(union)) return undefined;
+  return union
+    .map((branch) => {
+      const names = ((branch as SchemaObject).required as Json[]).map(String);
+      if (names.length === 0) fail(`spec/v1/${ctx.file.relPath}: a required-field alternative must name at least one field`);
+      const fields = names.map((name) => {
+        const schema = properties[name];
+        if (schema === undefined) fail(`spec/v1/${ctx.file.relPath}: required-field alternative names "${name}", which is not a property`);
+        return `${propertyKey(name)}: ${typeExpression(ctx, schema, indent)}`;
+      });
+      return `{ ${fields.join("; ")} }`;
+    })
+    .join(" | ");
 }
 
 function relativeModule(from: SpecFile, to: SpecFile): string {

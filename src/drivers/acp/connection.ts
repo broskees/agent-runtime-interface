@@ -155,7 +155,12 @@ export class AcpConnection {
     const params: V1.InitializeRequest | V2.InitializeRequest =
       maxVersion === 2
         ? ({ protocolVersion: 2, info, capabilities: {} } satisfies V2.InitializeRequest)
-        : ({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: info } satisfies V1.InitializeRequest);
+        : ({
+            protocolVersion: 1,
+            // The driver maps boolean config options, which a v1 agent offers only to a client that says so.
+            clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, session: { configOptions: { boolean: {} } } },
+            clientInfo: info,
+          } satisfies V1.InitializeRequest);
     const result = (await this.peer.request("initialize", params)) as V1.InitializeResponse | V2.InitializeResponse;
     const version = result.protocolVersion;
     if (version !== 1 && version !== 2) {

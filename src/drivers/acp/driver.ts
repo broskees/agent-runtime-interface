@@ -3,11 +3,11 @@
 // capabilities or members differ; everything ACP is shared here.
 
 import * as fs from "node:fs/promises";
-import { callErrors } from "../../errors.ts";
+import { AriError, callErrors } from "../../errors.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
-import type { JsonSchema } from "../../generated/common.ts";
-import type { ConfigOption } from "../../generated/config.ts";
+import type { ConfigValues, JsonSchema } from "../../generated/common.ts";
+import type { ConfigOption, RuntimePolicy } from "../../generated/config.ts";
 import type { CliLaunchManifest, DriverMetadata } from "../../generated/driver.ts";
 import type { CallError } from "../../generated/errors.ts";
 import type { InstanceStatus, ModelCatalog, OpenSessionInput, ProbeResult, UpdateAdvisory } from "../../generated/instance.ts";
@@ -29,7 +29,7 @@ export interface AcpFlavorContext<Config> {
 
 /** What `probe()` checks: an executable to find and ask for its version, or a known result that needs no process. */
 export type AcpProbeTarget =
-  | { readonly kind: "command"; readonly command: string; readonly versionArgs: readonly string[] }
+  | { readonly kind: "command"; readonly command: string; readonly versionArgs: readonly string[]; readonly env?: { readonly [name: string]: string } }
   | { readonly kind: "known"; readonly installed: boolean; readonly version?: string; readonly error?: CallError }
   | { readonly kind: "unset"; readonly message: string };
 
@@ -56,6 +56,8 @@ export interface AcpFlavor<Config extends AcpBaseConfig> {
   /** The command for one agent process of a session. */
   launch(context: AcpFlavorContext<Config>, input: OpenSessionInput): Promise<AcpLaunch>;
   adjustCapabilities?(capabilities: Capabilities, config: Config): Capabilities;
+  /** Config values the agent should get for a runtime policy, for agents that enforce a mode through a config option. */
+  policyConfig?(policy: RuntimePolicy, config: Config): ConfigValues;
   /** Adds or replaces session members the flavor handles differently. */
   decorateSession?(session: AcpSession, context: AcpFlavorContext<Config>): Session;
   /** Adds instance members the flavor has, such as `subProviders`. */
@@ -104,8 +106,8 @@ export function rangeText(range: TestedRange): string {
 }
 
 /** Runs `command <args>` to completion as a probe, and returns its exit code and output. */
-async function runProbe(host: HostServices<unknown>, command: string, args: readonly string[]): Promise<{ code: number | null; output: string }> {
-  const child = await host.process.spawn({ command, args: [...args], purpose: "probe", stdin: "ignore", timeoutMs: 10_000 });
+async function runProbe(host: HostServices<unknown>, command: string, args: readonly string[], env: { readonly [name: string]: string } | undefined): Promise<{ code: number | null; output: string }> {
+  const child = await host.process.spawn({ command, args: [...args], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, ...(env === undefined ? {} : { env: { ...env } }) });
   const decoder = new TextDecoder();
   let output = "";
   const drain = async (stream: AsyncIterable<Uint8Array>): Promise<void> => {
@@ -182,7 +184,7 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
       return { ok: false, installed: false, error: callErrors.driverUnavailable({ binary: target.command }, `${target.command} is not installed or not on PATH`).callError, checkedAt };
     }
     try {
-      const run = await runProbe(this.#context.host as HostServices<unknown>, target.command, target.versionArgs);
+      const run = await runProbe(this.#context.host as HostServices<unknown>, target.command, target.versionArgs, target.env);
       const version = parseVersion(run.output);
       return { ok: run.code === 0, installed: true, ...(version === undefined ? {} : { version }), checkedAt };
     } catch (error) {
@@ -197,12 +199,13 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
     if (target.kind === "command" && (await this.#context.host.process.resolveExecutable(target.command)) === null) {
       throw callErrors.driverUnavailable({ binary: target.command }, `${target.command} is not installed or not on PATH`);
     }
-    if (target.kind === "known" && !target.installed && target.error?.code === "driver_unavailable") throw callErrors.driverUnavailable({ binary: (target.error as { binary?: string }).binary ?? this.#flavor.kind }, target.error.message);
+    if (target.kind === "known" && !target.installed && target.error !== undefined) throw new AriError(target.error);
     await this.#flavor.beforeSession?.(this.#context);
     this.#sessionCount += 1;
     const id = deriveId({ kind: "session", native: { id: null, strength: "none", ordinal: this.#sessionCount }, identityVersion: ACP_IDENTITY_VERSION, scope: this.id });
     const config = this.#context.config;
-    const adjust = this.#flavor.adjustCapabilities;
+    const adjust = this.#flavor.adjustCapabilities?.bind(this.#flavor);
+    const policyConfig = this.#flavor.policyConfig?.bind(this.#flavor);
     const session = new AcpSession(
       this.#context.host as HostServices<unknown>,
       {
@@ -216,6 +219,7 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
           if (model !== undefined) this.#modelOption = model;
         },
         ...(adjust === undefined ? {} : { adjustCapabilities: (capabilities: Capabilities) => adjust(capabilities, config) }),
+        ...(policyConfig === undefined ? {} : { policyConfig: (policy: RuntimePolicy) => policyConfig(policy, config) }),
       },
       input,
       id,

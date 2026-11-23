@@ -202,6 +202,8 @@ function setOption(sessionId: string, configId: string, value: unknown): AnyOpti
   const target = options.find((entry) => (entry["configId"] ?? entry["id"]) === configId);
   if (target === undefined) throw acp1.RequestError.invalidParams(undefined, `no config option ${configId}`);
   target["currentValue"] = value;
+  // Options can depend on each other (fx's model list follows its provider), so the agent also re-announces the list.
+  setImmediate(() => void update(sessionId, { sessionUpdate: "config_option_update", configOptions: options }));
   return options;
 }
 
@@ -445,6 +447,7 @@ const puppet: { [method: string]: (...args: never[]) => unknown } = {
     }),
   finishCancelled: (turnId: string) => liveTurn(turnId).finish("cancelled"),
   exitProcess: () => process.exit(3),
+  rawUpdate: (turnId: string, value: { [key: string]: unknown }) => update(liveTurn(turnId).sessionId, value),
   inspectSession: (sessionId: string) => inspect(sessionId),
   activity: () => activity,
 };

@@ -82,6 +82,8 @@ export interface AcpSessionSettings {
   readonly canonicalPath: (directory: string) => Promise<string>;
   /** A flavor's changes to the declared capabilities. */
   readonly adjustCapabilities?: (capabilities: Capabilities) => Capabilities;
+  /** Config values a flavor sets from a thread's runtime policy, for agents that enforce a mode through a config option. */
+  readonly policyConfig?: (policy: RuntimePolicy) => ConfigValues;
   /** Told the config options each time the agent sends a new list. */
   readonly onConfigOptions?: (options: readonly ConfigOption[]) => void;
 }
@@ -271,7 +273,7 @@ export class AcpSession implements Session {
     this.#setOptions(state, created.configOptions ?? undefined);
     const commands = (created as V2.NewSessionResponse).availableCommands;
     if (commands !== undefined) this.#emit({ type: "commands.updated", commands: slashCommands(commands) }, { threadId: state.thread.id });
-    await this.#applyConfig(state, input.config);
+    await this.#applyConfig(state, this.#withPolicy(input.policy, input.config));
     return { ...state.thread, appliedConfig: this.#currentConfig(state) };
   }
 
@@ -298,7 +300,7 @@ export class AcpSession implements Session {
       if (known !== undefined) this.#emit({ type: "thread.upsert", thread: state.thread }, { threadId: state.thread.id });
       this.#passMeta(resumed?._meta, "session/resume", "result", nativeId);
       this.#setOptions(state, resumed?.configOptions ?? undefined);
-      await this.#applyConfig(state, input.config);
+      await this.#applyConfig(state, this.#withPolicy(input.policy, input.config));
       return { ...state.thread, appliedConfig: this.#currentConfig(state) };
     } catch (error) {
       if (error instanceof JsonRpcError && error.code === ACP_ERRORS.authRequired) throw callErrorFrom(error, "session/resume");
@@ -315,7 +317,7 @@ export class AcpSession implements Session {
     );
     const state = this.#register(fresh.sessionId, cwd, { ...policy, cwd }, servers, undefined);
     this.#setOptions(state, fresh.configOptions ?? undefined);
-    await this.#applyConfig(state, input.config);
+    await this.#applyConfig(state, this.#withPolicy(policy, input.config));
     return { ...state.thread, appliedConfig: this.#currentConfig(state) };
   }
 
@@ -348,7 +350,7 @@ export class AcpSession implements Session {
     const state = this.#register(forked.sessionId, cwd, policy, source.mcp, undefined, { threadId: source.thread.id });
     this.#passMeta(forked._meta, "session/fork", "result", forked.sessionId);
     this.#setOptions(state, forked.configOptions ?? undefined);
-    await this.#applyConfig(state, input.config);
+    await this.#applyConfig(state, this.#withPolicy(policy, input.config));
     return state.thread;
   }
 
@@ -378,8 +380,8 @@ export class AcpSession implements Session {
     if (thread.active !== undefined) throw callErrors.invalidState("previous_turn_active", "A turn is still running on this thread");
     const agent = await this.#agent();
     await this.#ensureLoaded(agent, thread);
-    await this.#applyConfig(thread, input.config);
     const policy = input.policy ?? thread.policy;
+    await this.#applyConfig(thread, this.#withPolicy(input.policy, input.config));
     const instructions = [...thread.pendingInstructions, ...[input.context?.system, input.context?.developer].filter((text): text is string => text !== undefined && text !== "")];
     const blocks = await this.#promptBlocks(agent, input.content);
     const prompt = instructions.length === 0 ? blocks : [{ type: "text" as const, text: instructions.join("\n\n") }, ...blocks];
@@ -660,6 +662,13 @@ export class AcpSession implements Session {
     const mapped = [...thread.options.values()].map((entry) => entry.ari);
     this.#settings.onConfigOptions?.(mapped);
     this.#emit({ type: "config.updated", options: mapped }, { threadId: thread.thread.id });
+  }
+
+  /** The host's config values, after the values a flavor derives from the policy (the host's own values win). */
+  #withPolicy(policy: RuntimePolicy | undefined, config: ConfigValues | undefined): ConfigValues | undefined {
+    const derived = policy === undefined ? undefined : this.#settings.policyConfig?.(policy);
+    if (derived === undefined) return config;
+    return { ...derived, ...(config ?? {}) };
   }
 
   #currentConfig(thread: ThreadState): ConfigValues {

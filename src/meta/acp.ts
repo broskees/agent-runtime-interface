@@ -67,13 +67,17 @@ export const ACP_BASE_CONFIG_PROPERTIES: { readonly [field: string]: JsonSchema 
 };
 
 export const ACP_BASE_FORM_HINTS: { readonly [field: string]: FormHint } = {
-  maxProtocolVersion: { label: "Newest ACP version", description: "ACP v2 is in Preview; choose 1 to keep every connection on v1.", advanced: true },
+  maxProtocolVersion: { label: "Newest ACP version", description: "ACP v2 is in Preview; choose 2 to ask the agent for it.", advanced: true },
   forkAcrossDirectories: { label: "Forks may change directory", advanced: true },
   configDependencies: { label: "Config option dependencies", advanced: true },
 };
 
-/** The base driver's defaults: request ACP v2, which a v1 agent answers with v1. */
-export const ACP_BASE_DEFAULTS: AcpBaseConfig = { maxProtocolVersion: 2, forkAcrossDirectories: false, configDependencies: {} };
+/**
+ * The defaults: request ACP v1. ACP v2 is in Preview, and ACP's migration
+ * guide suggests clients keep requesting it opt-in; set `maxProtocolVersion`
+ * to 2 to ask for it (a v1 agent still answers with v1).
+ */
+export const ACP_BASE_DEFAULTS: AcpBaseConfig = { maxProtocolVersion: 1, forkAcrossDirectories: false, configDependencies: {} };
 
 /** A plug in a socket, drawn for this package, monochrome so it follows the theme. */
 export const ACP_ICON: Icon = {

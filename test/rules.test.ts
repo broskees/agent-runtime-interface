@@ -1,5 +1,5 @@
 // The repository rule checker fails, naming the file and the rule, on each of
-// its five violations, and passes a clean fixture and the real repository.
+// its six violations, and passes a clean fixture and the real repository.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -255,6 +255,43 @@ describe("repository rules", () => {
       ].join("\n"),
     );
     assert.deepEqual(check(root), []);
+  });
+
+  test("(f) a driver that reaches the host-side approval reviewer fails", () => {
+    const withHost = (): string => {
+      const root = cleanFixture();
+      write(root, "src/host/approval-reviewer.ts", "export const narrowest = (scopes: string[]): string | undefined => scopes[0];\n");
+      write(root, "src/host/reducer.ts", "export const reduce = (count: number): number => count + 1;\n");
+      write(root, "src/host/index.ts", 'export { narrowest } from "./approval-reviewer.ts";\nexport { reduce } from "./reducer.ts";\n');
+      return root;
+    };
+
+    // Importing another host-toolkit module file directly is allowed.
+    const allowed = withHost();
+    write(allowed, "src/drivers/sample/state.ts", 'import { reduce } from "../../host/reducer.ts";\nexport const next = reduce(1);\n');
+    assert.deepEqual(check(allowed), []);
+
+    const direct = withHost();
+    write(direct, "src/drivers/sample/review.ts", 'import { narrowest } from "../../host/approval-reviewer.ts";\nexport const pick = narrowest(["once"]);\n');
+    only(check(direct), "drivers-no-approval-reviewer", "src/drivers/sample/review.ts");
+
+    const typeOnly = withHost();
+    write(typeOnly, "src/drivers/sample/review.ts", 'import type { narrowest } from "../../host/approval-reviewer.ts";\nexport type Pick = typeof narrowest;\n');
+    only(check(typeOnly), "drivers-no-approval-reviewer", "src/drivers/sample/review.ts");
+
+    const throughEntry = withHost();
+    write(throughEntry, "src/drivers/sample/review.ts", 'import { reduce } from "../../host/index.ts";\nexport const next = reduce(1);\n');
+    only(check(throughEntry), "drivers-no-approval-reviewer", "src/drivers/sample/review.ts");
+
+    const bySpecifier = withHost();
+    write(bySpecifier, "src/drivers/sample/review.ts", 'export async function load(): Promise<unknown> {\n  return import("rules-fixture/host");\n}\n');
+    only(check(bySpecifier), "drivers-no-approval-reviewer", "src/drivers/sample/review.ts");
+
+    // Reaching it through an intermediate module outside src/drivers/ fails too.
+    const transitive = withHost();
+    write(transitive, "src/shared/review-helper.ts", 'export { narrowest } from "../host/approval-reviewer.ts";\n');
+    write(transitive, "src/drivers/sample/review.ts", 'import { narrowest } from "../../shared/review-helper.ts";\nexport const pick = narrowest(["once"]);\n');
+    only(check(transitive), "drivers-no-approval-reviewer", "src/drivers/sample/review.ts");
   });
 
   test("the command line exits non-zero and names the file and rule", () => {

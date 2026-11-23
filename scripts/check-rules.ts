@@ -29,6 +29,13 @@
 //                            and dynamic ones included. Drivers that need
 //                            another host-toolkit module import that module
 //                            file directly.
+//   effect-only-in-ari-effect
+//                            only `ari/effect` loads Effect: no source file in
+//                            src/ outside src/effect/ loads `effect` (statically
+//                            or with import()) or reaches a module under
+//                            src/effect/ (by a relative import or the package's
+//                            own `<name>/effect` specifier). Type-only imports
+//                            are erased and allowed.
 //
 // Dynamic imports in dist/ whose specifier is not a string literal: the
 // checker resolves the specifier when it provably can, then applies the rule
@@ -59,7 +66,8 @@ export type RuleName =
   | "browser-safe-entries"
   | "no-static-optional-imports"
   | "dist-imports"
-  | "drivers-no-approval-reviewer";
+  | "drivers-no-approval-reviewer"
+  | "effect-only-in-ari-effect";
 
 export interface RuleViolation {
   readonly rule: RuleName;
@@ -85,6 +93,9 @@ export const SOURCE_EXTENSIONS = [".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", 
 
 /** Built files rule dist-imports reads. */
 export const DIST_EXTENSIONS = [".js", ".mjs", ".cjs"];
+
+/** The sources of `ari/effect`, the only modules that may load `effect`. */
+export const EFFECT_SOURCE_DIRECTORY = "src/effect/";
 
 /** The approval reviewer module and the `ari/host` entry that re-exports it; no driver may reach either. */
 export const APPROVAL_REVIEWER_MODULES = ["src/host/approval-reviewer.ts", "src/host/index.ts"];
@@ -551,6 +562,35 @@ function checkDriversSkipReviewer(root: string, pkg: PackageJson): RuleViolation
   return violations;
 }
 
+function checkEffectConfinement(root: string, pkg: PackageJson): RuleViolation[] {
+  const effectSpecifier = `${pkg.name ?? "ari"}/effect`;
+  const violations: RuleViolation[] = [];
+  for (const full of walk(path.join(root, "src"))) {
+    if (!hasExtension(full, SOURCE_EXTENSIONS)) continue;
+    const file = toPosix(path.relative(root, full));
+    if (file.startsWith(EFFECT_SOURCE_DIRECTORY)) continue;
+    for (const site of findImports(file, fs.readFileSync(full, "utf8"))) {
+      if (site.typeOnly || site.specifier === undefined) continue;
+      let reached: string | undefined;
+      if (site.specifier === effectSpecifier || site.specifier.startsWith(`${effectSpecifier}/`)) {
+        reached = `"${site.specifier}"`;
+      } else if (isRelative(site.specifier)) {
+        const resolved = resolveRelative(root, file, site.specifier);
+        if (resolved?.startsWith(EFFECT_SOURCE_DIRECTORY)) reached = resolved;
+      } else if (packageName(site.specifier) === "effect") {
+        reached = `the optional peer "${site.specifier}"`;
+      }
+      if (reached === undefined) continue;
+      violations.push({
+        rule: "effect-only-in-ari-effect",
+        file,
+        message: `line ${site.line} loads ${reached}; only ari/effect (${EFFECT_SOURCE_DIRECTORY}) may load Effect`,
+      });
+    }
+  }
+  return violations;
+}
+
 /** Files `npm pack` would put in the tarball, relative to `root`. */
 export function packedFiles(root: string): string[] {
   const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf8" });
@@ -570,6 +610,7 @@ export function checkRepository(options: CheckOptions): RuleViolation[] {
     ...checkOptionalImports(root, pkg),
     ...checkDistImports(root, pkg),
     ...checkDriversSkipReviewer(root, pkg),
+    ...checkEffectConfinement(root, pkg),
   ];
 }
 
@@ -578,7 +619,7 @@ function main(argv: string[]): number {
   const root = rootIndex === -1 ? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..") : path.resolve(argv[rootIndex + 1] ?? ".");
   const violations = checkRepository({ root });
   if (violations.length === 0) {
-    process.stdout.write("check:rules passed: all six repository rules hold.\n");
+    process.stdout.write("check:rules passed: all seven repository rules hold.\n");
     return 0;
   }
   for (const violation of violations) {

@@ -90,10 +90,16 @@ class PuppetChannel {
   }
 }
 
-function childTurn(channel: PuppetChannel, turn: { turnId: string; prompt: string }): NativeTurn {
+/** A native turn of the fake agent, with one step beyond the kit's: sending any `session/update` as is. */
+export interface FakeNativeTurn extends NativeTurn {
+  raw(update: { readonly [key: string]: unknown }): Promise<void>;
+}
+
+function childTurn(channel: PuppetChannel, turn: { turnId: string; prompt: string }): FakeNativeTurn {
   const { turnId, prompt } = turn;
   return {
     prompt,
+    raw: (update) => channel.call("rawUpdate", turnId, update),
     say: (text) => channel.call("say", turnId, text),
     runTool: (tool) => channel.call("runTool", turnId, tool),
     requestApproval: async (approval) => {
@@ -114,8 +120,8 @@ function childTurn(channel: PuppetChannel, turn: { turnId: string; prompt: strin
   };
 }
 
-/** A `SpawnedProcess` whose stdin writes and stdout frames are recorded. */
-function recorded(spawned: SpawnedProcess, connection: number, frames: RecordedFrame[]): SpawnedProcess {
+/** A `SpawnedProcess` whose stdin writes and stdout frames are recorded in `frames`. */
+export function recorded(spawned: SpawnedProcess, connection: number, frames: RecordedFrame[]): SpawnedProcess {
   const fromClient = new NdjsonDecoder();
   const fromAgent = new NdjsonDecoder();
   const keep = (from: RecordedFrame["from"], records: ReturnType<NdjsonDecoder["push"]>): void => {

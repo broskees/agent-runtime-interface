@@ -14,6 +14,7 @@ import { after, before, describe, test } from "node:test";
 import { isAriError } from "../../src/index.ts";
 import { createFileSecrets } from "../../src/node/index.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
+import { createSymlinkedRoot, exists } from "../helpers/symlinked-root.ts";
 
 const run = promisify(execFile);
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -114,6 +115,21 @@ describe("ari/node file-backed secrets", () => {
     }
     assert.deepEqual(await fs.readdir(root), []);
     assert.deepEqual(await fs.readdir(scratch), besideStateDir, "nothing appeared beside the state dir");
+  });
+
+  test("a state dir with `..` after a symbolic link is used as the operating system reads it", async () => {
+    const layout = await createSymlinkedRoot("ari-secrets-symlink-");
+    try {
+      const secrets = createFileSecrets({ stateDir: layout.throughSymlink("state") });
+      await secrets.set("codex", "token", bytes("t0ken"));
+      assert.equal(Buffer.from((await secrets.get("codex", "token"))!).toString(), "t0ken");
+      const files = await filesUnder(layout.real("state"));
+      assert.equal(files.length, 1, "the secret is under the real state dir");
+      assert.equal((await fs.stat(files[0]!)).mode & 0o777, 0o600);
+      assert.equal(await exists(layout.collapsed("state")), false, "nothing is written where lexical normalization points");
+    } finally {
+      await fs.rm(layout.root, { recursive: true, force: true });
+    }
   });
 
   test("two processes writing the same key at once leave a complete value from one of them", async () => {

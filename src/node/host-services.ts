@@ -5,7 +5,10 @@
 //
 // What this adds on top of the single services:
 //   - paths: `<hostRoot>/instances/<safe instance id>/{state,cache,tmp}`,
-//     created with mode 0700;
+//     created with mode 0700. The host root is created if missing and then
+//     made canonical with the operating system's realpath, so drivers get
+//     absolute paths without symbolic links or `..` that stay correct even
+//     when a driver joins onto them with `path.join`;
 //   - secrets: file-backed under the instance's `stateDir`; every value read
 //     or written is registered with the instance's diagnostics, so it is
 //     redacted from later diagnostic entries;
@@ -13,6 +16,7 @@
 //     the services are disposed;
 //   - dispose: ends every process the instance spawned, with its process group.
 
+import * as fs from "node:fs/promises";
 import type { EnvPolicy } from "../generated/host.ts";
 import type { HostServices } from "../runtime.ts";
 import type { Coordination } from "./coordination.ts";
@@ -58,7 +62,9 @@ export type NodeHostServices<Config> = HostServices<Config> & {
 };
 
 export async function createNodeHostServices<Config>(options: NodeHostServicesOptions<Config>): Promise<NodeHostServices<Config>> {
-  const paths = instancePaths(options.hostRoot, options.instanceId);
+  await fs.mkdir(options.hostRoot, { recursive: true, mode: 0o700 });
+  // fs/promises realpath asks the operating system, which follows each link before any `..`.
+  const paths = instancePaths(await fs.realpath(options.hostRoot), options.instanceId);
   await createInstanceDirectories(paths);
   const diagnostics = createDiagnostics(
     options.maxDiagnosticEntryBytes === undefined

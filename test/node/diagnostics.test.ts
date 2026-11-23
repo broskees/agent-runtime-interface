@@ -1,7 +1,8 @@
 // Diagnostics in `ari/node`: entries past the byte budget (64 KiB by default)
 // are truncated to fit, and registered secret values are redacted, before any
 // truncation, in every form the redaction doc comment in
-// src/node/diagnostics.ts lists: text, base64 and hex text, numbers, and bytes.
+// src/node/diagnostics.ts lists: text, base64 and hex text, HTTP Basic
+// credentials, numbers, and bytes.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -141,6 +142,25 @@ describe("ari/node diagnostics", () => {
     diagnostics.log({ level: "info", msg: forms.join(" | "), data: { forms } });
     const text = JSON.stringify(records[0]);
     for (const form of forms) assert.equal(text.includes(form), false, `${form} was not redacted`);
+  });
+
+  test("an HTTP Basic credential whose decoded text holds a registered secret is redacted", () => {
+    const { records, diagnostics } = collect();
+    const password = "synthetic-password-7f3a";
+    diagnostics.registerSecret(password);
+    const credential = Buffer.from(`alice:${password}`).toString("base64");
+    const unrelated = Buffer.from("bob:not-registered").toString("base64");
+    diagnostics.log({
+      level: "debug",
+      msg: `proxy said Proxy-Authorization: basic ${credential}`,
+      native: { request: { headers: { authorization: `Basic ${credential}`, "x-other": `Basic ${unrelated}` } } },
+      data: [`Basic   ${credential}`, "Basic usage is documented"],
+    });
+    const [record] = records;
+    assert.equal(record?.msg, "proxy said Proxy-Authorization: basic [redacted]");
+    assert.deepEqual(record?.native, { request: { headers: { authorization: "Basic [redacted]", "x-other": `Basic ${unrelated}` } } });
+    assert.deepEqual(record?.data, ["Basic   [redacted]", "Basic usage is documented"]);
+    assert.equal(JSON.stringify(record).includes(credential), false);
   });
 
   test("redaction happens before truncation, so a cut never leaves part of a secret", () => {

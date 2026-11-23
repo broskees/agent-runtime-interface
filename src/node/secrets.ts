@@ -1,6 +1,7 @@
 // File-backed secrets: one file per `(namespace, key)` at
 // `<stateDir>/secrets/<namespace>/<key>`, using the safe names of
-// safe-name.ts. Files are mode 0600 and their directories mode 0700.
+// safe-name.ts, with `stateDir` kept as given (see os-path.ts). Files are mode
+// 0600 and their directories mode 0700.
 //
 // A write goes to a temporary file in the same directory, is flushed, and is
 // then renamed over the target. Rename is atomic, so a reader sees the old
@@ -10,9 +11,9 @@
 
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { callErrors } from "../errors.ts";
 import type { HostServices } from "../runtime.ts";
+import { appendToPath } from "./os-path.ts";
 import { encodePathSegment } from "./safe-name.ts";
 
 export type FileSecrets = HostServices["secrets"];
@@ -38,13 +39,13 @@ function isMissingFile(error: unknown): boolean {
 
 /** Secrets stored as private files under `stateDir`. */
 export function createFileSecrets(options: { stateDir: string }): FileSecrets {
-  const secretsRoot = path.join(path.resolve(options.stateDir), "secrets");
+  const secretsRoot = appendToPath(options.stateDir, ["secrets"]);
 
   const locate = (namespace: string, key: string): { directory: string; file: string } => {
     checkSecretName("namespace", namespace);
     checkSecretName("key", key);
-    const directory = path.join(secretsRoot, encodePathSegment(namespace, "namespace"));
-    return { directory, file: path.join(directory, encodePathSegment(key, "key")) };
+    const directory = appendToPath(secretsRoot, [encodePathSegment(namespace, "namespace")]);
+    return { directory, file: appendToPath(directory, [encodePathSegment(key, "key")]) };
   };
 
   return {
@@ -66,7 +67,7 @@ export function createFileSecrets(options: { stateDir: string }): FileSecrets {
       }
       await createPrivateDirectory(secretsRoot);
       await createPrivateDirectory(directory);
-      const temporaryFile = path.join(directory, `.tmp-${process.pid}-${randomUUID()}`);
+      const temporaryFile = appendToPath(directory, [`.tmp-${process.pid}-${randomUUID()}`]);
       try {
         const handle = await fs.open(temporaryFile, "wx", 0o600);
         try {

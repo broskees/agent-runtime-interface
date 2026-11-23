@@ -30,12 +30,15 @@
 //
 // Installs hold only the package's own files. A package that needs its npm
 // dependencies installed next to it must bundle them.
+//
+// `cacheDir` is kept as given (see os-path.ts); every path below it is built
+// from validated package names, versions and names this module chose.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { callErrors } from "../errors.ts";
+import { appendToPath } from "./os-path.ts";
 import { extractTarball } from "./tar.ts";
 
 /**
@@ -184,7 +187,7 @@ async function liveLockFiles(directory: string): Promise<LockFile[]> {
     const file = parseLockFile(name);
     if (file === null) continue;
     if (isProcessAlive(file.pid)) live.push(file);
-    else await fs.rm(path.join(directory, name), { force: true });
+    else await fs.rm(appendToPath(directory, [name]), { force: true });
   }
   return live;
 }
@@ -199,14 +202,14 @@ function ordersBefore(left: LockFile, right: LockFile): boolean {
 async function acquireVersionLock(directory: string, signal: AbortSignal | undefined): Promise<() => Promise<void>> {
   await fs.mkdir(directory, { recursive: true });
   const id = randomBytes(8).toString("hex");
-  const choosingFile = path.join(directory, `choosing.${process.pid}.${id}`);
+  const choosingFile = appendToPath(directory, [`choosing.${process.pid}.${id}`]);
   await fs.writeFile(choosingFile, "");
   let mine: LockFile;
   let ticketFile: string;
   try {
     const tickets = (await listDirectory(directory)).map(parseLockFile).filter((file) => file?.kind === "ticket") as LockFile[];
     mine = { kind: "ticket", number: 1 + Math.max(0, ...tickets.map((ticket) => ticket.number)), pid: process.pid, id };
-    ticketFile = path.join(directory, `ticket.${mine.number}.${mine.pid}.${id}`);
+    ticketFile = appendToPath(directory, [`ticket.${mine.number}.${mine.pid}.${id}`]);
     await fs.writeFile(ticketFile, "");
   } finally {
     await fs.rm(choosingFile, { force: true });
@@ -232,18 +235,18 @@ async function acquireVersionLock(directory: string, signal: AbortSignal | undef
 }
 
 export function createAdapterInstaller(options: AdapterInstallerOptions): AdapterInstaller {
-  const adaptersRoot = path.join(path.resolve(options.cacheDir), "adapters");
+  const adaptersRoot = appendToPath(options.cacheDir, ["adapters"]);
   const strip = options.strip ?? 1;
-  const packageDirectory = (pkg: string): string => path.join(adaptersRoot, ...pkg.split("/"));
+  const packageDirectory = (pkg: string): string => appendToPath(adaptersRoot, pkg.split("/"));
   const pathFor = (pkg: string, version: string): string => {
     checkPackage(pkg, version);
-    return path.join(packageDirectory(pkg), version);
+    return appendToPath(packageDirectory(pkg), [version]);
   };
-  const leaseDirectory = (pkg: string, version: string): string => path.join(packageDirectory(pkg), LEASES_DIRECTORY, version);
+  const leaseDirectory = (pkg: string, version: string): string => appendToPath(packageDirectory(pkg), [LEASES_DIRECTORY, version]);
 
   /** Runs `work` while holding the lock of `pkg@version`. */
   const withVersionLock = async <Result>(pkg: string, version: string, work: () => Promise<Result>): Promise<Result> => {
-    const release = await acquireVersionLock(path.join(packageDirectory(pkg), LOCKS_DIRECTORY, version), options.signal);
+    const release = await acquireVersionLock(appendToPath(packageDirectory(pkg), [LOCKS_DIRECTORY, version]), options.signal);
     try {
       return await work();
     } finally {
@@ -256,7 +259,7 @@ export function createAdapterInstaller(options: AdapterInstallerOptions): Adapte
     const dir = pathFor(pkg, version);
     const installed: InstalledAdapter = { pkg, version, dir };
     if (await exists(dir)) return installed;
-    const stagingDir = path.join(packageDirectory(pkg), `${STAGING_PREFIX}${process.pid}-${randomUUID()}`);
+    const stagingDir = appendToPath(packageDirectory(pkg), [`${STAGING_PREFIX}${process.pid}-${randomUUID()}`]);
     await fs.mkdir(stagingDir);
     try {
       const request: TarballRequest = options.signal === undefined ? { pkg, version } : { pkg, version, signal: options.signal };
@@ -275,7 +278,7 @@ export function createAdapterInstaller(options: AdapterInstallerOptions): Adapte
     let live = false;
     for (const name of await listDirectory(leaseDirectory(pkg, version))) {
       if (isProcessAlive(ownerPid(name))) live = true;
-      else await fs.rm(path.join(leaseDirectory(pkg, version), name), { force: true });
+      else await fs.rm(appendToPath(leaseDirectory(pkg, version), [name]), { force: true });
     }
     return live;
   };
@@ -284,9 +287,9 @@ export function createAdapterInstaller(options: AdapterInstallerOptions): Adapte
   const moveAsideUnlessLeased = (pkg: string, version: string): Promise<string | null> =>
     withVersionLock(pkg, version, async () => {
       if (await hasLiveLease(pkg, version)) return null;
-      const trashDir = path.join(packageDirectory(pkg), `${TRASH_PREFIX}${process.pid}-${randomUUID()}`);
+      const trashDir = appendToPath(packageDirectory(pkg), [`${TRASH_PREFIX}${process.pid}-${randomUUID()}`]);
       try {
-        await fs.rename(path.join(packageDirectory(pkg), version), trashDir);
+        await fs.rename(appendToPath(packageDirectory(pkg), [version]), trashDir);
       } catch (error) {
         if (errorCode(error) === "ENOENT") return null;
         throw error;
@@ -301,7 +304,7 @@ export function createAdapterInstaller(options: AdapterInstallerOptions): Adapte
         packages.push(name);
         continue;
       }
-      for (const scoped of await listDirectory(path.join(adaptersRoot, name))) packages.push(`${name}/${scoped}`);
+      for (const scoped of await listDirectory(appendToPath(adaptersRoot, [name]))) packages.push(`${name}/${scoped}`);
     }
     return packages;
   };
@@ -318,7 +321,7 @@ export function createAdapterInstaller(options: AdapterInstallerOptions): Adapte
       checkPackage(pkg, version);
       return withVersionLock(pkg, version, async () => {
         await fs.mkdir(leaseDirectory(pkg, version), { recursive: true });
-        const leaseFile = path.join(leaseDirectory(pkg, version), `${process.pid}-${randomUUID()}`);
+        const leaseFile = appendToPath(leaseDirectory(pkg, version), [`${process.pid}-${randomUUID()}`]);
         await fs.writeFile(leaseFile, "");
         try {
           const installed = await installHoldingLock(pkg, version);
@@ -346,7 +349,7 @@ export function createAdapterInstaller(options: AdapterInstallerOptions): Adapte
           const leftover = name.startsWith(STAGING_PREFIX) || name.startsWith(TRASH_PREFIX);
           if (leftover) {
             const pid = ownerPid(name.slice(name.indexOf("-") + 1));
-            if (!isProcessAlive(pid)) await fs.rm(path.join(packageDirectory(pkg), name), { recursive: true, force: true });
+            if (!isProcessAlive(pid)) await fs.rm(appendToPath(packageDirectory(pkg), [name]), { recursive: true, force: true });
             continue;
           }
           if (!VERSION.test(name)) continue;
@@ -355,7 +358,7 @@ export function createAdapterInstaller(options: AdapterInstallerOptions): Adapte
           if (trashDir === null) continue;
           // Out of the final path already, so deleting it outside the lock is safe.
           await fs.rm(trashDir, { recursive: true, force: true });
-          removed.push({ pkg, version: name, dir: path.join(packageDirectory(pkg), name) });
+          removed.push({ pkg, version: name, dir: appendToPath(packageDirectory(pkg), [name]) });
         }
       }
       return removed;

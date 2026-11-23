@@ -16,6 +16,7 @@ import { describe, test } from "node:test";
 import { isAriError } from "../../src/index.ts";
 import type { SpawnedProcess } from "../../src/index.ts";
 import { buildChildEnvironment, createProcessService, resolveExecutable } from "../../src/node/index.ts";
+import { createSymlinkedRoot } from "../helpers/symlinked-root.ts";
 
 const NODE = process.execPath;
 
@@ -226,6 +227,30 @@ describe("ari/node process spawning", () => {
     } finally {
       process.chdir(previousDirectory);
       await fs.rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("a PATH entry with `..` after a symbolic link is searched as the operating system reads it", async () => {
+    const layout = await createSymlinkedRoot("ari-path-symlink-");
+    try {
+      await fs.mkdir(layout.real("bin"), { recursive: true });
+      const realFile = layout.real("bin/ari-probe-adapter");
+      await fs.writeFile(realFile, "#!/bin/sh\necho release adapter\n", { mode: 0o755 });
+      const searchPath = `${layout.throughSymlink("bin")}:/usr/bin`;
+      const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH: searchPath } });
+      const byName = await service.spawn({ command: "ari-probe-adapter", stdin: "ignore" });
+      assert.equal((await readAll(byName.stdout)).trim(), "release adapter", "spawn finds the release's executable");
+      const fromBaseEnv = await service.resolveExecutable("ari-probe-adapter");
+      const fromOption = await service.resolveExecutable("ari-probe-adapter", { path: searchPath });
+      for (const resolved of [fromBaseEnv, fromOption]) {
+        assert.ok(resolved !== null, "resolveExecutable finds the executable spawn runs");
+        assert.equal(await fs.realpath(resolved), realFile, "the returned path names the release's executable");
+        const byPath = await service.spawn({ command: resolved, stdin: "ignore" });
+        assert.equal((await readAll(byPath.stdout)).trim(), "release adapter", "running the returned path runs the same file");
+      }
+      await service.dispose();
+    } finally {
+      await fs.rm(layout.root, { recursive: true, force: true });
     }
   });
 

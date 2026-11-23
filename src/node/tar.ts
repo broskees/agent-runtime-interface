@@ -21,6 +21,7 @@ import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { callErrors } from "../errors.ts";
+import { appendToPath } from "./os-path.ts";
 
 const BLOCK_SIZE = 512;
 
@@ -153,7 +154,12 @@ function parsePaxRecords(content: Uint8Array): Map<string, string> {
   return records;
 }
 
-/** Where entry `name` goes under `destination`, or null when stripping leaves nothing. */
+/**
+ * Where entry `name` goes under `destination`, or null when stripping leaves
+ * nothing. The kept segments contain no separator, `.`, `..` or drive letter,
+ * so the target is inside `destination` by construction; `destination` itself
+ * is kept as given (see os-path.ts).
+ */
 function entryPath(destination: string, name: string, strip: number): string | null {
   if (name.startsWith("/") || /^[A-Za-z]:/.test(name)) throw unsafeEntry(name, "the path is absolute");
   if (name.includes("\\")) throw unsafeEntry(name, "the path contains a backslash");
@@ -161,10 +167,7 @@ function entryPath(destination: string, name: string, strip: number): string | n
   if (segments.includes("..")) throw unsafeEntry(name, "the path leaves the directory");
   const kept = segments.slice(strip);
   if (kept.length === 0) return null;
-  const target = path.join(destination, ...kept);
-  const relative = path.relative(destination, target);
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) throw unsafeEntry(name, "the path leaves the directory");
-  return target;
+  return appendToPath(destination, kept);
 }
 
 async function writeFileEntry(target: string, mode: number, size: number, reader: ByteReader): Promise<void> {
@@ -281,7 +284,7 @@ async function detectGzip(source: AsyncIterable<Uint8Array>): Promise<{ isGzip: 
 /** Extracts the archive in `source` into `destination`, which must exist. Reads `source` to its end. */
 export async function extractTarball(source: AsyncIterable<Uint8Array>, destination: string, options: ExtractOptions = {}): Promise<void> {
   const strip = options.strip ?? 1;
-  const root = path.resolve(destination);
+  const root = appendToPath(destination, []);
   const { isGzip, chunks } = await detectGzip(source);
   const consume = async (decoded: AsyncIterable<Uint8Array>): Promise<void> => {
     await extractEntries(createByteReader(decoded), root, strip);

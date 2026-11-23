@@ -30,6 +30,7 @@ import type { AriError } from "../ari-error.ts";
 import { callErrors } from "../errors.ts";
 import type { EnvPolicy, ProcessExit, SpawnRequest } from "../generated/host.ts";
 import type { HostServices, SpawnedProcess } from "../runtime.ts";
+import { appendToPath } from "./os-path.ts";
 
 /** An environment such as `process.env`: names to values, where `undefined` means unset. */
 export type Environment = { readonly [name: string]: string | undefined };
@@ -114,14 +115,20 @@ async function firstExecutable(candidates: readonly string[]): Promise<string | 
  *
  * `cwd` defaults to this process's current directory, which is where spawn
  * looks when a request has no `cwd`.
+ *
+ * On Linux and macOS each candidate is the entry and the name joined with
+ * `/`, never normalized: `current/../bin` with `current` a symbolic link is
+ * read by the operating system, as spawn's exec does, not collapsed to `bin`.
+ * The returned path, run as a command, runs the same file spawn runs.
  */
 export async function resolveExecutable(name: string, searchPath: string | undefined, cwd: string = process.cwd()): Promise<string | null> {
   if (typeof name !== "string" || name === "") return null;
   if (!isWindows) {
-    if (name.includes("/")) return firstExecutable([path.resolve(cwd, name)]);
+    if (name.includes("/")) return firstExecutable([appendToPath(name, [], cwd)]);
     const entries = (searchPath ?? DEFAULT_SEARCH_PATH).split(":");
-    return firstExecutable(entries.map((entry) => path.resolve(cwd, entry, name)));
+    return firstExecutable(entries.map((entry) => appendToPath(entry, [name], cwd)));
   }
+  // Windows collapses `..` in a path string itself, so `path.resolve` names the same file libuv's search tries.
   const withExtensions = (base: string): string[] => {
     // libuv counts a name as having an extension when any `.` in it is followed by a character.
     const hasExtension = /\.[\s\S]/.test(path.win32.basename(base));

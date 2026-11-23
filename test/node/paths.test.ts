@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { describe, test } from "node:test";
 import { isAriError } from "../../src/index.ts";
 import { createInstanceDirectories, instancePaths } from "../../src/node/index.ts";
+import { createSymlinkedRoot, exists } from "../helpers/symlinked-root.ts";
 
 const TRICKY_INSTANCE_IDS = ["a", "b", "A", "a/b", "a_b", "a%2Fb", "a.b", ".", "..", "../a", "a\\b", "codex:work", "Codex:Work", "ünï-cödé", " a"];
 
@@ -67,6 +68,20 @@ describe("ari/node instance paths", () => {
       assert.deepEqual(await fs.readdir(second.stateDir), []);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a host root with `..` after a symbolic link is used as the operating system reads it", async () => {
+    const layout = await createSymlinkedRoot("ari-paths-symlink-");
+    try {
+      const paths = instancePaths(layout.throughSymlink("host"), "x");
+      await createInstanceDirectories(paths);
+      for (const directory of Object.values(paths)) {
+        assert.ok((await fs.realpath(directory)).startsWith(`${layout.real("host")}/`), `${directory} is under the real host root`);
+      }
+      assert.equal(await exists(layout.collapsed("host")), false, "nothing is created where lexical normalization points");
+    } finally {
+      await fs.rm(layout.root, { recursive: true, force: true });
     }
   });
 

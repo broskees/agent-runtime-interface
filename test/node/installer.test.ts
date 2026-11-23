@@ -29,6 +29,7 @@ import { isAriError } from "../../src/index.ts";
 import { createAdapterInstaller, extractTarball, npmRegistryFetch } from "../../src/node/index.ts";
 import type { TarballFetch } from "../../src/node/index.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
+import { createSymlinkedRoot, exists } from "../helpers/symlinked-root.ts";
 
 const run = promisify(execFile);
 const PKG = "@ari-test/fake-adapter";
@@ -71,11 +72,12 @@ async function makeFixturePackage(): Promise<void> {
   await fs.writeFile(plainTarball, gunzipSync(await fs.readFile(packedTarball)));
 }
 
+// Joined with "/" rather than path.join, which would collapse a `..` that `dir` may hold on purpose.
 async function assertCompleteInstall(dir: string): Promise<void> {
   for (const [relative, content] of fileContents) {
-    assert.equal(await fs.readFile(path.join(dir, relative), "utf8"), content, relative);
+    assert.equal(await fs.readFile(`${dir}/${relative}`, "utf8"), content, relative);
   }
-  const agentMode = (await fs.stat(path.join(dir, "bin", "agent.js"))).mode;
+  const agentMode = (await fs.stat(`${dir}/bin/agent.js`)).mode;
   assert.equal(agentMode & 0o100, 0o100, "the bin file stays executable");
 }
 
@@ -522,6 +524,36 @@ describe("ari/node adapter installer", () => {
     const removed = await installer.cleanup({ keep: (pkg, version) => pkg === PKG && version === "2.0.0" });
     assert.deepEqual(removed.map((entry) => entry.version), ["1.0.0"]);
     await assertCompleteInstall(installer.pathFor(PKG, "2.0.0"));
+  });
+
+  test("a cache dir with `..` after a symbolic link is used as the operating system reads it", async () => {
+    const layout = await createSymlinkedRoot("ari-installer-symlink-");
+    try {
+      const installer = createAdapterInstaller({ cacheDir: layout.throughSymlink("cache"), fetchTarball: fromFile(packedTarball) });
+      const lease = await installer.lease(PKG, "1.0.0");
+      await installer.install(PKG, "2.0.0");
+      await assertCompleteInstall(lease.dir);
+      assert.equal(await fs.realpath(lease.dir), layout.real("cache/adapters/@ari-test/fake-adapter/1.0.0"));
+      assert.deepEqual((await installer.cleanup()).map((entry) => entry.version), ["2.0.0"], "cleanup finds the lease in the real cache");
+      await assertCompleteInstall(lease.dir);
+      assert.deepEqual(await packageEntries(layout.real("cache/adapters/@ari-test/fake-adapter")), ["1.0.0"]);
+      assert.equal(await exists(layout.collapsed("cache")), false, "nothing is written where lexical normalization points");
+      await lease.release();
+    } finally {
+      await fs.rm(layout.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a tarball extracts into a destination with `..` after a symbolic link as the operating system reads it", async () => {
+    const layout = await createSymlinkedRoot("ari-tar-symlink-");
+    try {
+      await fs.mkdir(layout.real("extract"));
+      await extractTarball(createReadStream(packedTarball), layout.throughSymlink("extract"));
+      await assertCompleteInstall(layout.real("extract"));
+      assert.equal(await exists(layout.collapsed("extract")), false);
+    } finally {
+      await fs.rm(layout.root, { recursive: true, force: true });
+    }
   });
 
   test("the npm registry fetch checks the published digest", async () => {

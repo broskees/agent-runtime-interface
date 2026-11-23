@@ -20,6 +20,9 @@ const MIN_DIAGNOSTIC_ENTRY_BYTES = 256;
 
 const REDACTED = "[redacted]";
 
+/** An HTTP Basic credential in text: `Basic`, whitespace, then standard base64. */
+const BASIC_CREDENTIAL = /\b(basic\s+)([A-Za-z0-9+/]+={0,2})/gi;
+
 /** What the host's `write` receives: a redacted entry within the budget. */
 export interface DiagnosticRecord extends DiagnosticEntry {
   truncated?: true;
@@ -43,6 +46,11 @@ export type Diagnostics = HostServices["diagnostics"] & {
    *     their UTF-8 text when the bytes are valid UTF-8), and the base64 (with
    *     and without `=` padding), base64url and lowercase and uppercase hex
    *     encodings of its bytes (UTF-8 bytes for a string).
+   *   - HTTP Basic credentials, in the same text: a `Basic <base64>` token
+   *     (`Basic` in any letter case, whitespace, then standard base64) whose
+   *     decoded bytes contain the value's bytes (UTF-8 bytes for a string)
+   *     becomes `Basic [redacted]`, so `Authorization: Basic base64(user:pw)`
+   *     is redacted when `pw` is registered.
    *   - Numbers: a number or bigint whose decimal text contains a text form
    *     becomes `[redacted]`, so a numeric PIN registered as "123456" is
    *     redacted from `{ pin: 123456 }`.
@@ -54,8 +62,8 @@ export type Diagnostics = HostServices["diagnostics"] & {
    *
    * Not covered: any other encoding (UTF-16, URL encoding, a typed array
    * already turned into `{ "0": .., "1": .. }` by JSON), a value encoded
-   * together with other data (base64 of `user:secret` is not caught), and a
-   * value split across fields.
+   * together with other data outside an HTTP Basic token (base64 of
+   * `user:secret` elsewhere is not caught), and a value split across fields.
    */
   registerSecret(value: string | Uint8Array): void;
 };
@@ -122,13 +130,15 @@ export function createDiagnostics(options: DiagnosticsOptions): Diagnostics {
   // Longest first, so a text form that contains another is replaced whole.
   let textFormsLongestFirst: string[] = [];
 
+  const holdsSecretText = (text: string): boolean => textFormsLongestFirst.some((form) => text.includes(form));
+  const holdsSecretBytes = (bytes: Buffer): boolean => secretBytes.some((secret) => bytes.indexOf(secret) !== -1);
   const redactText = (text: string): string => {
-    let result = text;
+    let result = text.replace(BASIC_CREDENTIAL, (token: string, prefix: string, encoded: string) =>
+      holdsSecretBytes(Buffer.from(encoded, "base64")) ? `${prefix}${REDACTED}` : token,
+    );
     for (const form of textFormsLongestFirst) result = result.split(form).join(REDACTED);
     return result;
   };
-  const holdsSecretText = (text: string): boolean => textFormsLongestFirst.some((form) => text.includes(form));
-  const holdsSecretBytes = (bytes: Buffer): boolean => secretBytes.some((secret) => bytes.indexOf(secret) !== -1);
 
   // Plain JSON data for `value` with registered secrets redacted. Undefined
   // for what JSON leaves out (undefined, functions, symbols).

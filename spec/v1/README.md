@@ -27,6 +27,7 @@ would write now. Never edit generated files by hand.
 | `events.schema.json` | the event envelope and its 19 body variants |
 | `session.schema.json`, `instance.schema.json`, `driver.schema.json`, `host.schema.json` | inputs and results of the runtime interfaces |
 | `handshake.schema.json` | the `initialize` exchange and its three version axes |
+| `fixture.schema.json` | replay fixtures: a recorded session's calls, results and events, with a persistence version |
 | `rpc.schema.json` | JSON-RPC params and results for each method in `methods.json` |
 | `method-table.schema.json` | the format of `methods.json` |
 | `methods.json` | every wire method, its direction, params, result and how it streams |

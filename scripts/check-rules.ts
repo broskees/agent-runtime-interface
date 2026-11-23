@@ -19,6 +19,16 @@
 //                            bare package, except a Node built-in inside a
 //                            Node-only subpath, or a dynamic `import()` of a
 //                            declared optional peer.
+//   drivers-no-approval-reviewer
+//                            no source file under src/drivers/ reaches the
+//                            host-side approval reviewer: neither
+//                            src/host/approval-reviewer.ts nor the `ari/host`
+//                            entry that re-exports it (src/host/index.ts or the
+//                            package's own `<name>/host` specifier), directly or
+//                            through other modules, by any import, type-only
+//                            and dynamic ones included. Drivers that need
+//                            another host-toolkit module import that module
+//                            file directly.
 //
 // Dynamic imports in dist/ whose specifier is not a string literal: the
 // checker resolves the specifier when it provably can, then applies the rule
@@ -48,7 +58,8 @@ export type RuleName =
   | "no-host-names"
   | "browser-safe-entries"
   | "no-static-optional-imports"
-  | "dist-imports";
+  | "dist-imports"
+  | "drivers-no-approval-reviewer";
 
 export interface RuleViolation {
   readonly rule: RuleName;
@@ -75,6 +86,9 @@ export const SOURCE_EXTENSIONS = [".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", 
 /** Built files rule dist-imports reads. */
 export const DIST_EXTENSIONS = [".js", ".mjs", ".cjs"];
 
+/** The approval reviewer module and the `ari/host` entry that re-exports it; no driver may reach either. */
+export const APPROVAL_REVIEWER_MODULES = ["src/host/approval-reviewer.ts", "src/host/index.ts"];
+
 const TSC_REWRITE_HELPER = "__rewriteRelativeImportExtension";
 
 /** The specifier the checker assigns to a provable file URL; it counts as a local file. */
@@ -95,6 +109,7 @@ const SKIPPED_DIRECTORIES = new Set(["node_modules", "target", ".venv", "__pycac
 const NODE_BUILTINS = new Set(builtinModules);
 
 interface PackageJson {
+  name?: string;
   dependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   peerDependenciesMeta?: Record<string, { optional?: boolean }>;
@@ -490,6 +505,52 @@ function checkDistImports(root: string, pkg: PackageJson): RuleViolation[] {
   return violations;
 }
 
+/** The reviewer module (or the host entry specifier) `file` reaches through its imports, or undefined. */
+function reviewerReachedFrom(root: string, file: string, hostSpecifier: string): string | undefined {
+  const queue = [file];
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    if (APPROVAL_REVIEWER_MODULES.includes(current)) return current;
+    for (const site of findImports(current, fs.readFileSync(path.join(root, current), "utf8"))) {
+      if (site.specifier === undefined) continue;
+      if (site.specifier === hostSpecifier || site.specifier.startsWith(`${hostSpecifier}/`)) return site.specifier;
+      if (!isRelative(site.specifier)) continue;
+      const resolved = resolveRelative(root, current, site.specifier);
+      if (resolved !== undefined) queue.push(resolved);
+    }
+  }
+  return undefined;
+}
+
+function checkDriversSkipReviewer(root: string, pkg: PackageJson): RuleViolation[] {
+  const hostSpecifier = `${pkg.name ?? "ari"}/host`;
+  const violations: RuleViolation[] = [];
+  for (const full of walk(path.join(root, "src", "drivers"))) {
+    if (!hasExtension(full, SOURCE_EXTENSIONS)) continue;
+    const file = toPosix(path.relative(root, full));
+    for (const site of findImports(file, fs.readFileSync(full, "utf8"))) {
+      if (site.specifier === undefined) continue;
+      let reached: string | undefined;
+      if (site.specifier === hostSpecifier || site.specifier.startsWith(`${hostSpecifier}/`)) {
+        reached = site.specifier;
+      } else if (isRelative(site.specifier)) {
+        const resolved = resolveRelative(root, file, site.specifier);
+        reached = resolved === undefined ? undefined : reviewerReachedFrom(root, resolved, hostSpecifier);
+      }
+      if (reached === undefined) continue;
+      violations.push({
+        rule: "drivers-no-approval-reviewer",
+        file,
+        message: `line ${site.line} imports "${site.specifier}", which reaches ${reached}; the approval reviewer is host-side and drivers never import it`,
+      });
+    }
+  }
+  return violations;
+}
+
 /** Files `npm pack` would put in the tarball, relative to `root`. */
 export function packedFiles(root: string): string[] {
   const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: root, encoding: "utf8" });
@@ -508,6 +569,7 @@ export function checkRepository(options: CheckOptions): RuleViolation[] {
     ...checkBrowserSafeEntries(root, pkg),
     ...checkOptionalImports(root, pkg),
     ...checkDistImports(root, pkg),
+    ...checkDriversSkipReviewer(root, pkg),
   ];
 }
 
@@ -516,7 +578,7 @@ function main(argv: string[]): number {
   const root = rootIndex === -1 ? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..") : path.resolve(argv[rootIndex + 1] ?? ".");
   const violations = checkRepository({ root });
   if (violations.length === 0) {
-    process.stdout.write("check:rules passed: all five repository rules hold.\n");
+    process.stdout.write("check:rules passed: all six repository rules hold.\n");
     return 0;
   }
   for (const violation of violations) {

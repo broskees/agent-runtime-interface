@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/fixture.schema.json",
+  "title": "ARI replay fixtures",
+  "description": "A recorded session: the calls a host made to a `Session`, their results, and the events the session emitted, in the order they happened. `ari/host`'s replay recorder writes this format and `ari/conformance` reads it. `persistence` versions the format independently of the package and wire versions: a reader refuses a fixture whose persistence major version is higher than its own and reads any lower or equal one. Fixtures are JSON files; nothing in them is secret by design, so hosts must not record sessions that carry credentials.",
+  "$defs": {
+    "FixtureDriver": {
+      "description": "The driver that produced the recording.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string",
+          "description": "The driver's or vendor runtime's version, free-form."
+        },
+        "identityVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The id derivation version the driver used, so replayed ids can be compared."
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "FixtureCallEntry": {
+      "description": "The host called a session member. `method` is the wire method name from methods.json, for example `session/startTurn`; `params` are the wire params without `sessionId`.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "call"
+        },
+        "callId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "at": {
+          "type": "string",
+          "description": "ISO-8601 time the call was made."
+        }
+      },
+      "required": [
+        "type",
+        "callId",
+        "method",
+        "at"
+      ]
+    },
+    "FixtureResultEntry": {
+      "description": "The call with `callId` returned. `result` is the wire result: `null` for a call that returns nothing.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "result"
+        },
+        "callId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "result": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "callId",
+        "result",
+        "at"
+      ]
+    },
+    "FixtureErrorEntry": {
+      "description": "The call with `callId` failed. `callError` is set when the failure was an ARI call error; `message` is always set.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "callId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "callError": {
+          "$ref": "errors.schema.json#/$defs/CallError"
+        },
+        "at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "callId",
+        "message",
+        "at"
+      ]
+    },
+    "FixtureEventEntry": {
+      "description": "The session emitted one event. Each event `seq` appears once in a fixture.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "event"
+        },
+        "event": {
+          "$ref": "events.schema.json#/$defs/AriEvent"
+        }
+      },
+      "required": [
+        "type",
+        "event"
+      ]
+    },
+    "FixtureEntry": {
+      "description": "One step of the recording.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FixtureCallEntry"
+        },
+        {
+          "$ref": "#/$defs/FixtureResultEntry"
+        },
+        {
+          "$ref": "#/$defs/FixtureErrorEntry"
+        },
+        {
+          "$ref": "#/$defs/FixtureEventEntry"
+        }
+      ]
+    },
+    "Fixture": {
+      "description": "One recorded session.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "const": "ari.fixture"
+        },
+        "persistence": {
+          "$ref": "common.schema.json#/$defs/Version",
+          "description": "The persistence version of this format. A reader refuses a higher major version than its own."
+        },
+        "ariVersion": {
+          "type": "string"
+        },
+        "grammarVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The event grammar version the events follow."
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "recordedAt": {
+          "type": "string"
+        },
+        "driver": {
+          "$ref": "#/$defs/FixtureDriver"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "capabilities": {
+          "$ref": "capabilities.schema.json#/$defs/Capabilities",
+          "description": "The session's capabilities when recording started."
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FixtureEntry"
+          }
+        }
+      },
+      "required": [
+        "format",
+        "persistence",
+        "ariVersion",
+        "grammarVersion",
+        "entries"
+      ]
+    }
+  }
+}

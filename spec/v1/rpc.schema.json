@@ -1,0 +1,504 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/rpc.schema.json",
+  "title": "ARI wire params and results",
+  "description": "JSON-RPC params and results for the methods in methods.json. Mapping rules: a method's params are the TypeScript argument object plus the target id (`instanceId` or `sessionId`); positional TypeScript arguments become named fields; the result is the TypeScript return value, with `void` and `undefined` sent as `null`. Streams start with a request that returns `{ streamId }`; items arrive as notifications and the stream ends with `stream/end`.",
+  "$defs": {
+    "InstanceTarget": {
+      "type": "object",
+      "properties": { "instanceId": { "type": "string" } },
+      "required": ["instanceId"]
+    },
+    "SessionTarget": {
+      "type": "object",
+      "properties": { "sessionId": { "type": "string" } },
+      "required": ["sessionId"]
+    },
+    "SessionThreadTarget": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "threadId": { "type": "string" }
+      },
+      "required": ["sessionId", "threadId"]
+    },
+    "EmptyParams": { "type": "object" },
+    "VoidResult": { "type": "null" },
+    "BooleanResult": { "type": "boolean" },
+    "StringResult": { "type": "string" },
+    "NullableStringResult": { "type": ["string", "null"] },
+    "NullableIntegerResult": { "type": ["integer", "null"], "minimum": 0 },
+    "StreamStarted": {
+      "type": "object",
+      "properties": { "streamId": { "type": "string" } },
+      "required": ["streamId"]
+    },
+    "StreamEndParams": {
+      "description": "Ends a stream. `error` is set when it ended by failure.",
+      "type": "object",
+      "properties": {
+        "streamId": { "type": "string" },
+        "error": { "$ref": "errors.schema.json#/$defs/CallError" }
+      },
+      "required": ["streamId"]
+    },
+    "StreamCancelParams": {
+      "type": "object",
+      "properties": { "streamId": { "type": "string" } },
+      "required": ["streamId"]
+    },
+    "EventNotificationParams": {
+      "type": "object",
+      "properties": {
+        "streamId": { "type": "string" },
+        "event": { "$ref": "events.schema.json#/$defs/AriEvent" }
+      },
+      "required": ["streamId", "event"]
+    },
+    "StatusChangedParams": {
+      "type": "object",
+      "properties": {
+        "streamId": { "type": "string" },
+        "status": { "$ref": "instance.schema.json#/$defs/InstanceStatus" }
+      },
+      "required": ["streamId", "status"]
+    },
+    "UsageRecordParams": {
+      "type": "object",
+      "properties": {
+        "streamId": { "type": "string" },
+        "record": { "$ref": "usage.schema.json#/$defs/UsageRecord" }
+      },
+      "required": ["streamId", "record"]
+    },
+    "ConfigChangedParams": {
+      "type": "object",
+      "properties": {
+        "streamId": { "type": "string" },
+        "config": { "$ref": "common.schema.json#/$defs/AnyValue" }
+      },
+      "required": ["streamId", "config"]
+    },
+
+    "DriverCreateParams": {
+      "description": "`paths` carries the instance's `HostServices.paths`.",
+      "allOf": [
+        { "$ref": "driver.schema.json#/$defs/CreateInstanceInput" },
+        {
+          "type": "object",
+          "properties": { "paths": { "$ref": "host.schema.json#/$defs/HostPaths" } },
+          "required": ["paths"]
+        }
+      ]
+    },
+    "InstanceDescriptor": {
+      "description": "The instance's non-method members. `members` lists the optional members (`?` in the TypeScript interface) this instance implements, as dotted paths such as `auth.start`.",
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "continuationKey": { "type": "string" },
+        "bindingKey": { "type": "string" },
+        "members": { "type": "array", "items": { "type": "string" } },
+        "credentialBinding": { "$ref": "instance.schema.json#/$defs/CredentialBinding" },
+        "textGenerationGuarantees": { "$ref": "instance.schema.json#/$defs/TextGenerationGuarantees" },
+        "accountKey": { "type": "string", "description": "The value of `limits.accountKey()`, when the instance has limits." }
+      },
+      "required": ["instanceId", "continuationKey", "bindingKey", "members"]
+    },
+
+    "InstanceProbeParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/ProbeOptions" }]
+    },
+    "NullableUpdateAdvisory": {
+      "anyOf": [{ "$ref": "instance.schema.json#/$defs/UpdateAdvisory" }, { "type": "null" }]
+    },
+    "AuthMethodList": {
+      "type": "array",
+      "items": { "$ref": "instance.schema.json#/$defs/AuthMethod" }
+    },
+    "InstanceAuthReportRuntimeFailureParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/RuntimeFailureReport" }]
+    },
+    "InstanceAuthStartParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/AuthStartInput" }]
+    },
+    "InstanceAuthCompleteParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/AuthCompleteInput" }]
+    },
+    "InstanceAuthRespondParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/AuthRespondInput" }]
+    },
+    "InstanceAuthCancelParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "flowId": { "type": "string" }
+      },
+      "required": ["instanceId", "flowId"]
+    },
+    "InstanceAuthTransferProfileParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "profile": { "$ref": "instance.schema.json#/$defs/TransferredProfile" }
+      },
+      "required": ["instanceId", "profile"]
+    },
+    "InstanceAuthTransferSessionParams": {
+      "description": "Over the wire the target instance is named by `targetInstanceId`, because an `Instance` object cannot be serialized. Both instances must live in the same driver process.",
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "handle": { "$ref": "thread.schema.json#/$defs/SessionHandle" },
+        "targetInstanceId": { "type": "string" }
+      },
+      "required": ["instanceId", "handle", "targetInstanceId"]
+    },
+    "InstanceCatalogListParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/CatalogListOptions" }]
+    },
+    "InstanceWorkspaceSnapshotParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "cwd": { "type": "string" }
+      },
+      "required": ["instanceId", "cwd"]
+    },
+    "InstanceConsumeResetCreditParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/ConsumeResetCreditInput" }]
+    },
+    "InstanceUsageHistoryScanParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/UsageRange" }]
+    },
+    "InstanceTextGenerationParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/TextGenerationRequest" }]
+    },
+    "InstanceNativeSessionsListParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/NativeSessionListInput" }]
+    },
+    "InstanceNativeSessionParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "id": { "type": "string" }
+      },
+      "required": ["instanceId", "id"]
+    },
+    "InstanceSubProvidersListParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "cwd": { "type": "string" }
+      },
+      "required": ["instanceId", "cwd"]
+    },
+    "SubProviderList": {
+      "type": "array",
+      "items": { "$ref": "instance.schema.json#/$defs/SubProvider" }
+    },
+    "InstanceSubProvidersSetParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/SubProviderSetInput" }]
+    },
+    "InstanceSubProvidersDisableParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/SubProviderDisableInput" }]
+    },
+    "InstanceOpenSessionParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "instance.schema.json#/$defs/OpenSessionInput" }]
+    },
+    "SessionDescriptor": {
+      "description": "The session's non-method members. `members` lists the optional session members this session implements, as dotted paths such as `backgroundTasks.list`.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "capabilities": { "$ref": "capabilities.schema.json#/$defs/Capabilities" },
+        "members": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["sessionId", "capabilities", "members"]
+    },
+
+    "SessionEventsParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/EventsOptions" }]
+    },
+    "SessionCreateThreadParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/CreateThreadInput" }]
+    },
+    "SessionResumeThreadParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/ResumeThreadInput" }]
+    },
+    "SessionForkThreadParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/ForkThreadInput" }]
+    },
+    "SessionRollbackThreadParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/RollbackThreadInput" }]
+    },
+    "SessionInjectHistoryParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/InjectHistoryInput" }]
+    },
+    "SessionStartTurnParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/StartTurnInput" }]
+    },
+    "SessionInterruptTurnParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/InterruptTurnInput" }]
+    },
+    "SessionRespondParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/RespondInput" }]
+    },
+    "NullableRespondResult": {
+      "anyOf": [{ "$ref": "session.schema.json#/$defs/RespondResult" }, { "type": "null" }]
+    },
+    "SessionBackgroundTasksListParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionThreadTarget" }, { "$ref": "session.schema.json#/$defs/BackgroundTaskListOptions" }]
+    },
+    "TaskInfoList": {
+      "type": "array",
+      "items": { "$ref": "background.schema.json#/$defs/TaskInfo" }
+    },
+    "SessionBackgroundTasksStopParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/StopBackgroundTaskInput" }]
+    },
+    "SessionBackgroundTasksAwaitParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/AwaitBackgroundTasksInput" }]
+    },
+    "SessionStopSubagentParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/StopSubagentInput" }]
+    },
+    "NullableSubagentOutcome": {
+      "anyOf": [{ "$ref": "subagent.schema.json#/$defs/SubagentOutcome" }, { "type": "null" }]
+    },
+    "SessionMcpServerTarget": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "threadId": { "type": "string" },
+        "server": { "type": "string" }
+      },
+      "required": ["sessionId", "threadId", "server"]
+    },
+    "McpToolList": {
+      "type": "array",
+      "items": { "$ref": "session.schema.json#/$defs/McpTool" }
+    },
+    "SessionMcpAppsCallToolParams": {
+      "allOf": [
+        { "$ref": "#/$defs/SessionMcpServerTarget" },
+        {
+          "type": "object",
+          "properties": {
+            "tool": { "type": "string" },
+            "args": { "type": "object" }
+          },
+          "required": ["tool", "args"]
+        }
+      ]
+    },
+    "SessionMcpAppsReadResourceParams": {
+      "allOf": [
+        { "$ref": "#/$defs/SessionMcpServerTarget" },
+        {
+          "type": "object",
+          "properties": { "uri": { "type": "string" } },
+          "required": ["uri"]
+        }
+      ]
+    },
+    "SessionPlanConfigChangeParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/PlanConfigChangeInput" }]
+    },
+    "SessionContextWindowParams": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "model": { "type": "string" },
+        "cwd": { "type": "string" }
+      },
+      "required": ["sessionId", "model"]
+    },
+    "SessionCanReuseContextUsageParams": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "previousModel": { "type": "string" },
+        "nextModel": { "type": "string" }
+      },
+      "required": ["sessionId", "previousModel", "nextModel"]
+    },
+    "SessionUploadFeedbackParams": {
+      "allOf": [{ "$ref": "#/$defs/SessionTarget" }, { "$ref": "session.schema.json#/$defs/UploadFeedbackInput" }]
+    },
+    "SessionExtParams": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "ns": { "type": "string" },
+        "method": { "type": "string" },
+        "params": { "$ref": "common.schema.json#/$defs/AnyValue" }
+      },
+      "required": ["sessionId", "ns", "method"]
+    },
+
+    "HostConfigGetParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "watch": { "type": "boolean", "description": "Also start a change stream." }
+      },
+      "required": ["instanceId"]
+    },
+    "HostConfigGetResult": {
+      "description": "`streamId` is set when `watch` was true; changes arrive as `host/config.changed`.",
+      "type": "object",
+      "properties": {
+        "config": { "$ref": "common.schema.json#/$defs/AnyValue" },
+        "streamId": { "type": "string" }
+      },
+      "required": ["config"]
+    },
+    "HostSecretParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/SecretKey" }]
+    },
+    "NullableSecretValue": {
+      "anyOf": [{ "$ref": "host.schema.json#/$defs/SecretValue" }, { "type": "null" }]
+    },
+    "HostSecretsSetParams": {
+      "allOf": [
+        { "$ref": "#/$defs/InstanceTarget" },
+        { "$ref": "host.schema.json#/$defs/SecretKey" },
+        {
+          "type": "object",
+          "properties": { "value": { "$ref": "host.schema.json#/$defs/SecretValue" } },
+          "required": ["value"]
+        }
+      ]
+    },
+    "HostProcessSpawnParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/SpawnRequest" }]
+    },
+    "HostProcessResolveExecutableParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/ResolveExecutableInput" }]
+    },
+    "HostProcessTarget": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "processId": { "type": "string" }
+      },
+      "required": ["instanceId", "processId"]
+    },
+    "HostProcessWriteParams": {
+      "allOf": [
+        { "$ref": "#/$defs/HostProcessTarget" },
+        {
+          "type": "object",
+          "properties": { "data": { "type": "string", "description": "Base64-encoded bytes for the child's stdin." } },
+          "required": ["data"]
+        }
+      ]
+    },
+    "HostProcessKillParams": {
+      "allOf": [
+        { "$ref": "#/$defs/HostProcessTarget" },
+        {
+          "type": "object",
+          "properties": { "signal": { "type": "string" } }
+        }
+      ]
+    },
+    "HostProcessOutputParams": {
+      "type": "object",
+      "properties": {
+        "processId": { "type": "string" },
+        "stream": { "$ref": "events.schema.json#/$defs/OutputStream" },
+        "data": { "type": "string", "description": "Base64-encoded bytes." }
+      },
+      "required": ["processId", "stream", "data"]
+    },
+    "HostProcessExitParams": {
+      "type": "object",
+      "properties": {
+        "processId": { "type": "string" },
+        "exit": { "$ref": "host.schema.json#/$defs/ProcessExit" }
+      },
+      "required": ["processId", "exit"]
+    },
+    "HostAttachmentParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "ref": { "type": "string" }
+      },
+      "required": ["instanceId", "ref"]
+    },
+    "NullableAttachmentInfo": {
+      "anyOf": [{ "$ref": "common.schema.json#/$defs/AttachmentInfo" }, { "type": "null" }]
+    },
+    "HostCallbacksRegisterParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "flowId": { "type": "string" }
+      },
+      "required": ["instanceId", "flowId"]
+    },
+    "HostMcpServerForParams": {
+      "allOf": [
+        {
+          "type": "object",
+          "properties": {
+            "instanceId": { "type": "string" },
+            "threadId": { "type": "string" }
+          },
+          "required": ["instanceId", "threadId"]
+        },
+        { "$ref": "host.schema.json#/$defs/McpServerForOptions" }
+      ]
+    },
+    "HostCallDynamicToolParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/DynamicToolCall" }]
+    },
+    "HostBackgroundShouldRunParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "scope": { "type": "string", "description": "Driver-chosen name of the background work, for example `catalog_refresh`." }
+      },
+      "required": ["instanceId", "scope"]
+    },
+    "HostCoordinationAcquireParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "key": { "type": "string" },
+        "ttlMs": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["instanceId", "key", "ttlMs"]
+    },
+    "NullableLease": {
+      "description": "The lease, or null when another holder has the key.",
+      "anyOf": [{ "$ref": "host.schema.json#/$defs/Lease" }, { "type": "null" }]
+    },
+    "HostCoordinationReleaseParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "leaseId": { "type": "string" }
+      },
+      "required": ["instanceId", "leaseId"]
+    },
+    "HostDiagnosticsLogParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/DiagnosticEntry" }]
+    },
+    "HostTelemetryTrackParams": {
+      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/TelemetryEvent" }]
+    },
+    "HostIdsDeriveParams": {
+      "type": "object",
+      "properties": {
+        "instanceId": { "type": "string" },
+        "kind": { "type": "string" },
+        "key": { "type": "string" }
+      },
+      "required": ["instanceId", "kind", "key"]
+    }
+  }
+}

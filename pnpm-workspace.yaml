@@ -1,0 +1,14 @@
+# pnpm 12 reads project settings only from this file. The repository is still a
+# single package: there is no `packages` list, so there is no workspace.
+
+# The package's own peerDependencies are optional vendor SDKs and `effect`.
+# They must not be installed implicitly: tests have to see the package exactly
+# as a consumer without those SDKs sees it. Phases that need a vendor SDK for
+# type checks add it to devDependencies explicitly.
+autoInstallPeers: false
+dedupePeerDependents: false
+
+# esbuild's postinstall only verifies its platform binary, which pnpm already
+# installs as an optional dependency. Nothing needs to run.
+allowBuilds:
+  esbuild: false

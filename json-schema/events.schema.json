@@ -1,0 +1,587 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/events.schema.json",
+  "title": "ARI session events",
+  "description": "The event envelope and its 19 body variants. Every `*.upsert`, `session.replaced`, `background.updated` and `turn.terminal` event is durable; `item.delta` is ephemeral and may be dropped once its item settles. The event grammar (what opens, starts and settles mean, and the invariants every stream keeps) is defined in spec/v1/README.md.",
+  "$defs": {
+    "NativeFrame": {
+      "description": "A bounded copy of the raw provider frame, for diagnostics only.",
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        }
+      }
+    },
+    "AriEvent": {
+      "description": "One event of a session stream. `seq` increases by exactly one per event within a session, starting at 1, so a host can resume with `events({ fromSeq })`.",
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "at": {
+          "type": "string",
+          "description": "ISO-8601 timestamp."
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "hostTag": {
+          "type": "string",
+          "description": "The opaque tag the host passed on `startTurn`, echoed on every event of that turn."
+        },
+        "body": {
+          "$ref": "#/$defs/AriEventBody"
+        },
+        "native": {
+          "$ref": "#/$defs/NativeFrame"
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "sessionId",
+        "body"
+      ]
+    },
+    "AriEventBody": {
+      "description": "The event payload, discriminated by `type`. Extension events use `x:` types.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SessionStateBody"
+        },
+        {
+          "$ref": "#/$defs/SessionReplacedBody"
+        },
+        {
+          "$ref": "#/$defs/CapabilitiesUpdatedBody"
+        },
+        {
+          "$ref": "#/$defs/ConfigUpdatedBody"
+        },
+        {
+          "$ref": "#/$defs/CommandsUpdatedBody"
+        },
+        {
+          "$ref": "#/$defs/ThreadUpsertBody"
+        },
+        {
+          "$ref": "#/$defs/TurnUpsertBody"
+        },
+        {
+          "$ref": "#/$defs/ItemUpsertBody"
+        },
+        {
+          "$ref": "#/$defs/ItemDeltaBody"
+        },
+        {
+          "$ref": "#/$defs/RequestUpsertBody"
+        },
+        {
+          "$ref": "#/$defs/SubagentUpsertBody"
+        },
+        {
+          "$ref": "#/$defs/PlanUpsertBody"
+        },
+        {
+          "$ref": "#/$defs/BackgroundUpdatedBody"
+        },
+        {
+          "$ref": "#/$defs/UsageUpdatedBody"
+        },
+        {
+          "$ref": "#/$defs/LimitsUpdatedBody"
+        },
+        {
+          "$ref": "#/$defs/NoticeBody"
+        },
+        {
+          "$ref": "#/$defs/RetryBody"
+        },
+        {
+          "$ref": "#/$defs/TurnTerminalBody"
+        },
+        {
+          "$ref": "#/$defs/ExtensionEventBody"
+        }
+      ]
+    },
+    "SessionState": {
+      "anyOf": [
+        {
+          "enum": [
+            "starting",
+            "ready",
+            "running",
+            "waiting",
+            "stopped",
+            "error"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "SessionStateBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "session.state"
+        },
+        "state": {
+          "$ref": "#/$defs/SessionState"
+        },
+        "failure": {
+          "$ref": "errors.schema.json#/$defs/Failure"
+        }
+      },
+      "required": [
+        "type",
+        "state"
+      ]
+    },
+    "SessionReplacedBody": {
+      "description": "The driver could not resume the native session and started a fresh one. `contextLost` says whether the conversation context is gone.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "session.replaced"
+        },
+        "previousNativeId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "contextLost": {
+          "type": "boolean"
+        },
+        "showRuntimeNote": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "reason",
+        "contextLost"
+      ]
+    },
+    "CapabilitiesUpdatedBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "capabilities.updated"
+        },
+        "capabilities": {
+          "$ref": "capabilities.schema.json#/$defs/Capabilities"
+        }
+      },
+      "required": [
+        "type",
+        "capabilities"
+      ]
+    },
+    "ConfigUpdatedBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "config.updated"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "config.schema.json#/$defs/ConfigOption"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "options"
+      ]
+    },
+    "CommandsUpdatedBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "commands.updated"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "config.schema.json#/$defs/SlashCommand"
+          }
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "config.schema.json#/$defs/Skill"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "commands"
+      ]
+    },
+    "ThreadUpsertBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "thread.upsert"
+        },
+        "thread": {
+          "$ref": "thread.schema.json#/$defs/ThreadPatch"
+        },
+        "retainedNativeTurnIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Native turn ids still in the thread, used by hosts to reconcile after a rollback."
+        }
+      },
+      "required": [
+        "type",
+        "thread"
+      ]
+    },
+    "TurnUpsertBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "turn.upsert"
+        },
+        "turn": {
+          "$ref": "thread.schema.json#/$defs/TurnPatch"
+        }
+      },
+      "required": [
+        "type",
+        "turn"
+      ]
+    },
+    "ItemUpsertBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "item.upsert"
+        },
+        "item": {
+          "$ref": "item.schema.json#/$defs/ItemPatch"
+        }
+      },
+      "required": [
+        "type",
+        "item"
+      ]
+    },
+    "DeltaField": {
+      "description": "The item string field a delta appends to.",
+      "anyOf": [
+        {
+          "enum": [
+            "text",
+            "reasoning",
+            "output",
+            "plan"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "OutputStream": {
+      "anyOf": [
+        {
+          "enum": [
+            "stdout",
+            "stderr"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ItemDeltaBody": {
+      "description": "Ephemeral streaming text appended to `field` of an open item.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "item.delta"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "field": {
+          "$ref": "#/$defs/DeltaField"
+        },
+        "chunk": {
+          "type": "string"
+        },
+        "stream": {
+          "$ref": "#/$defs/OutputStream"
+        }
+      },
+      "required": [
+        "type",
+        "itemId",
+        "field",
+        "chunk"
+      ]
+    },
+    "RequestUpsertBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "request.upsert"
+        },
+        "request": {
+          "$ref": "request.schema.json#/$defs/RequestPatch"
+        }
+      },
+      "required": [
+        "type",
+        "request"
+      ]
+    },
+    "SubagentUpsertBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "subagent.upsert"
+        },
+        "subagent": {
+          "$ref": "subagent.schema.json#/$defs/SubagentPatch"
+        }
+      },
+      "required": [
+        "type",
+        "subagent"
+      ]
+    },
+    "PlanUpsertBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "plan.upsert"
+        },
+        "plan": {
+          "$ref": "plan.schema.json#/$defs/PlanPatch"
+        }
+      },
+      "required": [
+        "type",
+        "plan"
+      ]
+    },
+    "BackgroundUpdatedBody": {
+      "description": "The full list of yielded-but-alive background work. Empty once everything is back in the foreground or finished.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "background.updated"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "background.schema.json#/$defs/BackgroundTaskSummary"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "tasks"
+      ]
+    },
+    "UsageUpdatedBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "usage.updated"
+        },
+        "usage": {
+          "$ref": "usage.schema.json#/$defs/UsageSnapshot"
+        }
+      },
+      "required": [
+        "type",
+        "usage"
+      ]
+    },
+    "LimitsUpdatedBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "limits.updated"
+        },
+        "limits": {
+          "$ref": "usage.schema.json#/$defs/LimitStatus"
+        }
+      },
+      "required": [
+        "type",
+        "limits"
+      ]
+    },
+    "NoticeLevel": {
+      "anyOf": [
+        {
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "NoticeBody": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "notice"
+        },
+        "level": {
+          "$ref": "#/$defs/NoticeLevel"
+        },
+        "code": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "level",
+        "text"
+      ]
+    },
+    "RetryBody": {
+      "description": "The provider is retrying. `maxAttempts` and `retryDelayMs` are null when unknown.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "retry"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxAttempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "retryDelayMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "attempt",
+        "maxAttempts",
+        "retryDelayMs"
+      ]
+    },
+    "TurnTerminalStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "completed",
+            "interrupted",
+            "cancelled",
+            "failed"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ThreadDisposition": {
+      "anyOf": [
+        {
+          "enum": [
+            "reusable",
+            "broken"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "TurnTerminalBody": {
+      "description": "The turn settled. Emitted only on authoritative provider completion, an explicit cancel or process exit; never from a quiet timer. `childTurnsContinue` says children outlive a failed root turn.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "turn.terminal"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TurnTerminalStatus"
+        },
+        "failure": {
+          "$ref": "errors.schema.json#/$defs/Failure"
+        },
+        "threadDisposition": {
+          "$ref": "#/$defs/ThreadDisposition"
+        },
+        "childTurnsContinue": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "turnId",
+        "status",
+        "threadDisposition"
+      ]
+    },
+    "ExtensionEventBody": {
+      "description": "An extension event. `data` is the extension's payload; `fallback` is what a host that does not understand it shows.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "$ref": "common.schema.json#/$defs/ExtensionName"
+        },
+        "data": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "fallback": {
+          "$ref": "common.schema.json#/$defs/Fallback"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    }
+  }
+}

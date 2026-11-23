@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/plan.schema.json",
+  "title": "ARI plans",
+  "description": "A provider's live plan for a turn. A plan upsert that carries `entries` replaces the whole list.",
+  "$defs": {
+    "PlanEntryStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed",
+            "cancelled"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "PlanEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/PlanEntryStatus"
+        },
+        "priority": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "status"
+      ]
+    },
+    "Plan": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanEntry"
+          }
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "entries"
+      ]
+    },
+    "PlanPatch": {
+      "description": "Patch form of Plan. Only `id` is required; the upsert that opens a plan carries every field Plan requires.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanEntry"
+          }
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "explanation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  }
+}

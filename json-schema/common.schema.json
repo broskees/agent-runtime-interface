@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/common.schema.json",
+  "title": "ARI common types",
+  "description": "Small types shared by every other ARI schema file: identity, extension names, versions, content blocks and pass-through values.",
+  "$defs": {
+    "AnyValue": {
+      "description": "Any JSON value. Used where ARI passes a value through without interpreting it."
+    },
+    "ExtensionName": {
+      "description": "A name in an extension namespace. It always starts with `x:`, for example `x:codex.goal`. The `x:host.<name>.` prefix is reserved for hosts.",
+      "type": "string",
+      "pattern": "^x:"
+    },
+    "Fallback": {
+      "description": "Plain-text stand-in that a host shows when it does not understand an extension item or event.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "RefStrength": {
+      "description": "How far a native id can be trusted. `strong`: use it as is. `weak`: combine it with an ordinal or fingerprint. `none`: there is no native id; allocate by ordinal.",
+      "anyOf": [
+        {
+          "enum": [
+            "strong",
+            "weak",
+            "none"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "NativeRef": {
+      "description": "The provider's own reference for an entity, with its strength. Every ARI entity id is derived deterministically from native data: the same native input gives the same id across restarts and replays.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The provider's own id, or null when it has none."
+        },
+        "strength": {
+          "$ref": "#/$defs/RefStrength"
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "Stable content fingerprint used with weak or missing native ids."
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Position within the enclosing scope, used with weak or missing native ids."
+        }
+      },
+      "required": [
+        "id",
+        "strength"
+      ]
+    },
+    "Version": {
+      "description": "A `{ major, minor }` version. Minor versions only add; a major version change is breaking.",
+      "type": "object",
+      "properties": {
+        "major": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ]
+    },
+    "JsonSchema": {
+      "description": "A JSON Schema document, passed through unchanged.",
+      "type": [
+        "object",
+        "boolean"
+      ]
+    },
+    "ConfigValues": {
+      "description": "Configuration values keyed by config option id, for example `{ \"model\": \"gpt-5\", \"effort\": \"high\" }`.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "Icon": {
+      "description": "An icon as inline SVG or as a URL (which may be a `data:` URL).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "svg"
+            },
+            "svg": {
+              "type": "string"
+            },
+            "darkSvg": {
+              "type": "string",
+              "description": "Variant for dark backgrounds."
+            }
+          },
+          "required": [
+            "type",
+            "svg"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "url"
+            },
+            "url": {
+              "type": "string"
+            },
+            "darkUrl": {
+              "type": "string",
+              "description": "Variant for dark backgrounds."
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ]
+        }
+      ]
+    },
+    "TextContent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ]
+    },
+    "ImageContent": {
+      "description": "An image given inline as base64 `data`, by `url`, or by host attachment reference.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "image"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string",
+          "description": "Base64-encoded bytes."
+        },
+        "url": {
+          "type": "string"
+        },
+        "attachmentRef": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "data"
+          ]
+        },
+        {
+          "required": [
+            "url"
+          ]
+        },
+        {
+          "required": [
+            "attachmentRef"
+          ]
+        }
+      ]
+    },
+    "FileContent": {
+      "description": "A file the host stores. The driver resolves `attachmentRef` through the host's `attachments` service. A path in a prompt grants no access by itself.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "file"
+        },
+        "attachmentRef": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "attachmentRef"
+      ]
+    },
+    "ResourceLinkContent": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "resource_link"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "uri"
+      ]
+    },
+    "ContentBlock": {
+      "description": "One block of prompt or message content.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TextContent"
+        },
+        {
+          "$ref": "#/$defs/ImageContent"
+        },
+        {
+          "$ref": "#/$defs/FileContent"
+        },
+        {
+          "$ref": "#/$defs/ResourceLinkContent"
+        }
+      ]
+    },
+    "AttachmentInfo": {
+      "description": "What the host's `attachments.resolve` returns for a readable attachment.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path",
+        "mime",
+        "size"
+      ]
+    },
+    "MessageRole": {
+      "anyOf": [
+        {
+          "enum": [
+            "user",
+            "assistant",
+            "system"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "HistoricalMessage": {
+      "description": "A message from earlier conversation that the host injects into a thread.",
+      "type": "object",
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentBlock"
+          }
+        },
+        "at": {
+          "type": "string",
+          "description": "ISO-8601 timestamp."
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ]
+    },
+    "Page": {
+      "description": "One page of a cursor-paginated list. `nextCursor` is absent or null on the last page.",
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ]
+    }
+  }
+}

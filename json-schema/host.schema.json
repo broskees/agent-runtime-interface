@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/host.schema.json",
+  "title": "ARI host service data",
+  "description": "Data that host services take and return. A driver sees only its own instance's config and namespaced services. The host picks every name: MCP server names, telemetry event names and directory layout.",
+  "$defs": {
+    "HostPaths": {
+      "description": "Per-instance directories. Two instances never share one.",
+      "type": "object",
+      "properties": {
+        "stateDir": {
+          "type": "string"
+        },
+        "cacheDir": {
+          "type": "string"
+        },
+        "tmpDir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "stateDir",
+        "cacheDir",
+        "tmpDir"
+      ]
+    },
+    "EnvPolicy": {
+      "description": "Environment rules for spawned processes. Each `stripAmbient` entry is a variable name, or a prefix when it ends in `*` (for example `GOOGLE_*`). Matching variables are removed from the inherited environment before explicit additions apply.",
+      "type": "object",
+      "properties": {
+        "stripAmbient": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "stripAmbient"
+      ]
+    },
+    "SpawnPurpose": {
+      "description": "`probe`: a side-effect-free check such as `--version`. `runtime`: the agent process itself.",
+      "anyOf": [
+        {
+          "enum": [
+            "probe",
+            "runtime",
+            "install"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "SpawnRequest": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Explicit additions, applied after `envPolicy` stripping."
+        },
+        "purpose": {
+          "$ref": "#/$defs/SpawnPurpose"
+        },
+        "stdin": {
+          "anyOf": [
+            {
+              "enum": [
+                "pipe",
+                "ignore"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "command"
+      ]
+    },
+    "SpawnResult": {
+      "description": "Wire form of a spawned child. Output and exit arrive as `host/process.output` and `host/process.exit` notifications for `processId`.",
+      "type": "object",
+      "properties": {
+        "processId": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "processId"
+      ]
+    },
+    "ProcessExit": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "signal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "signal"
+      ]
+    },
+    "ResolveExecutableInput": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "description": "A PATH-style list of directories to search instead of the host default."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "SecretKey": {
+      "description": "Secrets are addressed by namespace and key. Neither may contain `..` or `/`.",
+      "type": "object",
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "key"
+      ]
+    },
+    "SecretValue": {
+      "description": "Wire form of secret bytes.",
+      "type": "object",
+      "properties": {
+        "base64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "base64"
+      ]
+    },
+    "CallbackRegistration": {
+      "description": "Where the provider should send a sign-in callback. The host routes it to `instance.auth.complete`.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "McpServerForOptions": {
+      "type": "object",
+      "properties": {
+        "transport": {
+          "$ref": "capabilities.schema.json#/$defs/McpTransport"
+        }
+      },
+      "required": [
+        "transport"
+      ]
+    },
+    "HostToolServer": {
+      "description": "The host's tool server for one thread. Drivers use `name` exactly and never hard-code host tool names.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "config": {
+          "$ref": "session.schema.json#/$defs/McpServerConfig"
+        },
+        "alwaysLoad": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "config"
+      ]
+    },
+    "DynamicToolCall": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        }
+      },
+      "required": [
+        "threadId",
+        "callId",
+        "name",
+        "input"
+      ]
+    },
+    "DynamicToolResult": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/ContentBlock"
+          }
+        },
+        "isError": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content"
+      ]
+    },
+    "Lease": {
+      "description": "An exclusive coordination lease, held until released or until `expiresAt`.",
+      "type": "object",
+      "properties": {
+        "leaseId": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "leaseId",
+        "key",
+        "expiresAt"
+      ]
+    },
+    "DiagnosticLevel": {
+      "anyOf": [
+        {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "DiagnosticEntry": {
+      "description": "One diagnostic log entry. The host enforces a size budget and redacts registered secrets.",
+      "type": "object",
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/DiagnosticLevel"
+        },
+        "msg": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "data": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        }
+      },
+      "required": [
+        "level",
+        "msg"
+      ]
+    },
+    "TelemetryEvent": {
+      "description": "A telemetry event. Ids in `props` are hashed by the driver before sending.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "props": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  }
+}

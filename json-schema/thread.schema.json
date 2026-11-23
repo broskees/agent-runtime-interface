@@ -1,0 +1,499 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/thread.schema.json",
+  "title": "ARI threads and turns",
+  "description": "Provider threads and turns, their patch forms, fork and rollback points, snapshots and persisted session handles. Patch forms follow ACP v2: an omitted field is unchanged, `null` clears an optional field, and a value replaces the field whole, including nested objects and arrays.",
+  "$defs": {
+    "ThreadStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "idle",
+            "running",
+            "unloaded",
+            "closed"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ForkOrigin": {
+      "description": "Where a forked thread came from.",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ]
+    },
+    "Thread": {
+      "description": "A provider conversation thread.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ThreadStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "handle": {
+          "type": "string",
+          "description": "Opaque provider handle that `resumeThread({ native: { handle } })` accepts."
+        },
+        "parentThreadId": {
+          "type": "string"
+        },
+        "forkedFrom": {
+          "$ref": "#/$defs/ForkOrigin"
+        },
+        "subagentId": {
+          "type": "string",
+          "description": "Set when this thread belongs to a provider-native subagent."
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "identityVersion": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "native",
+        "cwd",
+        "status"
+      ]
+    },
+    "ThreadPatch": {
+      "description": "Patch form of Thread. Only `id` is required; the upsert that opens a thread carries every field Thread requires.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ThreadStatus"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "forkedFrom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ForkOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subagentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identityVersion": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "TurnOrigin": {
+      "description": "`user`: started by a host request. `provider_initiated`: the provider started it on its own, for example the next turn of a goal run.",
+      "anyOf": [
+        {
+          "enum": [
+            "user",
+            "provider_initiated"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "TurnStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "pending",
+            "running",
+            "waiting",
+            "completed",
+            "interrupted",
+            "cancelled",
+            "failed"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "Turn": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "origin": {
+          "$ref": "#/$defs/TurnOrigin"
+        },
+        "status": {
+          "$ref": "#/$defs/TurnStatus"
+        },
+        "clientTurnKey": {
+          "type": "string",
+          "description": "The idempotency key the host passed to `startTurn`."
+        },
+        "hostTag": {
+          "type": "string"
+        },
+        "parentTurnId": {
+          "type": "string"
+        },
+        "subagentId": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "completedAt": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "failure": {
+          "$ref": "errors.schema.json#/$defs/Failure"
+        },
+        "usage": {
+          "$ref": "usage.schema.json#/$defs/UsageSnapshot"
+        }
+      },
+      "required": [
+        "id",
+        "threadId",
+        "native",
+        "origin",
+        "status"
+      ]
+    },
+    "TurnPatch": {
+      "description": "Patch form of Turn. Only `id` is required; the upsert that starts a turn carries every field Turn requires.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "origin": {
+          "$ref": "#/$defs/TurnOrigin"
+        },
+        "status": {
+          "$ref": "#/$defs/TurnStatus"
+        },
+        "clientTurnKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hostTag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subagentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "errors.schema.json#/$defs/Failure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "usage.schema.json#/$defs/UsageSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "ForkPoint": {
+      "description": "Where `forkThread` forks from.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "latest"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "turn"
+            },
+            "turnId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "turnId"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "item"
+            },
+            "itemId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "itemId"
+          ]
+        }
+      ]
+    },
+    "RollbackTarget": {
+      "description": "Where `rollbackThread` rolls back to: the start, or just after a turn.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "start"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "turn"
+            },
+            "turnId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "turnId"
+          ]
+        }
+      ]
+    },
+    "ThreadSnapshot": {
+      "type": "object",
+      "properties": {
+        "thread": {
+          "$ref": "#/$defs/Thread"
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Turn"
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "item.schema.json#/$defs/Item"
+          }
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "request.schema.json#/$defs/Request"
+          }
+        },
+        "subagents": {
+          "type": "array",
+          "items": {
+            "$ref": "subagent.schema.json#/$defs/Subagent"
+          }
+        },
+        "plans": {
+          "type": "array",
+          "items": {
+            "$ref": "plan.schema.json#/$defs/Plan"
+          }
+        },
+        "nativePayload": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        }
+      },
+      "required": [
+        "thread",
+        "turns",
+        "items",
+        "requests"
+      ]
+    },
+    "SessionHandle": {
+      "description": "A persisted handle that lets a later `openSession({ resumeFrom })` continue a session. `persistence` versions the handle's on-disk form independently of package and wire versions.",
+      "type": "object",
+      "properties": {
+        "driverKind": {
+          "type": "string"
+        },
+        "handle": {
+          "type": "string"
+        },
+        "persistence": {
+          "$ref": "common.schema.json#/$defs/Version"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "continuationKey": {
+          "type": "string"
+        },
+        "identityVersion": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        }
+      },
+      "required": [
+        "driverKind",
+        "handle",
+        "persistence"
+      ]
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/extensions/ari.goal.schema.json",
+  "title": "Shared experimental extension ari.goal",
+  "description": "Goal runs: one objective that the provider pursues over several turns it starts on its own. Filled natively by some providers and derived from the transcript by others, marked `derived: true`. Drivers list `{ ns: \"ari.goal\", version: \"1\" }` in `capabilities.extensions`, emit `x:ari.goal.updated` events, and answer `session.ext(\"ari.goal\", \"get\" | \"set\" | \"clear\", params)`.",
+  "$defs": {
+    "AriGoalStatus": {
+      "anyOf": [
+        { "enum": ["active", "paused", "completed", "cancelled", "failed"] },
+        { "type": "string" }
+      ]
+    },
+    "AriGoal": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "objective": { "type": "string" },
+        "status": { "$ref": "#/$defs/AriGoalStatus" },
+        "derived": { "type": "boolean", "description": "True when the driver read the goal from the transcript instead of a native goal API." },
+        "turnIds": { "type": "array", "items": { "type": "string" }, "description": "Turns the goal run has owned so far." },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["threadId", "objective", "status", "derived"]
+    },
+    "AriGoalUpdatedEvent": {
+      "description": "Event body for a goal change.",
+      "type": "object",
+      "properties": {
+        "type": { "const": "x:ari.goal.updated" },
+        "data": {
+          "anyOf": [{ "$ref": "#/$defs/AriGoal" }, { "type": "null" }],
+          "description": "The goal, or null once it is cleared."
+        },
+        "fallback": { "$ref": "../common.schema.json#/$defs/Fallback" }
+      },
+      "required": ["type", "data"]
+    },
+    "AriGoalGetParams": {
+      "type": "object",
+      "properties": { "threadId": { "type": "string" } },
+      "required": ["threadId"]
+    },
+    "AriGoalSetParams": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "objective": { "type": "string" }
+      },
+      "required": ["threadId", "objective"]
+    },
+    "AriGoalClearParams": {
+      "type": "object",
+      "properties": { "threadId": { "type": "string" } },
+      "required": ["threadId"]
+    },
+    "AriGoalResult": {
+      "description": "Result of `get` and `set`: the goal, or null when none is set.",
+      "anyOf": [{ "$ref": "#/$defs/AriGoal" }, { "type": "null" }]
+    }
+  }
+}

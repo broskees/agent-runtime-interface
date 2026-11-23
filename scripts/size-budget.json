@@ -1,0 +1,4 @@
+{
+  "rootExportMinifiedBytes": 180000,
+  "note": "Byte budget for the `ari` root export bundled with esbuild (minify, esm, platform neutral) from dist/index.js. At the first build it measured 150253 bytes (32295 gzipped), almost all of it the embedded schema documents behind the validators. The budget leaves about 20% headroom; raise it only with a reason in the commit message."
+}

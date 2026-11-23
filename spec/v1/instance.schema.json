@@ -1,0 +1,416 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/instance.schema.json",
+  "title": "ARI account plane data",
+  "description": "Data that `Instance` methods take and return: status, probes, sign-in, model catalog, native sessions, sub-providers and session options. Only `unauthenticated` blocks sending; `configured` and `unavailable` never do.",
+  "$defs": {
+    "AuthStatus": {
+      "anyOf": [
+        { "enum": ["authenticated", "configured", "unauthenticated", "unknown", "unavailable"] },
+        { "type": "string" }
+      ]
+    },
+    "AuthEvidence": {
+      "description": "`passive`: credentials were seen but not checked. `active`: a check succeeded or failed. `runtime_poison`: a live call failed with an auth error recently.",
+      "anyOf": [
+        { "enum": ["passive", "active", "runtime_poison"] },
+        { "type": "string" }
+      ]
+    },
+    "AuthScope": {
+      "description": "Managed profile and ambient account are judged separately, so an ambient sign-out never blocks a healthy managed profile.",
+      "anyOf": [
+        { "enum": ["managed_profile", "ambient"] },
+        { "type": "string" }
+      ]
+    },
+    "AuthAccount": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "plan": { "type": "string" }
+      }
+    },
+    "ActionRequired": {
+      "type": "object",
+      "properties": {
+        "reason": { "type": "string" },
+        "url": { "type": "string" }
+      },
+      "required": ["reason"]
+    },
+    "AuthState": {
+      "type": "object",
+      "properties": {
+        "status": { "$ref": "#/$defs/AuthStatus" },
+        "evidence": { "$ref": "#/$defs/AuthEvidence" },
+        "scope": { "$ref": "#/$defs/AuthScope" },
+        "account": { "$ref": "#/$defs/AuthAccount" },
+        "poisonExpiresAt": { "type": "string", "description": "When a runtime auth poison expires." },
+        "actionRequired": { "$ref": "#/$defs/ActionRequired" }
+      },
+      "required": ["status", "evidence", "scope"]
+    },
+    "AuthMethodKind": {
+      "anyOf": [
+        { "enum": ["api_key", "oauth_browser", "device_code", "terminal_cli", "cloud_iam", "external"] },
+        { "type": "string" }
+      ]
+    },
+    "AuthField": {
+      "description": "A value the user enters during sign-in, for example an API key.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "secret": { "type": "boolean" },
+        "required": { "type": "boolean" }
+      },
+      "required": ["id", "label"]
+    },
+    "AuthMethod": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "$ref": "#/$defs/AuthMethodKind" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/AuthField" } }
+      },
+      "required": ["id", "kind", "label"]
+    },
+    "AuthCallback": {
+      "description": "`server`: the host routes the provider's callback to `auth.complete`. `client`: the client returns to `returnUrl`.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            { "enum": ["server", "client"] },
+            { "type": "string" }
+          ]
+        },
+        "returnUrl": { "type": "string" }
+      },
+      "required": ["mode"]
+    },
+    "AuthStartInput": {
+      "type": "object",
+      "properties": {
+        "ownerSessionId": { "type": "string" },
+        "methodId": { "type": "string" },
+        "callback": { "$ref": "#/$defs/AuthCallback" }
+      },
+      "required": ["ownerSessionId", "methodId", "callback"]
+    },
+    "AuthFlow": {
+      "description": "A sign-in in progress. Depending on the method it gives a URL to open, a device code, or fields to fill.",
+      "type": "object",
+      "properties": {
+        "flowId": { "type": "string" },
+        "methodId": { "type": "string" },
+        "url": { "type": "string" },
+        "userCode": { "type": "string" },
+        "verificationUrl": { "type": "string" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/AuthField" } },
+        "instructions": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["flowId", "methodId"]
+    },
+    "AuthCompleteInput": {
+      "type": "object",
+      "properties": {
+        "flowId": { "type": "string" },
+        "callbackUrl": { "type": "string" }
+      },
+      "required": ["flowId", "callbackUrl"]
+    },
+    "AuthRespondInput": {
+      "type": "object",
+      "properties": {
+        "flowId": { "type": "string" },
+        "values": { "type": "object", "additionalProperties": { "type": "string" } }
+      },
+      "required": ["flowId", "values"]
+    },
+    "RuntimeFailureReport": {
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "required": ["message"]
+    },
+    "TransferredProfile": {
+      "description": "Credentials handed over from another machine that completed sign-in. Only the destination may refresh them afterwards.",
+      "type": "object",
+      "properties": {
+        "format": { "type": "string", "description": "Driver-defined format name of `data`." },
+        "data": { "type": "string", "description": "Opaque, driver-defined credential payload." },
+        "account": { "$ref": "#/$defs/AuthAccount" },
+        "issuedAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["format", "data"]
+    },
+    "CredentialBinding": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "anyOf": [
+            { "enum": ["provider", "host"] },
+            { "type": "string" }
+          ]
+        },
+        "key": { "type": "string" }
+      },
+      "required": ["owner", "key"]
+    },
+    "UpdateAdvisoryKind": {
+      "anyOf": [
+        { "enum": ["update_available", "update_required", "untested_version"] },
+        { "type": "string" }
+      ]
+    },
+    "UpdateAdvisory": {
+      "type": "object",
+      "properties": {
+        "kind": { "$ref": "#/$defs/UpdateAdvisoryKind" },
+        "message": { "type": "string" },
+        "currentVersion": { "type": "string" },
+        "latestVersion": { "type": "string" },
+        "testedRange": { "type": "string", "description": "The vendor versions the driver is tested against, as a semver range." }
+      },
+      "required": ["kind", "message"]
+    },
+    "InstanceState": {
+      "anyOf": [
+        { "enum": ["ready", "unavailable", "setup_required", "error"] },
+        { "type": "string" }
+      ]
+    },
+    "NativeSessionAbilities": {
+      "type": "object",
+      "properties": {
+        "list": { "type": "boolean" },
+        "delete": { "type": "boolean" },
+        "archive": { "type": "boolean" }
+      },
+      "required": ["list", "delete", "archive"]
+    },
+    "InstanceSetup": {
+      "type": "object",
+      "properties": {
+        "required": { "type": "boolean" },
+        "steps": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["required"]
+    },
+    "InstanceStatus": {
+      "description": "Everything the host shows about an instance. When `state` is `unavailable`, `error` names what is missing, typically a `driver_unavailable` error naming the package or binary to install.",
+      "type": "object",
+      "properties": {
+        "state": { "$ref": "#/$defs/InstanceState" },
+        "installed": { "type": "boolean" },
+        "version": { "type": "string", "description": "The vendor SDK or CLI version found." },
+        "error": { "$ref": "errors.schema.json#/$defs/CallError" },
+        "auth": { "$ref": "#/$defs/AuthState" },
+        "models": { "$ref": "#/$defs/ModelCatalog" },
+        "commands": { "type": "array", "items": { "$ref": "config.schema.json#/$defs/SlashCommand" } },
+        "skills": { "type": "array", "items": { "$ref": "config.schema.json#/$defs/Skill" } },
+        "limits": { "$ref": "usage.schema.json#/$defs/LimitStatus" },
+        "advisory": { "$ref": "#/$defs/UpdateAdvisory" },
+        "setup": { "$ref": "#/$defs/InstanceSetup" },
+        "nativeSessions": { "$ref": "#/$defs/NativeSessionAbilities" }
+      },
+      "required": ["state", "installed"]
+    },
+    "ProbeOptions": {
+      "type": "object",
+      "properties": {
+        "deep": { "type": "boolean" }
+      }
+    },
+    "ProbeResult": {
+      "description": "Result of a side-effect-free health check.",
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "installed": { "type": "boolean" },
+        "version": { "type": "string" },
+        "auth": { "$ref": "#/$defs/AuthState" },
+        "error": { "$ref": "errors.schema.json#/$defs/CallError" },
+        "checkedAt": { "type": "string" }
+      },
+      "required": ["ok", "installed", "checkedAt"]
+    },
+    "ModelInfo": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "legacy": { "type": "boolean" },
+        "contextWindow": { "type": "integer", "minimum": 0 },
+        "options": { "type": "array", "items": { "$ref": "config.schema.json#/$defs/ConfigOption" } }
+      },
+      "required": ["id", "label"]
+    },
+    "ModelCatalog": {
+      "type": "object",
+      "properties": {
+        "models": { "type": "array", "items": { "$ref": "#/$defs/ModelInfo" } },
+        "defaultModelId": { "type": "string" },
+        "aliases": { "type": "object", "additionalProperties": { "type": "string" } },
+        "updateRequired": {
+          "type": "object",
+          "properties": { "minVersion": { "type": "string" } },
+          "required": ["minVersion"]
+        }
+      },
+      "required": ["models"]
+    },
+    "CatalogListOptions": {
+      "type": "object",
+      "properties": {
+        "cwd": { "type": "string" }
+      }
+    },
+    "WorkspaceSnapshot": {
+      "type": "object",
+      "properties": {
+        "commands": { "type": "array", "items": { "$ref": "config.schema.json#/$defs/SlashCommand" } },
+        "skills": { "type": "array", "items": { "$ref": "config.schema.json#/$defs/Skill" } },
+        "options": { "type": "array", "items": { "$ref": "config.schema.json#/$defs/ConfigOption" } }
+      },
+      "required": ["commands", "skills", "options"]
+    },
+    "ConsumeResetCreditInput": {
+      "type": "object",
+      "properties": {
+        "idempotencyKey": { "type": "string" }
+      },
+      "required": ["idempotencyKey"]
+    },
+    "UsageRange": {
+      "type": "object",
+      "properties": {
+        "from": { "type": "string", "description": "ISO-8601 timestamp, inclusive." },
+        "to": { "type": "string", "description": "ISO-8601 timestamp, exclusive." }
+      },
+      "required": ["from", "to"]
+    },
+    "TextGenerationKind": {
+      "anyOf": [
+        { "enum": ["commit_message", "pr", "branch", "title", "review_guide"] },
+        { "$ref": "common.schema.json#/$defs/ExtensionName" }
+      ]
+    },
+    "TextGenerationGuarantees": {
+      "description": "`native`: the provider really disables tools. `prompt_only`: the model is only told not to use them, which is not a sandbox.",
+      "type": "object",
+      "properties": {
+        "toolsDisabled": {
+          "anyOf": [
+            { "enum": ["native", "prompt_only"] },
+            { "type": "string" }
+          ]
+        }
+      },
+      "required": ["toolsDisabled"]
+    },
+    "TextGenerationRequest": {
+      "type": "object",
+      "properties": {
+        "kind": { "$ref": "#/$defs/TextGenerationKind" },
+        "input": { "$ref": "common.schema.json#/$defs/AnyValue" },
+        "schema": { "$ref": "common.schema.json#/$defs/JsonSchema" }
+      },
+      "required": ["kind", "input"]
+    },
+    "NativeSessionListInput": {
+      "type": "object",
+      "properties": {
+        "cwd": { "type": "string" },
+        "cursor": { "type": "string" }
+      },
+      "required": ["cwd"]
+    },
+    "NativeSessionInfo": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "cwd": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "handle": { "type": "string", "description": "What `resumeThread({ native: { handle } })` accepts." },
+        "native": { "$ref": "common.schema.json#/$defs/NativeRef" },
+        "messageCount": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["id"]
+    },
+    "NativeSessionInfoPage": {
+      "description": "A page of native sessions.",
+      "type": "object",
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/NativeSessionInfo" } },
+        "nextCursor": { "type": ["string", "null"] }
+      },
+      "required": ["items"]
+    },
+    "SubProvider": {
+      "description": "A provider behind a multi-provider agent, such as an ACP Registry agent.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "installed": { "type": "boolean" },
+        "version": { "type": "string" },
+        "icon": { "$ref": "common.schema.json#/$defs/Icon" }
+      },
+      "required": ["id", "label", "enabled"]
+    },
+    "SubProviderSetInput": {
+      "description": "Enable or configure a sub-provider. Drivers may accept extra fields.",
+      "type": "object",
+      "properties": {
+        "cwd": { "type": "string" },
+        "providerId": { "type": "string" },
+        "settings": { "$ref": "common.schema.json#/$defs/ConfigValues" }
+      },
+      "required": ["cwd", "providerId"]
+    },
+    "SubProviderDisableInput": {
+      "type": "object",
+      "properties": {
+        "cwd": { "type": "string" },
+        "providerId": { "type": "string" }
+      },
+      "required": ["cwd", "providerId"]
+    },
+    "PayloadLimits": {
+      "type": "object",
+      "properties": {
+        "maxToolOutputBytes": { "type": "integer", "minimum": 0 },
+        "maxDiffBytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "OpenSessionInput": {
+      "type": "object",
+      "properties": {
+        "config": { "$ref": "common.schema.json#/$defs/ConfigValues" },
+        "policy": { "$ref": "config.schema.json#/$defs/RuntimePolicy" },
+        "resumeFrom": { "$ref": "thread.schema.json#/$defs/SessionHandle" },
+        "launch": { "$ref": "session.schema.json#/$defs/LaunchContext" },
+        "emitDiffs": { "type": "boolean" },
+        "handshakeTimeoutMs": { "type": "integer", "minimum": 0, "description": "Defaults to 120000. A hung startup fails deterministically." },
+        "payloadLimits": { "$ref": "#/$defs/PayloadLimits" }
+      }
+    }
+  }
+}

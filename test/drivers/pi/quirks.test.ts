@@ -10,7 +10,7 @@ import * as path from "node:path";
 import { after, test } from "node:test";
 import type { AriEvent, Request } from "../../../src/index.ts";
 import { FAKE_PI } from "./harness.ts";
-import { checkAgainstPiTypes, sessionLinesUnder } from "./pi-types.ts";
+import { checkRunsAgainstPiTypes } from "./pi-types.ts";
 import { openPiTestRig, policy } from "./rig.ts";
 import type { PiTestRig } from "./rig.ts";
 
@@ -255,13 +255,8 @@ test("Pi extension UI dialogs arrive as requests, and answers go back in Pi's ow
   assert.ok(session.events.some((event) => event.body.type === "request.upsert" && event.body.request.id === leftRequest.id && event.body.request.status === "cancelled"));
 });
 
-test("every frame of these tests matches Pi's published types", () => {
-  const frames = rigs.flatMap((opened) => opened.harness.frames);
-  assert.ok(frames.length > 0);
-  const diagnostics = checkAgainstPiTypes({
-    sent: frames.filter((frame) => frame.direction === "in").map((frame) => frame.record),
-    received: frames.filter((frame) => frame.direction === "out").map((frame) => frame.record),
-    sessionLines: rigs.flatMap((opened) => sessionLinesUnder(opened.harness.root)),
-  });
-  assert.deepEqual(diagnostics, []);
+test("every frame and session file line of these tests matches Pi's published types", () => {
+  const checked = checkRunsAgainstPiTypes(rigs.map((rig) => rig.harness));
+  assert.ok(checked.frames > 0);
+  assert.deepEqual(checked.diagnostics, []);
 });

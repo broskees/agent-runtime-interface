@@ -114,3 +114,14 @@ export function checkBridgeAgainstPiTypes(bridgeSource: string): string[] {
   const source = [`import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";`, bridgeSource.replace(marker, "pi: ExtensionAPI")].join("\n");
   return check(new Map([[path.join(VIRTUAL_DIRECTORY, "__pi_bridge__.ts"), source]]), { ...BASE_OPTIONS, noImplicitAny: false });
 }
+
+/** Every frame and session-file line of some fake-pi runs, checked against Pi's types; returns the diagnostics. */
+export function checkRunsAgainstPiTypes(runs: ReadonlyArray<{ readonly frames: ReadonlyArray<{ readonly direction: "in" | "out"; readonly record: unknown }>; readonly root: string }>): { frames: number; diagnostics: string[] } {
+  const frames = runs.flatMap((run) => run.frames);
+  const diagnostics = checkAgainstPiTypes({
+    sent: frames.filter((frame) => frame.direction === "in").map((frame) => frame.record),
+    received: frames.filter((frame) => frame.direction === "out").map((frame) => frame.record),
+    sessionLines: runs.flatMap((run) => sessionLinesUnder(run.root)),
+  });
+  return { frames: frames.length, diagnostics };
+}

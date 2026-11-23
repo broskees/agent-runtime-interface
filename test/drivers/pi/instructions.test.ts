@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
 import { piCapabilities } from "../../../src/drivers/pi/index.ts";
+import { checkRunsAgainstPiTypes } from "./pi-types.ts";
 import { openPiTestRig, policy } from "./rig.ts";
 import type { PiTestRig } from "./rig.ts";
 
@@ -109,4 +110,10 @@ test("launch prompts and instructions reach Pi through the declared system chann
     assert.deepEqual(filesContaining(home, marker), [], `${marker} was written under the provider's home`);
   }
   for (const spawn of rig.host.spawns) assert.equal(spawn.environment["HOME"], home, "pi ran with the temporary home");
+});
+
+test("every frame and session file line of these tests matches Pi's published types", () => {
+  const checked = checkRunsAgainstPiTypes(rigs.map((rig) => rig.harness));
+  assert.ok(checked.frames > 0);
+  assert.deepEqual(checked.diagnostics, []);
 });

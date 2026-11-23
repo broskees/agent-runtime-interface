@@ -58,10 +58,3 @@ SessionEntry`), and the bridge extension's source (`ExtensionAPI`), all from
 `@earendil-works/pi-coding-agent@1.6.0`. `conformance.test.ts` and
 `quirks.test.ts` run it over their whole runs.
 
-## T3 Code
-
-T3 Code's MIT `provider-pi` package at
-https://github.com/pingdotgg/t3code/tree/be6ff17f5171c8a55969ec74af46ff1d86666c3a/packages/provider-pi
-was read for protocol knowledge only (forks through `pi --fork` in the
-destination directory, `fork` and `navigateTree` for session trees, steering
-through Pi's queue). No names, prompts or code were copied.

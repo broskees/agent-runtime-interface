@@ -123,6 +123,15 @@ It never adds instruction text of its own. Its runtime mode arrives in the
   used. A steer Pi delivered right after a final answer cannot be told from a
   new prompt in a stored file, so after a restart it shows as its own turn.
 
+## Prompt content
+
+Text blocks become the prompt's text, and inline images go in Pi's `images`
+field. Host files (`attachmentRef`) reach Pi as the path
+`host.attachments.resolve` returns. When the host cannot give the bytes, the
+prompt names the attachment as unreadable, as the proposal's §10 requires;
+that is the only text the driver adds to a prompt. A `resource_link` or an
+image URL becomes its URI.
+
 ## Requests
 
 - The bridge's approval dialogs become approvals (`command`, `file_change` or

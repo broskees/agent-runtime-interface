@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { PI_AUTH_METHODS, piCapabilities } from "../../../src/drivers/pi/index.ts";
 import { isAriError, toCallError } from "../../../src/index.ts";
 import type { Instance, Session } from "../../../src/index.ts";
+import { checkRunsAgainstPiTypes } from "./pi-types.ts";
 import { openPiTestRig, policy } from "./rig.ts";
 import type { PiTestRig } from "./rig.ts";
 
@@ -207,4 +208,10 @@ test("docs/drivers/pi.md lists every declared capability with its value, and a s
     const differs = (proposal === "Y" && declared !== "true") || (proposal === "–" && declared === "true");
     if (differs) assert.match(note, /Pi docs|pi\.dev|github\.com|pi-coding-agent/, `${capability} differs from §1.2 (${proposal}) without a source`);
   }
+});
+
+test("every frame and session file line of these tests matches Pi's published types", () => {
+  const checked = checkRunsAgainstPiTypes(rigs.map((rig) => rig.harness));
+  assert.ok(checked.frames > 0);
+  assert.deepEqual(checked.diagnostics, []);
 });

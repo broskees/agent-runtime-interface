@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 export const SPEC_BASE_ID = "https://ari.invalid/spec/v1/";
 export const DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema";
 
-const ANNOTATION_KEYWORDS = ["$schema", "$id", "$defs", "$comment", "title", "description", "examples", "default", "deprecated"];
+export const ANNOTATION_KEYWORDS = ["$schema", "$id", "$defs", "$comment", "title", "description", "examples", "default", "deprecated"];
 const APPLICATOR_KEYWORDS = ["$ref", "allOf", "anyOf", "oneOf", "not", "properties", "additionalProperties", "items", "prefixItems"];
 const VALIDATION_KEYWORDS = [
   "type",
@@ -36,13 +36,13 @@ const VALIDATION_KEYWORDS = [
   "maxItems",
 ];
 const ALLOWED_KEYWORDS = new Set([...ANNOTATION_KEYWORDS, ...APPLICATOR_KEYWORDS, ...VALIDATION_KEYWORDS]);
-const EXTENSION_PATTERN = "^x:";
+export const EXTENSION_PATTERN = "^x:";
 const REF_PATTERN = /^([^#]*)#\/\$defs\/([A-Za-z_][A-Za-z0-9_]*)$/;
 
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-type SchemaObject = { [keyword: string]: Json };
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+export type SchemaObject = { [keyword: string]: Json };
 
-interface SpecFile {
+export interface SpecFile {
   /** Path relative to spec/v1, with forward slashes, e.g. `extensions/ari.goal.schema.json`. */
   readonly relPath: string;
   /** Module path relative to src/generated without extension, e.g. `extensions/ari.goal`. */
@@ -52,7 +52,7 @@ interface SpecFile {
   readonly defs: Map<string, Json>;
 }
 
-interface DefLocation {
+export interface DefLocation {
   readonly file: SpecFile;
   readonly name: string;
 }
@@ -63,7 +63,7 @@ function fail(message: string): never {
   throw new CodegenError(message);
 }
 
-function listFiles(directory: string): string[] {
+export function listFiles(directory: string): string[] {
   if (!fs.existsSync(directory)) return [];
   const results: string[] = [];
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -74,11 +74,11 @@ function listFiles(directory: string): string[] {
   return results.sort();
 }
 
-function toPosix(relative: string): string {
+export function toPosix(relative: string): string {
   return relative.split(path.sep).join("/");
 }
 
-function isSchemaObject(value: Json | undefined): value is SchemaObject {
+export function isSchemaObject(value: Json | undefined): value is SchemaObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -87,7 +87,7 @@ function camelCase(name: string): string {
   return words.map((word, index) => (index === 0 ? word.toLowerCase() : word[0]!.toUpperCase() + word.slice(1))).join("");
 }
 
-function loadSpec(specDir: string): SpecFile[] {
+export function loadSpec(specDir: string): SpecFile[] {
   const files: SpecFile[] = [];
   for (const full of listFiles(specDir)) {
     const relPath = toPosix(path.relative(specDir, full));
@@ -149,7 +149,7 @@ function forEachRef(node: Json, visit: (ref: string) => void): void {
   }
 }
 
-class SpecModel {
+export class SpecModel {
   readonly files: SpecFile[];
   readonly filesByRelPath: Map<string, SpecFile>;
   readonly defOwners = new Map<string, SpecFile>();
@@ -223,7 +223,7 @@ interface ModuleContext {
   readonly typeImports: Map<SpecFile, Set<string>>;
 }
 
-function jsDoc(description: Json | undefined, indent: string): string {
+export function jsDoc(description: Json | undefined, indent: string): string {
   if (typeof description !== "string" || description === "") return "";
   const text = description.replaceAll("*/", "*\\/");
   const lines = text.split("\n");
@@ -235,11 +235,11 @@ function literal(value: Json): string {
   return JSON.stringify(value);
 }
 
-function propertyKey(name: string): string {
+export function propertyKey(name: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
 }
 
-function isAnnotationOnly(node: SchemaObject): boolean {
+export function isAnnotationOnly(node: SchemaObject): boolean {
   return Object.keys(node).every((key) => ANNOTATION_KEYWORDS.includes(key));
 }
 
@@ -248,7 +248,7 @@ function isPlainString(node: Json): boolean {
   return Object.keys(node).every((key) => key === "type" || ANNOTATION_KEYWORDS.includes(key));
 }
 
-function isRequiredOnlyUnion(members: Json[]): boolean {
+export function isRequiredOnlyUnion(members: Json[]): boolean {
   return members.every((member) => isSchemaObject(member) && Object.keys(member).every((key) => key === "required"));
 }
 

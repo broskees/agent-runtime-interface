@@ -365,7 +365,13 @@ function resolveSessionArgument(argument: string, dir: string): string | undefin
 // Startup
 
 const cwd = process.cwd();
-const sessionDir = path.resolve(flag("--session-dir") ?? path.join(process.env["HOME"] ?? cwd, ".pi", "agent", "sessions"));
+// Pi's default is ~/.pi/agent/sessions. The fake never guesses a home: without HOME or --session-dir it refuses.
+const homeDirectory = process.env["HOME"];
+if (flag("--session-dir") === undefined && (homeDirectory === undefined || homeDirectory === "") && !args.switches.has("--no-session")) {
+  process.stderr.write("fake pi: give --session-dir or HOME\n");
+  process.exit(2);
+}
+const sessionDir = path.resolve(flag("--session-dir") ?? path.join(homeDirectory ?? cwd, ".pi", "agent", "sessions"));
 let model = findModel(flag("--model") ?? "fake/fake-small");
 if (model === undefined) {
   process.stderr.write(`Error: Model not found: ${flag("--model")}\n`);

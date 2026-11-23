@@ -108,7 +108,7 @@ export const ConfigChangedParamsSchema: Effect.Schema.Codec<Wire.ConfigChangedPa
   [kit.OtherFields],
 ).check(kit.hasFields(["config"])).annotate({ identifier: "ConfigChangedParams" });
 
-/** `paths` carries the instance's `HostServices.paths`. */
+/** `paths` carries the instance's `HostServices.paths`. `hostMembers` lists the optional host-service members the host serves for this instance; the driver sees every optional member not listed as absent. */
 export const DriverCreateParamsSchema: Effect.Schema.Codec<Wire.DriverCreateParams> = Schema.StructWithRest(
   Schema.Struct({
     instanceId: Schema.String,
@@ -118,9 +118,17 @@ export const DriverCreateParamsSchema: Effect.Schema.Codec<Wire.DriverCreatePara
     /** Environment variables the host chose for this instance. */
     environment: Schema.Record(Schema.String, Schema.String),
     paths: Schema.suspend(() => HostPathsSchema),
+    /** The optional `HostServices` members the host serves, by dotted path. Absent means none. */
+    hostMembers: Schema.optional(Schema.mutable(Schema.Array(Schema.suspend(() => OptionalHostMemberSchema)))),
   }),
   [kit.OtherFields],
 ).check(kit.hasFields(["config"])).annotate({ identifier: "DriverCreateParams" });
+
+/** An optional `HostServices` member, by dotted path. */
+export const OptionalHostMemberSchema: Effect.Schema.Codec<Wire.OptionalHostMember> = Schema.Union([
+  Schema.Literals(["attachments.extractText", "hostTools.callDynamicTool", "telemetry.track", "ids.derive"]),
+  Schema.String,
+]).annotate({ identifier: "OptionalHostMember" });
 
 /** The instance's non-method members. `members` lists the optional members (`?` in the TypeScript interface) this instance implements, as dotted paths such as `auth.start`. */
 export const InstanceDescriptorSchema: Effect.Schema.Codec<Wire.InstanceDescriptor> = Schema.StructWithRest(

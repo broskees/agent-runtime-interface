@@ -29,7 +29,7 @@
         "major": 1,
         "minor": 0
       },
-      "notes": "The producer of a stream ends it, with an error when it failed."
+      "notes": "The producer of a stream ends it, with an error when it failed. A producer sends a stream's notifications only after the response that carries its streamId."
     },
     {
       "name": "stream/cancel",
@@ -1629,7 +1629,8 @@
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "Base64 output of a delegated child. The host sends all of a child's output before its host/process.exit."
     },
     {
       "name": "host/process.exit",
@@ -1642,7 +1643,8 @@
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "The child exited. Sent after its last host/process.output; the driver ends the child's stdout and stderr here."
     }
   ],
   "properties": [

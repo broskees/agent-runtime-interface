@@ -91,10 +91,15 @@ export type ConfigChangedParams = {
   config: AnyValue;
 };
 
-/** `paths` carries the instance's `HostServices.paths`. */
+/** `paths` carries the instance's `HostServices.paths`. `hostMembers` lists the optional host-service members the host serves for this instance; the driver sees every optional member not listed as absent. */
 export type DriverCreateParams = CreateInstanceInput & {
   paths: HostPaths;
+  /** The optional `HostServices` members the host serves, by dotted path. Absent means none. */
+  hostMembers?: OptionalHostMember[];
 };
+
+/** An optional `HostServices` member, by dotted path. */
+export type OptionalHostMember = "attachments.extractText" | "hostTools.callDynamicTool" | "telemetry.track" | "ids.derive" | (string & {});
 
 /** The instance's non-method members. `members` lists the optional members (`?` in the TypeScript interface) this instance implements, as dotted paths such as `auth.start`. */
 export type InstanceDescriptor = {
@@ -517,7 +522,7 @@ export const rpcDocument: SchemaDocument = {
       ]
     },
     "DriverCreateParams": {
-      "description": "`paths` carries the instance's `HostServices.paths`.",
+      "description": "`paths` carries the instance's `HostServices.paths`. `hostMembers` lists the optional host-service members the host serves for this instance; the driver sees every optional member not listed as absent.",
       "allOf": [
         {
           "$ref": "driver.schema.json#/$defs/CreateInstanceInput"
@@ -527,11 +532,34 @@ export const rpcDocument: SchemaDocument = {
           "properties": {
             "paths": {
               "$ref": "host.schema.json#/$defs/HostPaths"
+            },
+            "hostMembers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OptionalHostMember"
+              },
+              "description": "The optional `HostServices` members the host serves, by dotted path. Absent means none."
             }
           },
           "required": [
             "paths"
           ]
+        }
+      ]
+    },
+    "OptionalHostMember": {
+      "description": "An optional `HostServices` member, by dotted path.",
+      "anyOf": [
+        {
+          "enum": [
+            "attachments.extractText",
+            "hostTools.callDynamicTool",
+            "telemetry.track",
+            "ids.derive"
+          ]
+        },
+        {
+          "type": "string"
         }
       ]
     },
@@ -1512,6 +1540,7 @@ export const StatusChangedParamsSchema: Validator<StatusChangedParams> = /* @__P
 export const UsageRecordParamsSchema: Validator<UsageRecordParams> = /* @__PURE__ */ createValidator<UsageRecordParams>("UsageRecordParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const ConfigChangedParamsSchema: Validator<ConfigChangedParams> = /* @__PURE__ */ createValidator<ConfigChangedParams>("ConfigChangedParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const DriverCreateParamsSchema: Validator<DriverCreateParams> = /* @__PURE__ */ createValidator<DriverCreateParams>("DriverCreateParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
+export const OptionalHostMemberSchema: Validator<OptionalHostMember> = /* @__PURE__ */ createValidator<OptionalHostMember>("OptionalHostMember", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const InstanceDescriptorSchema: Validator<InstanceDescriptor> = /* @__PURE__ */ createValidator<InstanceDescriptor>("InstanceDescriptor", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const InstanceProbeParamsSchema: Validator<InstanceProbeParams> = /* @__PURE__ */ createValidator<InstanceProbeParams>("InstanceProbeParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const NullableUpdateAdvisorySchema: Validator<NullableUpdateAdvisory> = /* @__PURE__ */ createValidator<NullableUpdateAdvisory>("NullableUpdateAdvisory", "https://ari.invalid/spec/v1/rpc.schema.json", documents);

@@ -117,14 +117,29 @@ every method. Its mapping rules:
   (`instanceId` for instance methods and host services, `sessionId` for session
   methods). Positional TypeScript arguments become named fields.
 - The result is the TypeScript return value; `void` and `undefined` are `null`.
-- A rejected call carries a `CallError` in the JSON-RPC error's `data`.
+- A rejected call carries a `CallError` in the JSON-RPC error's `data`: code
+  -32000 for a call error the callee threw, -32601 (`unsupported`) for an
+  unknown method, -32602 (`validation`) for params that fail their schema,
+  -32603 (`protocol`, `detail: "uncaught_error"`) for anything else thrown.
 - Streaming members return `{ streamId }`. Items arrive as the notification the
-  entry names, ending with `stream/end`; the consumer may send `stream/cancel`.
+  entry names, only after that response, ending with `stream/end`; the
+  consumer may send `stream/cancel`, which the producer answers before its
+  `stream/end`.
+- `driver/create` and `instance/openSession` answer descriptors whose
+  `members` list the optional members the object has; `driver/create`'s
+  `hostMembers` lists the optional host services the host serves.
+- The host's `initialize` says whether it runs the driver's processes
+  (`host.capabilities.process`). If not, the driver spawns locally with the
+  `envPolicy` sent there, and looks executables up locally.
 - Non-method members (`Session.id`, `Instance.bindingKey`, `Driver.metadata`,
   `HostServices.paths.stateDir` and so on) travel inside the params or results
   listed in the `properties` section of `methods.json`.
 - `Instance.auth.transferSession` names its target instance by
   `targetInstanceId`, because an `Instance` object cannot be serialized.
+
+docs/wire.md describes the protocol in full for client authors: the
+handshake's negotiation rules, framing, processes, synchronous members and
+what a client does when the driver process dies.
 
 ## Versions
 

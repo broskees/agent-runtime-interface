@@ -81,14 +81,28 @@
     },
 
     "DriverCreateParams": {
-      "description": "`paths` carries the instance's `HostServices.paths`.",
+      "description": "`paths` carries the instance's `HostServices.paths`. `hostMembers` lists the optional host-service members the host serves for this instance; the driver sees every optional member not listed as absent.",
       "allOf": [
         { "$ref": "driver.schema.json#/$defs/CreateInstanceInput" },
         {
           "type": "object",
-          "properties": { "paths": { "$ref": "host.schema.json#/$defs/HostPaths" } },
+          "properties": {
+            "paths": { "$ref": "host.schema.json#/$defs/HostPaths" },
+            "hostMembers": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/OptionalHostMember" },
+              "description": "The optional `HostServices` members the host serves, by dotted path. Absent means none."
+            }
+          },
           "required": ["paths"]
         }
+      ]
+    },
+    "OptionalHostMember": {
+      "description": "An optional `HostServices` member, by dotted path.",
+      "anyOf": [
+        { "enum": ["attachments.extractText", "hostTools.callDynamicTool", "telemetry.track", "ids.derive"] },
+        { "type": "string" }
       ]
     },
     "InstanceDescriptor": {

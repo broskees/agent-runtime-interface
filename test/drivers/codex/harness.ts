@@ -22,7 +22,7 @@ function iso(seconds: number): string {
 
 /** What the fake served for extension calls, in the shapes the driver returns them (the harness knows both protocols). */
 export function extensionActivity(world: FakeCodexWorld): NativeActivity["extensions"] {
-  return world.activityLog.extensions.flatMap((entry) => {
+  return world.activityLog.extensions.flatMap((entry): Array<{ params: unknown; result: unknown }> => {
     const threadId = threadIdFor(entry.params["threadId"] as string);
     if (entry.method === "thread/goal/set") {
       const goal = (entry.result as { goal: ThreadGoal }).goal;
@@ -101,7 +101,7 @@ export function codexHarness(): CodexHarness {
         exercise: {
           mcpApp: { server: FAKE_MCP_SERVER, tool: FAKE_MCP_TOOL, args: { text: "hello" }, resourceUri: FAKE_MCP_RESOURCE },
           // Every Codex extension call names a thread, so the calls are made when the kit asks: on the rig's first thread.
-          get extensionCalls() {
+          get extensionCalls(): { [ns: string]: { method: string; params: unknown } } {
             const first = world.threadOrder[0];
             if (first === undefined) return {};
             const threadId = threadIdFor(first);

@@ -951,6 +951,24 @@ export class FakeCodexWorld {
     return this.#puppet(turn);
   }
 
+  /** Codex changes a goal on its own (for example when the objective is met). */
+  setGoalStatus(nativeThreadId: string, status: ThreadGoal["status"]): void {
+    for (const server of this.servers) {
+      if (!server.alive || !server.loaded.has(nativeThreadId)) continue;
+      const thread = server.thread(nativeThreadId);
+      if (thread.goal === undefined) throw new Error(`thread ${nativeThreadId} has no goal`);
+      thread.goal = { ...thread.goal, status, updatedAt: seconds(), tokensUsed: thread.goal.tokensUsed + 100 };
+      server.notify("thread/goal/updated", { threadId: nativeThreadId, goal: thread.goal });
+    }
+  }
+
+  /** Codex asks the client for fresh ChatGPT tokens; resolves with the client's answer. */
+  requestTokenRefresh(): Promise<unknown> {
+    const server = this.servers.find((candidate) => candidate.alive);
+    if (server === undefined) throw new Error("no live app-server");
+    return server.request("account/chatgptAuthTokens/refresh", { reason: "unauthorized", previousAccountId: null });
+  }
+
   /** Sends `account/rateLimits/updated` from every live app-server. */
   updateRateLimits(snapshot: RateLimitSnapshot): void {
     this.rateLimits = snapshot;

@@ -1,0 +1,339 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/session.schema.json",
+  "title": "ARI conversation plane inputs and results",
+  "description": "Data that `Session` methods take and return. The `Session` interface itself is hand-written TypeScript in the package and listed method by method in methods.json.",
+  "$defs": {
+    "McpServerConfig": {
+      "description": "An MCP server the agent should connect to. `stdio` servers use `command`, `args` and `env`; `http` and `sse` servers use `url` and `headers`.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "transport": { "$ref": "capabilities.schema.json#/$defs/McpTransport" },
+        "command": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "object", "additionalProperties": { "type": "string" } },
+        "cwd": { "type": "string" },
+        "url": { "type": "string" },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+      },
+      "required": ["name", "transport"]
+    },
+    "LaunchMcpServer": {
+      "description": "An MCP server injected at launch. `alwaysLoad` keeps providers from deferring its tools behind tool search.",
+      "allOf": [
+        { "$ref": "#/$defs/McpServerConfig" },
+        {
+          "type": "object",
+          "properties": { "alwaysLoad": { "type": "boolean" } }
+        }
+      ]
+    },
+    "DynamicToolSpec": {
+      "description": "A host tool the agent may call without MCP. Calls arrive through `hostTools.callDynamicTool`.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "inputSchema": { "$ref": "common.schema.json#/$defs/JsonSchema" }
+      },
+      "required": ["name", "inputSchema"]
+    },
+    "LaunchContext": {
+      "description": "Launch-only injections from the host. Drivers never write these into native provider config files.",
+      "type": "object",
+      "properties": {
+        "appendSystemPrompt": { "type": "array", "items": { "type": "string" } },
+        "developerPrompt": { "type": "array", "items": { "type": "string" } },
+        "mcpServers": { "type": "array", "items": { "$ref": "#/$defs/LaunchMcpServer" } },
+        "dynamicTools": { "type": "array", "items": { "$ref": "#/$defs/DynamicToolSpec" } }
+      }
+    },
+    "InstructionContext": {
+      "description": "Host instructions for a thread.",
+      "type": "object",
+      "properties": {
+        "system": { "type": "string" },
+        "developer": { "type": "string" }
+      }
+    },
+    "SyntheticContext": {
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "text": { "type": "string" }
+      },
+      "required": ["key", "text"]
+    },
+    "TurnContext": {
+      "description": "Host instructions for one turn.",
+      "type": "object",
+      "properties": {
+        "system": { "type": "string" },
+        "developer": { "type": "string" },
+        "synthetic": { "type": "array", "items": { "$ref": "#/$defs/SyntheticContext" } }
+      }
+    },
+    "EventsOptions": {
+      "type": "object",
+      "properties": {
+        "fromSeq": { "type": "integer", "minimum": 1, "description": "Replay from this sequence number, then continue live." }
+      }
+    },
+    "CreateThreadInput": {
+      "type": "object",
+      "properties": {
+        "cwd": { "type": "string" },
+        "policy": { "$ref": "config.schema.json#/$defs/RuntimePolicy" },
+        "config": { "$ref": "common.schema.json#/$defs/ConfigValues" },
+        "launch": { "$ref": "#/$defs/LaunchContext" },
+        "title": { "type": "string" },
+        "forceNew": { "type": "boolean" },
+        "persistSession": { "type": "boolean", "description": "False for ephemeral side tasks. Defaults to true." },
+        "context": { "$ref": "#/$defs/InstructionContext" }
+      },
+      "required": ["cwd", "policy"]
+    },
+    "AppliedThread": {
+      "description": "A thread plus the config the provider actually applied after clamping.",
+      "allOf": [
+        { "$ref": "thread.schema.json#/$defs/Thread" },
+        {
+          "type": "object",
+          "properties": { "appliedConfig": { "$ref": "common.schema.json#/$defs/ConfigValues" } }
+        }
+      ]
+    },
+    "NativeHandleRef": {
+      "type": "object",
+      "properties": { "handle": { "type": "string" } },
+      "required": ["handle"]
+    },
+    "ResumeThreadInput": {
+      "type": "object",
+      "properties": {
+        "native": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/NativeRef" },
+            { "$ref": "#/$defs/NativeHandleRef" }
+          ]
+        },
+        "config": { "$ref": "common.schema.json#/$defs/ConfigValues" },
+        "policy": { "$ref": "config.schema.json#/$defs/RuntimePolicy" },
+        "launch": { "$ref": "#/$defs/LaunchContext" },
+        "purpose": {
+          "description": "`history` loads the transcript read-only without a live runtime.",
+          "anyOf": [
+            { "enum": ["interactive", "history"] },
+            { "type": "string" }
+          ]
+        },
+        "quiet": { "type": "boolean", "description": "Skip replaying stored items as events." }
+      },
+      "required": ["native"]
+    },
+    "ForkThreadInput": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "at": { "$ref": "thread.schema.json#/$defs/ForkPoint" },
+        "cwd": { "type": "string" },
+        "config": { "$ref": "common.schema.json#/$defs/ConfigValues" },
+        "policy": { "$ref": "config.schema.json#/$defs/RuntimePolicy" }
+      },
+      "required": ["threadId", "at"]
+    },
+    "RollbackThreadInput": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "to": { "$ref": "thread.schema.json#/$defs/RollbackTarget" }
+      },
+      "required": ["threadId", "to"]
+    },
+    "InjectHistoryInput": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "messages": { "type": "array", "items": { "$ref": "common.schema.json#/$defs/HistoricalMessage" } },
+        "summary": { "type": "string" }
+      },
+      "required": ["threadId", "messages", "summary"]
+    },
+    "InjectHistoryResult": {
+      "type": "object",
+      "properties": { "consumed": { "type": "boolean" } },
+      "required": ["consumed"]
+    },
+    "StartTurnIntent": {
+      "anyOf": [
+        { "enum": ["start", "queue", "steer"] },
+        { "type": "string" }
+      ]
+    },
+    "StartTurnInput": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "clientTurnKey": { "type": "string", "description": "Idempotency key: a retry with the same key never sends twice." },
+        "intent": { "$ref": "#/$defs/StartTurnIntent" },
+        "expectedTurnId": { "type": "string", "description": "For steer: the turn the host means to steer." },
+        "clearPendingPermissions": { "type": "boolean", "description": "For steer: deny blocking permission requests first." },
+        "content": { "type": "array", "items": { "$ref": "common.schema.json#/$defs/ContentBlock" } },
+        "context": { "$ref": "#/$defs/TurnContext" },
+        "config": { "$ref": "common.schema.json#/$defs/ConfigValues" },
+        "policy": { "$ref": "config.schema.json#/$defs/RuntimePolicy" },
+        "hostTag": { "type": "string" }
+      },
+      "required": ["threadId", "clientTurnKey", "intent", "content"]
+    },
+    "StartTurnResult": {
+      "description": "`prompt_required`: a steer arrived after the turn ended; the host must send a normal `start` turn.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": { "const": "accepted" },
+            "turnId": { "type": "string" },
+            "accepted": {
+              "anyOf": [
+                { "enum": ["started", "queued", "steered"] },
+                { "type": "string" }
+              ]
+            },
+            "providerMessageId": { "type": "string" }
+          },
+          "required": ["status", "turnId", "accepted"]
+        },
+        {
+          "type": "object",
+          "properties": { "status": { "const": "prompt_required" } },
+          "required": ["status"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": { "const": "unsupported" },
+            "capability": { "type": "string" }
+          },
+          "required": ["status", "capability"]
+        }
+      ]
+    },
+    "InterruptTurnInput": {
+      "type": "object",
+      "properties": {
+        "turnId": { "type": "string" },
+        "restartRuntime": { "type": "boolean" }
+      },
+      "required": ["turnId"]
+    },
+    "RespondInput": {
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string" },
+        "responseKey": { "type": "string", "description": "Idempotency key." },
+        "optionId": { "type": "string" },
+        "answers": { "type": "object", "additionalProperties": { "$ref": "request.schema.json#/$defs/Answer" } },
+        "feedback": { "type": "string" },
+        "custom": { "type": "string" },
+        "scope": { "$ref": "request.schema.json#/$defs/ApprovalScope" }
+      },
+      "required": ["requestId", "responseKey"]
+    },
+    "RespondResult": {
+      "description": "Returned when resolving the request needs a follow-up turn, for example after approving a plan.",
+      "type": "object",
+      "properties": {
+        "followUpPrompt": { "type": "array", "items": { "$ref": "common.schema.json#/$defs/ContentBlock" } }
+      }
+    },
+    "BackgroundTaskListOptions": {
+      "type": "object",
+      "properties": {
+        "includeSubagents": { "type": "boolean" }
+      }
+    },
+    "StopBackgroundTaskInput": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "taskId": { "type": "string" }
+      },
+      "required": ["threadId", "taskId"]
+    },
+    "AwaitBackgroundTasksInput": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "taskIds": { "type": "array", "items": { "type": "string" } },
+        "awaited": { "type": "boolean" }
+      },
+      "required": ["threadId", "taskIds", "awaited"]
+    },
+    "AwaitBackgroundTasksResult": {
+      "type": "object",
+      "properties": {
+        "matched": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["matched"]
+    },
+    "StopSubagentInput": {
+      "type": "object",
+      "properties": {
+        "subagentId": { "type": "string" },
+        "requestedAt": { "type": "string", "description": "When the host asked; a delayed stop must not kill a task resumed after this." }
+      },
+      "required": ["subagentId"]
+    },
+    "McpTool": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "inputSchema": { "$ref": "common.schema.json#/$defs/JsonSchema" },
+        "outputSchema": { "$ref": "common.schema.json#/$defs/JsonSchema" },
+        "annotations": { "type": "object" }
+      },
+      "required": ["name"]
+    },
+    "McpCallResult": {
+      "type": "object",
+      "properties": {
+        "content": { "type": "array" },
+        "structuredContent": { "$ref": "common.schema.json#/$defs/AnyValue" },
+        "isError": { "type": "boolean" }
+      },
+      "required": ["content"]
+    },
+    "McpResourceContents": {
+      "type": "object",
+      "properties": {
+        "contents": { "type": "array" }
+      },
+      "required": ["contents"]
+    },
+    "PlanConfigChangeInput": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "changes": { "$ref": "common.schema.json#/$defs/ConfigValues" }
+      },
+      "required": ["threadId", "changes"]
+    },
+    "UploadFeedbackInput": {
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "required": ["threadId"]
+    },
+    "UploadFeedbackResult": {
+      "type": "object",
+      "properties": { "feedbackId": { "type": "string" } },
+      "required": ["feedbackId"]
+    }
+  }
+}

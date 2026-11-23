@@ -1,0 +1,557 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/item.schema.json",
+  "title": "ARI items",
+  "description": "Items are the units of turn output: messages, reasoning, tool calls, plans and so on. An item is one flat object: the common fields plus the payload fields its kind uses. `item.delta` appends text to one of the string fields `text`, `reasoning`, `output` or `plan`.",
+  "$defs": {
+    "ItemKind": {
+      "description": "The 19 core item kinds, plus extension kinds named `x:<namespace>.<name>`. `tool_call` is the generic fallback for tools that fit no other kind.",
+      "anyOf": [
+        {
+          "enum": [
+            "user_message",
+            "assistant_message",
+            "reasoning",
+            "command_execution",
+            "file_change",
+            "file_read",
+            "file_search",
+            "web_search",
+            "mcp_tool_call",
+            "dynamic_tool_call",
+            "tool_call",
+            "todo_list",
+            "proposed_plan",
+            "compaction",
+            "review",
+            "image",
+            "subagent_spawn",
+            "system_notice",
+            "error"
+          ]
+        },
+        {
+          "$ref": "common.schema.json#/$defs/ExtensionName"
+        }
+      ]
+    },
+    "ItemStatus": {
+      "description": "`completed`, `failed`, `cancelled` and `interrupted` are terminal: an item settles when it first reaches one of them.",
+      "anyOf": [
+        {
+          "enum": [
+            "pending",
+            "running",
+            "waiting",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "FileChangeKind": {
+      "anyOf": [
+        {
+          "enum": [
+            "add",
+            "delete",
+            "modify",
+            "move",
+            "copy"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "FileChange": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/FileChangeKind"
+        },
+        "path": {
+          "type": "string"
+        },
+        "oldPath": {
+          "type": "string",
+          "description": "Source path of a move or copy."
+        },
+        "diff": {
+          "type": "string",
+          "description": "Unified diff text. Present only when the session emits diffs."
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ]
+    },
+    "ToolInvocation": {
+      "description": "A tool call: MCP (`server` set), dynamic host tool or generic tool.",
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "result": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "TodoStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed",
+            "cancelled"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "TodoEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TodoStatus"
+        }
+      },
+      "required": [
+        "text",
+        "status"
+      ]
+    },
+    "SearchResult": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "snippet": {
+          "type": "string"
+        }
+      }
+    },
+    "ItemError": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ]
+    },
+    "Item": {
+      "description": "One item of turn output. Payload fields by kind: messages and reviews use `text` (user messages may add `content`); `reasoning` uses `reasoning`; `command_execution` uses `command`, `cwd`, `exitCode`, `durationMs` and `output`; `file_change` uses `changes`; `file_read` uses `paths` and `output`; `file_search` and `web_search` use `query` and `results`; tool kinds use `tool` and `output`; `todo_list` uses `todos`; `proposed_plan` uses `plan`; `compaction` uses `text` for the summary; `image` uses `image`; `subagent_spawn` uses `subagentId`; `system_notice` uses `text`; `error` uses `error`; extension kinds use `data` and `fallback`.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ItemKind"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "status": {
+          "$ref": "#/$defs/ItemStatus"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "parentItemId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "completedAt": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when tool output or a diff hit the session's payload limits."
+        },
+        "hostMeta": {
+          "$ref": "common.schema.json#/$defs/AnyValue",
+          "description": "Host metadata echoed back on user messages."
+        },
+        "text": {
+          "type": "string"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/ContentBlock"
+          }
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "plan": {
+          "type": "string"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "durationMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileChange"
+          }
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "query": {
+          "type": "string"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SearchResult"
+          }
+        },
+        "tool": {
+          "$ref": "#/$defs/ToolInvocation"
+        },
+        "todos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TodoEntry"
+          }
+        },
+        "image": {
+          "$ref": "common.schema.json#/$defs/ImageContent"
+        },
+        "subagentId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string",
+          "description": "The request this item waits on, if any."
+        },
+        "error": {
+          "$ref": "#/$defs/ItemError"
+        },
+        "data": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "fallback": {
+          "$ref": "common.schema.json#/$defs/Fallback"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "native",
+        "status"
+      ]
+    },
+    "ItemPatch": {
+      "description": "Patch form of Item. Only `id` is required; the upsert that opens an item carries every field Item requires.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ItemKind"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "status": {
+          "$ref": "#/$defs/ItemStatus"
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentItemId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "hostMeta": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/ContentBlock"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasoning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exitCode": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "durationMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "changes": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FileChange"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "paths": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "query": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "results": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SearchResult"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolInvocation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "todos": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TodoEntry"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/ImageContent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subagentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "fallback": {
+          "anyOf": [
+            {
+              "$ref": "common.schema.json#/$defs/Fallback"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  }
+}

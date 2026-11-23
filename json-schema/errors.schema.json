@@ -1,0 +1,433 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/errors.schema.json",
+  "title": "ARI call errors and turn failures",
+  "description": "Call errors are what a rejected method call carries. Failures describe why a turn or session failed. Credentials are redacted before either is built.",
+  "$defs": {
+    "CallErrorCode": {
+      "description": "The eleven call error codes. Extensions use `x:` codes.",
+      "anyOf": [
+        {
+          "enum": [
+            "unsupported",
+            "invalid_state",
+            "not_found",
+            "auth_required",
+            "usage_limit",
+            "permission_denied",
+            "transport",
+            "protocol",
+            "validation",
+            "attachment_unreadable",
+            "driver_unavailable"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "UnsupportedError": {
+      "description": "The driver does not support the call. `capability` is the capability path that is off, for example `threads.fork`.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "unsupported"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "capability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "capability"
+      ]
+    },
+    "InvalidStateError": {
+      "description": "The call is not valid now, for example `reason: \"previous_turn_active\"`.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "invalid_state"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "reason"
+      ]
+    },
+    "NotFoundError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "not_found"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "resource": {
+          "type": "string",
+          "description": "What was not found, for example `thread`."
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "AuthRequiredError": {
+      "description": "Sign-in is needed. `methods` lists the ways to sign in.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "auth_required"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "$ref": "instance.schema.json#/$defs/AuthMethod"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "methods"
+      ]
+    },
+    "UsageLimitError": {
+      "description": "A quota or rate limit was hit. `resetAt` is when it resets, or null when unknown.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "usage_limit"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "resetAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "ISO-8601 timestamp."
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "resetAt"
+      ]
+    },
+    "PermissionDeniedError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "permission_denied"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "TransportError": {
+      "description": "The connection to the driver or provider failed, for example because the process exited.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "transport"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "ProtocolError": {
+      "description": "The other side broke the protocol. `detail` says how.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "protocol"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "detail"
+      ]
+    },
+    "ValidationIssue": {
+      "description": "One validation issue, in the Standard Schema issue shape.",
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          }
+        }
+      },
+      "required": [
+        "message"
+      ]
+    },
+    "ValidationError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "validation"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ValidationIssue"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "AttachmentUnreadableError": {
+      "description": "The host could not give the bytes of an attachment.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "attachment_unreadable"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "attachmentRef": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "DriverUnavailableError": {
+      "description": "The driver cannot run because its vendor SDK package or CLI binary is missing. At least one of `package` and `binary` names what to install.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "const": "driver_unavailable"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "package": {
+          "type": "string"
+        },
+        "binary": {
+          "type": "string"
+        },
+        "installHint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "package"
+          ]
+        },
+        {
+          "required": [
+            "binary"
+          ]
+        }
+      ]
+    },
+    "ExtensionCallError": {
+      "description": "An error code defined by an extension.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "common.schema.json#/$defs/ExtensionName"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "data": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "CallError": {
+      "description": "The error a rejected call carries, discriminated by `code`.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/UnsupportedError"
+        },
+        {
+          "$ref": "#/$defs/InvalidStateError"
+        },
+        {
+          "$ref": "#/$defs/NotFoundError"
+        },
+        {
+          "$ref": "#/$defs/AuthRequiredError"
+        },
+        {
+          "$ref": "#/$defs/UsageLimitError"
+        },
+        {
+          "$ref": "#/$defs/PermissionDeniedError"
+        },
+        {
+          "$ref": "#/$defs/TransportError"
+        },
+        {
+          "$ref": "#/$defs/ProtocolError"
+        },
+        {
+          "$ref": "#/$defs/ValidationError"
+        },
+        {
+          "$ref": "#/$defs/AttachmentUnreadableError"
+        },
+        {
+          "$ref": "#/$defs/DriverUnavailableError"
+        },
+        {
+          "$ref": "#/$defs/ExtensionCallError"
+        }
+      ]
+    },
+    "FailureClass": {
+      "description": "Why a turn or session failed. Quota and rate-limit errors must be `usage_limit` with a reset time.",
+      "anyOf": [
+        {
+          "enum": [
+            "usage_limit",
+            "provider_error",
+            "transport_error",
+            "permission_error",
+            "validation_error",
+            "unknown"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "Failure": {
+      "description": "A turn or session failure. `code` is the provider's own code, if any.",
+      "type": "object",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/FailureClass"
+        },
+        "message": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "resetAt": {
+          "type": "string",
+          "description": "ISO-8601 timestamp when a usage limit resets."
+        },
+        "detail": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        }
+      },
+      "required": [
+        "class",
+        "message",
+        "retryable"
+      ]
+    }
+  }
+}

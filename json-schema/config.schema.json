@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/config.schema.json",
+  "title": "ARI config options and runtime policy",
+  "description": "Config options are modelled on ACP's session config options. Runtime policy carries one of five runtime modes and one of two interaction modes.",
+  "$defs": {
+    "ConfigOptionCategory": {
+      "anyOf": [
+        {
+          "enum": [
+            "model",
+            "reasoning",
+            "mode",
+            "permission",
+            "provider",
+            "other"
+          ]
+        },
+        {
+          "$ref": "common.schema.json#/$defs/ExtensionName"
+        }
+      ]
+    },
+    "ConfigOptionType": {
+      "anyOf": [
+        {
+          "enum": [
+            "select",
+            "boolean",
+            "text",
+            "number"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigOptionScope": {
+      "anyOf": [
+        {
+          "enum": [
+            "instance",
+            "session",
+            "thread",
+            "turn"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigChangeEffect": {
+      "anyOf": [
+        {
+          "enum": [
+            "next_turn",
+            "immediate",
+            "restart_session",
+            "new_thread"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigOptionValue": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "badge": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "ConfigOption": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/ConfigOptionCategory"
+        },
+        "label": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/ConfigOptionType"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConfigOptionValue"
+          }
+        },
+        "current": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "scope": {
+          "$ref": "#/$defs/ConfigOptionScope"
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Ids of options this one depends on, for example a model select that depends on a provider select."
+        },
+        "changeEffect": {
+          "$ref": "#/$defs/ConfigChangeEffect"
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "label",
+        "type",
+        "current",
+        "scope",
+        "changeEffect"
+      ]
+    },
+    "RuntimeMode": {
+      "anyOf": [
+        {
+          "enum": [
+            "read_only",
+            "approval_required",
+            "auto_accept_edits",
+            "auto",
+            "full_access"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "InteractionMode": {
+      "anyOf": [
+        {
+          "enum": [
+            "default",
+            "plan"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "RuntimePolicy": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/RuntimeMode"
+        },
+        "interaction": {
+          "$ref": "#/$defs/InteractionMode"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "additionalRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/AnyValue",
+          "description": "Opaque provider-native policy passed through unchanged."
+        }
+      },
+      "required": [
+        "mode",
+        "interaction",
+        "cwd"
+      ]
+    },
+    "SlashCommand": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "argumentHint": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "description": "Where the command comes from, for example `builtin`, `project` or `user`."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "Skill": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "ConfigChangePlan": {
+      "description": "How a config change would take effect, returned by `planConfigChange` without applying anything.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "apply_next_turn"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "apply_now"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "restart_session"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "new_thread_with_handoff"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "reject"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "reason"
+          ]
+        }
+      ]
+    }
+  }
+}

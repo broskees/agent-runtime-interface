@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/usage.schema.json",
+  "title": "ARI usage and limits",
+  "description": "Token usage, cost, context fill, usage limits and reset credits. Account pooling, retry timing and credit serialization belong to the host.",
+  "$defs": {
+    "UsageScope": {
+      "anyOf": [
+        {
+          "enum": [
+            "turn",
+            "thread",
+            "session"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "UsageSnapshot": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/UsageScope"
+        },
+        "model": {
+          "type": "string"
+        },
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedInputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoningTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costUsd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "contextUsedTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "contextMaxTokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "LimitWindowName": {
+      "anyOf": [
+        {
+          "enum": [
+            "5h",
+            "daily",
+            "weekly",
+            "credits"
+          ]
+        },
+        {
+          "$ref": "common.schema.json#/$defs/ExtensionName"
+        }
+      ]
+    },
+    "LimitWindow": {
+      "type": "object",
+      "properties": {
+        "window": {
+          "$ref": "#/$defs/LimitWindowName"
+        },
+        "utilization": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "resetsAt": {
+          "type": "string"
+        },
+        "remaining": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "window"
+      ]
+    },
+    "LimitStatus": {
+      "type": "object",
+      "properties": {
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LimitWindow"
+          }
+        },
+        "limited": {
+          "type": "boolean"
+        },
+        "resetsAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "windows",
+        "limited"
+      ]
+    },
+    "UsageRecord": {
+      "description": "One historical usage entry, as `usageHistory.scan` yields it.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "nativeSessionId": {
+          "type": "string"
+        },
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedInputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoningTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costUsd": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "at"
+      ]
+    },
+    "ResetCreditStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "consumed",
+            "not_available",
+            "already_consumed",
+            "failed"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ResetCreditOutcome": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/ResetCreditStatus"
+        },
+        "remainingCredits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limits": {
+          "$ref": "#/$defs/LimitStatus"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    }
+  }
+}

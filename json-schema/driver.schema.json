@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/driver.schema.json",
+  "title": "ARI driver data",
+  "description": "Driver metadata, CLI launch manifests and instance creation input. The `Driver` interface itself is hand-written TypeScript.",
+  "$defs": {
+    "DriverMetadata": {
+      "type": "object",
+      "properties": {
+        "displayName": {
+          "type": "string"
+        },
+        "icon": {
+          "$ref": "common.schema.json#/$defs/Icon"
+        },
+        "docsUrl": {
+          "type": "string"
+        },
+        "multipleInstances": {
+          "type": "boolean"
+        },
+        "hasDefaultInstance": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "displayName",
+        "multipleInstances",
+        "hasDefaultInstance"
+      ]
+    },
+    "CliLaunchArgs": {
+      "description": "Arguments for each launch kind. `{sessionId}` and `{cwd}` are placeholders the host fills in.",
+      "type": "object",
+      "properties": {
+        "fresh": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resume": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fork": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "fresh"
+      ]
+    },
+    "CliMcpInjection": {
+      "description": "How a host passes MCP servers to the CLI. `inline_json`: `flag` followed by a JSON config string. `config_file`: `flag` followed by the path of a JSON file the host writes. `env`: the JSON config string in the environment variable `env`.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "inline_json",
+                "config_file",
+                "env"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "flag": {
+          "type": "string"
+        },
+        "env": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ]
+    },
+    "CliLaunchManifest": {
+      "description": "A declarative launch descriptor for hosts that offer a native terminal fallback.",
+      "type": "object",
+      "properties": {
+        "binary": {
+          "type": "string"
+        },
+        "envScrubPrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Environment variables whose names start with one of these prefixes are removed before launch."
+        },
+        "args": {
+          "$ref": "#/$defs/CliLaunchArgs"
+        },
+        "mcpInjection": {
+          "$ref": "#/$defs/CliMcpInjection"
+        }
+      },
+      "required": [
+        "binary",
+        "args"
+      ]
+    },
+    "CreateInstanceInput": {
+      "type": "object",
+      "properties": {
+        "instanceId": {
+          "type": "string"
+        },
+        "config": {
+          "$ref": "common.schema.json#/$defs/AnyValue",
+          "description": "The instance's own config, valid against the driver's `configSchema`."
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables the host chose for this instance."
+        }
+      },
+      "required": [
+        "instanceId",
+        "config",
+        "environment"
+      ]
+    },
+    "DriverDescriptor": {
+      "description": "The driver's non-method members, as the wire handshake carries them.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "ariVersion": {
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/DriverMetadata"
+        },
+        "configSchema": {
+          "$ref": "common.schema.json#/$defs/JsonSchema"
+        },
+        "cliManifest": {
+          "$ref": "#/$defs/CliLaunchManifest"
+        }
+      },
+      "required": [
+        "kind",
+        "ariVersion",
+        "metadata",
+        "configSchema"
+      ]
+    }
+  }
+}

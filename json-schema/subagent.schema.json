@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/subagent.schema.json",
+  "title": "ARI subagents",
+  "description": "Provider-native subagents. Delegation the host does itself stays in the host.",
+  "$defs": {
+    "SubagentStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "pending",
+            "running",
+            "waiting",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "SubagentOutcome": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/SubagentStatus"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "failure": {
+          "$ref": "errors.schema.json#/$defs/Failure"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "Subagent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "parentThreadId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/SubagentStatus"
+        },
+        "threadId": {
+          "type": "string",
+          "description": "The subagent's own thread, when the provider exposes it."
+        },
+        "parentTurnId": {
+          "type": "string"
+        },
+        "parentItemId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "completedAt": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/SubagentOutcome"
+        }
+      },
+      "required": [
+        "id",
+        "native",
+        "parentThreadId",
+        "status"
+      ]
+    },
+    "SubagentPatch": {
+      "description": "Patch form of Subagent. Only `id` is required; the upsert that opens a subagent carries every field Subagent requires.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "parentThreadId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/SubagentStatus"
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentItemId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubagentOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  }
+}

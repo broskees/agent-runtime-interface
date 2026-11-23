@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/background.schema.json",
+  "title": "ARI background work",
+  "description": "Work the agent yielded but that is still alive, such as background terminals or detached subagents.",
+  "$defs": {
+    "BackgroundTaskKind": {
+      "anyOf": [
+        {
+          "enum": [
+            "terminal",
+            "subagent",
+            "tool"
+          ]
+        },
+        {
+          "$ref": "common.schema.json#/$defs/ExtensionName"
+        }
+      ]
+    },
+    "BackgroundTaskStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "running",
+            "completed",
+            "failed",
+            "stopped"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "BackgroundTaskSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/BackgroundTaskKind"
+        },
+        "status": {
+          "$ref": "#/$defs/BackgroundTaskStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "status"
+      ]
+    },
+    "TaskInfo": {
+      "description": "Full detail of a background task, as `backgroundTasks.list` returns it.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/BackgroundTaskKind"
+        },
+        "status": {
+          "$ref": "#/$defs/BackgroundTaskStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string",
+          "description": "Recent output, bounded by the session's payload limits."
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "subagentId": {
+          "type": "string"
+        },
+        "awaited": {
+          "type": "boolean",
+          "description": "The host asked the agent to wait for this task."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "status"
+      ]
+    }
+  }
+}

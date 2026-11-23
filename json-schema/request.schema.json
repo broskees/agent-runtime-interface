@@ -1,0 +1,465 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/request.schema.json",
+  "title": "ARI requests",
+  "description": "Approvals, questions, elicitation, sign-in refresh and dynamic tool calls the provider asks the host to answer. Native option and question ids are kept exactly: reply with the id, never the label. A driver never grants broader scope than the host asked for. Responses are idempotent by `(requestId, responseKey)`.",
+  "$defs": {
+    "RequestKind": {
+      "anyOf": [
+        {
+          "enum": [
+            "command",
+            "file_read",
+            "file_change",
+            "permission",
+            "mcp_elicitation",
+            "user_input",
+            "dynamic_tool_call",
+            "auth_refresh"
+          ]
+        },
+        {
+          "$ref": "common.schema.json#/$defs/ExtensionName"
+        }
+      ]
+    },
+    "ApprovalDecision": {
+      "anyOf": [
+        {
+          "enum": [
+            "accept",
+            "accept_for_session",
+            "accept_always",
+            "decline",
+            "cancel",
+            "other"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ApprovalScope": {
+      "description": "The real reach of an approval on this provider. Ordered from narrowest to widest: `once`, `session`, `project`, `global`.",
+      "anyOf": [
+        {
+          "enum": [
+            "once",
+            "session",
+            "project",
+            "global"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "RequestOption": {
+      "type": "object",
+      "properties": {
+        "optionId": {
+          "type": "string",
+          "description": "Native, opaque option id. Reply with this."
+        },
+        "label": {
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "scope": {
+          "$ref": "#/$defs/ApprovalScope"
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "optionId",
+        "label",
+        "decision"
+      ]
+    },
+    "QuestionType": {
+      "anyOf": [
+        {
+          "enum": [
+            "single_select",
+            "multi_select",
+            "text",
+            "secret",
+            "url"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "QuestionOption": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Native option id."
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "Question": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Native question id."
+        },
+        "type": {
+          "$ref": "#/$defs/QuestionType"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "header": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          }
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "allowCustom": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string",
+          "description": "For `url` questions: the page the user must open."
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "prompt"
+      ]
+    },
+    "Answer": {
+      "description": "The answer to one question: chosen option ids, free text, or both.",
+      "type": "object",
+      "properties": {
+        "optionIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "ResponseMode": {
+      "description": "`live`: answer with `respond`. `message`: the host answers by sending a normal user message. `not_resumable`: the request can no longer be answered.",
+      "anyOf": [
+        {
+          "enum": [
+            "live",
+            "message",
+            "not_resumable"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "RequestResponse": {
+      "description": "How this request can be answered.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "live"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "message"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "not_resumable"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "RequestStatus": {
+      "anyOf": [
+        {
+          "enum": [
+            "pending",
+            "resolved",
+            "expired",
+            "cancelled"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "RequestOrigin": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "subagentId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ]
+    },
+    "RequestSubject": {
+      "description": "What the request is about.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "diff": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "object",
+          "properties": {
+            "server": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "input": {
+              "$ref": "common.schema.json#/$defs/AnyValue"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    },
+    "FullAccessOverride": {
+      "description": "Why a request still reached the user under `full_access`.",
+      "anyOf": [
+        {
+          "enum": [
+            "ask_rule",
+            "provider_check"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "Request": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "kind": {
+          "$ref": "#/$defs/RequestKind"
+        },
+        "origin": {
+          "$ref": "#/$defs/RequestOrigin"
+        },
+        "subject": {
+          "$ref": "#/$defs/RequestSubject"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RequestOption"
+          }
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Question"
+          }
+        },
+        "allowCustomAnswer": {
+          "type": "boolean"
+        },
+        "allowFeedback": {
+          "type": "boolean"
+        },
+        "response": {
+          "$ref": "#/$defs/RequestResponse"
+        },
+        "survivesRestart": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/RequestStatus"
+        },
+        "fullAccessOverride": {
+          "$ref": "#/$defs/FullAccessOverride"
+        }
+      },
+      "required": [
+        "id",
+        "native",
+        "kind",
+        "origin",
+        "allowCustomAnswer",
+        "allowFeedback",
+        "response",
+        "survivesRestart",
+        "status"
+      ]
+    },
+    "RequestPatch": {
+      "description": "Patch form of Request. Only `id` is required; the upsert that opens a request carries every field Request requires.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "native": {
+          "$ref": "common.schema.json#/$defs/NativeRef"
+        },
+        "kind": {
+          "$ref": "#/$defs/RequestKind"
+        },
+        "origin": {
+          "$ref": "#/$defs/RequestOrigin"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestSubject"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "options": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RequestOption"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "questions": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Question"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "allowCustomAnswer": {
+          "type": "boolean"
+        },
+        "allowFeedback": {
+          "type": "boolean"
+        },
+        "response": {
+          "$ref": "#/$defs/RequestResponse"
+        },
+        "survivesRestart": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/RequestStatus"
+        },
+        "fullAccessOverride": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FullAccessOverride"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  }
+}

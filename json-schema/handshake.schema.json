@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/handshake.schema.json",
+  "title": "ARI wire handshake",
+  "description": "The `initialize` exchange. Three version axes are negotiated independently: the contract (`ariVersion`, an event grammar version range and per-method versions) and the persistence version of stored handles and journals. The package's npm version is not part of the handshake.",
+  "$defs": {
+    "VersionRange": {
+      "description": "An ascending `[min, max]` range of integer versions.",
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "MethodVersions": {
+      "description": "Per-method `{ major, minor }` versions keyed by wire method name.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "common.schema.json#/$defs/Version"
+      }
+    },
+    "Handshake": {
+      "type": "object",
+      "properties": {
+        "ariVersion": {
+          "type": "string"
+        },
+        "grammarVersions": {
+          "$ref": "#/$defs/VersionRange"
+        },
+        "methodVersions": {
+          "$ref": "#/$defs/MethodVersions"
+        },
+        "persistenceVersion": {
+          "$ref": "common.schema.json#/$defs/Version"
+        }
+      },
+      "required": [
+        "ariVersion",
+        "grammarVersions",
+        "methodVersions",
+        "persistenceVersion"
+      ]
+    },
+    "HostCapabilities": {
+      "description": "What the host offers over the wire. `process`: the host runs `process.spawn` itself (for remote or sandboxed hosts); otherwise the driver spawns locally with `envPolicy`.",
+      "type": "object",
+      "properties": {
+        "process": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "process"
+      ]
+    },
+    "InitializeParams": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/Handshake"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "$ref": "#/$defs/HostCapabilities"
+                },
+                "envPolicy": {
+                  "$ref": "host.schema.json#/$defs/EnvPolicy"
+                }
+              },
+              "required": [
+                "capabilities"
+              ]
+            }
+          },
+          "required": [
+            "host"
+          ]
+        }
+      ]
+    },
+    "InitializeResult": {
+      "description": "The driver's side of the handshake: its own ranges, the negotiated grammar version (the highest version both ranges contain) and its non-method members.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/Handshake"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "grammarVersion": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "driver": {
+              "$ref": "driver.schema.json#/$defs/DriverDescriptor"
+            }
+          },
+          "required": [
+            "grammarVersion",
+            "driver"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,1755 @@
+{
+  "$schema": "./method-table.schema.json",
+  "ariVersion": "1.0.0",
+  "methods": [
+    {
+      "name": "initialize",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "params": {
+        "$ref": "handshake.schema.json#/$defs/InitializeParams"
+      },
+      "result": {
+        "$ref": "handshake.schema.json#/$defs/InitializeResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "First message on a connection. Negotiates the contract version, the event grammar version (highest version in both ranges), per-method versions and the persistence version."
+    },
+    {
+      "name": "stream/end",
+      "direction": "both",
+      "kind": "notification",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/StreamEndParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "The producer of a stream ends it, with an error when it failed."
+    },
+    {
+      "name": "stream/cancel",
+      "direction": "both",
+      "kind": "request",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/StreamCancelParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "The consumer of a stream stops it early. The producer answers and then sends stream/end."
+    },
+    {
+      "name": "driver/defaultConfig",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Driver",
+      "member": "defaultConfig",
+      "synchronous": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/EmptyParams"
+      },
+      "result": {
+        "$ref": "common.schema.json#/$defs/AnyValue"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "driver/create",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Driver",
+      "member": "create",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/DriverCreateParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/InstanceDescriptor"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "The host services for the new instance are this connection's host/* methods, scoped by instanceId; params.paths carries HostServices.paths."
+    },
+    {
+      "name": "instance/status",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "status",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/InstanceStatus"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/statusChanges",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "statusChanges",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/StreamStarted"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "stream": {
+        "notification": "instance/statusChanged",
+        "item": {
+          "$ref": "instance.schema.json#/$defs/InstanceStatus"
+        },
+        "end": "stream/end",
+        "cancel": "stream/cancel"
+      }
+    },
+    {
+      "name": "instance/probe",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "probe",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceProbeParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/ProbeResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "Must have no side effects."
+    },
+    {
+      "name": "instance/invalidateCaches",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "invalidateCaches",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/maintenance.advisory",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "maintenance.advisory",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableUpdateAdvisory"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/maintenance.install",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "maintenance.install",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/maintenance.update",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "maintenance.update",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.methods",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.methods",
+      "optional": true,
+      "synchronous": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/AuthMethodList"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.state",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.state",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/AuthState"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.reportRuntimeFailure",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.reportRuntimeFailure",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceAuthReportRuntimeFailureParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/AuthState"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.start",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.start",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceAuthStartParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/AuthFlow"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.complete",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.complete",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceAuthCompleteParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/AuthState"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.respond",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.respond",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceAuthRespondParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/AuthState"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.cancel",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.cancel",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceAuthCancelParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/AuthState"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.logout",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.logout",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.transferProfile",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.transferProfile",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceAuthTransferProfileParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/AuthState"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/auth.transferSession",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "auth.transferSession",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceAuthTransferSessionParams"
+      },
+      "result": {
+        "$ref": "thread.schema.json#/$defs/SessionHandle"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "The TypeScript member takes the target Instance; the wire form names it by targetInstanceId."
+    },
+    {
+      "name": "instance/catalog.list",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "catalog.list",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceCatalogListParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/ModelCatalog"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/catalog.refresh",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "catalog.refresh",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/workspace.snapshot",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "workspace.snapshot",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceWorkspaceSnapshotParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/WorkspaceSnapshot"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/limits.current",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "limits.current",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "usage.schema.json#/$defs/LimitStatus"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/limits.accountKey",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "limits.accountKey",
+      "optional": true,
+      "synchronous": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/StringResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "Also carried as InstanceDescriptor.accountKey."
+    },
+    {
+      "name": "instance/limits.consumeResetCredit",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "limits.consumeResetCredit",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceConsumeResetCreditParams"
+      },
+      "result": {
+        "$ref": "usage.schema.json#/$defs/ResetCreditOutcome"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/usageHistory.scan",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "usageHistory.scan",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceUsageHistoryScanParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/StreamStarted"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "stream": {
+        "notification": "instance/usageRecord",
+        "item": {
+          "$ref": "usage.schema.json#/$defs/UsageRecord"
+        },
+        "end": "stream/end",
+        "cancel": "stream/cancel"
+      },
+      "notes": "The stream ends after the last record in the range."
+    },
+    {
+      "name": "instance/textGeneration.generate",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "textGeneration.generate",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTextGenerationParams"
+      },
+      "result": {
+        "$ref": "common.schema.json#/$defs/AnyValue"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/nativeSessions.list",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "nativeSessions.list",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceNativeSessionsListParams"
+      },
+      "result": {
+        "$ref": "instance.schema.json#/$defs/NativeSessionInfoPage"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/nativeSessions.delete",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "nativeSessions.delete",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceNativeSessionParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/nativeSessions.archive",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "nativeSessions.archive",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceNativeSessionParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/subProviders.list",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "subProviders.list",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceSubProvidersListParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/SubProviderList"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/subProviders.set",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "subProviders.set",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceSubProvidersSetParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/subProviders.disable",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "subProviders.disable",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceSubProvidersDisableParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/openSession",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "openSession",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceOpenSessionParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/SessionDescriptor"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/dispose",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Instance",
+      "member": "dispose",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/statusChanged",
+      "direction": "driver_to_host",
+      "kind": "notification",
+      "relatesTo": "Instance.statusChanges",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/StatusChangedParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "instance/usageRecord",
+      "direction": "driver_to_host",
+      "kind": "notification",
+      "relatesTo": "Instance.usageHistory.scan",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/UsageRecordParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/capabilities",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "capabilities",
+      "synchronous": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionTarget"
+      },
+      "result": {
+        "$ref": "capabilities.schema.json#/$defs/Capabilities"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "Wire clients serve capabilities() from SessionDescriptor.capabilities and later capabilities.updated events."
+    },
+    {
+      "name": "session/events",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "events",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionEventsParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/StreamStarted"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "stream": {
+        "notification": "ari/event",
+        "item": {
+          "$ref": "events.schema.json#/$defs/AriEvent"
+        },
+        "end": "stream/end",
+        "cancel": "stream/cancel"
+      },
+      "notes": "Replays from fromSeq when given, then continues live."
+    },
+    {
+      "name": "session/createThread",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "createThread",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionCreateThreadParams"
+      },
+      "result": {
+        "$ref": "session.schema.json#/$defs/AppliedThread"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/resumeThread",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "resumeThread",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionResumeThreadParams"
+      },
+      "result": {
+        "$ref": "session.schema.json#/$defs/AppliedThread"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "Required: every driver can resume from a stored handle or reject with a resume failure."
+    },
+    {
+      "name": "session/readSnapshot",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "readSnapshot",
+      "optional": true,
+      "capability": "threads.readSnapshot",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionThreadTarget"
+      },
+      "result": {
+        "$ref": "thread.schema.json#/$defs/ThreadSnapshot"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/forkThread",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "forkThread",
+      "optional": true,
+      "capability": "threads.fork",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionForkThreadParams"
+      },
+      "result": {
+        "$ref": "thread.schema.json#/$defs/Thread"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/rollbackThread",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "rollbackThread",
+      "optional": true,
+      "capability": "threads.rollback",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionRollbackThreadParams"
+      },
+      "result": {
+        "$ref": "thread.schema.json#/$defs/ThreadSnapshot"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/compactThread",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "compactThread",
+      "optional": true,
+      "capability": "threads.compact",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionThreadTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/injectHistory",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "injectHistory",
+      "optional": true,
+      "capability": "threads.injectHistory",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionInjectHistoryParams"
+      },
+      "result": {
+        "$ref": "session.schema.json#/$defs/InjectHistoryResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/unloadThread",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "unloadThread",
+      "optional": true,
+      "capability": "threads.unload",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionThreadTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/canRelease",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "canRelease",
+      "synchronous": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/BooleanResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/release",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "release",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/startTurn",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "startTurn",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionStartTurnParams"
+      },
+      "result": {
+        "$ref": "session.schema.json#/$defs/StartTurnResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "intent steer is gated by turns.steer and intent queue by turns.queue; when off the result is { status: \"unsupported\", capability }."
+    },
+    {
+      "name": "session/interruptTurn",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "interruptTurn",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionInterruptTurnParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/respond",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "respond",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionRespondParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableRespondResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "Idempotent by (requestId, responseKey)."
+    },
+    {
+      "name": "session/backgroundTasks.list",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "backgroundTasks.list",
+      "optional": true,
+      "capability": "background.list",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionBackgroundTasksListParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/TaskInfoList"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/backgroundTasks.stop",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "backgroundTasks.stop",
+      "optional": true,
+      "capability": "background.stop",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionBackgroundTasksStopParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/backgroundTasks.await",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "backgroundTasks.await",
+      "optional": true,
+      "capability": "background.await",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionBackgroundTasksAwaitParams"
+      },
+      "result": {
+        "$ref": "session.schema.json#/$defs/AwaitBackgroundTasksResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/stopSubagent",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "stopSubagent",
+      "optional": true,
+      "capability": "subagents.stop",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionStopSubagentParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableSubagentOutcome"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/mcpApps.listTools",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "mcpApps.listTools",
+      "optional": true,
+      "capability": "tools.mcpApps",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionMcpServerTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/McpToolList"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/mcpApps.callTool",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "mcpApps.callTool",
+      "optional": true,
+      "capability": "tools.mcpApps",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionMcpAppsCallToolParams"
+      },
+      "result": {
+        "$ref": "session.schema.json#/$defs/McpCallResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/mcpApps.readResource",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "mcpApps.readResource",
+      "optional": true,
+      "capability": "tools.mcpApps",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionMcpAppsReadResourceParams"
+      },
+      "result": {
+        "$ref": "session.schema.json#/$defs/McpResourceContents"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/planConfigChange",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "planConfigChange",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionPlanConfigChangeParams"
+      },
+      "result": {
+        "$ref": "config.schema.json#/$defs/ConfigChangePlan"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/contextWindow",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "contextWindow",
+      "optional": true,
+      "synchronous": true,
+      "capability": "contextWindowReporting",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionContextWindowParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableIntegerResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/canReuseContextUsage",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "canReuseContextUsage",
+      "optional": true,
+      "synchronous": true,
+      "capability": "sessions.contextUsageReuse",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionCanReuseContextUsageParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/BooleanResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/uploadFeedback",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "uploadFeedback",
+      "optional": true,
+      "capability": "sessions.feedbackUpload",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionUploadFeedbackParams"
+      },
+      "result": {
+        "$ref": "session.schema.json#/$defs/UploadFeedbackResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/ext",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "ext",
+      "optional": true,
+      "capability": "extensions",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionExtParams"
+      },
+      "result": {
+        "$ref": "common.schema.json#/$defs/AnyValue"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "session/close",
+      "direction": "host_to_driver",
+      "kind": "request",
+      "interface": "Session",
+      "member": "close",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/SessionTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "ari/event",
+      "direction": "driver_to_host",
+      "kind": "notification",
+      "relatesTo": "Session.events",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/EventNotificationParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "One session event of the stream started by session/events."
+    },
+    {
+      "name": "host/config.get",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "config.get",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostConfigGetParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/HostConfigGetResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "stream": {
+        "notification": "host/config.changed",
+        "item": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "end": "stream/end",
+        "cancel": "stream/cancel",
+        "startedWhen": "params.watch is true; the result then carries streamId"
+      }
+    },
+    {
+      "name": "host/secrets.get",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "secrets.get",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostSecretParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableSecretValue"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/secrets.set",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "secrets.set",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostSecretsSetParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/secrets.delete",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "secrets.delete",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostSecretParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/process.spawn",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "process.spawn",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostProcessSpawnParams"
+      },
+      "result": {
+        "$ref": "host.schema.json#/$defs/SpawnResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "notes": "Sent only when the host advertised capabilities.process in initialize; otherwise the driver spawns locally with the envPolicy from initialize. Output and exit arrive as host/process.output and host/process.exit."
+    },
+    {
+      "name": "host/process.resolveExecutable",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "process.resolveExecutable",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostProcessResolveExecutableParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableStringResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/attachments.resolve",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "attachments.resolve",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostAttachmentParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableAttachmentInfo"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/attachments.extractText",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "attachments.extractText",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostAttachmentParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableStringResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/callbacks.register",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "callbacks.register",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostCallbacksRegisterParams"
+      },
+      "result": {
+        "$ref": "host.schema.json#/$defs/CallbackRegistration"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/hostTools.mcpServerFor",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "hostTools.mcpServerFor",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostMcpServerForParams"
+      },
+      "result": {
+        "$ref": "host.schema.json#/$defs/HostToolServer"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/hostTools.callDynamicTool",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "hostTools.callDynamicTool",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostCallDynamicToolParams"
+      },
+      "result": {
+        "$ref": "host.schema.json#/$defs/DynamicToolResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/background.shouldRun",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "background.shouldRun",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostBackgroundShouldRunParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/BooleanResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/coordination.acquire",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "coordination.acquire",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostCoordinationAcquireParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/NullableLease"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/coordination.release",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "coordination.release",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostCoordinationReleaseParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/diagnostics.log",
+      "direction": "driver_to_host",
+      "kind": "notification",
+      "interface": "HostServices",
+      "member": "diagnostics.log",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostDiagnosticsLogParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/telemetry.track",
+      "direction": "driver_to_host",
+      "kind": "notification",
+      "interface": "HostServices",
+      "member": "telemetry.track",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostTelemetryTrackParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/ids.derive",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "interface": "HostServices",
+      "member": "ids.derive",
+      "optional": true,
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostIdsDeriveParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/StringResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/config.changed",
+      "direction": "host_to_driver",
+      "kind": "notification",
+      "relatesTo": "HostServices.config.get",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/ConfigChangedParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/process.write",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "relatesTo": "HostServices.process.spawn",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostProcessWriteParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/process.closeStdin",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "relatesTo": "HostServices.process.spawn",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostProcessTarget"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/process.kill",
+      "direction": "driver_to_host",
+      "kind": "request",
+      "relatesTo": "HostServices.process.spawn",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostProcessKillParams"
+      },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/process.output",
+      "direction": "host_to_driver",
+      "kind": "notification",
+      "relatesTo": "HostServices.process.spawn",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostProcessOutputParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    },
+    {
+      "name": "host/process.exit",
+      "direction": "host_to_driver",
+      "kind": "notification",
+      "relatesTo": "HostServices.process.spawn",
+      "params": {
+        "$ref": "rpc.schema.json#/$defs/HostProcessExitParams"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0
+      }
+    }
+  ],
+  "properties": [
+    {
+      "interface": "Driver",
+      "member": "kind",
+      "method": "initialize",
+      "location": "result",
+      "pointer": "/driver/kind"
+    },
+    {
+      "interface": "Driver",
+      "member": "ariVersion",
+      "method": "initialize",
+      "location": "result",
+      "pointer": "/driver/ariVersion"
+    },
+    {
+      "interface": "Driver",
+      "member": "metadata",
+      "method": "initialize",
+      "location": "result",
+      "pointer": "/driver/metadata"
+    },
+    {
+      "interface": "Driver",
+      "member": "configSchema",
+      "method": "initialize",
+      "location": "result",
+      "pointer": "/driver/configSchema"
+    },
+    {
+      "interface": "Driver",
+      "member": "cliManifest",
+      "method": "initialize",
+      "location": "result",
+      "pointer": "/driver/cliManifest"
+    },
+    {
+      "interface": "Instance",
+      "member": "id",
+      "method": "driver/create",
+      "location": "result",
+      "pointer": "/instanceId"
+    },
+    {
+      "interface": "Instance",
+      "member": "continuationKey",
+      "method": "driver/create",
+      "location": "result",
+      "pointer": "/continuationKey"
+    },
+    {
+      "interface": "Instance",
+      "member": "bindingKey",
+      "method": "driver/create",
+      "location": "result",
+      "pointer": "/bindingKey"
+    },
+    {
+      "interface": "Instance",
+      "member": "auth.credentialBinding",
+      "method": "driver/create",
+      "location": "result",
+      "pointer": "/credentialBinding"
+    },
+    {
+      "interface": "Instance",
+      "member": "textGeneration.guarantees",
+      "method": "driver/create",
+      "location": "result",
+      "pointer": "/textGenerationGuarantees"
+    },
+    {
+      "interface": "Session",
+      "member": "id",
+      "method": "instance/openSession",
+      "location": "result",
+      "pointer": "/sessionId"
+    },
+    {
+      "interface": "HostServices",
+      "member": "paths.stateDir",
+      "method": "driver/create",
+      "location": "params",
+      "pointer": "/paths/stateDir"
+    },
+    {
+      "interface": "HostServices",
+      "member": "paths.cacheDir",
+      "method": "driver/create",
+      "location": "params",
+      "pointer": "/paths/cacheDir"
+    },
+    {
+      "interface": "HostServices",
+      "member": "paths.tmpDir",
+      "method": "driver/create",
+      "location": "params",
+      "pointer": "/paths/tmpDir"
+    },
+    {
+      "interface": "HostServices",
+      "member": "process.envPolicy",
+      "method": "initialize",
+      "location": "params",
+      "pointer": "/host/envPolicy"
+    }
+  ]
+}

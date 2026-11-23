@@ -12,3 +12,7 @@ dedupePeerDependents: false
 # installs as an optional dependency. Nothing needs to run.
 allowBuilds:
   esbuild: false
+  # Transitive dependencies of @earendil-works/pi-coding-agent, the Pi driver's
+  # type source. Their scripts only check versions; types need neither.
+  "@google/genai": false
+  protobufjs: false

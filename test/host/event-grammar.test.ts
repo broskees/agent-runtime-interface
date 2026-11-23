@@ -1,14 +1,15 @@
-// EventGrammar catches each of its six rules in strict, warn and repair mode,
-// and passes a valid recorded stream through all three modes unchanged.
+// EventGrammar catches each of its rules in strict, warn and repair mode, and
+// passes a valid recorded stream through all three modes unchanged.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { AriEventSchema } from "../../src/index.ts";
 import type { AriEvent } from "../../src/index.ts";
-import { EVENT_GRAMMAR_RULES, EventGrammar, EventGrammarError } from "../../src/host/index.ts";
+import { EVENT_GRAMMAR_RULES, EventGrammar, EventGrammarError, ITEM_REQUIRED_FIELDS, TURN_REQUIRED_FIELDS } from "../../src/host/index.ts";
 import type { EventGrammarMode, EventGrammarRule, EventGrammarViolation } from "../../src/host/index.ts";
 import { SESSION_ID, THREAD_ID, sessionEvents, sessionSteps, stepIndex, toEvents } from "../fixtures/session-stream.ts";
 import type { StreamStep } from "../fixtures/session-stream.ts";
+import { resolveSpecRef } from "../helpers/spec.ts";
 
 function run(mode: EventGrammarMode, events: readonly AriEvent[]): { output: AriEvent[]; violations: EventGrammarViolation[] } {
   const violations: EventGrammarViolation[] = [];
@@ -70,7 +71,7 @@ function brokenStreams(): Array<{ rule: EventGrammarRule; events: AriEvent[] }> 
 }
 
 describe("EventGrammar", () => {
-  test("names the six rules", () => {
+  test("names the six invariants of spec/v1/README.md and the two opening rules", () => {
     assert.deepEqual([...EVENT_GRAMMAR_RULES], [
       "item/opens-before-delta",
       "item/settles-once",
@@ -78,6 +79,8 @@ describe("EventGrammar", () => {
       "turn/settles-once",
       "turn/known",
       "seq/gap-free",
+      "item/opens-complete",
+      "turn/starts-complete",
     ]);
   });
 
@@ -146,6 +149,110 @@ describe("EventGrammar", () => {
       });
     });
   }
+
+  describe("an opening upsert that lacks a field the entity requires", () => {
+    /** The stream with the `native` field removed from the upsert that would open `item-2` or start `turn-1`. */
+    function withoutNative(target: "item" | "turn"): { events: AriEvent[]; openerSeq: number } {
+      const steps = sessionSteps();
+      const index =
+        target === "item"
+          ? stepIndex(steps, (body) => body.type === "item.upsert" && body.item.id === "item-2")
+          : stepIndex(steps, (body) => body.type === "turn.upsert" && body.turn.id === "turn-1");
+      const step = steps[index]!;
+      if (step.body.type === "item.upsert") {
+        const { native: _native, ...item } = step.body.item;
+        steps[index] = { ...step, body: { ...step.body, item } };
+      } else if (step.body.type === "turn.upsert") {
+        const { native: _native, ...turn } = step.body.turn;
+        steps[index] = { ...step, body: { ...step.body, turn } };
+      }
+      return { events: toEvents(steps), openerSeq: index + 1 };
+    }
+
+    const cases = [
+      { target: "item", rule: "item/opens-complete" },
+      { target: "turn", rule: "turn/starts-complete" },
+    ] as const;
+
+    test("the required-field lists are the spec's", () => {
+      assert.deepEqual([...ITEM_REQUIRED_FIELDS], (resolveSpecRef("item.schema.json#/$defs/Item").node as { required: string[] }).required);
+      assert.deepEqual([...TURN_REQUIRED_FIELDS], (resolveSpecRef("thread.schema.json#/$defs/Turn").node as { required: string[] }).required);
+    });
+
+    for (const { target, rule } of cases) {
+      test(`an incomplete ${target} upsert is still schema-valid as an event`, () => {
+        for (const event of withoutNative(target).events) assert.ok(AriEventSchema.is(event), JSON.stringify(event));
+      });
+
+      test(`strict mode throws ${rule} at the incomplete ${target} upsert`, () => {
+        const { events, openerSeq } = withoutNative(target);
+        const grammar = new EventGrammar({ mode: "strict" });
+        let thrown: unknown;
+        let reachedSeq = 0;
+        try {
+          for (const event of events) {
+            reachedSeq = event.seq;
+            grammar.observe(event);
+          }
+        } catch (error) {
+          thrown = error;
+        }
+        assert.ok(thrown instanceof EventGrammarError, `strict mode accepted the stream (${String(thrown)})`);
+        assert.equal(thrown.rule, rule);
+        assert.ok(thrown.message.includes("native"), thrown.message);
+        assert.equal(reachedSeq, openerSeq);
+      });
+
+      test(`warn mode reports ${rule} first and passes every event through`, () => {
+        const { events, openerSeq } = withoutNative(target);
+        const { output, violations } = run("warn", events);
+        assert.ok(violations.length > 0, "warn mode reported nothing");
+        assert.equal(violations[0]!.rule, rule);
+        assert.equal(violations[0]!.event.seq, openerSeq);
+        assert.equal(output.length, events.length);
+        output.forEach((event, index) => assert.equal(event, events[index]));
+      });
+
+      test(`repair mode drops the incomplete ${target} upsert and yields a stream strict mode accepts`, () => {
+        const { events, openerSeq } = withoutNative(target);
+        const { output, violations } = run("repair", events);
+        assert.equal(violations[0]!.rule, rule);
+        assert.ok(!output.includes(events[openerSeq - 1]!), "the incomplete opener was passed on");
+        const strict = new EventGrammar({ mode: "strict" });
+        for (const event of output) assert.equal(strict.observe(event), event);
+        if (target === "item") {
+          // The item never opened, so its deltas and its later (also incomplete) upserts are gone too.
+          assert.ok(!output.some((event) => event.body.type === "item.delta" && event.body.itemId === "item-2"));
+          assert.ok(!output.some((event) => event.body.type === "item.upsert" && event.body.item.id === "item-2"));
+        } else {
+          // The turn never started: its terminal is dropped and envelopes lose its id.
+          assert.ok(!output.some((event) => event.body.type === "turn.terminal" && event.body.turnId === "turn-1"));
+          assert.ok(!output.some((event) => event.turnId === "turn-1"));
+        }
+      });
+    }
+
+    test("a later upsert that carries every required field opens the item", () => {
+      const steps = sessionSteps();
+      const index = stepIndex(steps, (body) => body.type === "item.upsert" && body.item.id === "item-2");
+      const opener = steps[index]!;
+      if (opener.body.type !== "item.upsert") throw new Error("unexpected step");
+      const { native: _native, ...incomplete } = opener.body.item;
+      const events = toEvents([
+        ...steps.slice(0, index),
+        { ...opener, body: { type: "item.upsert", item: incomplete } },
+        opener,
+        ...steps.slice(index + 1),
+      ]);
+      const { output, violations } = run("repair", events);
+      assert.deepEqual(
+        violations.map((violation) => violation.rule),
+        ["item/opens-complete"],
+      );
+      assert.ok(output.some((event) => event.body.type === "item.delta" && event.body.itemId === "item-2"));
+      assert.equal(output.length, events.length - 1);
+    });
+  });
 
   test("an envelope naming a turn that never started breaks turn/known, and repair removes the turn id", () => {
     const steps = sessionSteps();

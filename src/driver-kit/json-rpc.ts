@@ -13,7 +13,8 @@
 //   a `JsonRpcError` is answered with "Internal error" (-32603).
 // - `close` rejects every pending call, aborts the signals of requests still
 //   being handled and refuses new calls. It runs when the `signal` option
-//   aborts, too.
+//   aborts, too. Frames are handed to `send` synchronously when a call,
+//   notification or response is made, so nothing is ever sent after `close`.
 //
 // Batches (a JSON array of messages) are not supported: a batch is answered
 // with one "Invalid Request" error (-32600) whose id is null. Messages that
@@ -282,8 +283,19 @@ export class JsonRpcPeer {
     });
   }
 
+  /**
+   * Hands one frame to `send` right away, never later, and never once the peer
+   * is closed: a call or notification made before `close()` has already left,
+   * and nothing leaves after it. A `send` that throws or rejects gives a
+   * rejected promise.
+   */
   #send(message: JsonRpcMessage): Promise<void> {
-    return Promise.resolve().then(() => this.#options.send(message));
+    if (this.#closeError !== undefined) return Promise.reject(this.#closeError);
+    try {
+      return Promise.resolve(this.#options.send(message));
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
 
   #protocolError(message: string, payload: unknown): void {

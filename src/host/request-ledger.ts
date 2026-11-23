@@ -14,6 +14,10 @@
 //   restart, such as a `message`-mode question, stays pending.
 // - A request is never removed because it is absent from a later event window
 //   or snapshot. Only its own `request.upsert` events change it.
+// - An event is applied once. The ledger remembers the highest `seq` it saw in
+//   each session and ignores events at or below it, so a reconnect whose
+//   `fromSeq` window overlaps events already seen cannot turn an expired or
+//   resolved request back into a pending one.
 //
 // The ledger outlives sessions: feed it every session's events for the thread
 // and pass the current session to `respond`.
@@ -43,6 +47,8 @@ export class RequestLedger {
   readonly #requests = new Map<string, Request>();
   /** Response attempts by request id, then by response key. */
   readonly #attempts = new Map<string, Map<string, ResponseAttempt>>();
+  /** The highest `seq` observed in each session. */
+  readonly #lastSeqBySession = new Map<string, number>();
 
   constructor(options: RequestLedgerOptions = {}) {
     for (const request of options.requests ?? []) this.#requests.set(request.id, request);
@@ -51,9 +57,13 @@ export class RequestLedger {
   /**
    * Follows one session event. `request.upsert` patches the request it names;
    * `session.state` with state `stopped` ends the session (see `endSession`).
-   * Every other event is ignored.
+   * Every other event, and any event whose `seq` is not above the highest
+   * already seen in its session, is ignored.
    */
   observe(event: AriEvent): void {
+    const lastSeq = this.#lastSeqBySession.get(event.sessionId);
+    if (lastSeq !== undefined && event.seq <= lastSeq) return;
+    this.#lastSeqBySession.set(event.sessionId, event.seq);
     const body = event.body;
     if (body.type === "request.upsert") {
       const patch = body.request;

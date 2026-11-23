@@ -54,6 +54,22 @@ describe("CLI manifests", () => {
     assert.equal(launch.cwd, "/elsewhere");
   });
 
+  test("placeholder values containing $$, $&, $` and $' pass through literally", () => {
+    const manifest: CliLaunchManifest = { binary: "agent", args: { fresh: ["--cwd", "{cwd}", "--in={cwd}/x"], resume: ["--resume", "{sessionId}", "{cwd}"] } };
+    for (const cwd of ["/work/Revenue $$", "/work/$&", "/work/a$`b", "/work/a$'b", "/work/$1 $<name>"]) {
+      const fresh = buildCliLaunch(manifest, { kind: "fresh", cwd, env: {} });
+      assert.deepEqual(fresh.args, ["--cwd", cwd, `--in=${cwd}/x`]);
+      assert.equal(fresh.cwd, cwd);
+    }
+    const sessionId = "native-$$-$&-$`-$'";
+    const resumed = buildCliLaunch(manifest, { kind: "resume", cwd: "/work/$'", sessionId, env: {} });
+    assert.deepEqual(resumed.args, ["--resume", sessionId, "/work/$'"]);
+
+    // A value that contains a placeholder is not expanded again.
+    const nested = buildCliLaunch(manifest, { kind: "resume", cwd: "/work/{sessionId}", sessionId: "id-{cwd}", env: {} });
+    assert.deepEqual(nested.args, ["--resume", "id-{cwd}", "/work/{sessionId}"]);
+  });
+
   test("explicit env additions are applied after scrubbing", () => {
     const launch = buildCliLaunch(MANIFEST, { kind: "fresh", cwd: "/work", env: ENV, extraEnv: { ANTHROPIC_MODEL: "chosen-by-host" } });
     assert.equal(launch.env.ANTHROPIC_MODEL, "chosen-by-host");

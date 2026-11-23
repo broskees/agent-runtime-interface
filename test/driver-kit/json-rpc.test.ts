@@ -126,6 +126,27 @@ describe("JSON-RPC 2.0 peer", () => {
     await assert.rejects(call, /agent exited with code 1/);
   });
 
+  test("nothing is sent once the peer is closed, even for a call or notification made just before", async () => {
+    const sentWhileClosed: JsonRpcMessage[] = [];
+    const sent: JsonRpcMessage[] = [];
+    const holder: { peer?: JsonRpcPeer } = {};
+    holder.peer = new JsonRpcPeer({
+      send(message) {
+        sent.push(message);
+        if (holder.peer?.closed === true) sentWhileClosed.push(message);
+      },
+    });
+    const peer = holder.peer;
+    const call = peer.request("session/startTurn", { threadId: "thread-1" });
+    const notification = peer.notify("ari/event", { seq: 1 }).catch((error: unknown) => error);
+    peer.close();
+    await assert.rejects(call, (error: unknown) => isAriError(error, "transport"));
+    await notification;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(sentWhileClosed, []);
+    assert.ok(sent.every((message) => !("method" in message) || message.method !== "never"));
+  });
+
   test("an aborted peer signal closes the peer; closing aborts handlers still running and drops their responses", async () => {
     const controller = new AbortController();
     const sent: JsonRpcMessage[] = [];

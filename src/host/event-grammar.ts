@@ -2,12 +2,19 @@
 // spec/v1/README.md ("Event grammar"). The definitions it applies:
 //
 // - An item opens with the first `item.upsert` that carries its id in the
-//   session, and settles with the first `item.upsert` that sets its `status` to
-//   `completed`, `failed`, `cancelled` or `interrupted`.
+//   session; that upsert carries every field `Item` requires (`id`, `kind`,
+//   `native`, `status`). It settles with the first `item.upsert` that sets its
+//   `status` to `completed`, `failed`, `cancelled` or `interrupted`.
 // - A turn starts with the first `turn.upsert` that carries its id in the
-//   session, and settles with its `turn.terminal` event, never otherwise.
+//   session; that upsert carries every field `Turn` requires (`id`,
+//   `threadId`, `native`, `origin`, `status`). It settles with its
+//   `turn.terminal` event, never otherwise.
+// - An upsert that would open an item or start a turn but lacks a required
+//   field opens or starts nothing. A later upsert for the same id that carries
+//   every required field opens or starts it.
 //
-// The six rules it enforces:
+// The rules it enforces, the six invariants of the spec and the two
+// completeness rules of its definitions:
 //
 //   item/opens-before-delta  an `item.delta` comes after its item opens and
 //                            before it settles.
@@ -20,6 +27,10 @@
 //                            The event that starts a turn may carry its own id.
 //   seq/gap-free             the first event of a session has `seq` 1 and each
 //                            next event the previous `seq` plus 1.
+//   item/opens-complete      the `item.upsert` that would open an item carries
+//                            every field `Item` requires.
+//   turn/starts-complete     the `turn.upsert` that would start a turn carries
+//                            every field `Turn` requires.
 //
 // Three modes:
 //
@@ -28,7 +39,10 @@
 //   warn    reports each violation to `onViolation` and passes every event
 //           through unchanged, so a vendor regression never crashes a live host.
 //   repair  reports each violation to `onViolation` and yields a stream that
-//           strict mode accepts: it drops deltas for items that are not open,
+//           strict mode accepts. It never invents an event or a field value:
+//           it drops an upsert that would open an item or start a turn but
+//           lacks a required field (so that entity stays unopened until a
+//           complete upsert arrives), deltas for items that are not open,
 //           `turn.upsert` events for settled turns, a second `turn.terminal` and
 //           a `turn.terminal` for a turn that never started; it removes `status`
 //           from an `item.upsert` for a settled item and an unknown `turnId`
@@ -41,7 +55,7 @@
 
 import type { AriEvent, AriEventBody } from "../generated/events.ts";
 
-/** The six grammar rules, by the name violations report. */
+/** The grammar rules, by the name violations report. */
 export const EVENT_GRAMMAR_RULES = [
   "item/opens-before-delta",
   "item/settles-once",
@@ -49,7 +63,15 @@ export const EVENT_GRAMMAR_RULES = [
   "turn/settles-once",
   "turn/known",
   "seq/gap-free",
+  "item/opens-complete",
+  "turn/starts-complete",
 ] as const;
+
+/** The fields the `item.upsert` that opens an item must carry: `Item`'s required fields in spec/v1/item.schema.json. */
+export const ITEM_REQUIRED_FIELDS = ["id", "kind", "native", "status"] as const;
+
+/** The fields the `turn.upsert` that starts a turn must carry: `Turn`'s required fields in spec/v1/thread.schema.json. */
+export const TURN_REQUIRED_FIELDS = ["id", "threadId", "native", "origin", "status"] as const;
 
 export type EventGrammarRule = (typeof EVENT_GRAMMAR_RULES)[number];
 
@@ -79,6 +101,14 @@ export interface EventGrammarOptions {
   readonly mode: EventGrammarMode;
   /** Called once per violation in `warn` and `repair` modes. */
   readonly onViolation?: (violation: EventGrammarViolation) => void;
+}
+
+/** The required fields `entity` lacks: absent, `undefined` or `null`. */
+function missingFields(entity: object, required: readonly string[]): string[] {
+  return required.filter((field) => {
+    const value = (entity as { [field: string]: unknown })[field];
+    return value === undefined || value === null;
+  });
 }
 
 /** Item statuses that settle an item. */
@@ -184,18 +214,27 @@ function judge(state: SessionGrammarState, event: AriEvent): Verdict {
   if (Number.isInteger(event.seq)) state.lastInputSeq = event.seq;
 
   const body: AriEventBody = event.body;
-  // The body's own turn id, when this event already judged it under turn/known.
+  // The turn the body itself names, when the body was already judged for it:
+  // the envelope may carry that same id without a second report.
   let bodyTurnIdJudged: string | undefined;
 
   switch (body.type) {
     case "turn.upsert": {
       const turnId = body.turn.id;
+      bodyTurnIdJudged = turnId;
       if (state.settledTurnIds.has(turnId)) {
         broke("turn/starts-once", `turn.upsert for turn "${turnId}", which already settled`);
         verdict.repaired = undefined;
-      } else {
-        state.startedTurnIds.add(turnId);
+        break;
       }
+      if (state.startedTurnIds.has(turnId)) break;
+      const missing = missingFields(body.turn, TURN_REQUIRED_FIELDS);
+      if (missing.length > 0) {
+        broke("turn/starts-complete", `turn.upsert would start turn "${turnId}" but lacks ${missing.join(", ")}`);
+        verdict.repaired = undefined;
+        break;
+      }
+      state.startedTurnIds.add(turnId);
       break;
     }
     case "turn.terminal": {
@@ -223,7 +262,15 @@ function judge(state: SessionGrammarState, event: AriEvent): Verdict {
         }
         break;
       }
-      state.openItemIds.add(item.id);
+      if (!state.openItemIds.has(item.id)) {
+        const missing = missingFields(item, ITEM_REQUIRED_FIELDS);
+        if (missing.length > 0) {
+          broke("item/opens-complete", `item.upsert would open item "${item.id}" but lacks ${missing.join(", ")}`);
+          verdict.repaired = undefined;
+          break;
+        }
+        state.openItemIds.add(item.id);
+      }
       if (setsStatus && TERMINAL_ITEM_STATUSES.has(item.status as string)) {
         state.openItemIds.delete(item.id);
         state.settledItemIds.add(item.id);

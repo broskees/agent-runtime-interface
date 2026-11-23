@@ -124,6 +124,49 @@ describe("capability guard", () => {
     assert.deepEqual(driver.calls.map((entry) => entry.member), ["forkThread"]);
   });
 
+  test("a cross-directory fork with crossCwd off rejects with unsupported naming threads.fork.crossCwd and never reaches the driver", async () => {
+    const capabilities = fullCapabilities();
+    assert.equal(capabilities.threads.fork.supported, true);
+    assert.equal(capabilities.threads.fork.crossCwd, false);
+    const driver = fakeSession(capabilities);
+    const guarded = guardSession(driver);
+    const thread = await guarded.createThread({ cwd: "/work/project", policy: { mode: "approval_required", interaction: "default", cwd: "/work/project" } });
+
+    const error = await refusal(() => guarded.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: "/work/other-project" }));
+    assert.ok(isAriError(error, "unsupported"), String(error));
+    assert.equal(error.callError.code === "unsupported" ? error.callError.capability : undefined, "threads.fork.crossCwd");
+    assert.deepEqual(driver.calls.map((entry) => entry.member), ["createThread"]);
+
+    // A thread the guard has not seen has no known directory, so naming one is refused too.
+    const unknown = await refusal(() => guarded.forkThread!({ threadId: "thread-elsewhere", at: { type: "latest" }, cwd: "/work/project" }));
+    assert.ok(isAriError(unknown, "unsupported"));
+    assert.deepEqual(driver.calls.map((entry) => entry.member), ["createThread"]);
+
+    // The same directory, or no directory, is not a cross-directory fork.
+    await guarded.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: "/work/project" });
+    await guarded.forkThread!({ threadId: "thread-elsewhere", at: { type: "latest" } });
+    assert.deepEqual(driver.calls.map((entry) => entry.member), ["createThread", "forkThread", "forkThread"]);
+  });
+
+  test("the guard learns thread directories from thread.upsert events read through it", async () => {
+    const driver = fakeSession(fullCapabilities());
+    const guarded = guardSession(driver);
+    driver.sequencer.emit({ body: { type: "thread.upsert", thread: { id: "thread-9", native: { id: "n9", strength: "strong" }, cwd: "/work/nine", status: "idle" } } });
+    const stream = guarded.events();
+    await stream[Symbol.asyncIterator]().next();
+    await guarded.forkThread!({ threadId: "thread-9", at: { type: "latest" }, cwd: "/work/nine" });
+    assert.deepEqual(driver.calls.map((entry) => entry.member), ["forkThread"]);
+  });
+
+  test("with crossCwd on, a cross-directory fork reaches the driver", async () => {
+    const capabilities = capabilitiesWith((value) => (value.threads.fork.crossCwd = true));
+    const driver = fakeSession(capabilities);
+    const guarded = guardSession(driver);
+    const thread = await guarded.createThread({ cwd: "/work/project", policy: { mode: "approval_required", interaction: "default", cwd: "/work/project" } });
+    await guarded.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: "/work/other-project" });
+    assert.deepEqual(driver.calls.map((entry) => entry.member), ["createThread", "forkThread"]);
+  });
+
   test("a steer or queue the capabilities do not allow answers unsupported without reaching the driver", async () => {
     const driver = fakeSession(allGatesOff());
     const guarded = guardSession(driver);

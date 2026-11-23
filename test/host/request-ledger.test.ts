@@ -151,6 +151,27 @@ describe("request ledger", () => {
     assert.equal(calls.length, 1);
   });
 
+  test("replaying events the ledger already saw, as a reconnect with an overlapping fromSeq does, changes nothing", () => {
+    const ledger = new RequestLedger();
+    const opening = upsert(request({ id: "request-1", survivesRestart: false }), 1);
+    const stopped: AriEvent = { seq: 2, at: "2026-11-23T12:00:02.000Z", sessionId: "session-1", body: { type: "session.state", state: "stopped" } };
+    ledger.observe(opening);
+    ledger.observe(stopped);
+    assert.equal(ledger.get("request-1")?.status, "expired");
+
+    // The overlapping window replays seq 1, then seq 2.
+    ledger.observe(opening);
+    assert.equal(ledger.get("request-1")?.status, "expired");
+    ledger.observe(stopped);
+    assert.equal(ledger.get("request-1")?.status, "expired");
+
+    // Events past the window still apply, and other sessions keep their own numbering.
+    ledger.observe(upsert(request({ id: "request-2" }), 3));
+    ledger.observe({ ...upsert(request({ id: "request-3" }), 1), sessionId: "session-2" });
+    assert.equal(ledger.get("request-2")?.status, "pending");
+    assert.equal(ledger.get("request-3")?.status, "pending");
+  });
+
   test("a request absent from a later event window or snapshot is not removed", () => {
     const ledger = new RequestLedger();
     ledger.observe(upsert(request({ id: "request-1", survivesRestart: true })));

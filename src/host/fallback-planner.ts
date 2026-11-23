@@ -31,7 +31,7 @@
 import { hasCapability } from "../capabilities.ts";
 import type { Capabilities } from "../generated/capabilities.ts";
 import type { ForkPoint, RollbackTarget } from "../generated/thread.ts";
-import { forkCapabilityPath } from "./capability-guard.ts";
+import { forkCapabilityPath, forkChangesDirectory } from "./capability-guard.ts";
 
 /** What went wrong, or what the host wants to do. */
 export type FallbackRequest =
@@ -152,8 +152,7 @@ function historySteps(
 function canForkNatively(capabilities: Capabilities, at: ForkPoint, cwd: string | undefined, sourceCwd: string | undefined): boolean {
   if (!hasCapability(capabilities, "threads.fork")) return false;
   if (!hasCapability(capabilities, forkCapabilityPath({ at }))) return false;
-  const changesDirectory = cwd !== undefined && cwd !== sourceCwd;
-  return !changesDirectory || hasCapability(capabilities, "threads.fork.crossCwd");
+  return !forkChangesDirectory({ cwd }, sourceCwd) || hasCapability(capabilities, "threads.fork.crossCwd");
 }
 
 function planFork(capabilities: Capabilities, request: Extract<FallbackRequest, { kind: "fork" }>): FallbackPlan {

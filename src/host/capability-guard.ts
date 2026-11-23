@@ -5,8 +5,16 @@
 //
 //   readSnapshot          threads.readSnapshot
 //   forkThread            threads.fork, plus threads.fork.fromTurn for
-//                         `at: { type: "turn" }` and threads.fork.fromItem for
-//                         `at: { type: "item" }`
+//                         `at: { type: "turn" }`, threads.fork.fromItem for
+//                         `at: { type: "item" }`, and threads.fork.crossCwd
+//                         when the input names a `cwd` other than the source
+//                         thread's. The guard knows a thread's directory from
+//                         the threads its calls return (createThread,
+//                         resumeThread, forkThread, readSnapshot,
+//                         rollbackThread) and from `thread.upsert` events read
+//                         through its `events()`. A `cwd` given for a thread
+//                         whose directory it does not know counts as another
+//                         directory: leave `cwd` out to fork in place.
 //   rollbackThread        threads.rollback
 //   compactThread         threads.compact
 //   injectHistory         threads.injectHistory
@@ -30,6 +38,7 @@
 import { hasCapability } from "../capabilities.ts";
 import { callErrors } from "../errors.ts";
 import type { Capabilities } from "../generated/capabilities.ts";
+import type { AriEvent } from "../generated/events.ts";
 import type { ForkThreadInput, StartTurnInput, StartTurnResult } from "../generated/session.ts";
 import type { Session } from "../runtime.ts";
 
@@ -51,6 +60,35 @@ function extensionListed(capabilities: Capabilities, ns: string): boolean {
   return capabilities.extensions.some((extension) => extension.ns === ns);
 }
 
+/**
+ * True when a fork names a `cwd` that is not the source thread's known
+ * directory. An unknown source directory counts as different, so the guard
+ * never lets a possibly cross-directory fork through.
+ */
+export function forkChangesDirectory(input: Pick<ForkThreadInput, "cwd">, sourceCwd: string | undefined): boolean {
+  return input.cwd !== undefined && input.cwd !== sourceCwd;
+}
+
+/** Passes `events` through, telling `onEvent` about each one. Cancelling the outer stream cancels the inner one at once. */
+function observeEvents(events: AsyncIterable<AriEvent>, onEvent: (event: AriEvent) => void): AsyncIterable<AriEvent> {
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<AriEvent> {
+      const inner = events[Symbol.asyncIterator]();
+      return {
+        async next(): Promise<IteratorResult<AriEvent>> {
+          const result = await inner.next();
+          if (result.done !== true) onEvent(result.value);
+          return result;
+        },
+        async return(value?: unknown): Promise<IteratorResult<AriEvent>> {
+          if (inner.return !== undefined) return inner.return(value);
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+}
+
 /** Returns a `Session` that refuses capability-gated calls whose capability is off. */
 export function guardSession(session: Session): Session {
   /** Rejects when `path` is off; otherwise runs `call`. */
@@ -59,14 +97,24 @@ export function guardSession(session: Session): Session {
     return call();
   };
 
+  /** The working directory of each thread the guard has seen. */
+  const threadCwds = new Map<string, string>();
+  const remember = <Thread extends { id: string; cwd?: string }>(thread: Thread): Thread => {
+    if (typeof thread.cwd === "string") threadCwds.set(thread.id, thread.cwd);
+    return thread;
+  };
+
   const guarded: Session = {
     get id() {
       return session.id;
     },
     capabilities: () => session.capabilities(),
-    events: (options) => session.events(options),
-    createThread: (input) => session.createThread(input),
-    resumeThread: (input) => session.resumeThread(input),
+    events: (options) =>
+      observeEvents(session.events(options), (event) => {
+        if (event.body.type === "thread.upsert") remember(event.body.thread);
+      }),
+    createThread: (input) => session.createThread(input).then(remember),
+    resumeThread: (input) => session.resumeThread(input).then(remember),
     canRelease: () => session.canRelease(),
     release: () => session.release(),
     startTurn: (input): Promise<StartTurnResult> => {
@@ -84,14 +132,31 @@ export function guardSession(session: Session): Session {
 
   const { readSnapshot, forkThread, rollbackThread, compactThread, injectHistory, unloadThread } = session;
   if (readSnapshot !== undefined) {
-    guarded.readSnapshot = (threadId) => gated("threads.readSnapshot", () => readSnapshot.call(session, threadId));
+    guarded.readSnapshot = (threadId) =>
+      gated("threads.readSnapshot", async () => {
+        const snapshot = await readSnapshot.call(session, threadId);
+        remember(snapshot.thread);
+        return snapshot;
+      });
   }
   if (forkThread !== undefined) {
     guarded.forkThread = (input) =>
-      gated("threads.fork", () => gated(forkCapabilityPath(input), () => forkThread.call(session, input)));
+      gated("threads.fork", () =>
+        gated(forkCapabilityPath(input), () => {
+          if (forkChangesDirectory(input, threadCwds.get(input.threadId))) {
+            return gated("threads.fork.crossCwd", () => forkThread.call(session, input).then(remember));
+          }
+          return forkThread.call(session, input).then(remember);
+        }),
+      );
   }
   if (rollbackThread !== undefined) {
-    guarded.rollbackThread = (input) => gated("threads.rollback", () => rollbackThread.call(session, input));
+    guarded.rollbackThread = (input) =>
+      gated("threads.rollback", async () => {
+        const snapshot = await rollbackThread.call(session, input);
+        remember(snapshot.thread);
+        return snapshot;
+      });
   }
   if (compactThread !== undefined) {
     guarded.compactThread = (threadId) => gated("threads.compact", () => compactThread.call(session, threadId));

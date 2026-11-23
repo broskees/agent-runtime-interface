@@ -91,8 +91,19 @@ Invariants:
 5. `turn/known`: every `turn.terminal`, and every event whose envelope carries
    a `turnId`, names a turn that has started. The event that starts the turn
    may carry its own id.
-6. `seq` is gap-free and increasing: the first event of a session has `seq` 1
-   and each next event has the previous `seq` plus 1.
+6. `seq/gap-free`: `seq` is gap-free and increasing: the first event of a
+   session has `seq` 1 and each next event has the previous `seq` plus 1.
+
+The definitions add two rules, which `EventGrammar` reports by name:
+
+7. `item/opens-complete`: the `item.upsert` that would open an item carries
+   every field `Item` requires (`id`, `kind`, `native`, `status`).
+8. `turn/starts-complete`: the `turn.upsert` that would start a turn carries
+   every field `Turn` requires (`id`, `threadId`, `native`, `origin`,
+   `status`).
+
+An upsert that breaks rule 7 or 8 opens or starts nothing; the first later
+upsert for that id that carries every required field opens or starts it.
 
 `item.delta` is ephemeral: once an item settles, a host may drop its deltas,
 because the settling `item.upsert` carries the full text.

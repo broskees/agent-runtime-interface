@@ -38,6 +38,16 @@ describe("approval reviewer", () => {
     assert.deepEqual(fullAccessAutoReply(request, "auto-1"), { requestId: "request-1", responseKey: "auto-1", optionId: "once", scope: "once" });
   });
 
+  test("a request that still reached the user under full access gets no auto-reply and no reviewer approval", () => {
+    for (const fullAccessOverride of ["ask_rule", "provider_check", "x:vendor.policy"]) {
+      const request = approval([ONCE, REJECT], { fullAccessOverride });
+      assert.equal(fullAccessAutoReply(request, "auto-1"), undefined, fullAccessOverride);
+      assert.equal(applyApprovalVerdict(request, { decision: "approve" }, "review-1"), undefined, fullAccessOverride);
+      // Denying never widens anything, so a reviewer may still deny it.
+      assert.equal(applyApprovalVerdict(request, { decision: "deny" }, "review-1")?.optionId, "reject");
+    }
+  });
+
   test("approve picks the narrowest accepting option whatever the order", () => {
     assert.equal(narrowestOption(approval([SESSION, ALWAYS_PROJECT]), "approve")?.optionId, "session");
     assert.equal(narrowestOption(approval([ALWAYS_PROJECT, SESSION, ONCE]), "approve")?.optionId, "once");

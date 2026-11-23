@@ -89,7 +89,10 @@ function fillPlaceholders(argument: string, request: CliLaunchRequest): string {
       `A ${request.kind} launch needs a sessionId`,
     );
   }
-  return argument.replaceAll("{sessionId}", request.sessionId ?? "").replaceAll("{cwd}", request.cwd);
+  // One pass with a replacer function: its return value is inserted literally
+  // (a replacement string would read `$$`, `$&`, `` $` `` and `$'` in a path or
+  // id as patterns), and a value that itself contains `{cwd}` is not rewritten.
+  return argument.replace(/\{(sessionId|cwd)\}/g, (_placeholder, name: string) => (name === "cwd" ? request.cwd : (request.sessionId ?? "")));
 }
 
 /**

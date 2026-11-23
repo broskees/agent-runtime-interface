@@ -7,7 +7,9 @@ export {
   EVENT_GRAMMAR_RULES,
   EventGrammar,
   EventGrammarError,
+  ITEM_REQUIRED_FIELDS,
   TERMINAL_ITEM_STATUSES,
+  TURN_REQUIRED_FIELDS,
 } from "./event-grammar.ts";
 export type { EventGrammarMode, EventGrammarOptions, EventGrammarRule, EventGrammarViolation } from "./event-grammar.ts";
 
@@ -17,7 +19,7 @@ export type { ReducedSession } from "./reducer.ts";
 export { RequestLedger } from "./request-ledger.ts";
 export type { RequestLedgerOptions } from "./request-ledger.ts";
 
-export { forkCapabilityPath, guardSession, startTurnCapabilityPath } from "./capability-guard.ts";
+export { forkCapabilityPath, forkChangesDirectory, guardSession, startTurnCapabilityPath } from "./capability-guard.ts";
 
 export { planFallback } from "./fallback-planner.ts";
 export type { FallbackPlan, FallbackRequest, FallbackStep } from "./fallback-planner.ts";

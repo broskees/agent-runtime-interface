@@ -12,6 +12,12 @@
 // `global`), and an unknown scope ranks after `global`. A `full_access`
 // auto-reply is an approve verdict, so it too takes the narrowest accepting
 // option.
+//
+// A request that carries `fullAccessOverride` (for example `ask_rule` or
+// `provider_check`, or any other value) is one the provider says must reach
+// the user even under `full_access`. Neither a `full_access` auto-reply nor a
+// reviewer's approval answers it; a reviewer may still deny it, because a
+// denial never widens anything.
 
 import type { RuntimePolicy } from "../generated/config.ts";
 import type { ApprovalScope, Request, RequestOption } from "../generated/request.ts";
@@ -84,11 +90,13 @@ export function narrowestOption(
 /**
  * Applies a verdict to a pending request: the `respond` input that answers it
  * with the narrowest matching option, or undefined when the request is not
- * pending, the verdict is `ask_user`, or no option matches. Send the result
- * through the request ledger.
+ * pending, the verdict is `ask_user`, no option matches, or the verdict
+ * approves a request that carries `fullAccessOverride` (it must reach the
+ * user). Send the result through the request ledger.
  */
 export function applyApprovalVerdict(request: Request, verdict: ApprovalVerdict, responseKey: string): RespondInput | undefined {
   if (request.status !== "pending" || verdict.decision === "ask_user") return undefined;
+  if (verdict.decision === "approve" && request.fullAccessOverride !== undefined && request.fullAccessOverride !== null) return undefined;
   const option =
     verdict.decision === "approve" ? narrowestOption(request, "approve", verdict.maxScope) : narrowestOption(request, "deny");
   if (option === undefined) return undefined;
@@ -99,7 +107,11 @@ export function applyApprovalVerdict(request: Request, verdict: ApprovalVerdict,
   return input;
 }
 
-/** The auto-reply a host sends under a `full_access` policy: the narrowest accepting option. */
+/**
+ * The auto-reply a host sends under a `full_access` policy: the narrowest
+ * accepting option. Undefined for a request that carries `fullAccessOverride`,
+ * which must reach the user.
+ */
 export function fullAccessAutoReply(request: Request, responseKey: string): RespondInput | undefined {
   return applyApprovalVerdict(request, { decision: "approve" }, responseKey);
 }

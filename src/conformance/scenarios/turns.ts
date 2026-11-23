@@ -9,7 +9,7 @@ import type { StartTurnResult } from "../../generated/session.ts";
 import type { OpenedSession, ScenarioContext } from "../context.ts";
 import type { HarnessRig } from "../harness.ts";
 import { brief, realSleep } from "../util.ts";
-import { approval, approvalKind, assistantText, isToolItem, pendingRequestOffering, supervisedMode } from "./scenario.ts";
+import { approval, approvalKind, assistantText, isToolItem, nativeOptionId, pendingRequestOffering, supervisedMode } from "./scenario.ts";
 import type { Scenario } from "./scenario.ts";
 import { describeError } from "./sessions.ts";
 
@@ -73,8 +73,9 @@ export const grammarScenario: Scenario = {
         ),
         "the native agent to ask for an approval",
       );
-      const request = await pendingRequestOffering(context, opened, "grammar-approve");
-      await context.wait(opened.session.respond({ requestId: request.id, responseKey: "grammar-1", optionId: "grammar-approve" }), "respond");
+      const approve = nativeOptionId(handle, "grammar-approve");
+      const request = await pendingRequestOffering(context, opened, approve);
+      await context.wait(opened.session.respond({ requestId: request.id, responseKey: "grammar-1", optionId: approve }), "respond");
       await context.wait(handle.nextReply(), "the native agent to get the approval reply");
     }
     await context.wait(first.native.say("All done."), "the native agent to stream text");

@@ -49,7 +49,7 @@ export const FAKE_MCP_TOOL = "echo";
 export const FAKE_MCP_RESOURCE = "fake://readme";
 
 type JsonObject = { [key: string]: unknown };
-type AmbientAuth = "authenticated" | "unauthenticated" | "unknown" | "unavailable";
+type AmbientAuth = "authenticated" | "unauthenticated" | "unknown" | "unavailable" | "api_key";
 
 const LOCKED_MESSAGE = (threadId: string) => `error resuming thread: thread ${threadId} already has an active writer`;
 
@@ -811,6 +811,10 @@ export class FakeCodexWorld {
         switch (this.options.ambientAuth ?? "authenticated") {
           case "authenticated":
             memory.stderr("Logged in using ChatGPT\n");
+            memory.exit(0, null);
+            return;
+          case "api_key":
+            memory.stderr("API key configured - sk-proj-***abcd\n");
             memory.exit(0, null);
             return;
           case "unauthenticated":

@@ -50,7 +50,7 @@ async function until<T>(find: () => T | undefined, what: string, timeoutMs = 500
 
 export async function codexRig(
   options: {
-    readonly ambientAuth?: "authenticated" | "unauthenticated" | "unknown" | "unavailable";
+    readonly ambientAuth?: "authenticated" | "unauthenticated" | "unknown" | "unavailable" | "api_key";
     readonly version?: string;
     readonly missingBinary?: boolean;
     readonly host?: Partial<FakeHostOptions<CodexDriverConfig>>;

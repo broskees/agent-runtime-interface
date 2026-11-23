@@ -2754,5 +2754,16 @@ export interface ProtocolNotifications {
   "$/cancel_request": CancelRequestNotification;
 }
 
+/** Requests an ACP proxy handles (draft): params and result types by method. */
+export interface ProxyMethods {
+  "proxy/initialize": { params: InitializeProxyRequest; result: InitializeProxyResponse };
+  "proxy/successor": { params: ProxySuccessorRequest; result: ProxySuccessorResponse };
+}
+
+/** Notifications an ACP proxy handles (draft): params types by method. */
+export interface ProxyNotifications {
+  "proxy/successor": ProxySuccessorNotification;
+}
+
 /** Every method the stable v2 schema (schema.json) defines; the rest are draft features. */
 export const STABLE_METHODS: readonly string[] = ["$/cancel_request","auth/login","auth/logout","elicitation/complete","elicitation/create","initialize","session/cancel","session/close","session/delete","session/list","session/new","session/prompt","session/request_permission","session/resume","session/set_config_option","session/update","terminal/cancel","tool_call/cancel"];

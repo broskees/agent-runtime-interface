@@ -263,6 +263,7 @@ const SIDE_DOCS: { readonly [side: string]: { readonly requests: string; readonl
   agent: { requests: "AgentMethods", notifications: "AgentNotifications", what: "the agent handles (the client sends them)" },
   client: { requests: "ClientMethods", notifications: "ClientNotifications", what: "the client handles (the agent sends them)" },
   protocol: { requests: "ProtocolMethods", notifications: "ProtocolNotifications", what: "either side may send" },
+  proxy: { requests: "ProxyMethods", notifications: "ProxyNotifications", what: "an ACP proxy handles (draft)" },
 };
 
 /** The generated module for one protocol version. */
@@ -288,7 +289,8 @@ export function generateVersion(root: string, version: number): string {
   }
 
   const tables = methodTables(unstable, relSchema);
-  for (const side of ["agent", "client", "protocol"]) {
+  for (const unknown of tables.keys()) if (SIDE_DOCS[unknown] === undefined) throw new AcpCodegenError(`${relSchema}: unknown x-side ${unknown}`);
+  for (const side of Object.keys(SIDE_DOCS)) {
     const docs = SIDE_DOCS[side]!;
     const table = [...(tables.get(side) ?? new Map<string, MethodEntry>()).values()].sort((a, b) => a.method.localeCompare(b.method));
     const requests = table.filter((entry) => entry.params !== undefined || entry.result !== undefined);

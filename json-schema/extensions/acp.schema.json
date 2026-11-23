@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/extensions/acp.schema.json",
+  "title": "ACP driver extension acp",
+  "description": "What the `acp` driver and its flavors (`grok`, `fx`, `kiro`, `acp-registry`, `antigravity`) pass through from the Agent Client Protocol without a core ARI mapping. Drivers list `{ ns: \"acp\", version: \"1\" }` in `capabilities.extensions`. Vendor `_meta` objects arrive as `x:acp.meta` events, session updates the driver has no mapping for arrive as `x:acp.update` events, and `session.ext(\"acp\", method, params)` sends an ACP extension request (a method name starting with `_`) to the agent and resolves with its result.",
+  "$defs": {
+    "AcpMetaEventData": {
+      "description": "One vendor `_meta` object as the agent sent it.",
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "description": "The ACP version the connection negotiated, 1 or 2."
+        },
+        "method": {
+          "type": "string",
+          "description": "The ACP method of the frame that carried it, for example `session/update`."
+        },
+        "source": {
+          "type": "string",
+          "description": "Where in the frame the `_meta` was: `params`, `result`, `update`, `toolCall` or `option`."
+        },
+        "updateKind": {
+          "type": "string",
+          "description": "The `sessionUpdate` kind, for `session/update` frames."
+        },
+        "nativeSessionId": {
+          "type": "string"
+        },
+        "nativeEntityId": {
+          "type": "string",
+          "description": "The tool call, message or option id the `_meta` belongs to, when it belongs to one."
+        },
+        "meta": {
+          "type": "object",
+          "description": "The `_meta` object, unchanged."
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "method",
+        "source",
+        "meta"
+      ]
+    },
+    "AcpMetaEvent": {
+      "description": "Event body that passes a vendor `_meta` object through.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "x:acp.meta"
+        },
+        "data": {
+          "$ref": "#/$defs/AcpMetaEventData"
+        },
+        "fallback": {
+          "$ref": "../common.schema.json#/$defs/Fallback"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    "AcpUpdateEventData": {
+      "description": "A `session/update` the driver does not map to a core event, unchanged.",
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer"
+        },
+        "nativeSessionId": {
+          "type": "string"
+        },
+        "update": {
+          "type": "object",
+          "description": "The `update` object of the notification."
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "nativeSessionId",
+        "update"
+      ]
+    },
+    "AcpUpdateEvent": {
+      "description": "Event body that passes an unmapped session update through.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "x:acp.update"
+        },
+        "data": {
+          "$ref": "#/$defs/AcpUpdateEventData"
+        },
+        "fallback": {
+          "$ref": "../common.schema.json#/$defs/Fallback"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    "AcpExtensionMethod": {
+      "description": "The `method` of `session.ext(\"acp\", method, params)`: an ACP extension method, which starts with `_`.",
+      "type": "string",
+      "pattern": "^_"
+    }
+  }
+}

@@ -64,9 +64,10 @@ export const duplicateAlwaysScenario: Scenario = {
       context.check(expected.has(option.decision), `native option ${optionId} has decision ${brief(option.decision)}; expected one of ${[...expected].join(", ")}`);
     }
 
-    await context.wait(opened.session.respond({ requestId: request.id, responseKey: "duplicate-always-1", optionId: "allow-session" }), "respond");
+    // The second of the two accept_always options, so a driver that answers by decision alone sends the wrong one.
+    await context.wait(opened.session.respond({ requestId: request.id, responseKey: "duplicate-always-1", optionId: "allow-prefix" }), "respond");
     const reply = await context.wait(handle.nextReply(), "the native agent to get the reply");
-    context.check(reply === "allow-session", `the provider got option ${brief(reply)}; the host chose "allow-session"`);
+    context.check(reply === "allow-prefix", `the provider got option ${brief(reply)}; the host chose "allow-prefix"`);
     await context.wait(native.complete(), "the native agent to complete the turn");
     await context.terminal(opened, turnId);
   },
@@ -112,6 +113,25 @@ export const idempotentResponsesScenario: Scenario = {
     );
     const reply = await context.wait(handle.nextReply(), "the native agent to get the reply");
     context.check(reply === "approve-once", `the provider got option ${brief(reply)}; the host chose "approve-once"`);
+
+    // Another request in the same session answered with the same responseKey is another pair: it reaches the provider too.
+    const againHandle = await context.wait(
+      first.native.requestApproval(
+        approval(kind, [
+          { optionId: "approve-again", label: "Allow once", decision: "accept" },
+          { optionId: "reject-again", label: "Reject", decision: "decline" },
+        ]),
+      ),
+      "the native agent to ask for a second approval",
+    );
+    const again = await pendingRequestOffering(context, opened, "approve-again");
+    context.check(again.id !== request.id, `the second native approval reached the host as the first request ${request.id}`);
+    await context.wait(
+      opened.session.respond({ requestId: again.id, responseKey: input.responseKey, optionId: "approve-again" }),
+      `a respond to a second request with the same responseKey "${input.responseKey}"`,
+    );
+    const againReply = await context.wait(againHandle.nextReply(), `the native agent to get the reply to a second request answered with the same responseKey "${input.responseKey}"`);
+    context.check(againReply === "approve-again", `the provider got option ${brief(againReply)} for the second request; the host chose "approve-again"`);
     await context.wait(first.native.complete(), "the native agent to complete the turn");
     await context.terminal(opened, first.turnId);
     const replies = await context.wait(handle.replies(), "the native agent's replies");

@@ -92,7 +92,7 @@ uses the workspace `workspace()` returned.
 interface ConformanceWorkspace {
   cwd: string;           // a directory, as its canonical real path
   symlinkedCwd?: string; // the same directory reached through a symbolic link (scenario 11)
-  otherCwd?: string;     // a second directory (forks into another directory)
+  otherCwd?: string;     // a second directory, as its canonical real path (forks into another directory)
 }
 
 interface RigRequest {
@@ -117,7 +117,7 @@ interface HarnessRig<Config> {
   native: NativeAgent;        // the puppet
   probeExecutables?: string[];      // what probe() may spawn; default: cliManifest.binary
   inheritedCredentials?: string[];  // your provider's credential variables, e.g. ["ANTHROPIC_API_KEY"]
-  listInstanceFiles?(paths: HostPaths): Promise<InstanceFile[]>;
+  watchInstanceFiles?(paths: HostPaths): Promise<InstanceFileWatch>; // { stop(): Promise<string[]> }
   exercise?: CapabilityExercise;    // inputs for members the kit cannot invent
   missingSession?: NativeRef | { handle: string };
   dispose?(): Promise<void>;
@@ -129,9 +129,12 @@ interface HarnessRig<Config> {
   executables, and its secrets. When `arrangement.managedProfile` is true,
   give the instance its own stored but never-checked credential (for example
   an API key in its secrets), so its auth state is `configured`.
-- `listInstanceFiles` lists every file under an instance's paths with its
-  size and modification time; the probe scenario compares the list before and
-  after `probe()`. `test/helpers/conformance.ts` has a Node implementation.
+- `watchInstanceFiles` starts watching every file under an instance's paths
+  (`stateDir`, `cacheDir`, `tmpDir`); its `stop()` returns every path that was
+  created, changed, renamed or removed meanwhile, including a file written and
+  deleted again. The probe scenario watches for the whole of both `probe()`
+  calls. `test/helpers/conformance.ts` has a Node implementation; see [what
+  the probe's file check can see](#what-the-probe-file-check-can-see).
 - `exercise` gives the kit an MCP app your fake serves
   (`{ server, tool, args, resourceUri }`), one harmless call per extension
   namespace your driver lists (`{ [ns]: { method, params } }`), and a model id.
@@ -143,6 +146,15 @@ interface NativeAgent {
   nextTurn(): Promise<NativeTurn>;           // the next prompt your driver sent
   lockSession?(thread: Thread): Promise<void>;
   observedEnvironments?(): Promise<Array<{ [name: string]: string }>>;
+  inspectSession?(thread: Thread): Promise<NativeSessionState | undefined>;
+}
+
+interface NativeSessionState {
+  loaded: boolean;           // a running native agent has it loaded (not only stored)
+  cwd: string;               // its working directory, as the agent resolved it
+  turns: number;             // how many turns it holds
+  compactions: number;       // how many times it was compacted
+  injectedMessages: number;  // how many history messages were injected into it
 }
 
 interface NativeTurn {
@@ -154,6 +166,7 @@ interface NativeTurn {
   spawnSubagent?(subagent: { name: string }): Promise<void>;
   nextSteer?(): Promise<string>;             // the text of the next steer for this turn
   complete(): Promise<void>;                 // the provider's authoritative completion
+  completeHeld?(): Promise<{ release(): Promise<void> }>; // complete natively, tell the driver only on release()
   fail(failure: NativeFailure): Promise<void>;
   stopRequested(): Promise<"cancel" | "exit">;
   finishCancelled(): Promise<void>;
@@ -188,12 +201,26 @@ Rules every harness keeps:
   host, such as an in-process SDK given an `env` option: return the
   environments the native runtime was started with. Spawns through the host
   are checked from the fake host's record.
+- **`completeHeld`** ends the turn on the native side exactly as `complete`
+  does (the provider has no active turn any more and refuses a steer the way
+  it refuses one after a turn ended), but holds back the message that tells
+  your driver until `release()`. Scenario 7 sends a steer in between, while
+  your driver still believes the turn is running.
+- **`inspectSession`** reads the native session behind a thread from the
+  native side: your fake's own state, not your driver's. Return `loaded:
+  true` while a running fake agent holds the session, and the stored state
+  with `loaded: false` when only its files or records remain; `undefined`
+  when the fake has no such session. Scenario 14 uses it to see that a fork
+  landed at the right turn and in the right directory, and that compaction,
+  history injection, rollback, unload and release changed the native session.
 
 Optional puppet members are needed only when your driver declares the
 matching capability: `startBackgroundTask` for `background.*`,
-`spawnSubagent` for `subagents.stop`, `nextSteer` for `turns.steer`. Without
-them, the scenario fails unless you give a reason (see
-[Applicability](#applicability)).
+`spawnSubagent` for `subagents.stop`, `nextSteer` and `completeHeld` for
+`turns.steer`, and `inspectSession` for `threads.fork`, `threads.compact`,
+`threads.injectHistory`, `threads.rollback`, `threads.unload` or
+`sessions.release`. Without them, the scenario fails unless you give a reason
+(see [Applicability](#applicability)).
 
 ## Three shapes of harness
 
@@ -215,7 +242,7 @@ ways work:
 
 ```ts
 import * as childProcess from "node:child_process";
-import { toSpawnedProcess, instanceDirectories, listInstanceFiles, createConformanceWorkspace } from "../helpers/conformance.ts";
+import { toSpawnedProcess, instanceDirectories, watchInstanceFiles, createConformanceWorkspace } from "../helpers/conformance.ts";
 
 export function piHarness(): ConformanceHarness<PiConfig> {
   const { workspace, root } = createConformanceWorkspace();
@@ -241,7 +268,7 @@ export function piHarness(): ConformanceHarness<PiConfig> {
           resolveExecutable: async (name) => (name === "pi" ? FAKE_PI : null),
         }),
         native: { nextTurn: () => turns.next() },
-        listInstanceFiles,
+        watchInstanceFiles,
         inheritedCredentials: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
       };
     },
@@ -278,7 +305,7 @@ async setup(request) {
     config: { ...opencodeDriver.defaultConfig(), serverUrl: server.url },
     native: { nextTurn: () => server.nextPrompt() },  // NativeTurn whose steps write SSE events
     hostOptions: (instanceId) => ({ paths: instanceDirectories(root, instanceId) }),
-    listInstanceFiles,
+    watchInstanceFiles,
     dispose: () => server.close(),
   };
 }
@@ -302,7 +329,7 @@ async setup(request) {
     driver: createClaudeDriver({ loadSdk: async () => sdk }),
     native: { nextTurn: () => sdk.nextQuery(), observedEnvironments: async () => sdk.environments() },
     hostOptions: (instanceId) => ({ paths: instanceDirectories(root, instanceId) }),
-    listInstanceFiles,
+    watchInstanceFiles,
     inheritedCredentials: ["ANTHROPIC_API_KEY"],
   };
 }
@@ -350,55 +377,133 @@ result and the completion, and the auth scenario waits for a runtime auth
 poison to expire (30 seconds for the reference driver).
 
 With `time: "virtual"` (the default), the kit installs a `VirtualClock` for
-those stretches. It replaces this realm's `setTimeout`, `clearTimeout`,
-`setInterval`, `clearInterval`, `Date` (`new Date()` and `Date.now()`) and
-`performance.now()`. Time stands still until the kit moves it, in 250 ms
-steps with real I/O between them. A driver that settles a turn from an
-ordinary quiet timer, either a `setTimeout` re-armed on every frame or a
+those checks, **before it asks your harness for the rig**. Every timer your
+driver makes for the check is therefore virtual, including one it makes in
+`create` or when the session opens and re-arms later with `refresh()`. The
+clock replaces this realm's `setTimeout`, `clearTimeout`, `setInterval`,
+`clearInterval`, `Date` (`new Date()` and `Date.now()`) and
+`performance.now()`; its handles have Node's `ref`, `unref`, `hasRef` and
+`refresh` (which, as in Node, runs a timer that already fired again).
+
+Virtual time never runs slower than real time. While the kit waits for
+something, it moves the clock on by the real time that passed, so a short real
+wait in your driver (a back-off, a debounce) still ends. Only the pause jumps
+ahead, in 250 ms steps with real I/O between them. A driver that settles a turn
+from an ordinary quiet timer, either a `setTimeout` re-armed on every frame or a
 `setInterval` comparing `Date.now()` against the last frame, sees its timer
 fire at the 30-second mark and is caught, while the test takes well under a
 second. The kit's own deadlines keep real time.
 
 Virtual time does not reach `setImmediate`, `queueMicrotask`,
 `process.nextTick` (all stay real, so I/O and promises keep running), timers
-taken from `node:timers` or `node:timers/promises` directly,
-`AbortSignal.timeout`, or anything in another process. If your driver runs in
-another process (behind `ari/wire`) or keeps its timers that way, set
-`time: "real"`: the scenarios then wait the full 36.5 seconds.
+your driver made before the scenario began (at module load, or in an earlier
+scenario), timers taken from `node:timers` or `node:timers/promises`
+directly, `AbortSignal.timeout`, or anything in another process. If your
+driver runs in another process (behind `ari/wire`) or keeps its timers that
+way, set `time: "real"`: the scenarios then wait the full 36.5 seconds and
+the poison's whole lifetime.
 
 ## The scenarios
 
 | # | Key | The kit checks | The harness provides | Not applicable when |
 |---|---|---|---|---|
 | 1 | `grammar` | Every session stream of the run, read from `seq` 1, keeps the `ari/host` EventGrammar in strict mode. Its own stream adds a rich turn (text, a tool, an approval if available) and a stopped turn. | - | never |
-| 2 | `turn-completed` | The turn stays open after its assistant message ends; after the provider completes it, `turn.terminal` is `completed` and `reusable`, the turn's assistant text is what the agent said, and no item is left open. | `say`, `complete` | never |
-| 3 | `turn-interrupted` | `interruptTurn` reaches the agent; `turn.terminal` is `interrupted`; nothing left open. | `stopRequested`, `finishCancelled` | never |
-| 4 | `turn-failed` | A provider error ends `failed` with failure class `provider_error`; a usage limit ends `failed` with class `usage_limit` and the provider's `resetAt`. | `fail` | check `turn-failed.usage_limit` |
-| 5 | `process-exit` | The agent's process dying mid-turn ends the turn `failed` with a valid failure. | `exitProcess` | never |
-| 6 | `settlement` | Nothing settles the turn (no `turn.terminal`, no `turn.upsert` with a settled status) from its start, through the tool result and a 36.5 s pause after it, until the provider completes it; then it completes. | `runTool`, `complete` | never |
-| 7 | `steer-after-end` | A steer after the turn ended, and one that races the provider's completion, return `prompt_required`; the provider never sees them as turns. | `complete` | `turns.steer` off |
-| 8 | `duplicate-always-options` | An approval with two `accept_always` options and a decline is an approval kind (not `user_input`), with no questions, keeping each native option id and an accepting or declining decision; replying reaches the agent. | `requestApproval` | `approvals.command` and `approvals.fileChange` off, `requests.responseModes` without `live`, or no supervised runtime mode |
-| 9 | `session-replaced` | Resuming an available session keeps its thread and replaces nothing. Resuming a locked session, then a missing one, falls back to a fresh session and emits `session.replaced` with `contextLost: true`. | `lockSession` | check `session-replaced.locked` |
-| 10 | `auth-states` | A stored unchecked credential is `configured` and Send works, even with the ambient account signed out; an unanswerable check is `unavailable` and Send works; an undecidable one is `unknown`; `reportRuntimeFailure` poisons only its own scope (`runtime_poison`, `unauthenticated`, a short `poisonExpiresAt`) and expires; inherited credentials never reach the agent. | `ambientAuth` arrangements, `managedProfile` secrets, `inheritedCredentials` | `Instance.auth` left out; checks `auth-states.configured`, `.unavailable`, `.unknown`, `.poison`, `.inherited-credentials` |
-| 11 | `symlinked-workspace` | A thread created through the symbolic link has the same id and cwd, and every event the same ids and paths, as one created through the real path. | `workspace().symlinkedCwd` | `symlinked-workspace` |
-| 12 | `side-effect-free-probe` | `probe()` and `probe({ deep: true })` return valid results, call no `secrets.set`, `secrets.delete`, `callbacks.register`, `coordination.acquire` or `hostTools.*`, spawn only the probe executables, and change no file under the instance's paths. | `listInstanceFiles`, `probeExecutables` | check `side-effect-free-probe.files` |
+| 2 | `turn-completed` | The turn stays open after its assistant message ends; after the provider completes it, `turn.terminal` is `completed` and `reusable`, the turn's assistant text is what the agent said, no item is left open, and the thread takes the next turn. | `say`, `complete` | never |
+| 3 | `turn-interrupted` | `interruptTurn` reaches the agent; `turn.terminal` is `interrupted`; nothing is left open; a thread the driver calls `reusable` takes the next turn. | `stopRequested`, `finishCancelled` | never |
+| 4 | `turn-failed` | A provider error ends `failed` with failure class `provider_error`, and a thread the driver calls `reusable` takes the next turn; a usage limit ends `failed` with class `usage_limit` and the provider's `resetAt`. | `fail` | check `turn-failed.usage_limit` |
+| 5 | `process-exit` | The agent's process dying mid-turn ends the turn `failed` with a valid failure; a thread the driver calls `reusable` takes the next turn. | `exitProcess` | never |
+| 6 | `settlement` | Nothing settles the turn (no `turn.terminal`, no `turn.upsert` with a settled status) from its start, through the tool result and a 36.5 s pause after it, until the provider completes it; then it completes. The clock is installed before the rig exists. | `runTool`, `complete` | never |
+| 7 | `steer-after-end` | A steer after the turn ended returns `prompt_required`. So does a steer that arrives after the provider ended the turn but before the driver heard (`completeHeld`): the driver steers, the provider refuses, and the host must still get `prompt_required`. The provider never sees either as a turn. | `complete`, `completeHeld` | `turns.steer` off; check `steer-after-end.race` |
+| 8 | `duplicate-always-options` | An approval with two `accept_always` options and a decline is an approval kind (not `user_input`), with no questions, keeping each native option id and an accepting or declining decision; answering with the second `accept_always` option sends that native option, not the first one with the same decision. | `requestApproval` | `approvals.command` and `approvals.fileChange` off, `requests.responseModes` without `live`, or no supervised runtime mode |
+| 9 | `session-replaced` | Resuming an available session keeps its thread, replaces nothing, and the thread runs a turn. Resuming a locked session, then a missing one, falls back to a fresh session, emits `session.replaced` with `contextLost: true`, and the replacement thread runs a turn. | `lockSession` | check `session-replaced.locked` |
+| 10 | `auth-states` | A stored unchecked credential is `configured` and Send works, even with the ambient account signed out; an unanswerable check is `unavailable` and Send works; an undecidable one is `unknown`; `reportRuntimeFailure` poisons only its own scope (`runtime_poison`, `unauthenticated`, the scope of the instance that failed, a short `poisonExpiresAt`, the other instance unchanged); after `poisonExpiresAt` the instance reports its verdict from before the failure and Send works; inherited credentials never reach the agent. | `ambientAuth` arrangements, `managedProfile` secrets, `inheritedCredentials` | `Instance.auth` left out; checks `auth-states.configured`, `.unavailable`, `.unknown`, `.poison`, `.inherited-credentials` |
+| 11 | `symlinked-workspace` | A thread created in the real path reports that path as its cwd, and its tool paths lie inside it. A thread created through the symbolic link has the same id and cwd, and every event the same ids and paths. | `workspace().symlinkedCwd` | `symlinked-workspace` |
+| 12 | `side-effect-free-probe` | `probe()` and `probe({ deep: true })` return valid results, call no `secrets.set`, `secrets.delete`, `callbacks.register`, `coordination.acquire` or `hostTools.*`, spawn only the probe executables, and create, change or remove no file under the instance's paths at any moment while they run. | `watchInstanceFiles`, `probeExecutables` | check `side-effect-free-probe.files` |
 | 13 | `replay-from-seq` | `events({ fromSeq: 1 })` and `events({ fromSeq: middle })` replay exactly the live events (same `seq`, same ids, same bodies), and the replayed stream goes on live identically. | `say`, `runTool`, `complete` | never |
-| 14 | `capability-honesty` | Every capability-gated member the driver declares off is left out or rejects with `unsupported{capability}`; every one it declares on works and returns a valid result. See below. | the optional puppet members and `exercise` its declarations need | checks `capability-honesty.<member>` |
-| 15 | `idempotent-responses` | Three responses with one `(requestId, responseKey)`, two of them concurrent, have one outcome and reach the agent once. Under `full_access`, the reply the agent gets is the narrowest accepting option, whether the driver answers itself or hands the request to the host's `fullAccessAutoReply`. | `requestApproval` | as scenario 8; the `full_access` part is skipped with a note when `runtimePolicy.modes.full_access` is off |
+| 14 | `capability-honesty` | Every capability-gated member the driver declares off is left out or rejects with `unsupported{capability}`; every one it declares on returns a valid result and has its effect. See below. | the optional puppet members, `inspectSession` and `exercise` its declarations need | checks `capability-honesty.<member>` and `capability-honesty.native-effects` |
+| 15 | `idempotent-responses` | Three responses with one `(requestId, responseKey)`, two of them concurrent, have one outcome and reach the agent once. A second request in the same session answered with the same `responseKey` is another pair and reaches the agent too. Under `full_access`, the reply the agent gets is the narrowest accepting option, whether the driver answers itself or hands the request to the host's `fullAccessAutoReply`. | `requestApproval` | as scenario 8; the `full_access` part is skipped with a note when `runtimePolicy.modes.full_access` is off |
 
-Scenario 14 checks these members, with the capability paths that gate them
-(`GATED_MEMBERS` holds the table, and a test keeps it in step with
-`spec/v1/methods.json`): `readSnapshot`, `forkThread` (and its `fromTurn`,
-`fromItem` and `crossCwd` variants), `rollbackThread` (both
-`threads.rollback` and `checkpointing.conversationRollback`),
-`compactThread`, `injectHistory`, `unloadThread`, `release` (and a turn
-after it), `backgroundTasks.list/stop/await`, `stopSubagent`,
-`mcpApps.listTools/callTool/readResource`, `uploadFeedback`, `ext` (each
-declared namespace works; an undeclared one is `unsupported`),
-`contextWindow`, `canReuseContextUsage`, and the `steer` and `queue` intents
-of `startTurn` (which may answer `{ status: "unsupported", capability }`).
-It calls your driver's own session, without `ari/host`'s guard, because the
-driver itself must be honest.
+Scenario 14 checks the members below, with the capability paths that gate
+them (`GATED_MEMBERS` holds the table, and a test keeps it in step with
+`spec/v1/methods.json`). It calls your driver's own session, without
+`ari/host`'s guard, because the driver itself must be honest. A member
+declared on must return a valid result **and** have its effect; a
+well-shaped answer that does nothing fails. Before the checks, the thread has
+run two turns (the second is the queued turn, or a plain one when `queue` is
+off), with a background task and a subagent started in the first.
+
+| Member | Works when |
+|---|---|
+| `startTurn` steer | it is accepted and the agent receives the steer text |
+| `startTurn` queue | it is accepted and the agent starts the queued prompt after the active turn |
+| `backgroundTasks.list` | it lists the running task |
+| `backgroundTasks.await` | it matches the running task |
+| `backgroundTasks.stop` | afterwards the task no longer runs, by `list` when declared, else by `background.updated` |
+| `stopSubagent` | the subagent's status settles (`completed`, `failed`, `cancelled` or `interrupted`) |
+| `readSnapshot` | the snapshot is of the thread and holds both turns that ran on it |
+| `forkThread` at latest | it returns a new thread, and that thread runs a turn |
+| `forkThread` from a turn | natively, the fork from the first turn holds fewer turns than the two-turn source |
+| `forkThread` from an item | it returns a valid thread |
+| `forkThread` into another directory | the fork reports `otherCwd` as its cwd, and its native session works there |
+| `compactThread` | natively, the session's compaction count grew |
+| `injectHistory` | it returns a valid result, and natively the session received every injected message |
+| `uploadFeedback` | it returns a valid result (shape only) |
+| `mcpApps.listTools` | the list includes `exercise.mcpApp.tool` |
+| `mcpApps.callTool`, `mcpApps.readResource` | they return valid results (shape only) |
+| `ext` | a call in each declared namespace resolves (shape only); an undeclared namespace is `unsupported` |
+| `contextWindow` | it equals the catalog's `contextWindow` for the model, when the catalog gives one |
+| `canReuseContextUsage` | it is true for the same model on both sides |
+| `rollbackThread` to the start | the snapshot lists no turns, and natively the session holds none |
+| `unloadThread` | natively the session is no longer loaded, and `resumeThread` brings the thread back to run a turn |
+| `release` | in a fresh session with one finished turn and nothing running or pending, `canRelease()` turns true within the step timeout (one that stays false fails: release could never be exercised), `release()` resolves, natively the session is no longer loaded, and the thread then runs a turn |
+
+"Natively" means read through `NativeAgent.inspectSession`. When your harness
+gives a reason under `capability-honesty.native-effects` instead, those
+native checks are skipped with a note, and the ARI-side checks still run.
+The kit checks `uploadFeedback`, `mcpApps.callTool`, `mcpApps.readResource`
+and `ext` for shape only, because what they should do depends on the vendor
+and the tool.
+
+### What the probe file check can see
+
+Scenario 12 starts `watchInstanceFiles` before the first `probe()` and stops
+it after the second returns. The Node helper in `test/helpers/conformance.ts`
+works like this, and harnesses that write their own should match it.
+
+It sees:
+
+- every file or directory created, written, renamed or removed under
+  `stateDir`, `cacheDir` and `tmpDir`, by your driver or by any process it
+  spawns, while the watch runs. That includes a file written and deleted
+  again before `probe()` returns: each directory has its own non-recursive
+  `fs.watch` (inotify on Linux), and inotify queues every event. Node's
+  recursive watch is not used, because on Linux it misses such a file;
+- a file created in a new directory, reported as that new directory when the
+  write comes before the helper has started watching inside it;
+- any file whose size or modification time differs from an inventory taken
+  when the watch started, as a second net.
+
+`stop()` writes a sentinel file and waits until the watch reports it, so every
+change made before `stop()` was called has arrived. If the sentinel never
+shows, `stop()` throws rather than vouch for a watch that saw nothing.
+
+It cannot see:
+
+- writes outside the three directories: the home directory, the system temp
+  directory, or a target outside them reached through a symbolic link inside
+  them;
+- reads, or changes to access time only;
+- writes that work left running by `probe()` makes after the second call
+  returned and `stop()` saw its sentinel;
+- anything before the three directories exist (the helper throws if one is
+  missing; `instanceDirectories` creates them);
+- on macOS, where `fs.watch` uses FSEvents, a create-and-delete pair that
+  FSEvents merges into nothing. The kit is tested on Linux only.
+
+The in-memory reference harness has no real files. Its agent's store reports
+every write it makes to the watch, so the watch there sees exactly what that
+agent writes under the instance's virtual paths, and nothing a driver writes
+with `node:fs`.
 
 ## Applicability
 
@@ -414,11 +519,18 @@ always shows why:
    fails the scenario.
 
 The same rule covers checks inside a scenario. A check the harness cannot
-support (a missing `lockSession`, no `listInstanceFiles`, an auth state it
-cannot arrange) fails the scenario unless `notApplicable` has a reason under
-the check's key, such as `session-replaced.locked`. A skipped check becomes a
-note in the result. Nothing else makes a scenario skip: a fake that lacks a
-step the scenario needs is a failure.
+support (a missing `lockSession`, `completeHeld`, `inspectSession` or
+`watchInstanceFiles`, an auth state it cannot arrange) fails the scenario
+unless `notApplicable` has a reason under the check's key. The check keys are
+`turn-failed.usage_limit`, `steer-after-end.race`, `session-replaced.locked`,
+`auth-states.configured`, `auth-states.unavailable`, `auth-states.unknown`,
+`auth-states.poison`, `auth-states.inherited-credentials`,
+`side-effect-free-probe.files`, `capability-honesty.native-effects`,
+`capability-honesty.background`, `capability-honesty.stopSubagent`,
+`capability-honesty.turns.steer`, `capability-honesty.mcpApps`,
+`capability-honesty.forkThread.crossCwd` and `capability-honesty.ext.<ns>`.
+A skipped check becomes a note in the result. Nothing else makes a scenario
+skip: a fake that lacks a step the scenario needs is a failure.
 
 ## The report
 
@@ -488,8 +600,9 @@ It shows the patterns the scenarios check: ids derived from native ids only,
 settlement only on the agent's `turn_ended` or on process exit, `prompt_required`
 for a late steer, native option ids with their real reach, `session.replaced`
 on a locked or missing session, five auth states with a 30-second runtime
-poison per scope, a probe that only runs `--version`, and `unsupported` for
-everything declared off.
+poison per scope, a probe that only runs `--version`, forks into another
+directory, an unloaded thread that `resumeThread` loads again, and
+`unsupported` for everything declared off.
 
 Its config: `profile` is `"full"` (every optional feature declared and
 implemented) or `"minimal"` (all declared off, and no `auth`);
@@ -501,21 +614,35 @@ the host.
 virtual workspace and filesystem, so it works in a browser.
 `test/conformance/child-process-harness.ts` runs the same driver against the
 same agent as a real child process, with real files and a real symbolic link.
-Both pass all 15 scenarios.
+Both implement every optional puppet member (`completeHeld` and
+`inspectSession` included) and pass all 15 scenarios.
 
 ## How the kit proves itself
 
-`test/conformance/broken-drivers.ts` holds a deliberately broken variant of the
-reference driver for each scenario: a delta before its item opens, completion
-reported as interrupt, a turn settled when its message ends, Stop that never
-reaches the agent, a usage limit classified as a provider error, a turn left
-open when the process dies, a 30-second quiet timer, a turn settled by a tool
-result, a late steer that starts a turn, duplicate `always`
-options turned into a question, a silent session swap, a configured
-credential treated as signed out, inherited credentials passed to the agent,
-the workspace path reported as given, a probe that writes secrets or session
-files, a replay that renumbers `seq`, a capability declared off but served (and
-one declared on but refused), responses that are not idempotent, and an
-`always` option mislabelled as reaching once. `test/conformance/broken.test.ts`
-asserts each fails its scenario for that reason. Write your own the same way
-when you add a check: a wrapper around an honest driver that adds one bug.
+`test/conformance/broken-drivers.ts` holds 50 deliberately broken variants of
+the reference driver. Each wraps the honest driver and adds one bug the way a
+production driver has broken; `test/conformance/broken.test.ts` asserts each
+fails its scenario for that reason, and that the honest driver passes the same
+scenarios. Many are bugs that return the right shape and skip the effect.
+
+| # | Variants | The bugs |
+|---|---|---|
+| 1 | 1 | a delta before its item opens |
+| 2 | 3 | completion reported as interrupt; the turn settled when its message ends; a completed turn kept active, so the "reusable" thread refuses the next turn |
+| 3 | 2 | Stop that never reaches the agent; an interrupted turn kept active |
+| 4 | 2 | a usage limit classified as a provider error; a failed turn kept active |
+| 5 | 1 | a turn left open when the process dies |
+| 6 | 3 | a 30-second quiet timer re-armed per event; a turn settled by a tool result; one 30-second timer made when the session opens and `refresh()`ed per event |
+| 7 | 2 | a late steer that starts a turn; the provider's "no active turn" refusal surfaced as an error unless the driver already heard the turn end |
+| 8 | 2 | duplicate `always` options turned into a question; the reply sent as the first option with the chosen decision |
+| 9 | 3 | a silent session swap; a placeholder thread no native session backs as the fallback; a remembered thread returned on resume without loading its native session |
+| 10 | 4 | a configured credential treated as signed out; inherited credentials passed to the agent; the poison reported under the ambient scope; a poisoned instance kept signed out after expiry |
+| 11 | 2 | the workspace path reported as given; the requested directory ignored |
+| 12 | 3 | a probe that writes secrets and takes a lease; one that opens a native session; one that writes a scratch file under `tmpDir` and deletes it before returning (run with the child-process harness, on real files) |
+| 13 | 1 | a replay that renumbers `seq` |
+| 14 | 18 | readSnapshot declared off but served; fork from an item declared on but refused; a cross-directory fork that stays in the source directory; a compaction that does nothing; `canRelease()` always false; a `release()` that parks nothing; a snapshot without the thread's turns; a fork no native session backs; a fork from a turn made at the latest turn; a rollback that only empties the returned snapshot; history reported consumed but never sent; an unload that unloads nothing; a background stop that stops nothing; an await that matches nothing; a subagent stop that stops nothing; no context window for a catalog model; context usage never reusable for the same model; an MCP server listed with no tools |
+| 15 | 3 | responses that are not idempotent; an `always` option mislabelled as reaching once; responses cached by `responseKey` alone, so a second request answered with the same key never reaches the agent |
+
+Write your own the same way when you add a check: a wrapper around an honest
+driver that adds one bug, which passes the scenario before your check exists
+and fails it after.

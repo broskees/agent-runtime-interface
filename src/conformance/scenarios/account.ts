@@ -5,7 +5,7 @@ import type { AuthState, ProbeResult } from "../../generated/instance.ts";
 import { ProbeResultSchema } from "../../generated/instance.ts";
 import type { CreatedInstance, ScenarioContext } from "../context.ts";
 import type { FakeSpawnRequest, HostCall } from "../fake-host.ts";
-import type { AmbientAuthArrangement, HarnessRig, InstanceFile } from "../harness.ts";
+import type { AmbientAuthArrangement, HarnessRig, InstanceFileWatch } from "../harness.ts";
 import { baseName, brief, sameJson } from "../util.ts";
 import { describeError } from "./sessions.ts";
 import type { Scenario } from "./scenario.ts";
@@ -113,35 +113,47 @@ async function checkInheritedCredentialsDropped(context: ScenarioContext): Promi
 }
 
 async function checkRuntimePoison(context: ScenarioContext): Promise<void> {
-  const rig = await context.rig({ ambientAuth: "authenticated" });
-  const managed = await context.instance(rig, { managedProfile: true });
-  const ambient = await context.instance(rig, { managedProfile: false });
-  const managedAuth = authOf(context, managed);
-  const ambientAuth = authOf(context, ambient);
-  if (managedAuth.reportRuntimeFailure === undefined) {
-    context.note("runtime auth poison not checked: the driver leaves out the optional member Instance.auth.reportRuntimeFailure");
-    return;
-  }
-  const report = managedAuth.reportRuntimeFailure.bind(managedAuth);
-  const ambientBefore = await context.wait(ambientAuth.state(), "auth.state() of the ambient instance");
+  // The clock goes in first, so a timer the driver makes for the poison (or for anything else) is on it.
   await context.withClock(async (clock) => {
+    const rig = await context.rig({ ambientAuth: "authenticated" });
+    const managed = await context.instance(rig, { managedProfile: true });
+    const ambient = await context.instance(rig, { managedProfile: false });
+    const managedAuth = authOf(context, managed);
+    const ambientAuth = authOf(context, ambient);
+    if (managedAuth.reportRuntimeFailure === undefined) {
+      context.note("runtime auth poison not checked: the driver leaves out the optional member Instance.auth.reportRuntimeFailure");
+      return;
+    }
+    const report = managedAuth.reportRuntimeFailure.bind(managedAuth);
+    const managedBefore = await context.wait(managedAuth.state(), "auth.state() of the managed instance before the failure");
+    const ambientBefore = await context.wait(ambientAuth.state(), "auth.state() of the ambient instance");
+
     const poisoned = await context.wait(report({ code: "401", message: "The provider rejected the credentials." }), "auth.reportRuntimeFailure()");
     context.check(poisoned.evidence === "runtime_poison", `after a runtime auth failure, auth state evidence is ${brief(poisoned.evidence)}; expected "runtime_poison"`);
     context.check(poisoned.status === "unauthenticated", `a runtime auth poison reports status ${brief(poisoned.status)}; expected "unauthenticated"`);
+    context.check(poisoned.scope === managedBefore.scope, `the runtime auth poison names scope ${brief(poisoned.scope)}; the failure was in scope ${brief(managedBefore.scope)}`);
     const expiresAt = poisoned.poisonExpiresAt === undefined ? Number.NaN : Date.parse(poisoned.poisonExpiresAt);
     context.check(Number.isFinite(expiresAt) && expiresAt > clock.now(), `a runtime auth poison needs a future poisonExpiresAt; got ${brief(poisoned.poisonExpiresAt)}`);
     const ttl = expiresAt - clock.now();
     context.check(ttl <= LONGEST_POISON_MS, `the runtime auth poison lasts ${Math.round(ttl / 1000)} s; it must be short-lived`);
     const stillPoisoned = await context.wait(managedAuth.state(), "auth.state() of the poisoned instance");
     context.check(stillPoisoned.evidence === "runtime_poison", `auth.state() right after the runtime failure reports evidence ${brief(stillPoisoned.evidence)}; expected "runtime_poison"`);
+    context.check(stillPoisoned.scope === managedBefore.scope, `auth.state() right after the runtime failure names scope ${brief(stillPoisoned.scope)}; the failure was in scope ${brief(managedBefore.scope)}`);
     const ambientAfter = await context.wait(ambientAuth.state(), "auth.state() of the ambient instance");
     context.check(
       sameJson(ambientBefore, ambientAfter),
       `a runtime auth failure of the managed profile changed the ambient instance's auth state from ${brief(ambientBefore)} to ${brief(ambientAfter)}`,
     );
+
+    // After the advertised expiry the instance is back where it was: the same verdict, and Send works.
     await clock.pass(ttl + 1000);
     const expired = await context.wait(managedAuth.state(), "auth.state() after the poison expired");
     context.check(expired.evidence !== "runtime_poison", `auth.state() still reports runtime_poison ${Math.round((ttl + 1000) / 1000)} s later, after poisonExpiresAt`);
+    context.check(
+      expired.status === managedBefore.status && expired.scope === managedBefore.scope,
+      `after the runtime auth poison expired, auth.state() reports ${brief(expired.status)} in scope ${brief(expired.scope)}; before the failure it was ${brief(managedBefore.status)} in scope ${brief(managedBefore.scope)}`,
+    );
+    await checkSendWorks(context, rig, managed, `${managedBefore.status} (after the runtime auth poison expired)`);
     context.note(`the runtime auth poison lasted ${Math.round(ttl / 1000)} s of ${clock.mode} time`);
   });
 }
@@ -195,10 +207,6 @@ function describeCall(call: HostCall): string {
   return `${call.operation}(${brief(call.args, 120)})`;
 }
 
-function fileKey(file: InstanceFile): string {
-  return `${file.size}:${file.modifiedMs}`;
-}
-
 export const sideEffectFreeProbeScenario: Scenario = {
   id: 12,
   key: "side-effect-free-probe",
@@ -207,21 +215,26 @@ export const sideEffectFreeProbeScenario: Scenario = {
     const rig = await context.rig();
     const created = await context.instance(rig);
     const allowed = new Set((rig.probeExecutables ?? (rig.driver.cliManifest === undefined ? [] : [rig.driver.cliManifest.binary])).map(baseName));
-    const listFiles = rig.listInstanceFiles?.bind(rig);
-    let before: Map<string, string> | undefined;
-    if (listFiles === undefined) {
+    const watchFiles = rig.watchInstanceFiles?.bind(rig);
+    let watch: InstanceFileWatch | undefined;
+    if (watchFiles === undefined) {
       if (!context.skipCheck("side-effect-free-probe.files", "files written under the instance's paths")) {
-        context.fail("the rig cannot list the files under an instance's paths; add listInstanceFiles, or give a reason under side-effect-free-probe.files");
+        context.fail("the rig cannot watch the files under an instance's paths; add watchInstanceFiles, or give a reason under side-effect-free-probe.files");
       }
     } else {
-      before = new Map((await listFiles(created.host.paths)).map((file) => [file.path, fileKey(file)]));
+      watch = await context.wait(watchFiles(created.host.paths), "the harness to start watching the instance's files");
     }
 
+    // The watch runs for the whole of both calls, so a file written and removed again before probe() returns still shows.
     const mark = created.host.mark();
-    const results: ProbeResult[] = [
-      await context.wait(created.instance.probe(), "probe()"),
-      await context.wait(created.instance.probe({ deep: true }), "probe({ deep: true })"),
-    ];
+    const results: ProbeResult[] = [];
+    let written: readonly string[] = [];
+    try {
+      results.push(await context.wait(created.instance.probe(), "probe()"));
+      results.push(await context.wait(created.instance.probe({ deep: true }), "probe({ deep: true })"));
+    } finally {
+      if (watch !== undefined) written = await context.wait(watch.stop(), "the harness to stop watching the instance's files");
+    }
     for (const result of results) context.check(ProbeResultSchema.is(result), `probe() returned an invalid ProbeResult: ${brief(result)}`);
 
     const calls = created.host.callsSince(mark);
@@ -234,12 +247,7 @@ export const sideEffectFreeProbeScenario: Scenario = {
       mutating.length === 0,
       `probe() made mutating host calls: ${mutating.map(describeCall).join("; ")}${allowed.size === 0 ? "" : ` (probe executables: ${[...allowed].join(", ")})`}`,
     );
-
-    if (listFiles !== undefined && before !== undefined) {
-      const after = await listFiles(created.host.paths);
-      const written = after.filter((file) => before.get(file.path) !== fileKey(file)).map((file) => file.path);
-      context.check(written.length === 0, `probe() wrote files under the instance's paths: ${written.join(", ")}`);
-    }
+    context.check(written.length === 0, `probe() wrote files under the instance's paths: ${written.join(", ")}`);
     context.note(`probe() made ${calls.length} host call(s): ${[...new Set(calls.map((call) => call.operation))].join(", ") || "none"}`);
   },
 };

@@ -6,13 +6,13 @@
 // The virtual workspace is `/workspace/project`, reached through the virtual
 // symbolic link `/workspace/link-to-project`; the agent resolves paths the way
 // an operating system resolves that link. Session files the agent writes live
-// under the instance's virtual state directory, where `listInstanceFiles`
-// sees them.
+// under the instance's virtual state directory; the memory store reports each
+// write, so `watchInstanceFiles` sees every one.
 
 import { callErrors } from "../../errors.ts";
 import type { Driver } from "../../runtime.ts";
 import type { FakeSpawnRequest } from "../fake-host.ts";
-import type { ConformanceHarness, ConformanceWorkspace, HarnessRig, NativeTurn } from "../harness.ts";
+import type { ConformanceHarness, ConformanceWorkspace, HarnessRig, NativeSessionState, NativeTurn } from "../harness.ts";
 import { AsyncQueue, baseName } from "../util.ts";
 import { ReferenceAgent } from "./agent.ts";
 import { referenceDriver } from "./driver.ts";
@@ -48,6 +48,10 @@ export function referenceNativeTurn(agent: ReferenceAgent, turn: { readonly turn
     spawnSubagent: (subagent) => agent.spawnSubagent(turnId, subagent.name),
     nextSteer: () => agent.nextSteer(turnId),
     complete: () => agent.complete(turnId),
+    completeHeld: async () => {
+      await agent.holdCompletion(turnId);
+      return { release: () => agent.releaseCompletion(turnId) };
+    },
     fail: (failure) => agent.fail(turnId, failure),
     stopRequested: () => agent.stopRequested(turnId),
     finishCancelled: () => agent.finishCancelled(turnId),
@@ -74,10 +78,14 @@ export function referenceHarness(options: ReferenceHarnessOptions = {}): Conform
     workspace: async () => REFERENCE_WORKSPACE,
     async setup(request): Promise<HarnessRig<ReferenceDriverConfig>> {
       const stores = new Map<string, MemoryReferenceStore>();
+      /** What each running `watchInstanceFiles` hears. */
+      const watchers = new Set<(path: string) => void>();
       const storeFor = (directory: string): MemoryReferenceStore => {
         let store = stores.get(directory);
         if (store === undefined) {
-          store = new MemoryReferenceStore(directory);
+          store = new MemoryReferenceStore(directory, (path) => {
+            for (const watcher of watchers) watcher(path);
+          });
           stores.set(directory, store);
         }
         return store;
@@ -130,12 +138,36 @@ export function referenceHarness(options: ReferenceHarnessOptions = {}): Conform
             for (const store of stores.values()) if (store.has(sessionId)) store.lock(sessionId);
           },
           observedEnvironments: async () => [...environments],
+          inspectSession: async (thread): Promise<NativeSessionState | undefined> => {
+            const sessionId = thread.handle ?? thread.native.id ?? "";
+            for (const agent of agents) {
+              const loaded = agent.inspectSession(sessionId);
+              if (loaded !== undefined) return loaded;
+            }
+            for (const store of stores.values()) {
+              const stored = store.load(sessionId);
+              if (stored !== undefined) {
+                return { loaded: false, cwd: stored.cwd, turns: stored.turns.length, compactions: stored.compactions, injectedMessages: stored.injectedMessages };
+              }
+            }
+            return undefined;
+          },
         },
         probeExecutables: ["reference-agent"],
         inheritedCredentials: ["REFERENCE_AGENT_API_KEY"],
-        listInstanceFiles: async (paths) => {
+        watchInstanceFiles: async (paths) => {
           const roots = [paths.stateDir, paths.cacheDir, paths.tmpDir].map((root) => `${root}/`);
-          return [...stores.values()].flatMap((store) => store.files()).filter((file) => roots.some((root) => file.path.startsWith(root)));
+          const written = new Set<string>();
+          const watcher = (path: string): void => {
+            if (roots.some((root) => path.startsWith(root))) written.add(path);
+          };
+          watchers.add(watcher);
+          return {
+            stop: async () => {
+              watchers.delete(watcher);
+              return [...written].sort();
+            },
+          };
         },
         exercise: {
           mcpApp: { server: "reference-tools", tool: "echo", args: { text: "hello" }, resourceUri: "reference://readme" },

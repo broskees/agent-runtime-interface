@@ -47,7 +47,7 @@ export interface ScenarioClock {
   now(): number;
   /** Lets `ms` pass. */
   pass(ms: number): Promise<void>;
-  /** Runs virtual timers already due; nothing in real mode. */
+  /** Moves virtual time on by the real time that passed and runs the timers that are due; nothing in real mode. */
   tick(): void;
 }
 
@@ -287,7 +287,12 @@ export class ScenarioContext {
     return settled.value;
   }
 
-  /** Runs `body` with the harness's clock: virtual time installed for its duration, or real time. */
+  /**
+   * Runs `body` with the harness's clock: virtual time installed for its
+   * duration, or real time. Call it before asking for the rig, so every timer
+   * the driver makes for the check (even one it makes when the session opens)
+   * is on the clock.
+   */
   async withClock<T>(body: (clock: ScenarioClock) => Promise<T>): Promise<T> {
     if (this.harness.time === "real") {
       const clock: ScenarioClock = { mode: "real", now: () => realNow(), pass: (ms) => realSleep(ms), tick: () => undefined };
@@ -303,9 +308,7 @@ export class ScenarioContext {
       mode: "virtual",
       now: () => virtual.now(),
       pass: (ms) => virtual.pass(ms),
-      tick: () => {
-        virtual.runDue();
-      },
+      tick: () => virtual.followRealTime(),
     };
     virtual.install();
     this.#clock = clock;

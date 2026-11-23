@@ -57,11 +57,15 @@ export interface InstanceArrangement {
   readonly managedProfile: boolean;
 }
 
-/** One file under an instance's paths, as `listInstanceFiles` reports it. */
-export interface InstanceFile {
-  readonly path: string;
-  readonly size: number;
-  readonly modifiedMs: number;
+/** A watch on an instance's paths that `watchInstanceFiles` started. */
+export interface InstanceFileWatch {
+  /**
+   * Stops watching and returns every path under the instance's paths that was
+   * created, changed, renamed or removed while the watch ran, including a file
+   * written and deleted again before `stop` was called. Resolves only after
+   * the changes made before the call have been seen.
+   */
+  stop(): Promise<readonly string[]>;
 }
 
 /** Inputs for exercising members the driver declares supported, where the kit cannot invent them. */
@@ -105,8 +109,13 @@ export interface HarnessRig<Config = unknown> {
    * and checks that none reaches the native agent.
    */
   readonly inheritedCredentials?: readonly string[];
-  /** Lists the files under an instance's paths, so the probe scenario can see writes. */
-  listInstanceFiles?(paths: HostPaths): Promise<readonly InstanceFile[]>;
+  /**
+   * Starts watching every file under an instance's paths (`stateDir`,
+   * `cacheDir`, `tmpDir`), so the probe scenario sees each write `probe()`
+   * makes, by the driver or by a process it spawns, even one it undoes before
+   * returning. docs/conformance.md says what the Node helper can and cannot see.
+   */
+  watchInstanceFiles?(paths: HostPaths): Promise<InstanceFileWatch>;
   readonly exercise?: CapabilityExercise;
   /** A native reference no native session has. Defaults to a strong id the kit makes up. */
   readonly missingSession?: ResumeThreadInput["native"];
@@ -158,6 +167,29 @@ export interface NativeAgent {
    * Spawns through the host are checked from the fake host's record.
    */
   observedEnvironments?(): Promise<ReadonlyArray<{ readonly [name: string]: string }>>;
+  /**
+   * What the native agent holds for the native session behind `thread`, read
+   * from the native side, or undefined when it has no such session. Scenario
+   * 14 uses it to see that a declared thread operation (fork, compact, inject
+   * history, rollback, unload, release) had its effect, not only a
+   * well-shaped result. Needed when the driver declares one of those; else
+   * give a reason under `capability-honesty.native-effects`.
+   */
+  inspectSession?(thread: Thread): Promise<NativeSessionState | undefined>;
+}
+
+/** One native session as the native agent holds it. */
+export interface NativeSessionState {
+  /** True while a running native agent has the session loaded; false when it is only stored. */
+  readonly loaded: boolean;
+  /** The session's working directory, as the native agent resolved it. */
+  readonly cwd: string;
+  /** How many turns the session holds. */
+  readonly turns: number;
+  /** How many times the session was compacted. */
+  readonly compactions: number;
+  /** How many history messages were injected into it. */
+  readonly injectedMessages: number;
 }
 
 /** A tool the native agent runs: its call and then its result. */
@@ -215,6 +247,15 @@ export interface NativeTurn {
   nextSteer?(): Promise<string>;
   /** Completes the turn: the provider's authoritative completion. */
   complete(): Promise<void>;
+  /**
+   * Completes the turn on the native side, as `complete` does, but holds back
+   * the message that tells the driver until `release()`. Meanwhile the
+   * provider has no active turn while the driver still believes it has one,
+   * so a steer the driver sends meets the provider's own refusal. Scenario 7
+   * needs it when the driver declares `turns.steer`; else give a reason under
+   * `steer-after-end.race`.
+   */
+  completeHeld?(): Promise<{ release(): Promise<void> }>;
   /** Fails the turn the way the provider reports that failure. */
   fail(failure: NativeFailure): Promise<void>;
   /** Resolves when the driver asked the agent to stop this turn (`cancel`) or ended the agent's process to do so (`exit`). */

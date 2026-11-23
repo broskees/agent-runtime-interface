@@ -84,6 +84,8 @@ export class ReferenceAgent {
   readonly #steers = new Map<string, AsyncQueue<string>>();
   readonly #approvals = new Map<string, Approval>();
   readonly #subagents = new Map<string, { readonly sessionId: string; readonly turnId: string; status: string }>();
+  /** Turns that ended natively whose `turn_ended` message is held back, by turn id: sends it. */
+  readonly #heldEnds = new Map<string, () => void>();
   #exited = false;
 
   constructor(options: ReferenceAgentOptions) {
@@ -236,6 +238,26 @@ export class ReferenceAgent {
     this.#end(turnId, "completed", { type: "turn_ended", turnId, stopReason: "end_turn" });
   }
 
+  /** Completes the turn natively but holds back the `turn_ended` message until `releaseCompletion`. */
+  async holdCompletion(turnId: string): Promise<void> {
+    this.#end(turnId, "completed", { type: "turn_ended", turnId, stopReason: "end_turn" }, true);
+  }
+
+  /** Sends the `turn_ended` message `holdCompletion` held back. */
+  async releaseCompletion(turnId: string): Promise<void> {
+    const send = this.#heldEnds.get(turnId);
+    if (send === undefined) throw new Error(`the reference agent holds no completion for turn ${turnId}`);
+    this.#heldEnds.delete(turnId);
+    send();
+  }
+
+  /** The loaded native session `sessionId` as the conformance kit's `NativeAgent.inspectSession` reports it, or undefined. */
+  inspectSession(sessionId: string): { loaded: true; cwd: string; turns: number; compactions: number; injectedMessages: number } | undefined {
+    const session = this.#sessions.get(sessionId);
+    if (session === undefined || this.#exited) return undefined;
+    return { loaded: true, cwd: session.cwd, turns: session.turns.length, compactions: session.compactions, injectedMessages: session.injectedMessages };
+  }
+
   async fail(turnId: string, failure: NativeFailure): Promise<void> {
     const error = failure.kind === "usage_limit" ? { kind: failure.kind, message: failure.message, resetAt: failure.resetAt } : { kind: failure.kind, message: failure.message };
     this.#end(turnId, "failed", { type: "turn_ended", turnId, stopReason: "error", error });
@@ -296,16 +318,20 @@ export class ReferenceAgent {
     this.#store.save(session);
   }
 
-  #end(turnId: string, status: StoredTurn["status"], update: ReferenceUpdate): void {
+  #end(turnId: string, status: StoredTurn["status"], update: ReferenceUpdate, hold = false): void {
     const { session, turn } = this.#turn(turnId);
     turn.status = status;
     for (const item of turn.items) item.status = "completed";
     this.#active.delete(session.sessionId);
     this.#steers.get(turnId)?.end();
     this.#save(session);
-    this.#update(session, turnId, update);
-    const queued = session.turns.find((candidate) => candidate.status === "queued");
-    if (queued !== undefined) this.#begin(session, queued);
+    const announce = (): void => {
+      this.#update(session, turnId, update);
+      const queued = session.turns.find((candidate) => candidate.status === "queued");
+      if (queued !== undefined) this.#begin(session, queued);
+    };
+    if (hold) this.#heldEnds.set(turnId, announce);
+    else announce();
   }
 
   #begin(session: StoredSession, turn: StoredTurn): void {
@@ -386,7 +412,7 @@ export class ReferenceAgent {
         if (cut === 0) throw new JsonRpcError(REFERENCE_ERRORS.notFound, `no turn ${String(atTurnId)}`);
         const fork: StoredSession = {
           sessionId: this.#store.nextId("session"),
-          cwd: source.cwd,
+          cwd: params["cwd"] === undefined ? source.cwd : this.#options.realpath(String(params["cwd"])),
           turns: JSON.parse(JSON.stringify(source.turns.slice(0, cut).filter((turn) => turn.status !== "queued" && turn.status !== "running"))) as StoredTurn[],
           tasks: [],
           injectedMessages: source.injectedMessages,

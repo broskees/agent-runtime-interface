@@ -17,7 +17,7 @@
 //   session/steer { sessionId, turnId, text }       -> {}                   or NO_ACTIVE_TURN
 //   session/cancel { sessionId, turnId }            -> {}
 //   session/snapshot { sessionId }                  -> StoredSession
-//   session/fork { sessionId, atTurnId? }           -> { sessionId, cwd }
+//   session/fork { sessionId, atTurnId?, cwd? }     -> { sessionId, cwd }
 //   session/rollback { sessionId, toTurnId? }       -> StoredSession
 //   session/compact, session/unload { sessionId }   -> {}
 //   session/inject { sessionId, messages }          -> {}

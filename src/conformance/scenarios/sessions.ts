@@ -6,7 +6,8 @@ import type { NativeRef } from "../../generated/common.ts";
 import type { AriEvent, SessionReplacedBody } from "../../generated/events.ts";
 import type { ResumeThreadInput } from "../../generated/session.ts";
 import type { Thread } from "../../generated/thread.ts";
-import type { CreatedInstance, ScenarioContext } from "../context.ts";
+import type { CreatedInstance, OpenedSession, ScenarioContext } from "../context.ts";
+import type { HarnessRig } from "../harness.ts";
 import { brief, sameJson } from "../util.ts";
 import type { Scenario } from "./scenario.ts";
 
@@ -22,8 +23,20 @@ export function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Runs one turn on `threadId`, failing with `what` and the reason when the thread cannot run it. */
+export async function checkRunsTurn(context: ScenarioContext, opened: OpenedSession, rig: HarnessRig<unknown>, threadId: string, what: string): Promise<void> {
+  let status: string;
+  try {
+    status = (await context.simpleTurn(opened, rig, threadId, "What do you know so far?")).terminal.status;
+  } catch (error) {
+    context.fail(`${what} could not run a turn: ${describeError(error)}`);
+  }
+  context.check(status === "completed", `${what} ended a turn ${brief(status)}`);
+}
+
 async function expectReplaced(
   context: ScenarioContext,
+  rig: HarnessRig<unknown>,
   created: CreatedInstance,
   native: ResumeThreadInput["native"],
   cwd: string,
@@ -51,6 +64,8 @@ async function expectReplaced(
   }
   const asked = "id" in native ? native.id : null;
   context.check(asked === null || thread.native.id !== asked, `the fresh thread claims the ${what} native session's id ${brief(asked)}`);
+  // The event is not the result: the replacement must be a thread the host can use.
+  await checkRunsTurn(context, opened, rig, thread.id, `the replacement thread ${thread.id} after resuming a ${what} native session`);
   await opened.close();
 }
 
@@ -77,6 +92,7 @@ export const sessionReplacedScenario: Scenario = {
       normal.events.find((event) => event.body.type === "session.replaced") === undefined,
       "resuming an available native session emitted session.replaced",
     );
+    await checkRunsTurn(context, normal, rig, resumed.id, `the thread ${resumed.id} resumed from an available native session`);
     await normal.close();
 
     const previousIds = [thread.native.id, thread.handle];
@@ -86,12 +102,12 @@ export const sessionReplacedScenario: Scenario = {
       }
     } else {
       await context.wait(rig.native.lockSession(thread), "the native agent to lock the session");
-      await expectReplaced(context, created, resumeTarget(thread), thread.cwd, previousIds, "locked");
+      await expectReplaced(context, rig, created, resumeTarget(thread), thread.cwd, previousIds, "locked");
     }
 
     const missing: ResumeThreadInput["native"] = rig.missingSession ?? ({ id: "ari-conformance-missing-session", strength: "strong" } satisfies NativeRef);
     const missingIds = "handle" in missing ? [missing.handle] : [missing.id];
-    await expectReplaced(context, created, missing, context.workspace.cwd, missingIds, "missing");
+    await expectReplaced(context, rig, created, missing, context.workspace.cwd, missingIds, "missing");
   },
 };
 
@@ -137,7 +153,7 @@ function idsAndPaths(event: AriEvent): unknown {
   return projection;
 }
 
-async function runInWorkspace(context: ScenarioContext, cwd: string): Promise<{ thread: Thread; projection: unknown[] }> {
+async function runInWorkspace(context: ScenarioContext, cwd: string): Promise<{ thread: Thread; projection: unknown[]; paths: string[] }> {
   const rig = await context.rig();
   const created = await context.instance(rig, { instanceId: "conformance-symlinked-workspace" });
   const opened = await context.openSession(created);
@@ -148,7 +164,8 @@ async function runInWorkspace(context: ScenarioContext, cwd: string): Promise<{ 
   await context.wait(native.complete(), "the native agent to complete the turn");
   await context.terminal(opened, turnId);
   await opened.close();
-  return { thread, projection: opened.events.events.map(idsAndPaths) };
+  const paths = opened.events.events.flatMap((event) => (event.body.type === "item.upsert" ? [...(event.body.item.paths ?? [])] : []));
+  return { thread, projection: opened.events.events.map(idsAndPaths), paths };
 }
 
 export const symlinkedWorkspaceScenario: Scenario = {
@@ -159,6 +176,11 @@ export const symlinkedWorkspaceScenario: Scenario = {
     const link = context.workspace.symlinkedCwd;
     if (link === undefined) context.fail("the harness's workspace has no symlinkedCwd; give one, or a reason under symlinked-workspace");
     const real = await runInWorkspace(context, context.workspace.cwd);
+    // Equal ids and paths prove nothing if the driver ignored the directory both times: the thread must be where the host asked.
+    context.check(real.thread.cwd === context.workspace.cwd, `the thread created in ${context.workspace.cwd} reports cwd ${real.thread.cwd}; the host asked for ${context.workspace.cwd}`);
+    // A driver whose provider reports no tool paths has none to check here.
+    const outside = real.paths.filter((path) => !path.startsWith(`${context.workspace.cwd}/`));
+    context.check(outside.length === 0, `the tool that read README.md in ${context.workspace.cwd} reported paths ${brief(outside)} outside it`);
     const viaLink = await runInWorkspace(context, link);
     context.check(viaLink.thread.id === real.thread.id, `the thread created in ${link} has id ${viaLink.thread.id}; through the real path ${context.workspace.cwd} it is ${real.thread.id}`);
     context.check(viaLink.thread.cwd === real.thread.cwd, `the thread created in ${link} reports cwd ${viaLink.thread.cwd}; through the real path it reports ${real.thread.cwd}`);

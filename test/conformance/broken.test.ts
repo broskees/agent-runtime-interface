@@ -12,9 +12,14 @@ describe("each scenario fails its deliberately broken variant", () => {
   for (const variant of BROKEN_VARIANTS) {
     const scenario = SCENARIOS.find((candidate) => candidate.id === variant.scenario)!;
     test(`scenario ${scenario.id} (${scenario.key}) fails a driver that ${variant.bug}`, async () => {
-      const result = await runScenario(variant.harness(), variant.scenario);
-      assert.equal(result.status, "failed", `expected the broken variant to fail; got ${result.status}: ${result.reason ?? ""}`);
-      assert.match(result.reason ?? "", variant.reason);
+      const harness = variant.harness();
+      try {
+        const result = await runScenario(harness, variant.scenario);
+        assert.equal(result.status, "failed", `expected the broken variant to fail; got ${result.status}: ${result.reason ?? ""}`);
+        assert.match(result.reason ?? "", variant.reason);
+      } finally {
+        harness.cleanup?.();
+      }
     });
   }
 

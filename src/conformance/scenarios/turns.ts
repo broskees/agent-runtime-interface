@@ -4,16 +4,39 @@
 import { hasCapability } from "../../capabilities.ts";
 import { isFailure } from "../../errors.ts";
 import { TERMINAL_ITEM_STATUSES } from "../../host/event-grammar.ts";
+import type { TurnTerminalBody } from "../../generated/events.ts";
+import type { StartTurnResult } from "../../generated/session.ts";
 import type { OpenedSession, ScenarioContext } from "../context.ts";
 import type { HarnessRig } from "../harness.ts";
 import { brief, realSleep } from "../util.ts";
 import { approval, approvalKind, assistantText, isToolItem, pendingRequestOffering, supervisedMode } from "./scenario.ts";
 import type { Scenario } from "./scenario.ts";
+import { describeError } from "./sessions.ts";
 
 /** Checks that nothing the turn opened is still open at its `turn.terminal`. */
 function checkNothingLeftOpen(context: ScenarioContext, opened: OpenedSession, turnId: string): void {
   const open = context.openItemsAtTerminal(opened, turnId);
   context.check(open.length === 0, `items ${open.join(", ")} were still open when turn ${turnId} ended; a turn that ends settles its items first`);
+}
+
+/**
+ * A turn that ended with `threadDisposition: "reusable"` must leave a thread
+ * that takes the next turn: the terminal event alone is not the result.
+ */
+async function checkThreadReusable(context: ScenarioContext, opened: OpenedSession, rig: HarnessRig<unknown>, threadId: string, turnId: string, terminal: TurnTerminalBody): Promise<void> {
+  if (terminal.threadDisposition !== "reusable") return;
+  const said = `turn ${turnId} ended ${brief(terminal.status)} with threadDisposition "reusable"`;
+  let next: StartTurnResult;
+  try {
+    next = await context.startTurn(opened, threadId, "Next task.");
+  } catch (error) {
+    context.fail(`${said}, but the thread refused the next turn: ${describeError(error)}`);
+  }
+  context.check(next.status === "accepted", `${said}, but the thread answered the next turn with ${brief(next)}`);
+  const native = await context.wait(rig.native.nextTurn(), `the native agent to receive the turn after ${turnId}`);
+  await context.wait(native.complete(), "the native agent to complete the next turn");
+  const after = await context.terminal(opened, next.turnId);
+  context.check(after.status === "completed", `${said}, but the next turn on the thread ended ${brief(after.status)}`);
 }
 
 async function openThread(context: ScenarioContext, rig?: HarnessRig<unknown>) {
@@ -105,6 +128,7 @@ export const completedScenario: Scenario = {
     const text = assistantText(context, opened, turnId);
     context.check(text === "Hello there.", `the turn's assistant text is ${brief(text)}; the provider said "Hello there."`);
     checkNothingLeftOpen(context, opened, turnId);
+    await checkThreadReusable(context, opened, rig, thread.id, turnId, terminal);
   },
 };
 
@@ -124,6 +148,7 @@ export const interruptedScenario: Scenario = {
     const terminal = await context.terminal(opened, turnId);
     context.check(terminal.status === "interrupted", `turn.terminal has status ${brief(terminal.status)} after Stop; expected "interrupted"`);
     checkNothingLeftOpen(context, opened, turnId);
+    await checkThreadReusable(context, opened, rig, thread.id, turnId, terminal);
   },
 };
 
@@ -146,6 +171,7 @@ export const failedScenario: Scenario = {
       context.check(isFailure(terminal.failure), `turn.terminal's failure is not a valid Failure: ${brief(terminal.failure)}`);
       context.check(terminal.failure.class === "provider_error", `a provider error was classified as ${brief(terminal.failure.class)}; expected "provider_error"`);
       checkNothingLeftOpen(context, opened, turnId);
+      await checkThreadReusable(context, opened, rig, thread.id, turnId, terminal);
       await opened.close();
     }
     if (context.skipCheck("turn-failed.usage_limit", "a usage-limit failure")) return;
@@ -181,6 +207,7 @@ export const processExitScenario: Scenario = {
     context.check(terminal.status === "failed", `turn.terminal has status ${brief(terminal.status)} after the native process exited; expected "failed"`);
     context.check(isFailure(terminal.failure), `turn.terminal after a process exit carries no valid failure: ${brief(terminal.failure)}`);
     checkNothingLeftOpen(context, opened, turnId);
+    await checkThreadReusable(context, opened, rig, thread.id, turnId, terminal);
   },
 };
 
@@ -192,8 +219,9 @@ export const settlementScenario: Scenario = {
   key: "settlement",
   title: "Authoritative settlement: no turn.terminal during a pause of at least 36 seconds after a tool result",
   async run(context: ScenarioContext) {
-    const { rig, opened, thread } = await openThread(context);
+    // The clock goes in before the rig exists, so a timer the driver makes at any point (at create, when the session opens) is on it.
     await context.withClock(async (clock) => {
+      const { rig, opened, thread } = await openThread(context);
       const { turnId, native } = await context.beginTurn(opened, rig, thread.id, "Run the slow tool.");
       await context.wait(native.runTool({ name: "slow_tool", input: { seconds: 40 }, output: "slow tool finished" }), "the native agent to run a tool");
       await context.until(() => {
@@ -241,12 +269,28 @@ export const steerAfterEndScenario: Scenario = {
     const late = await context.startTurn(opened, thread.id, "Also check the tests.", { intent: "steer", expectedTurnId: first.turnId });
     context.check(late.status === "prompt_required", `a steer after turn ${first.turnId} ended returned ${brief(late)}; expected { status: "prompt_required" }`);
 
-    // The race: the provider finishes the turn just before the steer arrives.
+    // The race: the provider has ended the turn, but the driver has not heard yet when the steer arrives.
+    // The driver still sees an active turn and steers it; the provider refuses; the host must get prompt_required.
     const second = await context.beginTurn(opened, rig, thread.id, "Second task.");
     await context.wait(second.native.say("Finishing."), "the native agent to stream text");
-    await context.wait(second.native.complete(), "the native agent to complete the turn");
-    const raced = await context.startTurn(opened, thread.id, "A late steer.", { intent: "steer", expectedTurnId: second.turnId });
-    context.check(raced.status === "prompt_required", `a steer that raced the end of turn ${second.turnId} returned ${brief(raced)}; expected { status: "prompt_required" }`);
+    const completeHeld = second.native.completeHeld?.bind(second.native);
+    if (completeHeld === undefined) {
+      if (!context.skipCheck("steer-after-end.race", "a steer that races the end of its turn")) {
+        context.fail("the harness's native turn has no completeHeld; add it, or give a reason under steer-after-end.race");
+      }
+      await context.wait(second.native.complete(), "the native agent to complete the turn");
+    } else {
+      const held = await context.wait(completeHeld(), "the native agent to end the turn without telling the driver yet");
+      const race = `a steer that raced the end of turn ${second.turnId} (the provider had ended it, the driver had not heard yet)`;
+      let raced: StartTurnResult;
+      try {
+        raced = await context.startTurn(opened, thread.id, "A late steer.", { intent: "steer", expectedTurnId: second.turnId });
+      } catch (error) {
+        context.fail(`${race} failed with ${describeError(error)}; expected { status: "prompt_required" }`);
+      }
+      context.check(raced.status === "prompt_required", `${race} returned ${brief(raced)}; expected { status: "prompt_required" }`);
+      await context.wait(held.release(), "the native agent to report the completion it held back");
+    }
     await context.terminal(opened, second.turnId);
 
     // No untracked turn: the next prompt the provider sees is the host's own start.

@@ -26,12 +26,13 @@ export type {
   ConformanceWorkspace,
   HarnessRig,
   InstanceArrangement,
-  InstanceFile,
+  InstanceFileWatch,
   NativeAgent,
   NativeApproval,
   NativeApprovalHandle,
   NativeApprovalOption,
   NativeFailure,
+  NativeSessionState,
   NativeTool,
   NativeTurn,
   RigRequest,
@@ -59,7 +60,7 @@ export type { ReferenceHarnessOptions } from "./reference/harness.ts";
 export { ReferenceAgent } from "./reference/agent.ts";
 export type { ReferenceAgentIo, ReferenceAgentOptions } from "./reference/agent.ts";
 export { MemoryReferenceStore } from "./reference/store.ts";
-export type { ReferenceStore, VirtualFile } from "./reference/store.ts";
+export type { ReferenceStore } from "./reference/store.ts";
 export { createMemoryProcess } from "./reference/memory-process.ts";
 export type { MemoryProcess, MemoryProcessHandlers } from "./reference/memory-process.ts";
 export { REFERENCE_AGENT_VERSION, REFERENCE_ERRORS } from "./reference/protocol.ts";

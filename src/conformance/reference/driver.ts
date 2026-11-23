@@ -110,7 +110,7 @@ export function referenceCapabilities(profile: ReferenceDriverConfig["profile"])
       injectHistory: full,
       unload: full,
       exposesNativeIds: true,
-      fork: { supported: full, fromTurn: full, fromItem: false, fromSubagent: false, crossCwd: false },
+      fork: { supported: full, fromTurn: full, fromItem: false, fromSubagent: false, crossCwd: full },
     },
     turns: {
       interrupt: true,
@@ -351,9 +351,11 @@ class ReferenceSession implements Session {
     const nativeId = "handle" in input.native ? input.native.handle : input.native.id;
     if (nativeId === null) throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const known = this.#threadsByNative.get(nativeId);
-    if (known !== undefined) return this.#threads.get(known)!.thread;
+    const knownState = known === undefined ? undefined : this.#threads.get(known);
+    // A thread this session holds loaded needs nothing; an unloaded one loads its native session again below.
+    if (knownState !== undefined && !knownState.unloaded) return knownState.thread;
     const agent = await this.#agent();
-    const policy = input.policy ?? { mode: "approval_required", interaction: "default", cwd: "" };
+    const policy = input.policy ?? knownState?.policy ?? { mode: "approval_required", interaction: "default", cwd: "" };
     try {
       const loaded = await agent.request<{ sessionId: string; cwd: string }>("session/load", { sessionId: nativeId });
       return this.#register(loaded.sessionId, loaded.cwd, { ...policy, cwd: policy.cwd === "" ? loaded.cwd : policy.cwd });
@@ -389,10 +391,11 @@ class ReferenceSession implements Session {
     this.#require("threads.fork");
     if (input.at.type === "item") throw callErrors.unsupported("threads.fork.fromItem");
     const source = this.#thread(input.threadId);
-    if (input.cwd !== undefined && input.cwd !== source.thread.cwd) throw callErrors.unsupported("threads.fork.crossCwd");
     const atTurnId = input.at.type === "turn" ? this.#nativeTurnId(source, input.at.turnId) : undefined;
-    const fork = await this.#request<{ sessionId: string; cwd: string }>("session/fork", { sessionId: source.nativeId, atTurnId }, "turn");
-    const thread = this.#register(fork.sessionId, fork.cwd, input.policy ?? source.policy, undefined, {
+    // The agent forks into another directory itself, and resolves that directory the way it resolves a new session's.
+    const fork = await this.#request<{ sessionId: string; cwd: string }>("session/fork", { sessionId: source.nativeId, atTurnId, cwd: input.cwd }, "turn");
+    const policy = input.policy ?? (input.cwd === undefined ? source.policy : { ...source.policy, cwd: fork.cwd });
+    const thread = this.#register(fork.sessionId, fork.cwd, policy, undefined, {
       threadId: source.thread.id,
       ...(input.at.type === "turn" ? { turnId: input.at.turnId } : {}),
     });

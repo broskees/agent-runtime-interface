@@ -53,20 +53,35 @@ describe("the scenario list", () => {
   });
 });
 
-/** The reference harness with some rig members removed or replaced. */
+/** The reference harness with some rig members removed. */
 function adjustedHarness(
-  options: { notApplicable?: { [key: string]: string }; withoutLockSession?: boolean; withoutFileList?: boolean } = {},
+  options: {
+    notApplicable?: { [key: string]: string };
+    withoutLockSession?: boolean;
+    withoutFileWatch?: boolean;
+    withoutInspectSession?: boolean;
+    withoutCompleteHeld?: boolean;
+  } = {},
 ): ConformanceHarness<ReferenceDriverConfig> {
   const base = referenceHarness({ ...(options.notApplicable === undefined ? {} : { notApplicable: options.notApplicable }) });
   return {
     ...base,
     async setup(request) {
       const rig = await base.setup(request);
-      const { lockSession: _lock, ...native } = rig.native;
-      const { listInstanceFiles: _list, ...rest } = rig;
+      const { lockSession, inspectSession, ...otherNative } = rig.native;
+      const { watchInstanceFiles: _watch, ...withoutWatch } = rig;
+      const nextTurn = async () => {
+        const { completeHeld: _held, ...turn } = await rig.native.nextTurn();
+        return options.withoutCompleteHeld === true ? turn : { ...turn, completeHeld: _held };
+      };
       return {
-        ...(options.withoutFileList === true ? rest : rig),
-        native: options.withoutLockSession === true ? native : rig.native,
+        ...(options.withoutFileWatch === true ? withoutWatch : rig),
+        native: {
+          ...otherNative,
+          nextTurn,
+          ...(options.withoutLockSession === true ? {} : { lockSession }),
+          ...(options.withoutInspectSession === true ? {} : { inspectSession }),
+        },
       };
     },
   };
@@ -97,9 +112,28 @@ describe("not applicable only for a declared capability or a stated reason", () 
     assert.equal(excused.status, "passed", excused.reason);
     assert.deepEqual(excused.notes, ["resuming a locked native session not checked (session-replaced.locked): the provider has no session locks"]);
 
-    const noFiles = await runScenario(adjustedHarness({ withoutFileList: true }), "side-effect-free-probe");
+    const noFiles = await runScenario(adjustedHarness({ withoutFileWatch: true }), "side-effect-free-probe");
     assert.equal(noFiles.status, "failed");
-    assert.match(noFiles.reason ?? "", /add listInstanceFiles, or give a reason under side-effect-free-probe\.files/);
+    assert.match(noFiles.reason ?? "", /add watchInstanceFiles, or give a reason under side-effect-free-probe\.files/);
+
+    const noHeldCompletion = await runScenario(adjustedHarness({ withoutCompleteHeld: true }), "steer-after-end");
+    assert.equal(noHeldCompletion.status, "failed");
+    assert.match(noHeldCompletion.reason ?? "", /has no completeHeld; add it, or give a reason under steer-after-end\.race/);
+    const heldExcused = await runScenario(
+      adjustedHarness({ withoutCompleteHeld: true, notApplicable: { "steer-after-end.race": "the provider announces every turn end before it answers anything else" } }),
+      "steer-after-end",
+    );
+    assert.equal(heldExcused.status, "passed", heldExcused.reason);
+
+    const noInspect = await runScenario(adjustedHarness({ withoutInspectSession: true }), "capability-honesty");
+    assert.equal(noInspect.status, "failed");
+    assert.match(noInspect.reason ?? "", /the native agent has no inspectSession; add it to the harness, or give a reason under capability-honesty\.native-effects/);
+    const inspectExcused = await runScenario(
+      adjustedHarness({ withoutInspectSession: true, notApplicable: { "capability-honesty.native-effects": "the vendor's protocol cannot report session state" } }),
+      "capability-honesty",
+    );
+    assert.equal(inspectExcused.status, "passed", inspectExcused.reason);
+    assert.ok(inspectExcused.notes.some((note) => /not checked \(capability-honesty\.native-effects\)/.test(note)), inspectExcused.notes.join("\n"));
   });
 
   test("a workspace without a symbolic link fails scenario 11 unless the harness gives a reason", async () => {
@@ -309,6 +343,51 @@ describe("the gated-member table", () => {
     // The two gates the capability guard adds beyond methods.json.
     assert.deepEqual(GATED_MEMBERS.find((row) => row.member === "release")?.capabilities, ["sessions.release"]);
     assert.ok(GATED_MEMBERS.find((row) => row.member === "rollbackThread")?.capabilities.includes("checkpointing.conversationRollback"));
+  });
+});
+
+describe("virtual time follows real time and Node's timer handles", () => {
+  test("refresh() restarts a pending timer and runs a timer that already fired again; a cleared timer stays cleared", () => {
+    const clock = new VirtualClock(Date.UTC(2026, 10, 23));
+    clock.install();
+    try {
+      const fired: number[] = [];
+      const timer = setTimeout(() => fired.push(Date.now()), 30_000);
+      clock.advanceBy(20_000);
+      timer.refresh();
+      clock.advanceBy(20_000);
+      assert.deepEqual(fired, []);
+      clock.advanceBy(10_000);
+      assert.deepEqual(fired, [Date.UTC(2026, 10, 23, 0, 0, 50)]);
+      timer.refresh();
+      clock.advanceBy(30_000);
+      assert.equal(fired.length, 2);
+      clearTimeout(timer);
+      timer.refresh();
+      clock.advanceBy(60_000);
+      assert.equal(fired.length, 2);
+    } finally {
+      clock.uninstall();
+    }
+  });
+
+  test("followRealTime runs a short timer once that much real time has passed, without the kit moving the clock", async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    const clock = new VirtualClock();
+    clock.install();
+    try {
+      let fired = false;
+      setTimeout(() => {
+        fired = true;
+      }, 20);
+      clock.followRealTime();
+      assert.equal(fired, false);
+      await new Promise((resolve) => realSetTimeout(resolve, 40));
+      clock.followRealTime();
+      assert.equal(fired, true);
+    } finally {
+      clock.uninstall();
+    }
   });
 });
 

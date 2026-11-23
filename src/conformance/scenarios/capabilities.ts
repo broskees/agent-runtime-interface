@@ -5,11 +5,21 @@
 // out), and a member it declares on must work. The kit calls the driver's
 // own session, without `ari/host`'s guard in front, because the driver itself
 // must be honest.
+//
+// "Works" means the member had its effect, not only that it returned a
+// well-shaped value. Where the effect shows on the ARI side, the kit checks
+// it there: a snapshot holds the turns that ran, a fork runs a turn, a
+// stopped task or subagent stops, an awaited task matches. Where only the
+// native side can show it (the fork point and directory, compaction,
+// injected history, rollback, unload, release), the harness reads the native
+// session with `NativeAgent.inspectSession`. docs/conformance.md lists the
+// members the kit can check only for shape.
 
 import { hasCapability } from "../../capabilities.ts";
 import { toCallError } from "../../errors.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { AppliedThread } from "../../generated/session.ts";
+import type { Thread } from "../../generated/thread.ts";
 import {
   AwaitBackgroundTasksResultSchema,
   InjectHistoryResultSchema,
@@ -23,9 +33,9 @@ import { TaskInfoSchema } from "../../generated/background.ts";
 import { ThreadSchema, ThreadSnapshotSchema } from "../../generated/thread.ts";
 import type { Session } from "../../runtime.ts";
 import type { OpenedSession, ScenarioContext } from "../context.ts";
-import type { HarnessRig, NativeTurn } from "../harness.ts";
+import type { HarnessRig, NativeSessionState, NativeTurn } from "../harness.ts";
 import { brief } from "../util.ts";
-import { describeError } from "./sessions.ts";
+import { checkRunsTurn, describeError } from "./sessions.ts";
 import type { Scenario } from "./scenario.ts";
 
 /**
@@ -185,6 +195,21 @@ async function checkIntents(checker: Checker, rig: HarnessRig<unknown>, thread: 
   return queuedTurnId;
 }
 
+/** Capabilities whose effect only the native side shows; declaring one needs `NativeAgent.inspectSession` or a harness reason. */
+const NATIVE_EFFECT_CAPABILITIES = ["threads.fork", "threads.compact", "threads.injectHistory", "threads.rollback", "threads.unload", "sessions.release"];
+
+/** Subagent statuses that mean the subagent is no longer working. */
+const SETTLED_SUBAGENT_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+type Inspect = (thread: Thread) => Promise<NativeSessionState | undefined>;
+
+/** The native session behind `thread`, read from the native side; fails when the native agent has none. */
+async function nativeSession(context: ScenarioContext, inspect: Inspect, thread: Thread, what: string): Promise<NativeSessionState> {
+  const state = await context.wait(inspect(thread), `the native agent to report the native session behind thread ${thread.id}`);
+  if (state === undefined) context.fail(`${what}: the native agent has no native session behind thread ${thread.id}`);
+  return state;
+}
+
 export const capabilityHonestyScenario: Scenario = {
   id: 14,
   key: "capability-honesty",
@@ -198,6 +223,17 @@ export const capabilityHonestyScenario: Scenario = {
     const tally = new Tally();
     const checker: Checker = { context, opened, capabilities, tally };
     const thread = await context.createThread(opened);
+
+    // Effects only the native side shows need the harness to read it.
+    const inspect: Inspect | undefined = rig.native.inspectSession?.bind(rig.native);
+    if (inspect === undefined && NATIVE_EFFECT_CAPABILITIES.some((path) => hasCapability(capabilities, path))) {
+      needs(
+        context,
+        "capability-honesty.native-effects",
+        "the native effects of thread operations (fork point and directory, compaction, injected history, rollback, unload, release)",
+        "the native agent has no inspectSession",
+      );
+    }
 
     // A turn kept open for the steer and queue intents, background work and a subagent.
     const active = await context.beginTurn(opened, rig, thread.id, "Start the build.");
@@ -231,12 +267,24 @@ export const capabilityHonestyScenario: Scenario = {
       await context.wait(queued.complete(), "the native agent to complete the queued turn");
       await context.terminal(opened, queuedTurnId, `turn.terminal for the queued turn ${queuedTurnId}`);
     }
+    // Two turns on the thread, so a fork from the first differs from a fork at the latest.
+    const ranTurnIds = [active.turnId, queuedTurnId ?? (await context.simpleTurn(opened, rig, thread.id, "Second task.")).turnId];
     const state = context.reduced(opened);
     const itemId = [...state.items.values()].find((item) => item.turnId === active.turnId)?.id ?? "ari-conformance-item";
 
     // Background tasks and subagents.
     const tasks = session.backgroundTasks;
-    let taskId = "ari-conformance-task";
+    let listedTaskId: string | undefined;
+    /** The running task's id: from the list when the driver lists tasks, else from its background.updated events. */
+    const knownTaskId = (): string | undefined => listedTaskId ?? context.reduced(opened).backgroundTasks[0]?.id;
+    /** The task to exercise, or SKIPPED for a harness reason. */
+    const exercisedTask = (): string | typeof SKIPPED => {
+      if (!taskStarted) return SKIPPED;
+      const taskId = knownTaskId();
+      if (taskId !== undefined) return taskId;
+      needs(context, "capability-honesty.background", "background tasks", "background.list is off and no background.updated event named the running task");
+      return SKIPPED;
+    };
     await checkMember(
       checker,
       "backgroundTasks.list",
@@ -248,7 +296,7 @@ export const capabilityHonestyScenario: Scenario = {
         );
         if (!taskStarted) return SKIPPED;
         context.check(listed.length > 0, "backgroundTasks.list returned no task while the native agent runs background work");
-        taskId = listed[0]!.id;
+        listedTaskId = listed[0]!.id;
         return undefined;
       },
     );
@@ -256,20 +304,41 @@ export const capabilityHonestyScenario: Scenario = {
       checker,
       "backgroundTasks.await",
       ["background.await"],
-      () => tasks!.await({ threadId: thread.id, taskIds: [taskId], awaited: true }),
+      () => tasks!.await({ threadId: thread.id, taskIds: [knownTaskId() ?? "ari-conformance-task"], awaited: true }),
       async () => {
-        if (!taskStarted) return SKIPPED;
-        await expectWorks(context, "backgroundTasks.await", "background.await", () => tasks!.await({ threadId: thread.id, taskIds: [taskId], awaited: true }), schemaCheck(AwaitBackgroundTasksResultSchema));
+        const taskId = exercisedTask();
+        if (taskId === SKIPPED) return SKIPPED;
+        const result = await expectWorks(
+          context,
+          "backgroundTasks.await",
+          "background.await",
+          () => tasks!.await({ threadId: thread.id, taskIds: [taskId], awaited: true }),
+          schemaCheck(AwaitBackgroundTasksResultSchema),
+        );
+        context.check(result.matched.includes(taskId), `backgroundTasks.await: matched ${brief(result.matched)}; the host awaited the running task ${taskId}`);
+        return undefined;
       },
     );
     await checkMember(
       checker,
       "backgroundTasks.stop",
       ["background.stop"],
-      () => tasks!.stop({ threadId: thread.id, taskId }),
+      () => tasks!.stop({ threadId: thread.id, taskId: knownTaskId() ?? "ari-conformance-task" }),
       async () => {
-        if (!taskStarted) return SKIPPED;
+        const taskId = exercisedTask();
+        if (taskId === SKIPPED) return SKIPPED;
         await expectWorks(context, "backgroundTasks.stop", "background.stop", () => tasks!.stop({ threadId: thread.id, taskId }));
+        if (hasCapability(capabilities, "background.list")) {
+          const after = await context.wait(tasks!.list(thread.id), "backgroundTasks.list after backgroundTasks.stop");
+          const still = after.find((task) => task.id === taskId);
+          context.check(still === undefined || still.status !== "running", `backgroundTasks.stop: task ${taskId} still runs after stop: ${brief(still)}`);
+        } else {
+          await context.until(
+            () => !context.reduced(opened).backgroundTasks.some((task) => task.id === taskId),
+            `background task ${taskId} to leave the running tasks after backgroundTasks.stop`,
+          );
+        }
+        return undefined;
       },
     );
     await checkMember(
@@ -279,13 +348,19 @@ export const capabilityHonestyScenario: Scenario = {
       () => session.stopSubagent!({ subagentId: subagentId ?? "ari-conformance-subagent" }),
       async () => {
         if (subagentId === undefined) return SKIPPED;
-        await expectWorks(context, "stopSubagent", "subagents.stop", () => session.stopSubagent!({ subagentId: subagentId! }), (value) =>
+        const stopping = subagentId;
+        await expectWorks(context, "stopSubagent", "subagents.stop", () => session.stopSubagent!({ subagentId: stopping }), (value) =>
           value === undefined || value === null || SubagentOutcomeSchema.is(value) ? undefined : `not a SubagentOutcome: ${brief(value)}`,
         );
+        await context.until(
+          () => SETTLED_SUBAGENT_STATUSES.has(String(context.reduced(opened).subagents.get(stopping)?.status)),
+          `subagent ${stopping} to stop after stopSubagent (its status to become completed, failed, cancelled or interrupted)`,
+        );
+        return undefined;
       },
     );
 
-    // Thread operations on the finished turn.
+    // Thread operations on the finished turns.
     await checkMember(
       checker,
       "readSnapshot",
@@ -294,6 +369,8 @@ export const capabilityHonestyScenario: Scenario = {
       async () => {
         const snapshot = await expectWorks(context, "readSnapshot", "threads.readSnapshot", () => session.readSnapshot!(thread.id), schemaCheck(ThreadSnapshotSchema));
         context.check(snapshot.thread.id === thread.id, `readSnapshot(${thread.id}) returned thread ${snapshot.thread.id}`);
+        const missing = ranTurnIds.filter((turnId) => !snapshot.turns.some((turn) => turn.id === turnId));
+        context.check(missing.length === 0, `readSnapshot: the snapshot of thread ${thread.id} lacks turn${missing.length === 1 ? "" : "s"} ${missing.join(", ")} that ran on it`);
       },
     );
     await checkMember(
@@ -304,6 +381,7 @@ export const capabilityHonestyScenario: Scenario = {
       async () => {
         const fork = await expectWorks(context, "forkThread at latest", "threads.fork", () => session.forkThread!({ threadId: thread.id, at: { type: "latest" } }), schemaCheck(ThreadSchema));
         context.check(fork.id !== thread.id, `forkThread returned the source thread ${thread.id} instead of a new thread`);
+        await checkRunsTurn(context, opened, rig, fork.id, `forkThread at latest: the fork ${fork.id}`);
       },
     );
     if (hasCapability(capabilities, "threads.fork") && session.forkThread !== undefined) {
@@ -313,7 +391,14 @@ export const capabilityHonestyScenario: Scenario = {
         ["fromItem", "threads.fork.fromItem", { type: "item", itemId }],
       ] as const) {
         if (hasCapability(capabilities, path)) {
-          await expectWorks(context, `forkThread ${variant}`, path, () => fork({ threadId: thread.id, at }), schemaCheck(ThreadSchema));
+          const forked = await expectWorks(context, `forkThread ${variant}`, path, () => fork({ threadId: thread.id, at }), schemaCheck(ThreadSchema));
+          if (variant === "fromTurn" && inspect !== undefined) {
+            const native = await nativeSession(context, inspect, forked, "forkThread fromTurn");
+            context.check(
+              native.turns < ranTurnIds.length,
+              `forkThread fromTurn: the fork from turn ${active.turnId} holds ${native.turns} native turns, as many as the source thread, where that turn was the first of ${ranTurnIds.length}: the fork point was ignored`,
+            );
+          }
           tally.works.push(`forkThread ${variant}`);
         } else {
           await expectUnsupported(context, `forkThread ${variant}`, [path], () => fork({ threadId: thread.id, at }));
@@ -326,7 +411,12 @@ export const capabilityHonestyScenario: Scenario = {
           needs(context, "capability-honesty.forkThread.crossCwd", "forking into another directory", "the workspace has no otherCwd");
           tally.skipped.push("forkThread crossCwd");
         } else {
-          await expectWorks(context, "forkThread crossCwd", "threads.fork.crossCwd", () => fork({ threadId: thread.id, at: { type: "latest" }, cwd: otherCwd }), schemaCheck(ThreadSchema));
+          const forked = await expectWorks(context, "forkThread crossCwd", "threads.fork.crossCwd", () => fork({ threadId: thread.id, at: { type: "latest" }, cwd: otherCwd }), schemaCheck(ThreadSchema));
+          context.check(forked.cwd === otherCwd, `forkThread crossCwd: the host asked for ${otherCwd}, and the fork reports cwd ${forked.cwd}`);
+          if (inspect !== undefined) {
+            const native = await nativeSession(context, inspect, forked, "forkThread crossCwd");
+            context.check(native.cwd === otherCwd, `forkThread crossCwd: the host asked for ${otherCwd}, and the fork's native session works in ${native.cwd}`);
+          }
           tally.works.push("forkThread crossCwd");
         }
       } else {
@@ -341,7 +431,11 @@ export const capabilityHonestyScenario: Scenario = {
       ["threads.compact"],
       () => session.compactThread!(thread.id),
       async () => {
+        const before = inspect === undefined ? undefined : await nativeSession(context, inspect, thread, "compactThread");
         await expectWorks(context, "compactThread", "threads.compact", () => session.compactThread!(thread.id));
+        if (inspect === undefined || before === undefined) return;
+        const after = await nativeSession(context, inspect, thread, "compactThread");
+        context.check(after.compactions > before.compactions, `compactThread: the native session holds ${after.compactions} compactions after the call, as many as before: compaction had no effect`);
       },
     );
     const history = {
@@ -358,7 +452,12 @@ export const capabilityHonestyScenario: Scenario = {
       ["threads.injectHistory"],
       () => session.injectHistory!(history),
       async () => {
+        const before = inspect === undefined ? undefined : await nativeSession(context, inspect, thread, "injectHistory");
         await expectWorks(context, "injectHistory", "threads.injectHistory", () => session.injectHistory!(history), schemaCheck(InjectHistoryResultSchema));
+        if (inspect === undefined || before === undefined) return;
+        const after = await nativeSession(context, inspect, thread, "injectHistory");
+        const received = after.injectedMessages - before.injectedMessages;
+        context.check(received === history.messages.length, `injectHistory: the native session received ${received} of the ${history.messages.length} injected messages`);
       },
     );
     await checkMember(
@@ -391,7 +490,11 @@ export const capabilityHonestyScenario: Scenario = {
           needs(context, "capability-honesty.mcpApps", "MCP apps", "the rig gives no exercise.mcpApp");
           return SKIPPED;
         }
-        await expectWorks(context, member, "tools.mcpApps", calls[member] as () => Promise<unknown>, validators[member]);
+        const value = await expectWorks(context, member, "tools.mcpApps", calls[member] as () => Promise<unknown>, validators[member]);
+        if (member === "mcpApps.listTools") {
+          const names = (value as ReadonlyArray<{ name: string }>).map((tool) => tool.name);
+          context.check(names.includes(app.tool), `mcpApps.listTools: the tools of ${server} ${brief(names)} lack the tool ${brief(app.tool)}`);
+        }
         return undefined;
       });
     }
@@ -425,9 +528,13 @@ export const capabilityHonestyScenario: Scenario = {
       ["contextWindowReporting"],
       () => session.contextWindow!(model),
       async () => {
-        await expectWorks(context, "contextWindow", "contextWindowReporting", () => session.contextWindow!(model), (value) =>
+        const window = await expectWorks(context, "contextWindow", "contextWindowReporting", () => session.contextWindow!(model), (value) =>
           value === undefined || (Number.isInteger(value) && value > 0) ? undefined : `not a positive integer or undefined: ${brief(value)}`,
         );
+        const listed = catalog.models.find((entry) => entry.id === model)?.contextWindow;
+        if (listed !== undefined) {
+          context.check(window === listed, `contextWindow: the catalog gives ${model} a context window of ${listed}, but contextWindow("${model}") returned ${brief(window)}`);
+        }
       },
     );
     await checkMember(
@@ -436,9 +543,10 @@ export const capabilityHonestyScenario: Scenario = {
       ["sessions.contextUsageReuse"],
       () => session.canReuseContextUsage!(model, model),
       async () => {
-        await expectWorks(context, "canReuseContextUsage", "sessions.contextUsageReuse", () => session.canReuseContextUsage!(model, model), (value) =>
+        const reusable = await expectWorks(context, "canReuseContextUsage", "sessions.contextUsageReuse", () => session.canReuseContextUsage!(model, model), (value) =>
           typeof value === "boolean" ? undefined : `not a boolean: ${brief(value)}`,
         );
+        context.check(reusable, `canReuseContextUsage("${model}", "${model}") returned false: usage from a model always applies to the same model`);
       },
     );
 
@@ -449,10 +557,13 @@ export const capabilityHonestyScenario: Scenario = {
       ["threads.rollback", "checkpointing.conversationRollback"],
       () => session.rollbackThread!({ threadId: thread.id, to: { type: "start" } }),
       async () => {
-        await expectWorks(context, "rollbackThread", "threads.rollback", () => session.rollbackThread!({ threadId: thread.id, to: { type: "start" } }), schemaCheck(ThreadSnapshotSchema));
+        const snapshot = await expectWorks(context, "rollbackThread", "threads.rollback", () => session.rollbackThread!({ threadId: thread.id, to: { type: "start" } }), schemaCheck(ThreadSnapshotSchema));
+        context.check(snapshot.turns.length === 0, `rollbackThread: the snapshot after a rollback to the start still lists ${snapshot.turns.length} turns`);
+        if (inspect === undefined) return;
+        const native = await nativeSession(context, inspect, thread, "rollbackThread");
+        context.check(native.turns === 0, `rollbackThread: the native session still holds ${native.turns} turns after a rollback to the start`);
       },
     );
-    let unloaded = false;
     await checkMember(
       checker,
       "unloadThread",
@@ -460,27 +571,51 @@ export const capabilityHonestyScenario: Scenario = {
       () => session.unloadThread!(thread.id),
       async () => {
         await expectWorks(context, "unloadThread", "threads.unload", () => session.unloadThread!(thread.id));
-        unloaded = true;
+        if (inspect !== undefined) {
+          const native = await nativeSession(context, inspect, thread, "unloadThread");
+          context.check(!native.loaded, `unloadThread: the native session behind thread ${thread.id} is still loaded after unloadThread`);
+        }
+        // Unloading keeps the thread: resuming it brings it back for the next turn.
+        let resumed: Thread;
+        try {
+          resumed = await context.wait(
+            session.resumeThread({ native: thread.handle !== undefined ? { handle: thread.handle } : thread.native, policy: context.policy(capabilities, thread.cwd) }),
+            "resumeThread of the unloaded thread",
+          );
+        } catch (error) {
+          context.fail(`unloadThread: resuming the unloaded thread ${thread.id} failed: ${describeError(error)}`);
+        }
+        await checkRunsTurn(context, opened, rig, resumed.id, `unloadThread: the unloaded thread ${thread.id}, once resumed,`);
       },
     );
 
-    // Release parks the runtime; the session must still work afterwards.
+    // Release, in a session where it must be allowed: one finished turn, nothing running, nothing pending.
     await checkMember(
       checker,
       "release",
       ["sessions.release"],
       () => session.release(),
       async () => {
-        const releasable = session.canRelease();
+        const quiet = await context.openSession(created);
+        const quietThread = await context.createThread(quiet);
+        await context.simpleTurn(quiet, rig, quietThread.id, "One small task.");
+        const releasable = quiet.session.canRelease();
         context.check(typeof releasable === "boolean", `canRelease() returned ${brief(releasable)}`);
-        if (!releasable) {
-          context.note("release() not called: canRelease() vetoed it with nothing running");
-          return SKIPPED;
+        try {
+          await context.until(() => quiet.session.canRelease(), "canRelease() to allow a release in a quiet session");
+        } catch {
+          context.fail(
+            `release: the driver declares sessions.release on, but canRelease() stayed false for ${context.timeoutMs} ms in a session with no turn, request or background task running, so release can never be exercised`,
+          );
         }
-        await expectWorks(context, "release", "sessions.release", () => session.release());
-        // The parked runtime comes back for the next turn, on the same thread unless it was unloaded.
-        const target = unloaded ? (await context.createThread(opened)).id : thread.id;
-        await context.simpleTurn(opened, rig, target, "Still there?");
+        await expectWorks(context, "release", "sessions.release", () => quiet.session.release());
+        if (inspect !== undefined) {
+          const native = await nativeSession(context, inspect, quietThread, "release");
+          context.check(!native.loaded, `release: the native session behind thread ${quietThread.id} is still loaded after release()`);
+        }
+        // Release parks the runtime without destroying the thread: the next turn brings it back.
+        await checkRunsTurn(context, quiet, rig, quietThread.id, `release: the released thread ${quietThread.id}`);
+        await quiet.close();
       },
     );
 

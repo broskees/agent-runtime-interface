@@ -11,11 +11,19 @@
 // last frame) sees its timer fire when the kit moves time past it, and is
 // caught without the test waiting 36 real seconds.
 //
+// Virtual time never runs slower than real time: `followRealTime()` moves it
+// on by the real time that passed, so a driver that waits a few real
+// milliseconds (a retry back-off, a debounce) still gets its timer while the
+// kit waits for something. Only `pass()` moves it faster.
+//
 // What it does not reach: `setImmediate`, `queueMicrotask` and
 // `process.nextTick` stay real, so I/O and promises keep running. Timers a
-// driver takes from `node:timers` or `node:timers/promises` directly,
-// `AbortSignal.timeout`, and anything in another process keep real time. A
-// harness whose driver runs that way sets `time: "real"`, and the scenarios
+// driver made before the clock was installed, timers it takes from
+// `node:timers` or `node:timers/promises` directly, `AbortSignal.timeout`,
+// and anything in another process keep real time. The scenarios that need
+// long pauses install the clock before they ask the harness for a rig, so
+// every timer the driver makes for that scenario is virtual. A harness whose
+// driver keeps time some other way sets `time: "real"`, and the scenarios
 // then wait for real.
 
 import { realNow, realSleep } from "./util.ts";
@@ -58,11 +66,15 @@ const FIRST_TIMER_ID = 1_000_000_000;
 export class VirtualClock {
   #now: number;
   readonly #timers = new Map<number, VirtualTimer>();
+  /** Ids of timers cleared with `clearTimeout` or `clearInterval`. */
+  readonly #cancelled = new Set<number>();
   readonly #handleIds = new WeakMap<object, number>();
   #nextId = FIRST_TIMER_ID;
   #saved: SavedGlobals | undefined;
   #installedAtReal = 0;
   #installedAtVirtual = 0;
+  /** The real time `followRealTime` last caught up to. */
+  #followedReal = realNow();
 
   /** Starts at `startMs` milliseconds since the epoch; defaults to the real time now. */
   constructor(startMs: number = realNow()) {
@@ -98,6 +110,7 @@ export class VirtualClock {
     };
     this.#installedAtReal = performanceObject?.now?.() ?? 0;
     this.#installedAtVirtual = this.#now;
+    this.#followedReal = realNow();
 
     global["setTimeout"] = (callback: unknown, delay?: unknown, ...args: unknown[]) => this.#schedule(callback, delay, args, false);
     global["setInterval"] = (callback: unknown, delay?: unknown, ...args: unknown[]) => this.#schedule(callback, delay, args, true);
@@ -166,9 +179,18 @@ export class VirtualClock {
     this.#now = target;
   }
 
+  /** Moves virtual time forward by the real time that passed since the last call (or since install), running timers on the way. */
+  followRealTime(): void {
+    const real = realNow();
+    const elapsed = real - this.#followedReal;
+    this.#followedReal = real;
+    this.advanceBy(elapsed);
+  }
+
   /**
    * Lets `ms` of virtual time pass in steps of `stepMs`, yielding to real I/O
-   * after each step so a driver can react to the timers that fired.
+   * after each step so a driver can react to the timers that fired. The real
+   * time the steps take is not added on top.
    */
   async pass(ms: number, stepMs = 250): Promise<void> {
     let remaining = ms;
@@ -180,6 +202,7 @@ export class VirtualClock {
       this.runDue();
       await realSleep(0);
     }
+    this.#followedReal = realNow();
   }
 
   #earliest(): VirtualTimer | undefined {
@@ -209,22 +232,26 @@ export class VirtualClock {
     const wait = Number.isFinite(ms) && ms > 0 ? ms : 0;
     const id = this.#nextId;
     this.#nextId += 1;
-    this.#timers.set(id, {
+    const timer: VirtualTimer = {
       id,
       due: this.#now + wait,
       callback: callback as TimerCallback,
       args,
       interval: repeat ? Math.max(1, wait) : undefined,
-    });
+    };
+    this.#timers.set(id, timer);
     const timers = this.#timers;
+    const cancelled = this.#cancelled;
     const clock = this;
     const handle: VirtualTimerHandle = {
       ref: () => handle,
       unref: () => handle,
       hasRef: () => true,
+      // As Node's `refresh()`: restarts the timer, and runs a timer that already fired again; a cleared timer stays cleared.
       refresh() {
-        const timer = timers.get(id);
-        if (timer !== undefined) timer.due = clock.#now + wait;
+        if (cancelled.has(id)) return handle;
+        timer.due = clock.#now + wait;
+        timers.set(id, timer);
         return handle;
       },
       [Symbol.toPrimitive]: () => id,
@@ -238,6 +265,7 @@ export class VirtualClock {
     const id = typeof handle === "object" && handle !== null ? this.#handleIds.get(handle) : Number(handle);
     if (id === undefined || !(id >= FIRST_TIMER_ID && id < this.#nextId)) return false;
     this.#timers.delete(id);
+    this.#cancelled.add(id);
     return true;
   }
 

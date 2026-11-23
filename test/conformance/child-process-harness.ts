@@ -17,12 +17,13 @@ import type {
   ConformanceWorkspace,
   FakeSpawnRequest,
   HarnessRig,
+  NativeSessionState,
   NativeTurn,
   ReferenceDriverConfig,
 } from "../../src/conformance/index.ts";
 import { callErrors } from "../../src/index.ts";
 import type { HostPaths } from "../../src/index.ts";
-import { createConformanceWorkspace, instanceDirectories, listInstanceFiles, toSpawnedProcess } from "../helpers/conformance.ts";
+import { createConformanceWorkspace, instanceDirectories, toSpawnedProcess, watchInstanceFiles } from "../helpers/conformance.ts";
 import { FileReferenceStore } from "./file-store.ts";
 
 const AGENT_MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "reference-agent-main.ts");
@@ -32,6 +33,7 @@ class PuppetChannel {
   readonly #child: childProcess.ChildProcess;
   readonly #pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   #nextId = 1;
+  #alive = true;
   readonly exited: Promise<void>;
 
   constructor(child: childProcess.ChildProcess, onTurn: (turn: { turnId: string; prompt: string }) => void) {
@@ -49,6 +51,7 @@ class PuppetChannel {
     });
     this.exited = new Promise((resolve) => child.once("exit", () => resolve()));
     void this.exited.then(() => {
+      this.#alive = false;
       for (const pending of this.#pending.values()) pending.reject(new Error("the agent process exited"));
       this.#pending.clear();
     });
@@ -66,6 +69,11 @@ class PuppetChannel {
         }
       });
     });
+  }
+
+  /** False once the child exited. */
+  get alive(): boolean {
+    return this.#alive;
   }
 
   /** Sends a call whose answer may never come because the process exits. */
@@ -91,6 +99,10 @@ function childTurn(channel: PuppetChannel, turn: { turnId: string; prompt: strin
     spawnSubagent: (subagent) => channel.call("spawnSubagent", turnId, subagent.name),
     nextSteer: () => channel.call<string>("nextSteer", turnId),
     complete: () => channel.call("complete", turnId),
+    completeHeld: async () => {
+      await channel.call("holdCompletion", turnId);
+      return { release: () => channel.call("releaseCompletion", turnId) };
+    },
     fail: (failure) => channel.call("fail", turnId, failure),
     // The child exiting answers a pending stop request too.
     stopRequested: () => Promise.race([channel.call<"cancel" | "exit">("stopRequested", turnId), channel.exited.then(() => "exit" as const)]),
@@ -113,6 +125,7 @@ export function childProcessHarness(): ConformanceHarness<ReferenceDriverConfig>
       const rigRoot = path.join(created.root, "rigs", `${request.scenario}-${Math.random().toString(36).slice(2)}`);
       const turns = new AsyncQueue<NativeTurn>();
       const children = new Set<childProcess.ChildProcess>();
+      const channels: PuppetChannel[] = [];
       const instancePaths: HostPaths[] = [];
 
       const spawn = async (spawnRequest: FakeSpawnRequest) => {
@@ -126,6 +139,7 @@ export function childProcessHarness(): ConformanceHarness<ReferenceDriverConfig>
         children.add(child);
         child.once("exit", () => children.delete(child));
         const channel = new PuppetChannel(child, (turn) => turns.push(childTurn(channel, turn)));
+        channels.push(channel);
         return toSpawnedProcess(child);
       };
 
@@ -155,10 +169,25 @@ export function childProcessHarness(): ConformanceHarness<ReferenceDriverConfig>
               if (store.has(sessionId)) store.lock(sessionId);
             }
           },
+          inspectSession: async (thread): Promise<NativeSessionState | undefined> => {
+            const sessionId = thread.handle ?? thread.native.id ?? "";
+            for (const channel of channels) {
+              if (!channel.alive) continue;
+              const loaded = await channel.call<NativeSessionState | null>("inspectSession", sessionId).catch(() => null);
+              if (loaded !== null) return loaded;
+            }
+            for (const paths of instancePaths) {
+              const stored = new FileReferenceStore(path.join(paths.stateDir, "sessions")).load(sessionId);
+              if (stored !== undefined) {
+                return { loaded: false, cwd: stored.cwd, turns: stored.turns.length, compactions: stored.compactions, injectedMessages: stored.injectedMessages };
+              }
+            }
+            return undefined;
+          },
         },
         probeExecutables: ["reference-agent"],
         inheritedCredentials: ["REFERENCE_AGENT_API_KEY"],
-        listInstanceFiles,
+        watchInstanceFiles,
         exercise: {
           mcpApp: { server: "reference-tools", tool: "echo", args: { text: "hello" }, resourceUri: "reference://readme" },
           extensionCalls: { "reference.echo": { method: "echo", params: { text: "hello" } } },

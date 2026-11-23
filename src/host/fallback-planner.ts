@@ -14,12 +14,17 @@
 //   steer, outcome "prompt_required"  the turn ended before the steer arrived:
 //       send the same content as a normal turn (start_turn, intent "start").
 //   fork                              native forkThread when threads.fork
-//       allows this fork point and directory; otherwise read the history up to
-//       the fork point, create a thread and seed it with that history.
+//       allows this fork point, directory and (for a subagent's thread)
+//       threads.fork.fromSubagent; otherwise read the history up to the fork
+//       point, create a thread and seed it with that history.
 //   rollback                          native rollbackThread when
-//       threads.rollback is on; otherwise a native fork at the target turn when
-//       threads.fork.fromTurn is on; otherwise a new thread seeded with the
-//       history up to the target. The host then continues in the new thread.
+//       threads.rollback and checkpointing.conversationRollback are on;
+//       otherwise a native fork at the target turn when the fork rules above
+//       allow it; otherwise a new thread seeded with the history up to the
+//       target. The host then continues in the new thread.
+//
+// These are the same capability rules the capability guard enforces, so a plan
+// never calls something the guard would refuse.
 //
 // History comes from `readSnapshot` when threads.readSnapshot is on, and from
 // the host's own transcript otherwise. A new thread is seeded with
@@ -51,12 +56,16 @@ export type FallbackRequest =
       readonly cwd?: string;
       /** The source thread's working directory. */
       readonly sourceCwd?: string;
+      /** True when the source thread is a subagent's (its `subagentId` is set). */
+      readonly subagentThread?: boolean;
     }
   | {
       readonly kind: "rollback";
       readonly threadId: string;
       readonly to: RollbackTarget;
       readonly cwd?: string;
+      /** True when the thread is a subagent's (its `subagentId` is set). */
+      readonly subagentThread?: boolean;
     };
 
 /** One step of a plan. The host performs each step in order. */
@@ -149,14 +158,21 @@ function historySteps(
   ];
 }
 
-function canForkNatively(capabilities: Capabilities, at: ForkPoint, cwd: string | undefined, sourceCwd: string | undefined): boolean {
+function canForkNatively(
+  capabilities: Capabilities,
+  at: ForkPoint,
+  cwd: string | undefined,
+  sourceCwd: string | undefined,
+  subagentThread: boolean | undefined,
+): boolean {
   if (!hasCapability(capabilities, "threads.fork")) return false;
   if (!hasCapability(capabilities, forkCapabilityPath({ at }))) return false;
+  if (subagentThread === true && !hasCapability(capabilities, "threads.fork.fromSubagent")) return false;
   return !forkChangesDirectory({ cwd }, sourceCwd) || hasCapability(capabilities, "threads.fork.crossCwd");
 }
 
 function planFork(capabilities: Capabilities, request: Extract<FallbackRequest, { kind: "fork" }>): FallbackPlan {
-  if (canForkNatively(capabilities, request.at, request.cwd, request.sourceCwd)) {
+  if (canForkNatively(capabilities, request.at, request.cwd, request.sourceCwd, request.subagentThread)) {
     const step: FallbackStep =
       request.cwd === undefined
         ? { action: "fork_thread", threadId: request.threadId, at: request.at }
@@ -171,7 +187,7 @@ function planFork(capabilities: Capabilities, request: Extract<FallbackRequest, 
 }
 
 function planRollback(capabilities: Capabilities, request: Extract<FallbackRequest, { kind: "rollback" }>): FallbackPlan {
-  if (hasCapability(capabilities, "threads.rollback")) {
+  if (hasCapability(capabilities, "threads.rollback") && hasCapability(capabilities, "checkpointing.conversationRollback")) {
     return {
       native: true,
       steps: [{ action: "rollback_thread", threadId: request.threadId, to: request.to }],
@@ -187,7 +203,7 @@ function planRollback(capabilities: Capabilities, request: Extract<FallbackReque
     };
   }
   const at: ForkPoint = { type: "turn", turnId: request.to.turnId };
-  if (canForkNatively(capabilities, at, undefined, undefined)) {
+  if (canForkNatively(capabilities, at, undefined, undefined, request.subagentThread)) {
     return {
       native: false,
       steps: [{ action: "fork_thread", threadId: request.threadId, at }, switchBack],

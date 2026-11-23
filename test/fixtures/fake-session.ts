@@ -44,6 +44,9 @@ export function fakeSession(initial: Capabilities, sessionId = "session-fake"): 
     },
     async resumeThread(input) {
       called("resumeThread", input);
+      const target = input.native;
+      const known = [...threads.values()].find((thread) => ("handle" in target ? thread.handle === target.handle : thread.native.id === target.id));
+      if (known !== undefined) return known;
       const thread: Thread = { id: "thread-resumed", native: { id: "n-resumed", strength: "strong" }, cwd: "/work", status: "idle" };
       return thread;
     },

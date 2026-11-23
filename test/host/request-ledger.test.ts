@@ -172,6 +172,60 @@ describe("request ledger", () => {
     assert.equal(ledger.get("request-3")?.status, "pending");
   });
 
+  test("a backfilled earlier window still applies: a request opened there is learned, and expired if its session already stopped", () => {
+    const ledger = new RequestLedger();
+    const stopped: AriEvent = { seq: 3, at: "2026-11-23T12:00:03.000Z", sessionId: "session-1", body: { type: "session.state", state: "stopped" } };
+    // The tail window first.
+    ledger.observe(stopped);
+    // Then the earlier window, which the ledger has not seen.
+    ledger.observe(
+      upsert(
+        request({
+          id: "question-1",
+          kind: "user_input",
+          options: undefined,
+          questions: [{ id: "q1", type: "text", prompt: "Which branch?" }],
+          response: { mode: "message" },
+          survivesRestart: true,
+        }),
+        1,
+      ),
+    );
+    ledger.observe(upsert(request({ id: "request-2", survivesRestart: false }), 2));
+    assert.equal(ledger.get("question-1")?.status, "pending");
+    assert.equal(ledger.get("request-2")?.status, "expired");
+    assert.deepEqual(ledger.pending().map((value) => value.id), ["question-1"]);
+  });
+
+  test("an older upsert arriving late never undoes a newer state, but fills fields nothing newer set", () => {
+    const ledger = new RequestLedger();
+    ledger.observe(upsert(request({ id: "request-1" }), 1));
+    ledger.observe(upsert({ id: "request-1", status: "resolved" } as Request, 3));
+    ledger.observe(upsert({ id: "request-1", status: "pending", fullAccessOverride: "ask_rule" } as Request, 2));
+    assert.equal(ledger.get("request-1")?.status, "resolved");
+    assert.equal(ledger.get("request-1")?.fullAccessOverride, "ask_rule");
+
+    // A newer session's word wins over an older session's, whatever the seqs.
+    ledger.observe({ ...upsert({ id: "request-1", status: "cancelled" } as Request, 1), sessionId: "session-2" });
+    ledger.observe(upsert({ id: "request-1", status: "pending" } as Request, 9));
+    assert.equal(ledger.get("request-1")?.status, "cancelled");
+  });
+
+  test("a stop expires only requests its session raised before it, and only once", () => {
+    const ledger = new RequestLedger();
+    ledger.observe(upsert(request({ id: "request-a" }), 1));
+    ledger.observe({ ...upsert(request({ id: "request-b" }), 1), sessionId: "session-2" });
+    const stopped: AriEvent = { seq: 2, at: "2026-11-23T12:00:02.000Z", sessionId: "session-1", body: { type: "session.state", state: "stopped" } };
+    ledger.observe(stopped);
+    assert.equal(ledger.get("request-a")?.status, "expired");
+    assert.equal(ledger.get("request-b")?.status, "pending");
+
+    // The same session comes back after the stop and raises a request again: a replayed stop must not expire it.
+    ledger.observe(upsert(request({ id: "request-a" }), 4));
+    ledger.observe(stopped);
+    assert.equal(ledger.get("request-a")?.status, "pending");
+  });
+
   test("a request absent from a later event window or snapshot is not removed", () => {
     const ledger = new RequestLedger();
     ledger.observe(upsert(request({ id: "request-1", survivesRestart: true })));

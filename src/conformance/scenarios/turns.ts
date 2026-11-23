@@ -87,6 +87,17 @@ export const completedScenario: Scenario = {
     const { rig, opened, thread } = await openThread(context);
     const { turnId, native } = await context.beginTurn(opened, rig, thread.id, "Say hello.");
     await context.wait(native.say("Hello there."), "the native agent to stream its reply");
+    // Once the driver has reported the message as settled, the turn is still the provider's to end.
+    await context.until(() => {
+      for (const item of context.reduced(opened).items.values()) {
+        if (item.kind === "assistant_message" && item.turnId === turnId && TERMINAL_ITEM_STATUSES.has(item.status)) return true;
+      }
+      return undefined;
+    }, "the driver to report the assistant message as settled");
+    context.check(
+      opened.events.terminal(turnId) === undefined,
+      `the driver settled turn ${turnId} when its assistant message ended, before the provider completed the turn`,
+    );
     await context.wait(native.complete(), "the native agent to complete the turn");
     const terminal = await context.terminal(opened, turnId);
     context.check(terminal.status === "completed", `turn.terminal has status ${brief(terminal.status)} after the provider completed the turn; expected "completed"`);
@@ -194,20 +205,19 @@ export const settlementScenario: Scenario = {
       }, "the driver to report the tool result as a settled item");
 
       const pauseStart = clock.now();
-      const seenBefore = opened.events.events.length;
       await clock.pass(SETTLEMENT_PAUSE_MS);
       await realSleep(20);
       clock.tick();
-      const early = opened.events.events.slice(seenBefore).find((event) => {
+      // Anything that settled the turn before the provider completed it, from the turn's start on.
+      const early = opened.events.events.find((event) => {
         const body = event.body;
         if (body.type === "turn.terminal") return body.turnId === turnId;
         return body.type === "turn.upsert" && body.turn.id === turnId && ["completed", "failed", "interrupted", "cancelled"].includes(String(body.turn.status));
       });
       if (early !== undefined) {
-        const after = ((Date.parse(early.at) - pauseStart) / 1000).toFixed(1);
-        context.fail(
-          `the driver settled turn ${turnId} (${early.body.type}) about ${after} s into a ${SETTLEMENT_PAUSE_MS / 1000} s pause after the tool result, before the provider completed it: settlement must come from the provider, never from a quiet timer`,
-        );
+        const offset = (Date.parse(early.at) - pauseStart) / 1000;
+        const when = offset < 0.05 ? "as soon as the tool result arrived" : `about ${offset.toFixed(1)} s into a ${SETTLEMENT_PAUSE_MS / 1000} s pause after the tool result`;
+        context.fail(`the driver settled turn ${turnId} (${early.body.type}) ${when}, before the provider completed it: settlement must come from the provider, never from a quiet timer`);
       }
 
       await context.wait(native.say("The slow tool is done."), "the native agent to stream text");

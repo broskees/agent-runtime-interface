@@ -30,6 +30,7 @@ describe("conformance fixtures", () => {
       const check = checkFixture(serializeFixture(fixture));
       assert.equal(check.ok, true, JSON.stringify(check.grammarViolation ?? check.unsettledCalls));
       assert.ok(check.fixture.entries.some((entry) => entry.type === "event"));
+      assert.deepEqual(check.fixture.driver, { kind: "reference", identityVersion: 1 });
       assert.ok(check.fixture.entries.some((entry) => entry.type === "call" && entry.method === "session/startTurn"));
     }
   });

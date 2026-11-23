@@ -135,6 +135,8 @@ export interface CreatedInstance {
   readonly instance: Instance;
   readonly host: FakeHost;
   readonly instanceId: string;
+  /** The driver's `kind`, recorded in fixtures. */
+  readonly driverKind: string;
 }
 
 export interface InstanceOptions {
@@ -345,13 +347,17 @@ export class ScenarioContext {
     this.defer(async () => {
       await instance.dispose();
     });
-    return { instance, host: host as FakeHost, instanceId };
+    return { instance, host: host as FakeHost, instanceId, driverKind: rig.driver.kind };
   }
 
   /** Opens a session, records it as a fixture and starts collecting its events. */
   async openSession(created: CreatedInstance, input: OpenSessionInput = {}): Promise<OpenedSession> {
     const raw = await this.wait(created.instance.openSession(input), "openSession");
-    const recorder = new ReplayRecorder({ name: `${this.key}: ${raw.id}`, driver: { kind: this.harness.name } });
+    const recorder = new ReplayRecorder({
+      name: `${this.key}: ${raw.id}`,
+      description: `Recorded by the ARI conformance kit (${this.harness.name}).`,
+      driver: { kind: created.driverKind, identityVersion: raw.capabilities().identity.identityVersion },
+    });
     const session = recorder.recordSession(raw);
     const events = new EventCollector(session.events(), (error) => {
       this.suite.violations.push({ scenario: this.key, sessionId: raw.id, violation: error.violation });

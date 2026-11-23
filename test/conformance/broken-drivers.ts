@@ -130,6 +130,28 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
       }),
   },
   {
+    scenario: 2,
+    bug: "settles the turn when the assistant message ends",
+    reason: /settled turn .* when its assistant message ended, before the provider completed the turn/,
+    harness: () =>
+      brokenHarness("message end ends the turn", {
+        session: (session) => {
+          const settled = new Set<string>();
+          const rewritten = rewriteEvents(session, (event, pass) => {
+            const body = event.body;
+            const turnId = body.type === "turn.terminal" ? body.turnId : event.turnId;
+            if (turnId !== undefined && settled.has(turnId)) return;
+            pass();
+            if (turnId !== undefined && body.type === "item.upsert" && body.item.status === "completed" && body.item.text !== undefined && body.item.kind !== "user_message") {
+              settled.add(turnId);
+              rewritten.inject({ type: "turn.terminal", turnId, status: "completed", threadDisposition: "reusable" }, { threadId: event.threadId, turnId });
+            }
+          });
+          return rewritten.session;
+        },
+      }),
+  },
+  {
     scenario: 3,
     bug: "ends the turn locally on Stop without telling the agent",
     reason: /waiting for the native agent to be asked to stop the turn/,
@@ -204,6 +226,28 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
                 rewritten.inject({ type: "turn.terminal", turnId, status: "completed", threadDisposition: "reusable" }, { threadId: event.threadId, turnId });
               }, 30_000),
             );
+          });
+          return rewritten.session;
+        },
+      }),
+  },
+  {
+    scenario: 6,
+    bug: "settles a turn as soon as a tool result arrives",
+    reason: /settled turn .* as soon as the tool result arrived, before the provider completed it/,
+    harness: () =>
+      brokenHarness("tool result ends the turn", {
+        session: (session) => {
+          const settled = new Set<string>();
+          const rewritten = rewriteEvents(session, (event, pass) => {
+            const body = event.body;
+            const turnId = body.type === "turn.terminal" ? body.turnId : event.turnId;
+            if (turnId !== undefined && settled.has(turnId)) return;
+            pass();
+            if (turnId !== undefined && body.type === "item.upsert" && body.item.status === "completed" && body.item.output !== undefined) {
+              settled.add(turnId);
+              rewritten.inject({ type: "turn.terminal", turnId, status: "completed", threadDisposition: "reusable" }, { threadId: event.threadId, turnId });
+            }
           });
           return rewritten.session;
         },

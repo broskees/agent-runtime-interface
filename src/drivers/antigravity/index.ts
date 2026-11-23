@@ -105,6 +105,8 @@ export function createAntigravityDriver(options: AntigravityDriverOptions = {}):
   const install = async (context: AcpFlavorContext<AntigravityConfig>): Promise<string> => {
     const target = antigravityTarget(platform.os, platform.arch);
     if (target === null) throw callErrors.unsupported("maintenance.install", `The Antigravity CLI has no build for ${platform.os}-${platform.arch}`);
+    // Windows releases are a bare executable, which the adapter installer (tar archives only) cannot install.
+    if (platform.os === "win32") throw callErrors.unsupported("maintenance.install", "Managed Antigravity installs need a tar.gz release; the Windows release is a bare agy.exe. Use installation: \"path\".");
     const release = await fetchAntigravityRelease(fetchImplementation, context.config.releaseManifestUrl, target);
     if (context.config.version !== "latest" && context.config.version !== release.version) {
       throw callErrors.notFound({ resource: "Antigravity release", id: context.config.version, message: `The release manifest offers ${release.version}, not the pinned ${context.config.version}` });

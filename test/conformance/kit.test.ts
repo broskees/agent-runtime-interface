@@ -1,0 +1,335 @@
+// The conformance kit's own rules: the scenario list, when a scenario may
+// report "not applicable", the fake host's record, virtual time, the
+// node:test adapter, and the gated-member table against methods.json.
+
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { describe, test } from "node:test";
+import {
+  GATED_MEMBERS,
+  HOST_OPERATIONS,
+  SCENARIOS,
+  ScenarioContext,
+  VirtualClock,
+  conformanceTests,
+  createConformanceSuite,
+  createFakeHost,
+  referenceHarness,
+} from "../../src/conformance/index.ts";
+import type { ConformanceHarness, NodeTestContext, ReferenceDriverConfig } from "../../src/conformance/index.ts";
+import { isAriError } from "../../src/index.ts";
+import type { SpawnedProcess } from "../../src/index.ts";
+import { runScenario } from "./broken-drivers.ts";
+
+const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+
+describe("the scenario list", () => {
+  test("holds the 15 scenarios of the inventory, numbered 1 to 15 with unique keys", () => {
+    assert.deepEqual(
+      SCENARIOS.map((scenario) => scenario.id),
+      Array.from({ length: 15 }, (_, index) => index + 1),
+    );
+    assert.equal(new Set(SCENARIOS.map((scenario) => scenario.key)).size, 15);
+  });
+
+  test("runs the grammar scenario last, because it judges every other scenario's streams", () => {
+    const suite = createConformanceSuite(referenceHarness());
+    assert.deepEqual(
+      suite.order.map((scenario) => scenario.id),
+      [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1],
+    );
+    assert.throws(() => createConformanceSuite(referenceHarness(), { scenarios: ["no-such-scenario"] }), /unknown conformance scenario/);
+  });
+
+  test("no module of ari/conformance imports a Node built-in or a test runner", () => {
+    const directory = path.join(root, "src/conformance");
+    const files = fs.readdirSync(directory, { recursive: true, encoding: "utf8" }).filter((file) => file.endsWith(".ts"));
+    assert.ok(files.length > 10);
+    for (const file of files) {
+      const text = fs.readFileSync(path.join(directory, file), "utf8");
+      assert.doesNotMatch(text, /^\s*import[^;]*from\s+["'](node:|vitest|bun:test|mocha|jest)/m, file);
+    }
+  });
+});
+
+/** The reference harness with some rig members removed or replaced. */
+function adjustedHarness(
+  options: { notApplicable?: { [key: string]: string }; withoutLockSession?: boolean; withoutFileList?: boolean } = {},
+): ConformanceHarness<ReferenceDriverConfig> {
+  const base = referenceHarness({ ...(options.notApplicable === undefined ? {} : { notApplicable: options.notApplicable }) });
+  return {
+    ...base,
+    async setup(request) {
+      const rig = await base.setup(request);
+      const { lockSession: _lock, ...native } = rig.native;
+      const { listInstanceFiles: _list, ...rest } = rig;
+      return {
+        ...(options.withoutFileList === true ? rest : rig),
+        native: options.withoutLockSession === true ? native : rig.native,
+      };
+    },
+  };
+}
+
+describe("not applicable only for a declared capability or a stated reason", () => {
+  test("a harness reason makes a scenario not applicable, and the report shows it", async () => {
+    const result = await runScenario(adjustedHarness({ notApplicable: { settlement: "the agent cannot run tools" } }), "settlement");
+    assert.equal(result.status, "not_applicable");
+    assert.equal(result.notApplicableBy, "harness");
+    assert.equal(result.reason, "the agent cannot run tools");
+  });
+
+  test("a reason that is empty or spans two lines is a failure, not a pass", async () => {
+    for (const reason of ["", "   ", "first line\nsecond line"]) {
+      const result = await runScenario(adjustedHarness({ notApplicable: { settlement: reason } }), "settlement");
+      assert.equal(result.status, "failed", JSON.stringify(reason));
+      assert.match(result.reason ?? "", /must be one non-empty line/);
+    }
+  });
+
+  test("a check the harness cannot support fails the scenario unless the harness gives a reason", async () => {
+    const missing = await runScenario(adjustedHarness({ withoutLockSession: true }), "session-replaced");
+    assert.equal(missing.status, "failed");
+    assert.match(missing.reason ?? "", /has no lockSession; add it, or give a reason under session-replaced\.locked/);
+
+    const excused = await runScenario(adjustedHarness({ withoutLockSession: true, notApplicable: { "session-replaced.locked": "the provider has no session locks" } }), "session-replaced");
+    assert.equal(excused.status, "passed", excused.reason);
+    assert.deepEqual(excused.notes, ["resuming a locked native session not checked (session-replaced.locked): the provider has no session locks"]);
+
+    const noFiles = await runScenario(adjustedHarness({ withoutFileList: true }), "side-effect-free-probe");
+    assert.equal(noFiles.status, "failed");
+    assert.match(noFiles.reason ?? "", /add listInstanceFiles, or give a reason under side-effect-free-probe\.files/);
+  });
+
+  test("a workspace without a symbolic link fails scenario 11 unless the harness gives a reason", async () => {
+    const base = referenceHarness();
+    const noLink: ConformanceHarness<ReferenceDriverConfig> = { ...base, workspace: async () => ({ cwd: "/workspace/project" }) };
+    const result = await runScenario(noLink, "symlinked-workspace");
+    assert.equal(result.status, "failed");
+    assert.match(result.reason ?? "", /no symlinkedCwd; give one, or a reason under symlinked-workspace/);
+  });
+});
+
+describe("the fake host", () => {
+  test("records each of the 17 host-service operations by name, in order", async () => {
+    const host = createFakeHost({ config: { model: "small" } });
+    await host.config.get();
+    await host.secrets.get("ns", "key");
+    await host.secrets.set("ns", "key", new Uint8Array([1]));
+    await host.secrets.delete("ns", "key");
+    await host.process.spawn({ command: "agent" }).catch(() => undefined);
+    await host.process.resolveExecutable("agent");
+    await host.attachments.resolve("ref");
+    await host.attachments.extractText?.("ref");
+    await host.callbacks.register("flow-1");
+    await host.hostTools.mcpServerFor("thread-1", { transport: "stdio" });
+    await host.hostTools.callDynamicTool?.({ threadId: "thread-1", callId: "call-1", name: "tool", input: {} });
+    await host.background.shouldRun("refresh");
+    const lease = await host.coordination.acquire("key", 1000);
+    await host.coordination.release(lease!.leaseId);
+    host.diagnostics.log({ level: "info", msg: "hello" });
+    host.telemetry?.track("event");
+    await host.ids?.derive("thread", "native-1");
+    assert.deepEqual(
+      host.calls.map((call) => call.operation),
+      [...HOST_OPERATIONS],
+    );
+    assert.equal(HOST_OPERATIONS.length, 17);
+    const mark = host.mark();
+    await host.secrets.get("ns", "other");
+    assert.deepEqual(
+      host.callsSince(mark).map((call) => [call.operation, call.args]),
+      [["secrets.get", ["ns", "other"]]],
+    );
+  });
+
+  test("spawns with the ambient environment minus stripped names and prefixes, plus explicit additions", async () => {
+    let seen: { [name: string]: string } | undefined;
+    const host = createFakeHost({
+      envScrubPrefixes: ["VENDOR_"],
+      ambientEnvironment: { PATH: "/bin", VENDOR_API_KEY: "ambient", VENDOR_TOKEN: "ambient", OTHER: "kept" },
+      spawn: async (request) => {
+        seen = { ...request.environment };
+        return {} as SpawnedProcess;
+      },
+    });
+    assert.deepEqual(host.process.envPolicy, { stripAmbient: ["VENDOR_*"] });
+    await host.process.spawn({ command: "agent", env: { VENDOR_API_KEY: "configured" } });
+    assert.deepEqual(seen, { PATH: "/bin", OTHER: "kept", VENDOR_API_KEY: "configured" });
+    assert.deepEqual(host.spawns[0]?.environment, seen);
+
+    const exact = createFakeHost({ envPolicy: { stripAmbient: ["SECRET"] }, ambientEnvironment: { SECRET: "x", SECRET_2: "y" }, spawn: async () => ({}) as SpawnedProcess });
+    await exact.process.spawn({ command: "agent" });
+    assert.deepEqual(exact.spawns[0]?.environment, { SECRET_2: "y" });
+  });
+
+  test("refuses bad secret names, copies secret bytes, and rejects a spawn it cannot perform", async () => {
+    const host = createFakeHost({ secrets: [{ namespace: "ns", key: "key", value: "abc" }] });
+    for (const [namespace, key] of [
+      ["..", "key"],
+      ["ns", "a/b"],
+      ["", "key"],
+    ] as const) {
+      await assert.rejects(host.secrets.get(namespace, key), (error: unknown) => isAriError(error, "validation"));
+    }
+    const value = await host.secrets.get("ns", "key");
+    assert.deepEqual([...value!], [97, 98, 99]);
+    value![0] = 0;
+    assert.deepEqual([...(await host.secrets.get("ns", "key"))!], [97, 98, 99]);
+    await assert.rejects(host.process.spawn({ command: "missing" }), (error: unknown) => isAriError(error, "not_found"));
+  });
+
+  test("leases are exclusive until released or expired, and config changes reach watchers", async () => {
+    const clock = new VirtualClock(Date.UTC(2026, 10, 23));
+    clock.install();
+    try {
+      const host = createFakeHost<{ model: string }>({ config: { model: "small" } });
+      const first = await host.coordination.acquire("reset-credit", 30_000);
+      assert.ok(first !== null);
+      assert.equal(await host.coordination.acquire("reset-credit", 30_000), null);
+      clock.advanceBy(30_001);
+      const second = await host.coordination.acquire("reset-credit", 30_000);
+      assert.ok(second !== null && second.leaseId !== first.leaseId);
+      await host.coordination.release(second.leaseId);
+      assert.ok((await host.coordination.acquire("reset-credit", 30_000)) !== null);
+
+      const reading = await host.config.get({ watch: true });
+      assert.deepEqual(reading.config, { model: "small" });
+      host.setConfig({ model: "large" });
+      const next = await reading.changes![Symbol.asyncIterator]().next();
+      assert.deepEqual(next.value, { model: "large" });
+      host.dispose();
+    } finally {
+      clock.uninstall();
+    }
+  });
+});
+
+describe("virtual time", () => {
+  test("replaces timers, Date and performance.now until uninstalled", () => {
+    const realSetTimeout = globalThis.setTimeout;
+    const RealDate = globalThis.Date;
+    const realPerformanceNow = performance.now();
+    const clock = new VirtualClock(Date.UTC(2026, 10, 23, 12));
+    clock.install();
+    try {
+      const fired: string[] = [];
+      const timeout = setTimeout(() => fired.push("timeout"), 30_000);
+      const cancelled = setTimeout(() => fired.push("cancelled"), 10);
+      clearTimeout(cancelled);
+      let last = Date.now();
+      // A quiet timer built from setInterval and Date.now.
+      const interval = setInterval(() => {
+        if (Date.now() - last >= 30_000) fired.push("quiet");
+      }, 1000);
+      assert.equal(new Date().toISOString(), "2026-11-23T12:00:00.000Z");
+      assert.ok(new Date() instanceof RealDate);
+      assert.equal(new Date(0).getTime(), 0);
+      clock.advanceBy(29_999);
+      assert.deepEqual(fired, []);
+      clock.advanceBy(1);
+      assert.deepEqual(fired, ["timeout", "quiet"]);
+      assert.equal(Date.now(), Date.UTC(2026, 10, 23, 12, 0, 30));
+      assert.ok(performance.now() - realPerformanceNow >= 30_000);
+      last = Date.now();
+      clearInterval(interval);
+      clock.advanceBy(60_000);
+      assert.deepEqual(fired, ["timeout", "quiet"]);
+      void timeout;
+    } finally {
+      clock.uninstall();
+    }
+    assert.equal(globalThis.setTimeout, realSetTimeout);
+    assert.equal(globalThis.Date, RealDate);
+    assert.ok(performance.now() - realPerformanceNow < 30_000);
+  });
+
+  test("a harness on real time waits real time", async () => {
+    const context = new ScenarioContext({
+      harness: { ...referenceHarness(), time: "real" } as ConformanceHarness<unknown>,
+      workspace: { cwd: "/workspace/project" },
+      scenarioKey: "settlement",
+      timeoutMs: 1000,
+      suite: { violations: [], streams: 0 },
+    });
+    const started = Date.now();
+    const mode = await context.withClock(async (clock) => {
+      await clock.pass(40);
+      return clock.mode;
+    });
+    assert.equal(mode, "real");
+    assert.ok(Date.now() - started >= 30, `waited ${Date.now() - started} ms`);
+  });
+});
+
+describe("the node:test adapter", () => {
+  test("fails a failed scenario's subtest, skips a not-applicable one with its reason, and reports notes", async () => {
+    const events: string[] = [];
+    const context = (name: string): NodeTestContext => ({
+      test: async (child, fn) => {
+        try {
+          await fn(context(child));
+          events.push(`pass ${child}`);
+        } catch (error) {
+          events.push(`fail ${child}: ${(error as Error).message}`);
+        }
+      },
+      skip: (message) => events.push(`skip ${name}: ${message ?? ""}`),
+      diagnostic: (message) => events.push(`note ${name}: ${message}`),
+    });
+    let registered: Promise<void> | undefined;
+    conformanceTests(
+      (name, fn) => {
+        events.push(`register ${name}`);
+        registered = fn(context(name));
+      },
+      adjustedHarness({ withoutLockSession: true, notApplicable: { "turn-interrupted": "the agent cannot be stopped" } }),
+      { scenarios: ["turn-interrupted", "session-replaced"], timeoutMs: 1500 },
+    );
+    await registered;
+    assert.equal(events[0], "register ARI conformance: reference driver (full, in memory)");
+    assert.ok(events.includes("skip scenario 3 (turn-interrupted): A turn ends by interrupt (Stop): not applicable (harness): the agent cannot be stopped"), events.join("\n"));
+    assert.ok(events.some((event) => /^fail scenario 9 \(session-replaced\).*failed: the harness's native agent has no lockSession/.test(event)), events.join("\n"));
+  });
+});
+
+describe("the gated-member table", () => {
+  test("covers every capability-gated Session member of methods.json", () => {
+    const methods = JSON.parse(fs.readFileSync(path.join(root, "spec/v1/methods.json"), "utf8")) as {
+      methods: Array<{ interface?: string; member?: string; capability?: string }>;
+    };
+    const gated = methods.methods.filter((entry) => entry.interface === "Session" && entry.capability !== undefined);
+    assert.ok(gated.length >= 15);
+    for (const entry of gated) {
+      const row = GATED_MEMBERS.find((candidate) => candidate.member === entry.member);
+      assert.ok(row !== undefined, `methods.json gates ${entry.member} by ${entry.capability}, which scenario 14 does not check`);
+      assert.ok(row.capabilities.includes(entry.capability!), `${entry.member}: ${entry.capability} missing from ${row.capabilities.join(", ")}`);
+    }
+    // The two gates the capability guard adds beyond methods.json.
+    assert.deepEqual(GATED_MEMBERS.find((row) => row.member === "release")?.capabilities, ["sessions.release"]);
+    assert.ok(GATED_MEMBERS.find((row) => row.member === "rollbackThread")?.capabilities.includes("checkpointing.conversationRollback"));
+  });
+});
+
+describe("virtual time and real timers", () => {
+  test("clearing a timer made before virtual time was installed clears the real timer", async () => {
+    let fired = false;
+    const real = setTimeout(() => {
+      fired = true;
+    }, 20);
+    const clock = new VirtualClock();
+    clock.install();
+    try {
+      const virtual = setTimeout(() => undefined, 5);
+      clearTimeout(real);
+      assert.equal(clock.pendingTimers, 1, "clearing the real timer must not cancel a virtual one");
+      clearTimeout(virtual);
+      assert.equal(clock.pendingTimers, 0);
+    } finally {
+      clock.uninstall();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(fired, false);
+  });
+});

@@ -2,19 +2,22 @@
 // into `<cacheDir>/adapters/<pkg>/<version>` from a tarball supplied by a
 // pluggable fetch, never running `npx`. The final path either does not exist
 // or holds a complete install, even when the installing process is killed
-// midway. Concurrent installs of one version share the first result. Cleanup
-// keeps versions held by a lease and removes the rest.
+// midway. Concurrent installs of one version, from one installer object,
+// several objects or several processes, share the first result. Cleanup keeps
+// versions held by a lease, and never moves a version while a lease on it is
+// being handed out.
 //
 // The fixture tarball is made by `npm pack` from a throwaway package, so the
 // installer reads the format npm publishes.
 
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import nodeFs, { createReadStream } from "node:fs";
 import * as http from "node:http";
+import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -92,6 +95,14 @@ function slowFetch(file: string, delayMs: number): { fetch: TarballFetch; calls:
       }
     },
   };
+}
+
+// The installer's own bookkeeping directories: version locks and lease files.
+const BOOKKEEPING = new Set([".locks", ".leases"]);
+
+/** What a package directory holds besides bookkeeping: installed versions and any staging or trash left behind. */
+async function packageEntries(packageDir: string): Promise<string[]> {
+  return (await fs.readdir(packageDir)).filter((name) => !BOOKKEEPING.has(name)).sort();
 }
 
 async function newCacheDir(): Promise<string> {
@@ -192,7 +203,7 @@ describe("ari/node adapter installer", () => {
     assert.deepEqual(installed, { pkg: PKG, version: "1.0.0", dir: expected });
     assert.equal(installer.pathFor(PKG, "1.0.0"), expected);
     await assertCompleteInstall(expected);
-    assert.deepEqual(await fs.readdir(path.dirname(expected)), ["1.0.0"], "no staging directory is left");
+    assert.deepEqual(await packageEntries(path.dirname(expected)), ["1.0.0"], "no staging directory is left");
 
     // Installing again reuses the install without fetching.
     const again = createAdapterInstaller({
@@ -216,19 +227,64 @@ describe("ari/node adapter installer", () => {
     await assertCompleteInstall(firstResult.dir);
   });
 
-  test("two processes installing one version at once end with one complete install, and neither runs npx or npm", async () => {
+  test("a concurrent install through a second installer object on the same cache reuses the first result", async () => {
+    const cacheDir = await newCacheDir();
+    let releaseFirstFetch = (): void => {};
+    let firstFetchStarted = (): void => {};
+    const started = new Promise<void>((resolve) => {
+      firstFetchStarted = resolve;
+    });
+    const content = await fs.readFile(packedTarball);
+    const first = createAdapterInstaller({
+      cacheDir,
+      fetchTarball: async function* () {
+        firstFetchStarted();
+        await new Promise<void>((resolve) => {
+          releaseFirstFetch = resolve;
+        });
+        yield content;
+      },
+    });
+    let secondFetches = 0;
+    const second = createAdapterInstaller({
+      cacheDir,
+      fetchTarball: () => {
+        secondFetches += 1;
+        throw new Error("temporary HTTP 503");
+      },
+    });
+    const firstInstall = first.install(PKG, "1.0.0");
+    await started;
+    const secondInstall = second.install(PKG, "1.0.0");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    releaseFirstFetch();
+    const [firstResult, secondResult] = await Promise.all([firstInstall, secondInstall]);
+    assert.deepEqual(secondResult, firstResult);
+    assert.equal(secondFetches, 0, "the second object waited for the first install instead of fetching");
+    await assertCompleteInstall(firstResult.dir);
+  });
+
+  test("two processes installing one version at once share one fetch, and neither runs a package manager", async () => {
     const cacheDir = await newCacheDir();
     const markers = await fs.mkdtemp(path.join(scratch, "markers-"));
-    // A PATH whose only commands record that they ran.
+    // A PATH whose only commands record that they ran. The record is a shell
+    // redirect, so it needs no other command on PATH.
     const trap = await fs.mkdtemp(path.join(scratch, "trap-"));
-    for (const command of ["npx", "npm", "pnpm", "yarn", "tar"]) {
-      await fs.writeFile(path.join(trap, command), `#!/bin/sh\ntouch "${markers}/ran-${command}"\nexit 1\n`, { mode: 0o755 });
+    const trapCommands = ["npx", "npm", "pnpm", "yarn", "tar"];
+    for (const command of trapCommands) {
+      await fs.writeFile(path.join(trap, command), `#!/bin/sh\n: > "${markers}/ran-${command}"\nexit 1\n`, { mode: 0o755 });
     }
+    // Prove the trap fires with this PATH, then clear its record.
+    assert.throws(() => execFileSync("npx", ["-y", "anything"], { env: { PATH: trap }, stdio: "ignore" }));
+    assert.deepEqual(await fs.readdir(markers), ["ran-npx"]);
+    await fs.rm(path.join(markers, "ran-npx"));
+
     const script = [
       `const { createAdapterInstaller } = await import(${JSON.stringify(INSTALLER_MODULE)});`,
       "const fs = await import('node:fs');",
       `const content = fs.readFileSync(${JSON.stringify(packedTarball)});`,
       "async function* fetchTarball() {",
+      `  fs.writeFileSync(${JSON.stringify(markers)} + '/fetched-' + process.pid, '');`,
       "  for (let offset = 0; offset < content.length; offset += 2048) {",
       "    yield content.subarray(offset, offset + 2048);",
       "    await new Promise((resolve) => setTimeout(resolve, 3));",
@@ -252,8 +308,10 @@ describe("ari/node adapter installer", () => {
     );
     assert.equal(outputs[0]!.dir, outputs[1]!.dir);
     await assertCompleteInstall(outputs[0]!.dir);
-    assert.deepEqual(await fs.readdir(path.dirname(outputs[0]!.dir)), ["1.0.0"], "the losing copy was discarded");
-    assert.deepEqual(await fs.readdir(markers), [], "no package manager command ran");
+    assert.deepEqual(await packageEntries(path.dirname(outputs[0]!.dir)), ["1.0.0"], "no staging copy is left");
+    const records = await fs.readdir(markers);
+    assert.equal(records.filter((name) => name.startsWith("fetched-")).length, 1, "the tarball was fetched once across both processes");
+    assert.deepEqual(records.filter((name) => name.startsWith("ran-")), [], "no package manager command ran");
   });
 
   test("an install killed midway leaves nothing at the final path", async () => {
@@ -298,7 +356,7 @@ describe("ari/node adapter installer", () => {
     // Cleanup removes the dead process's staging; a later install succeeds.
     const installer = createAdapterInstaller({ cacheDir, fetchTarball: fromFile(packedTarball) });
     assert.deepEqual(await installer.cleanup(), []);
-    assert.deepEqual(await fs.readdir(packageDir), []);
+    assert.deepEqual(await packageEntries(packageDir), []);
     await assertCompleteInstall((await installer.install(PKG, "1.0.0")).dir);
   });
 
@@ -313,7 +371,7 @@ describe("ari/node adapter installer", () => {
       },
     });
     await assert.rejects(installer.install(PKG, "1.0.0"), /connection reset/);
-    assert.deepEqual(await fs.readdir(path.join(cacheDir, "adapters", "@ari-test", "fake-adapter")), []);
+    assert.deepEqual(await packageEntries(path.join(cacheDir, "adapters", "@ari-test", "fake-adapter")), []);
   });
 
   test("cleanup keeps a version held by a lease and removes one that is not held", async () => {
@@ -332,6 +390,105 @@ describe("ari/node adapter installer", () => {
     await held.release();
     assert.deepEqual((await installer.cleanup()).map((entry) => entry.version), ["1.0.0"]);
     assert.equal(await fs.stat(held.dir).then(() => true, () => false), false);
+  });
+
+  test("cleanup never moves a version while a lease on it is being handed out", async () => {
+    const cacheDir = await newCacheDir();
+    const installer = createAdapterInstaller({ cacheDir, fetchTarball: fromFile(packedTarball) });
+    const versionDir = (await installer.install(PKG, "1.0.0")).dir;
+
+    // Pause cleanup at the moment it moves the version aside.
+    const realRename = nodeFs.promises.rename;
+    let cleanupPaused = (): void => {};
+    const paused = new Promise<void>((resolve) => {
+      cleanupPaused = resolve;
+    });
+    let resumeCleanup = (): void => {};
+    const resumed = new Promise<void>((resolve) => {
+      resumeCleanup = resolve;
+    });
+    nodeFs.promises.rename = async (from, to) => {
+      if (String(from) === versionDir && String(to).includes(".trash-")) {
+        cleanupPaused();
+        await resumed;
+      }
+      return realRename(from, to);
+    };
+    syncBuiltinESMExports();
+    try {
+      const cleaning = installer.cleanup();
+      await paused;
+      let leaseSettled = false;
+      const leasing = installer.lease(PKG, "1.0.0").finally(() => {
+        leaseSettled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(leaseSettled, false, "the lease waits while cleanup is removing its version");
+      resumeCleanup();
+      const [removed, lease] = await Promise.all([cleaning, leasing]);
+      assert.deepEqual(removed.map((entry) => entry.version), ["1.0.0"], "cleanup removed the version it had started removing");
+      // The lease was handed out after cleanup finished, so its version was installed again and stays.
+      await assertCompleteInstall(lease.dir);
+      assert.deepEqual(await installer.cleanup(), [], "a held lease keeps its version");
+      await assertCompleteInstall(lease.dir);
+      await lease.release();
+    } finally {
+      resumeCleanup();
+      nodeFs.promises.rename = realRename;
+      syncBuiltinESMExports();
+    }
+  });
+
+  test("four processes leasing, releasing and cleaning one version never fetch at once or lose a leased version", async () => {
+    const cacheDir = await newCacheDir();
+    const markers = await fs.mkdtemp(path.join(scratch, "stress-"));
+    const script = [
+      `const { createAdapterInstaller } = await import(${JSON.stringify(INSTALLER_MODULE)});`,
+      "const fs = await import('node:fs');",
+      `const markers = ${JSON.stringify(markers)};`,
+      `const content = fs.readFileSync(${JSON.stringify(packedTarball)});`,
+      "const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));",
+      "async function* fetchTarball() {",
+      "  // Only one fetch of this version may run at a time, across every process.",
+      "  try { fs.writeFileSync(markers + '/inside', String(process.pid), { flag: 'wx' }); } catch { process.stdout.write('overlap\\n'); }",
+      "  fs.writeFileSync(markers + '/fetch-' + process.pid + '-' + Math.random(), '');",
+      "  await pause(10);",
+      "  yield content;",
+      "  fs.rmSync(markers + '/inside', { force: true });",
+      "}",
+      `const installer = createAdapterInstaller({ cacheDir: ${JSON.stringify(cacheDir)}, fetchTarball });`,
+      "for (let round = 0; round < 8; round += 1) {",
+      `  const lease = await installer.lease(${JSON.stringify(PKG)}, '1.0.0');`,
+      "  // A held lease's files stay readable however the other processes clean up.",
+      "  fs.readFileSync(lease.dir + '/bin/agent.js');",
+      "  await pause(5);",
+      "  fs.readFileSync(lease.dir + '/package.json');",
+      "  await lease.release();",
+      "  await installer.cleanup();",
+      "}",
+      "process.stdout.write('done\\n');",
+    ].join("\n");
+    const children = Array.from({ length: 4 }, () => startNode(script));
+    const outputs = await Promise.all(
+      children.map(async (child) => {
+        let output = "";
+        let errors = "";
+        child.stdout?.on("data", (chunk: Buffer) => {
+          output += chunk.toString();
+        });
+        child.stderr?.on("data", (chunk: Buffer) => {
+          errors += chunk.toString();
+        });
+        assert.deepEqual(await exitOf(child), { code: 0, signal: null }, errors);
+        return output;
+      }),
+    );
+    for (const output of outputs) assert.equal(output, "done\n");
+    const fetches = (await fs.readdir(markers)).filter((name) => name.startsWith("fetch-"));
+    assert.ok(fetches.length >= 1, `fetched ${fetches.length} times`);
+    const packageDir = path.join(cacheDir, "adapters", "@ari-test", "fake-adapter");
+    const left = (await packageEntries(packageDir)).filter((name) => name !== "1.0.0");
+    assert.deepEqual(left, [], "no staging or trash is left");
   });
 
   test("a lease held by another live process protects its version until that process ends", async () => {
@@ -400,7 +557,7 @@ describe("ari/node adapter installer", () => {
       await assert.rejects(installer.install(PKG, "6.6.6"), (error: unknown) => isAriError(error, "protocol"));
       assert.equal(await fs.stat(installer.pathFor(PKG, "6.6.6")).then(() => true, () => false), false);
       await assert.rejects(installer.install(PKG, "9.9.9"), (error: unknown) => isAriError(error, "not_found"));
-      assert.deepEqual(await fs.readdir(path.dirname(installer.pathFor(PKG, "1.0.0"))), ["1.0.0"]);
+      assert.deepEqual(await packageEntries(path.dirname(installer.pathFor(PKG, "1.0.0"))), ["1.0.0"]);
       assert.ok(requests.includes("/@ari-test%2Ffake-adapter/1.0.0"));
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -438,7 +595,7 @@ describe("ari/node adapter installer", () => {
       const cacheDir = await newCacheDir();
       const installer = createAdapterInstaller({ cacheDir, fetchTarball: () => yieldOnce(gzipSync(archive)) });
       await assert.rejects(installer.install("crafted", "1.0.0"), (error: unknown) => isAriError(error, code), name);
-      assert.deepEqual(await fs.readdir(path.join(cacheDir, "adapters", "crafted")), [], `${name}: nothing installed`);
+      assert.deepEqual(await packageEntries(path.join(cacheDir, "adapters", "crafted")), [], `${name}: nothing installed`);
       assert.deepEqual(await fs.readdir(cacheDir), ["adapters"], `${name}: nothing written outside`);
     }
     assert.equal(await fs.stat("/tmp/ari-absolute.txt").then(() => true, () => false), false);

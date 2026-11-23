@@ -1,10 +1,14 @@
 // Process spawning in `ari/node`: a child's environment is the base minus
 // every stripped name or prefix plus explicit additions; `resolveExecutable`
-// searches a given PATH; and disposing, aborting, `kill()`, a timeout or the
-// child's own exit end the child's whole process group, grandchildren
-// included.
+// searches a PATH the way spawn does, so it reports what spawn would run; and
+// disposing, aborting, `kill()`, a timeout or the child's own exit end the
+// child's whole process group, grandchildren included. `dispose()` returns
+// only once every child it spawned is gone.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -39,6 +43,26 @@ function isAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/** Pids of live processes whose command line has `token` as an argument. Zombies have no command line and do not count. */
+function processesWithArgument(token: string): number[] {
+  if (existsSync("/proc/self/cmdline")) {
+    const pids: number[] = [];
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        if (readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0").includes(token)) pids.push(Number(entry));
+      } catch {
+        // The process ended while being read.
+      }
+    }
+    return pids;
+  }
+  return execFileSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.split(/\s+/).includes(token))
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
 }
 
 async function waitUntilGone(pid: number, timeoutMs = 5000): Promise<boolean> {
@@ -158,6 +182,53 @@ describe("ari/node process spawning", () => {
     }
   });
 
+  test("an empty or relative PATH entry is the current directory, as for spawn, and resolveExecutable names what spawn runs", async () => {
+    const scratch = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ari-path-entries-")));
+    const previousDirectory = process.cwd();
+    const writeAdapter = async (directory: string, label: string, mode = 0o755): Promise<void> => {
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, "adapter"), `#!/bin/sh\necho ${label}\n`, { mode });
+    };
+    await writeAdapter(scratch, "current-directory");
+    await writeAdapter(path.join(scratch, "relative-bin"), "relative-bin");
+    await writeAdapter(path.join(scratch, "elsewhere"), "elsewhere");
+    await writeAdapter(path.join(scratch, "not-executable"), "not-executable", 0o644);
+    const elsewhere = path.join(scratch, "elsewhere");
+    const notExecutable = path.join(scratch, "not-executable");
+    const cases = [
+      { PATH: ":/usr/bin", expected: "current-directory" },
+      { PATH: "/usr/bin:", expected: "current-directory" },
+      { PATH: `/usr/bin::${elsewhere}`, expected: "current-directory" },
+      { PATH: `${elsewhere}::/usr/bin`, expected: "elsewhere" },
+      { PATH: "relative-bin:/usr/bin", expected: "relative-bin" },
+      { PATH: `${notExecutable}::${elsewhere}`, expected: "current-directory" },
+    ];
+    process.chdir(scratch);
+    try {
+      for (const { PATH, expected } of cases) {
+        const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH } });
+        const resolved = await service.resolveExecutable("adapter");
+        const child = await service.spawn({ command: "adapter", stdin: "ignore" });
+        const ran = (await readAll(child.stdout)).trim();
+        await service.dispose();
+        assert.equal(ran, expected, `spawn with PATH=${PATH}`);
+        const expectedFile = expected === "current-directory" ? path.join(scratch, "adapter") : path.join(scratch, expected, "adapter");
+        assert.equal(resolved, expectedFile, `resolveExecutable with PATH=${PATH}`);
+      }
+      // With no PATH at all, spawn and resolveExecutable both search /usr/bin:/bin.
+      const noPath = createProcessService({ envPolicy: { stripAmbient: ["PATH"] }, baseEnv: { PATH: elsewhere } });
+      const shell = await noPath.resolveExecutable("sh");
+      assert.ok(shell === "/usr/bin/sh" || shell === "/bin/sh", `sh resolved to ${shell}`);
+      assert.equal(await noPath.resolveExecutable("adapter"), null);
+      const child = await noPath.spawn({ command: "sh", args: ["-c", "echo ok"], stdin: "ignore" });
+      assert.equal((await readAll(child.stdout)).trim(), "ok");
+      await noPath.dispose();
+    } finally {
+      process.chdir(previousDirectory);
+      await fs.rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   test("disposing kills the child's whole process group, grandchild included", async () => {
     const service = createProcessService({ envPolicy: { stripAmbient: [] } });
     const { child, grandchildPid } = await startParentOfGrandchild(service.spawn);
@@ -169,12 +240,18 @@ describe("ari/node process spawning", () => {
     await assert.rejects(service.spawn({ command: NODE }), (error: unknown) => isAriError(error, "invalid_state"));
   });
 
-  test("a child still starting when the service is disposed is ended, and its spawn rejects", async () => {
-    const service = createProcessService({ envPolicy: { stripAmbient: [] } });
-    const spawning = service.spawn({ command: NODE, args: ["-e", "setInterval(() => {}, 1000)"] });
-    const disposing = service.dispose();
-    await assert.rejects(spawning, (error: unknown) => isAriError(error, "invalid_state"));
-    await disposing;
+  test("dispose() does not return while a child it spawned is alive, including one still starting", async () => {
+    for (const awaitSpawn of [false, true]) {
+      const token = `ari-dispose-${randomUUID()}`;
+      const service = createProcessService({ envPolicy: { stripAmbient: [] } });
+      const spawning = service.spawn({ command: NODE, args: ["-e", "setInterval(() => {}, 1000)", token] });
+      if (awaitSpawn) await spawning;
+      await service.dispose();
+      assert.deepEqual(processesWithArgument(token), [], `no child is alive when dispose() returns (spawn awaited: ${awaitSpawn})`);
+      const child = await spawning;
+      assert.equal(existsSync(`/proc/${child.pid}`) || isAlive(child.pid!), false, "the child is gone and reaped");
+      assert.equal((await child.exited).signal, "SIGTERM");
+    }
   });
 
   test("aborting the service's signal kills the child's whole process group", async () => {

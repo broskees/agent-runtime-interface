@@ -14,6 +14,10 @@
 // process groups; there `taskkill /T` ends the child's process tree instead
 // (not exercised by the test suite, which runs on Linux).
 //
+// Disposal: a child is registered for cleanup in the same synchronous step
+// that starts it, so `dispose()` always sees it and returns only once the
+// process group of every child it spawned is gone.
+//
 // Output: `stdout` and `stderr` are pipes. Read both, or a child that writes a
 // lot may block once a pipe buffer is full.
 
@@ -70,39 +74,66 @@ function environmentValue(environment: Environment, name: string): string | unde
   return match === undefined ? undefined : environment[match];
 }
 
+/** The search path Node's spawn uses on Linux and macOS when the child environment has no PATH. */
+const DEFAULT_SEARCH_PATH = "/usr/bin:/bin";
+
+/** A regular file the current user may execute (on Windows: any file that is not a directory). */
 async function isExecutableFile(file: string): Promise<boolean> {
   try {
     const stats = await fs.stat(file);
     if (!stats.isFile()) return false;
-    await fs.access(file, fs.constants.X_OK);
+    if (!isWindows) await fs.access(file, fs.constants.X_OK);
     return true;
   } catch {
     return false;
   }
 }
 
-/**
- * The absolute path of executable `name`, or null when there is none. A name
- * with a directory part is checked as a path; a bare name is looked up in
- * each directory of `searchPath` (a PATH-style list) in order. On Windows each
- * candidate is also tried with every extension in `pathExtensions` (PATHEXT).
- */
-export async function resolveExecutable(name: string, searchPath: string | undefined, pathExtensions?: string): Promise<string | null> {
-  if (typeof name !== "string" || name === "") return null;
-  const extensions = isWindows ? ["", ...(pathExtensions ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((extension) => extension !== "")] : [""];
-  const hasDirectoryPart = name.includes("/") || (isWindows && name.includes("\\"));
-  const bases = hasDirectoryPart
-    ? [path.resolve(name)]
-    : (searchPath ?? "")
-        .split(path.delimiter)
-        .filter((directory) => directory !== "")
-        .map((directory) => path.resolve(directory, name));
-  for (const base of bases) {
-    for (const extension of extensions) {
-      if (await isExecutableFile(base + extension)) return base + extension;
-    }
+async function firstExecutable(candidates: readonly string[]): Promise<string | null> {
+  for (const candidate of candidates) {
+    if (await isExecutableFile(candidate)) return candidate;
   }
   return null;
+}
+
+/**
+ * The absolute path of the file Node's spawn runs for command `name`, or null
+ * when spawn would find none. It repeats the search libuv (Node's process
+ * layer) makes, so it names what spawn runs:
+ *
+ *   - A name with a directory part is not searched; it is relative to `cwd`.
+ *   - Linux and macOS: the entries of `searchPath`, split on `:`, in order. An
+ *     empty entry is `cwd` and a relative entry is relative to `cwd`. The
+ *     first regular file the user may execute wins. Without a search path,
+ *     spawn searches `/usr/bin:/bin`, and so does this.
+ *   - Windows: `cwd` first (unless `NoDefaultCurrentDirectoryInExePath` is
+ *     set), then the entries of `searchPath` split on `;`, with empty entries
+ *     skipped and quotes removed. In each directory: the exact name when it
+ *     has an extension, then the name plus `.com`, then plus `.exe`. The test
+ *     suite runs on Linux and does not exercise this branch.
+ *
+ * `cwd` defaults to this process's current directory, which is where spawn
+ * looks when a request has no `cwd`.
+ */
+export async function resolveExecutable(name: string, searchPath: string | undefined, cwd: string = process.cwd()): Promise<string | null> {
+  if (typeof name !== "string" || name === "") return null;
+  if (!isWindows) {
+    if (name.includes("/")) return firstExecutable([path.resolve(cwd, name)]);
+    const entries = (searchPath ?? DEFAULT_SEARCH_PATH).split(":");
+    return firstExecutable(entries.map((entry) => path.resolve(cwd, entry, name)));
+  }
+  const withExtensions = (base: string): string[] => {
+    // libuv counts a name as having an extension when any `.` in it is followed by a character.
+    const hasExtension = /\.[\s\S]/.test(path.win32.basename(base));
+    return [...(hasExtension ? [base] : []), `${base}.com`, `${base}.exe`];
+  };
+  if (/[\\/:]/.test(name)) return firstExecutable(withExtensions(path.resolve(cwd, name)));
+  const directories = (searchPath ?? "")
+    .split(";")
+    .map((entry) => entry.replace(/^["']|["']$/g, ""))
+    .filter((entry) => entry !== "");
+  if (process.env.NoDefaultCurrentDirectoryInExePath === undefined) directories.unshift(cwd);
+  return firstExecutable(directories.flatMap((directory) => withExtensions(path.resolve(cwd, directory, name))));
 }
 
 /** Sends `signal` to process group `groupId`. False when the group no longer exists. */
@@ -165,6 +196,9 @@ function rememberRunningGroup(groupId: number): void {
 }
 
 function spawnFailure(command: string, error: NodeJS.ErrnoException): AriError {
+  if (typeof error.code === "string" && error.code.startsWith("ERR_INVALID_ARG")) {
+    return callErrors.validation([{ path: ["command"], message: error.message }], `Cannot spawn ${command}: ${error.message}`);
+  }
   if (error.code === "ENOENT") {
     return callErrors.notFound({
       resource: "executable",
@@ -225,9 +259,12 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
   return {
     envPolicy,
 
+    /** Searches the given `path`, or else the PATH a child would get, the way `spawn` does for a request without `cwd`. */
     async resolveExecutable(name, resolveOptions) {
-      const childEnvironment = buildChildEnvironment(baseEnv, envPolicy);
-      return resolveExecutable(name, resolveOptions?.path ?? environmentValue(childEnvironment, "PATH"), environmentValue(childEnvironment, "PATHEXT"));
+      const childPath = environmentValue(buildChildEnvironment(baseEnv, envPolicy), "PATH");
+      // On Windows, spawn falls back to this process's own PATH when the child environment has none.
+      const searchPath = resolveOptions?.path ?? childPath ?? (isWindows ? environmentValue(process.env, "PATH") : undefined);
+      return resolveExecutable(name, searchPath);
     },
 
     async spawn(request: SpawnRequest): Promise<SpawnedProcess> {
@@ -244,30 +281,33 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
       }
 
       const stdio: StdioOptions = [stdinMode, "pipe", "pipe"];
-      const child: ChildProcess = spawnChildProcess(request.command, request.args ?? [], {
-        cwd: request.cwd,
-        env: buildChildEnvironment(baseEnv, envPolicy, request.env ?? {}),
-        stdio,
-        detached: !isWindows,
-        windowsHide: true,
-      });
-      const exited = new Promise<ProcessExit>((resolve) => {
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      });
+      let child: ChildProcess;
       try {
-        await new Promise<void>((resolve, reject) => {
-          child.once("spawn", resolve);
-          child.once("error", reject);
+        child = spawnChildProcess(request.command, request.args ?? [], {
+          cwd: request.cwd,
+          env: buildChildEnvironment(baseEnv, envPolicy, request.env ?? {}),
+          stdio,
+          detached: !isWindows,
+          windowsHide: true,
         });
       } catch (error) {
         throw spawnFailure(request.command, error as NodeJS.ErrnoException);
       }
-      // After a successful spawn, 'error' only reports a failed kill, which the
-      // group signals below make moot; a write to a closed stdin is reported
-      // by `write()` instead.
+      // Node sets `pid` only when the process started; otherwise it emits 'error' on the next tick.
+      if (child.pid === undefined) {
+        const failure = await new Promise<NodeJS.ErrnoException>((resolve) => child.once("error", resolve));
+        throw spawnFailure(request.command, failure);
+      }
+      // From here to `return` nothing awaits, so the child is registered for
+      // cleanup before `dispose()` can run. Later 'error' events only report a
+      // failed kill, which the group signals make moot; a write to a closed
+      // stdin is reported by `write()` instead.
       child.on("error", () => {});
       child.stdin?.on("error", () => {});
-      const pid = child.pid as number;
+      const pid = child.pid;
+      const exited = new Promise<ProcessExit>((resolve) => {
+        child.once("exit", (code, signal) => resolve({ code, signal }));
+      });
       const isRunning = (): boolean => child.exitCode === null && child.signalCode === null;
 
       const terminate = async (): Promise<void> => {
@@ -290,12 +330,6 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
         // End anything the child left behind in its group, then forget the group.
         void track(terminateGroup(pid, killGraceMs).finally(() => runningGroups.delete(pid)));
       });
-
-      // The service was disposed while this child was starting: it must not outlive the disposal.
-      if (disposed) {
-        await track(terminate());
-        throw callErrors.invalidState("disposed", "The process service was disposed while the process started");
-      }
 
       return {
         pid,

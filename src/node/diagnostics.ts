@@ -1,10 +1,8 @@
-// Diagnostics for one instance. Each entry is redacted, then held to a byte
-// budget, then handed to the host's `write` function.
-//
-// Redaction: every occurrence of a registered secret value, in `msg`, in
-// `level`, and in any string or object key inside `native` or `data`, becomes
-// `[redacted]`. Redaction happens before truncation, so a cut can never leave
-// part of a secret behind.
+// Diagnostics for one instance. Each entry is turned into plain JSON data with
+// registered secrets redacted, then held to a byte budget, then handed to the
+// host's `write` function. Redaction happens before truncation, so a cut can
+// never leave part of a secret behind. What redaction covers is listed on
+// `Diagnostics.registerSecret` below.
 //
 // Budget: an entry whose JSON form is larger than `maxEntryBytes` UTF-8 bytes
 // (default 64 KiB) is truncated. `native` and `data` become their JSON text,
@@ -35,7 +33,30 @@ export interface DiagnosticsOptions {
 }
 
 export type Diagnostics = HostServices["diagnostics"] & {
-  /** Every later entry has this value replaced by `[redacted]`. Empty values are ignored. */
+  /**
+   * Redacts `value` from every later entry. Empty values are ignored. The
+   * guarantee covers only the values registered here, in these forms:
+   *
+   *   - Text, in `msg`, `level` and every string and object key inside
+   *     `native` and `data`: each occurrence of one of the value's text forms
+   *     becomes `[redacted]`. The text forms are the value itself (for bytes,
+   *     their UTF-8 text when the bytes are valid UTF-8), and the base64 (with
+   *     and without `=` padding), base64url and lowercase and uppercase hex
+   *     encodings of its bytes (UTF-8 bytes for a string).
+   *   - Numbers: a number or bigint whose decimal text contains a text form
+   *     becomes `[redacted]`, so a numeric PIN registered as "123456" is
+   *     redacted from `{ pin: 123456 }`.
+   *   - Bytes: a Buffer, typed array, DataView or ArrayBuffer, and an array of
+   *     integers 0 to 255 (which covers the `data` of Buffer's JSON form
+   *     `{ type: "Buffer", data: [...] }`), whose bytes contain the value's
+   *     bytes (UTF-8 bytes for a string) becomes `[redacted]` whole. Other
+   *     binary values are logged as `{ base64 }`.
+   *
+   * Not covered: any other encoding (UTF-16, URL encoding, a typed array
+   * already turned into `{ "0": .., "1": .. }` by JSON), a value encoded
+   * together with other data (base64 of `user:secret` is not caught), and a
+   * value split across fields.
+   */
   registerSecret(value: string | Uint8Array): void;
 };
 
@@ -68,14 +89,27 @@ function longestFittingPrefix(text: string, fits: (candidate: string) => boolean
   return prefixOf(text, low);
 }
 
-/** A plain JSON copy of `value`, or a note saying why there is none. */
-function toJson(value: unknown): unknown {
-  try {
-    const text = JSON.stringify(value);
-    return text === undefined ? null : JSON.parse(text);
-  } catch (error) {
-    return `[unserializable: ${(error as Error).message}]`;
+/** True for a non-empty array of integers 0 to 255, which may be bytes. */
+function isByteArray(value: readonly unknown[]): value is number[] {
+  return value.length > 0 && value.every((item) => Number.isInteger(item) && (item as number) >= 0 && (item as number) <= 255);
+}
+
+/** The text forms of a registered value; see `registerSecret`. */
+function textForms(value: string | Uint8Array, bytes: Buffer): string[] {
+  const forms: string[] = [];
+  if (typeof value === "string") {
+    forms.push(value);
+  } else {
+    try {
+      forms.push(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+      // Not valid UTF-8: the bytes have no text form of their own.
+    }
   }
+  const base64 = bytes.toString("base64");
+  const hex = bytes.toString("hex");
+  forms.push(base64, base64.replace(/=+$/, ""), bytes.toString("base64url"), hex, hex.toUpperCase());
+  return forms.filter((form) => form !== "");
 }
 
 export function createDiagnostics(options: DiagnosticsOptions): Diagnostics {
@@ -83,25 +117,56 @@ export function createDiagnostics(options: DiagnosticsOptions): Diagnostics {
   if (!Number.isInteger(maxEntryBytes) || maxEntryBytes < MIN_DIAGNOSTIC_ENTRY_BYTES) {
     throw new RangeError(`maxEntryBytes must be an integer of at least ${MIN_DIAGNOSTIC_ENTRY_BYTES}`);
   }
-  const secrets = new Set<string>();
-  // Longest first, so a secret that contains another is replaced whole.
-  let secretsLongestFirst: string[] = [];
+  const registeredHex = new Set<string>();
+  const secretBytes: Buffer[] = [];
+  // Longest first, so a text form that contains another is replaced whole.
+  let textFormsLongestFirst: string[] = [];
 
   const redactText = (text: string): string => {
     let result = text;
-    for (const secret of secretsLongestFirst) result = result.split(secret).join(REDACTED);
+    for (const form of textFormsLongestFirst) result = result.split(form).join(REDACTED);
+    return result;
+  };
+  const holdsSecretText = (text: string): boolean => textFormsLongestFirst.some((form) => text.includes(form));
+  const holdsSecretBytes = (bytes: Buffer): boolean => secretBytes.some((secret) => bytes.indexOf(secret) !== -1);
+
+  // Plain JSON data for `value` with registered secrets redacted. Undefined
+  // for what JSON leaves out (undefined, functions, symbols).
+  const toRedactedJson = (value: unknown, ancestors: readonly object[]): unknown => {
+    if (value === null || typeof value === "boolean") return value;
+    if (typeof value === "string") return redactText(value);
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return null;
+      return holdsSecretText(String(value)) ? REDACTED : value;
+    }
+    if (typeof value === "bigint") return holdsSecretText(value.toString()) ? REDACTED : value.toString();
+    if (typeof value !== "object") return undefined;
+    if (ancestors.includes(value)) return "[circular]";
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+      const bytes = value instanceof ArrayBuffer ? Buffer.from(value) : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+      return holdsSecretBytes(bytes) ? REDACTED : { base64: bytes.toString("base64") };
+    }
+    const inside = [...ancestors, value];
+    if (Array.isArray(value)) {
+      if (isByteArray(value) && holdsSecretBytes(Buffer.from(value))) return REDACTED;
+      return value.map((item) => toRedactedJson(item, inside) ?? null);
+    }
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") return toRedactedJson(toJSON.call(value), inside);
+    const result: { [key: string]: unknown } = {};
+    for (const [key, item] of Object.entries(value)) {
+      const converted = toRedactedJson(item, inside);
+      if (converted !== undefined) result[redactText(key)] = converted;
+    }
     return result;
   };
 
-  const redactValue = (value: unknown): unknown => {
-    if (typeof value === "string") return redactText(value);
-    if (Array.isArray(value)) return value.map(redactValue);
-    if (typeof value === "object" && value !== null) {
-      const result: { [key: string]: unknown } = {};
-      for (const [key, inner] of Object.entries(value)) result[redactText(key)] = redactValue(inner);
-      return result;
+  const redactedField = (value: unknown): unknown => {
+    try {
+      return toRedactedJson(value, []) ?? null;
+    } catch (error) {
+      return redactText(`[unserializable: ${(error as Error).message}]`);
     }
-    return value;
   };
 
   const fitToBudget = (record: DiagnosticRecord): DiagnosticRecord => {
@@ -123,10 +188,13 @@ export function createDiagnostics(options: DiagnosticsOptions): Diagnostics {
 
   return {
     registerSecret(value: string | Uint8Array): void {
-      const text = typeof value === "string" ? value : new TextDecoder().decode(value);
-      if (text === "" || secrets.has(text)) return;
-      secrets.add(text);
-      secretsLongestFirst = [...secrets].sort((left, right) => right.length - left.length);
+      // A copy, so a caller reusing its buffer cannot change what is redacted.
+      const bytes = typeof value === "string" ? Buffer.from(value, "utf8") : Buffer.from(Uint8Array.from(value));
+      if (bytes.length === 0 || registeredHex.has(bytes.toString("hex"))) return;
+      registeredHex.add(bytes.toString("hex"));
+      secretBytes.push(bytes);
+      const allForms = new Set([...textFormsLongestFirst, ...textForms(value, bytes)]);
+      textFormsLongestFirst = [...allForms].sort((left, right) => right.length - left.length);
     },
 
     log(entry: DiagnosticEntry): void {
@@ -134,8 +202,8 @@ export function createDiagnostics(options: DiagnosticsOptions): Diagnostics {
         level: redactText(String(entry.level)),
         msg: redactText(String(entry.msg)),
       };
-      if (entry.native !== undefined) record.native = redactValue(toJson(entry.native));
-      if (entry.data !== undefined) record.data = redactValue(toJson(entry.data));
+      if (entry.native !== undefined) record.native = redactedField(entry.native);
+      if (entry.data !== undefined) record.data = redactedField(entry.data);
       options.write(fitToBudget(record));
     },
   };

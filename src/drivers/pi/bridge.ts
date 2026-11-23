@@ -139,7 +139,7 @@ export default function ariBridge(pi /*: ExtensionAPI */) {
   delete process.env[SETTINGS_VARIABLE];
 
   const allowedForProcess = new Set();
-  let pendingContext = [];
+  let pendingContext = "";
 
   pi.on("session_start", (_event, ctx) => {
     ctx.ui.setStatus(STATUS_KEY, JSON.stringify({ cwd: ctx.cwd }));
@@ -149,10 +149,9 @@ export default function ariBridge(pi /*: ExtensionAPI */) {
     const verdict = verdictFor(settings.mode, event.toolName);
     if (verdict === "allow") return undefined;
     if (verdict === "block") return { block: true };
-    const input = event.input;
-    const key = event.toolName === "bash" ? "bash:" + String(input.command) : event.toolName;
+    const key = event.toolName === "bash" ? "bash:" + String(event.input.command) : event.toolName;
     if (allowedForProcess.has(key)) return undefined;
-    const title = JSON.stringify({ ari: "approval", kind: approvalKind(event.toolName), tool: event.toolName, input, options: OPTIONS });
+    const title = JSON.stringify({ ari: "approval", kind: approvalKind(event.toolName), tool: event.toolName, input: event.input, options: OPTIONS });
     const choice = await ctx.ui.select(title, OPTIONS.map((option) => option.id), { signal: ctx.signal });
     if (choice === "allow-once") return undefined;
     if (choice === "allow-session") {
@@ -182,14 +181,15 @@ export default function ariBridge(pi /*: ExtensionAPI */) {
     description: "Hold host instructions for the next run (used by ARI)",
     handler: async (args) => {
       const parsed = JSON.parse(args);
-      if (typeof parsed.text === "string" && parsed.text !== "") pendingContext.push(parsed.text);
+      if (typeof parsed.text !== "string" || parsed.text === "") return;
+      pendingContext = pendingContext === "" ? parsed.text : pendingContext + "\n\n" + parsed.text;
     },
   });
 
   pi.on("before_agent_start", (event) => {
-    if (pendingContext.length === 0) return undefined;
-    const text = pendingContext.join("\n\n");
-    pendingContext = [];
+    if (pendingContext === "") return undefined;
+    const text = pendingContext;
+    pendingContext = "";
     return { systemPrompt: event.systemPrompt + "\n\n" + text };
   });
 }

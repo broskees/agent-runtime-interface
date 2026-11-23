@@ -166,8 +166,9 @@ export class PiInstance implements Instance {
       await this.#host.secrets.set(SECRET_NAMESPACE, SECRET_KEY, new TextEncoder().encode(apiKey));
       return this.#state();
     },
+    // Pi's sign-ins finish in pi itself or with an API key; none returns through a callback URL.
     complete: async () => {
-      throw callErrors.invalidState("no_callback_flow", "Pi sign-in has no browser callback");
+      throw callErrors.unsupported("auth.complete", "Pi sign-in has no browser callback");
     },
     cancel: async () => this.#state(),
     logout: async () => {

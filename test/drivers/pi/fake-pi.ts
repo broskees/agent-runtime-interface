@@ -238,6 +238,7 @@ class SessionFile {
   header: Header;
   entries: Entry[];
   leafId: string | null;
+  /** The session file; empty for an in-memory session (`--no-session`). */
   file: string;
   flushed: boolean;
   /** Ids of user entries that `prompt` created (not steers): the fake's own record, kept beside the file. */
@@ -257,6 +258,11 @@ class SessionFile {
     const timestamp = new Date().toISOString();
     const file = path.join(dir, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
     return new SessionFile({ type: "session", version: 3, id, timestamp, cwd }, [], file, false, new Set());
+  }
+
+  /** `--no-session`: nothing is ever written. */
+  static inMemory(cwd: string): SessionFile {
+    return new SessionFile({ type: "session", version: 3, id: sessionIdFor(0), timestamp: new Date().toISOString(), cwd }, [], "", false, new Set());
   }
 
   static open(file: string, dir: string, cwd: string): SessionFile {
@@ -299,6 +305,7 @@ class SessionFile {
   }
 
   persist(entry: Entry): void {
+    if (this.file === "") return;
     if (!this.flushed) {
       if (!this.hasConversation) return;
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
@@ -369,7 +376,9 @@ const appendedSystemPrompts = args.flags.get("--append-system-prompt") ?? [];
 
 let session: SessionFile;
 try {
-  if (flag("--fork") !== undefined) {
+  if (args.switches.has("--no-session")) {
+    session = SessionFile.inMemory(cwd);
+  } else if (flag("--fork") !== undefined) {
     const source = resolveSessionArgument(flag("--fork")!, sessionDir);
     if (source === undefined) {
       process.stderr.write(`No session found matching '${flag("--fork")}'\n`);
@@ -490,7 +499,7 @@ function stateRecord(): Record {
     isCompacting: false,
     steeringMode: "one-at-a-time",
     followUpMode: "one-at-a-time",
-    sessionFile: session.file,
+    ...(session.file === "" ? {} : { sessionFile: session.file }),
     sessionId: session.header.id,
     autoCompactionEnabled: true,
     messageCount: session.messages().length,
@@ -997,7 +1006,7 @@ const puppet: { [method: string]: (...params: never[]) => unknown } = {
   },
   /** What this process holds for a session file, or null when it holds another. */
   inspect: (file: string) => {
-    if (path.resolve(file) !== path.resolve(session.file)) return null;
+    if (session.file === "" || path.resolve(file) !== path.resolve(session.file)) return null;
     return {
       loaded: true,
       cwd: session.header.cwd,

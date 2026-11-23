@@ -168,14 +168,28 @@ export interface NativeAgent {
    */
   observedEnvironments?(): Promise<ReadonlyArray<{ readonly [name: string]: string }>>;
   /**
-   * What the native agent holds for the native session behind `thread`, read
-   * from the native side, or undefined when it has no such session. Scenario
-   * 14 uses it to see that a declared thread operation (fork, compact, inject
-   * history, rollback, unload, release) had its effect, not only a
-   * well-shaped result. Needed when the driver declares one of those; else
-   * give a reason under `capability-honesty.native-effects`.
+   * What the native agent holds for the native session behind `thread`
+   * (`thread.handle`, else `thread.native.id`), read from the native side,
+   * or undefined when it has no such session. Scenarios 9 and 14 use it to
+   * see that a resume kept its history, that a turn reached the native
+   * session the thread names, and that a declared thread operation (fork,
+   * compact, inject history, rollback, unload, release, stopping a task or a
+   * subagent) changed the native session, not only returned a well-shaped
+   * result. Needed when the driver declares one of those; else give a reason
+   * under `session-replaced.native-history` or
+   * `capability-honesty.native-effects`.
    */
   inspectSession?(thread: Thread): Promise<NativeSessionState | undefined>;
+  /**
+   * Everything the native agent served that is not a session's own state,
+   * since the rig started, oldest first: feedback uploads, MCP app calls and
+   * extension calls. Scenario 14 compares it with what the driver answered,
+   * so a declared call must reach the agent and return what the agent
+   * produced. Report outputs in ARI's shapes. Needed when the driver declares
+   * `sessions.feedbackUpload`, `tools.mcpApps` or an extension namespace;
+   * else give a reason under `capability-honesty.native-activity`.
+   */
+  activity?(): Promise<NativeActivity>;
 }
 
 /** One native session as the native agent holds it. */
@@ -184,12 +198,30 @@ export interface NativeSessionState {
   readonly loaded: boolean;
   /** The session's working directory, as the native agent resolved it. */
   readonly cwd: string;
-  /** How many turns the session holds. */
-  readonly turns: number;
+  /** The prompt of each turn the session holds, oldest first: its history. */
+  readonly prompts: readonly string[];
   /** How many times the session was compacted. */
   readonly compactions: number;
-  /** How many history messages were injected into it. */
-  readonly injectedMessages: number;
+  /** The text of each history message injected into it, in order. */
+  readonly injectedMessages: readonly string[];
+  /** Its background tasks by title, and whether each still runs. */
+  readonly backgroundTasks: ReadonlyArray<{ readonly title: string; readonly running: boolean }>;
+  /** Its subagents by name, and whether each still runs. */
+  readonly subagents: ReadonlyArray<{ readonly name: string; readonly running: boolean }>;
+}
+
+/** What the native agent served outside any session's state, as `NativeAgent.activity` reports it. */
+export interface NativeActivity {
+  /** Feedback uploads the agent took, with the id it answered. */
+  readonly feedback: ReadonlyArray<{ readonly feedbackId: string; readonly reason?: string }>;
+  /** MCP app operations the agent served: the input it got and the output it produced, in ARI's shapes. */
+  readonly mcp: ReadonlyArray<
+    | { readonly operation: "listTools"; readonly server: string; readonly output: readonly unknown[] }
+    | { readonly operation: "callTool"; readonly server: string; readonly tool: string; readonly args: unknown; readonly output: unknown }
+    | { readonly operation: "readResource"; readonly server: string; readonly uri: string; readonly output: unknown }
+  >;
+  /** Extension calls the agent served: the params it got and the result it produced. */
+  readonly extensions: ReadonlyArray<{ readonly params: unknown; readonly result: unknown }>;
 }
 
 /** A tool the native agent runs: its call and then its result. */

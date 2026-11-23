@@ -27,6 +27,7 @@ export type {
   HarnessRig,
   InstanceArrangement,
   InstanceFileWatch,
+  NativeActivity,
   NativeAgent,
   NativeApproval,
   NativeApprovalHandle,
@@ -57,7 +58,7 @@ export { REFERENCE_CLI_MANIFEST, REFERENCE_CONFIG_SCHEMA, REFERENCE_POISON_MS, r
 export type { ReferenceDriverConfig } from "./reference/driver.ts";
 export { REFERENCE_WORKSPACE, referenceHarness, referenceNativeTurn } from "./reference/harness.ts";
 export type { ReferenceHarnessOptions } from "./reference/harness.ts";
-export { ReferenceAgent } from "./reference/agent.ts";
+export { ReferenceAgent, referenceSessionState } from "./reference/agent.ts";
 export type { ReferenceAgentIo, ReferenceAgentOptions } from "./reference/agent.ts";
 export { MemoryReferenceStore } from "./reference/store.ts";
 export type { ReferenceStore } from "./reference/store.ts";

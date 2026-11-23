@@ -7,7 +7,7 @@ import type { AriEvent, SessionReplacedBody } from "../../generated/events.ts";
 import type { ResumeThreadInput } from "../../generated/session.ts";
 import type { Thread } from "../../generated/thread.ts";
 import type { CreatedInstance, OpenedSession, ScenarioContext } from "../context.ts";
-import type { HarnessRig } from "../harness.ts";
+import type { HarnessRig, NativeSessionState } from "../harness.ts";
 import { brief, sameJson } from "../util.ts";
 import type { Scenario } from "./scenario.ts";
 
@@ -23,20 +23,47 @@ export function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Runs one turn on `threadId`, failing with `what` and the reason when the thread cannot run it. */
-export async function checkRunsTurn(context: ScenarioContext, opened: OpenedSession, rig: HarnessRig<unknown>, threadId: string, what: string): Promise<void> {
+/** Reads the native session behind a thread from the native side (`NativeAgent.inspectSession`). */
+export type InspectSession = (thread: Thread) => Promise<NativeSessionState | undefined>;
+
+/** The native session behind `thread`, read from the native side; fails with `what` when the native agent has none. */
+export async function nativeSession(context: ScenarioContext, inspect: InspectSession, thread: Thread, what: string): Promise<NativeSessionState> {
+  const state = await context.wait(inspect(thread), `the native agent to report the native session behind thread ${thread.id}`);
+  if (state === undefined) context.fail(`${what}: the native agent has no native session behind thread ${thread.id}`);
+  return state;
+}
+
+/**
+ * Runs one turn on `thread`, failing with `what` and the reason when the
+ * thread cannot run it. With `inspect`, the turn's prompt must also have
+ * reached the native session the thread names, not some other one.
+ */
+export async function checkRunsTurn(context: ScenarioContext, opened: OpenedSession, rig: HarnessRig<unknown>, thread: Thread, what: string, inspect?: InspectSession): Promise<void> {
+  const prompt = `What do you know so far? (${context.unique("check")})`;
   let status: string;
   try {
-    status = (await context.simpleTurn(opened, rig, threadId, "What do you know so far?")).terminal.status;
+    status = (await context.simpleTurn(opened, rig, thread.id, prompt)).terminal.status;
   } catch (error) {
     context.fail(`${what} could not run a turn: ${describeError(error)}`);
   }
   context.check(status === "completed", `${what} ended a turn ${brief(status)}`);
+  if (inspect === undefined) return;
+  const native = await nativeSession(context, inspect, thread, `the turn on ${what}`);
+  context.check(native.prompts.includes(prompt), `the turn on ${what} did not reach the native session it names, which holds the prompts ${brief(native.prompts)}`);
+}
+
+/** The harness's `inspectSession`, or undefined after noting the harness's reason under `key`; fails without either. */
+export function inspectOrReason(context: ScenarioContext, rig: HarnessRig<unknown>, key: string, what: string): InspectSession | undefined {
+  const inspect = rig.native.inspectSession?.bind(rig.native);
+  if (inspect !== undefined) return inspect;
+  if (context.skipCheck(key, what)) return undefined;
+  context.fail(`${what} cannot be checked: the native agent has no inspectSession; add it to the harness, or give a reason under ${key}`);
 }
 
 async function expectReplaced(
   context: ScenarioContext,
   rig: HarnessRig<unknown>,
+  inspect: InspectSession | undefined,
   created: CreatedInstance,
   native: ResumeThreadInput["native"],
   cwd: string,
@@ -65,7 +92,7 @@ async function expectReplaced(
   const asked = "id" in native ? native.id : null;
   context.check(asked === null || thread.native.id !== asked, `the fresh thread claims the ${what} native session's id ${brief(asked)}`);
   // The event is not the result: the replacement must be a thread the host can use.
-  await checkRunsTurn(context, opened, rig, thread.id, `the replacement thread ${thread.id} after resuming a ${what} native session`);
+  await checkRunsTurn(context, opened, rig, thread, `the replacement thread ${thread.id} after resuming a ${what} native session`, inspect);
   await opened.close();
 }
 
@@ -75,6 +102,7 @@ export const sessionReplacedScenario: Scenario = {
   title: "Resuming a locked or missing native session emits session.replaced with contextLost: true",
   async run(context: ScenarioContext) {
     const rig = await context.rig();
+    const inspect = inspectOrReason(context, rig, "session-replaced.native-history", "the native history behind resumed and replacement threads");
     const created = await context.instance(rig);
     const first = await context.openSession(created);
     const thread = await context.createThread(first);
@@ -92,7 +120,15 @@ export const sessionReplacedScenario: Scenario = {
       normal.events.find((event) => event.body.type === "session.replaced") === undefined,
       "resuming an available native session emitted session.replaced",
     );
-    await checkRunsTurn(context, normal, rig, resumed.id, `the thread ${resumed.id} resumed from an available native session`);
+    // Resuming an available session keeps its history: the next turn lands on the native session that holds it.
+    await checkRunsTurn(context, normal, rig, resumed, `the thread ${resumed.id} resumed from an available native session`, inspect);
+    if (inspect !== undefined) {
+      const native = await nativeSession(context, inspect, resumed, "resuming an available native session");
+      context.check(
+        native.prompts.includes("Remember the number 7."),
+        `the native session behind the thread ${resumed.id} resumed from an available native session holds the prompts ${brief(native.prompts)}; its history "Remember the number 7." is gone, with no session.replaced`,
+      );
+    }
     await normal.close();
 
     const previousIds = [thread.native.id, thread.handle];
@@ -102,12 +138,12 @@ export const sessionReplacedScenario: Scenario = {
       }
     } else {
       await context.wait(rig.native.lockSession(thread), "the native agent to lock the session");
-      await expectReplaced(context, rig, created, resumeTarget(thread), thread.cwd, previousIds, "locked");
+      await expectReplaced(context, rig, inspect, created, resumeTarget(thread), thread.cwd, previousIds, "locked");
     }
 
     const missing: ResumeThreadInput["native"] = rig.missingSession ?? ({ id: "ari-conformance-missing-session", strength: "strong" } satisfies NativeRef);
     const missingIds = "handle" in missing ? [missing.handle] : [missing.id];
-    await expectReplaced(context, rig, created, missing, context.workspace.cwd, missingIds, "missing");
+    await expectReplaced(context, rig, inspect, created, missing, context.workspace.cwd, missingIds, "missing");
   },
 };
 

@@ -52,6 +52,7 @@ type PuppetMethod =
   | "holdCompletion"
   | "releaseCompletion"
   | "inspectSession"
+  | "activity"
   | "fail"
   | "stopRequested"
   | "finishCancelled"

@@ -147,14 +147,27 @@ interface NativeAgent {
   lockSession?(thread: Thread): Promise<void>;
   observedEnvironments?(): Promise<Array<{ [name: string]: string }>>;
   inspectSession?(thread: Thread): Promise<NativeSessionState | undefined>;
+  activity?(): Promise<NativeActivity>;
 }
 
 interface NativeSessionState {
-  loaded: boolean;           // a running native agent has it loaded (not only stored)
-  cwd: string;               // its working directory, as the agent resolved it
-  turns: number;             // how many turns it holds
-  compactions: number;       // how many times it was compacted
-  injectedMessages: number;  // how many history messages were injected into it
+  loaded: boolean;              // a running native agent has it loaded (not only stored)
+  cwd: string;                  // its working directory, as the agent resolved it
+  prompts: string[];            // the prompt of each turn it holds, oldest first: its history
+  compactions: number;          // how many times it was compacted
+  injectedMessages: string[];   // the text of each history message injected into it
+  backgroundTasks: Array<{ title: string; running: boolean }>;
+  subagents: Array<{ name: string; running: boolean }>;
+}
+
+interface NativeActivity {      // everything since the rig started, oldest first, in ARI's shapes
+  feedback: Array<{ feedbackId: string; reason?: string }>;
+  mcp: Array<
+    | { operation: "listTools"; server: string; output: McpTool[] }
+    | { operation: "callTool"; server: string; tool: string; args: unknown; output: McpCallResult }
+    | { operation: "readResource"; server: string; uri: string; output: McpResourceContents }
+  >;
+  extensions: Array<{ params: unknown; result: unknown }>;
 }
 
 interface NativeTurn {
@@ -206,20 +219,34 @@ Rules every harness keeps:
   it refuses one after a turn ended), but holds back the message that tells
   your driver until `release()`. Scenario 7 sends a steer in between, while
   your driver still believes the turn is running.
-- **`inspectSession`** reads the native session behind a thread from the
-  native side: your fake's own state, not your driver's. Return `loaded:
-  true` while a running fake agent holds the session, and the stored state
-  with `loaded: false` when only its files or records remain; `undefined`
-  when the fake has no such session. Scenario 14 uses it to see that a fork
-  landed at the right turn and in the right directory, and that compaction,
-  history injection, rollback, unload and release changed the native session.
+- **`inspectSession`** reads the native session behind a thread
+  (`thread.handle`, else `thread.native.id`) from the native side: your
+  fake's own state, not your driver's. Return `loaded: true` while a running
+  fake agent holds the session, and the stored state with `loaded: false`
+  when only its files or records remain; `undefined` when the fake has no
+  such session. Scenario 9 uses it to see that a resumed thread kept its
+  history and that each turn reached the native session the thread names.
+  Scenario 14 uses it to see that a fork carries the source's history in its
+  own native session and directory, and that compaction, history injection,
+  rollback, unload, release and stopping a task or subagent changed the
+  native session.
+- **`activity`** lists what your fake agent served that is not a session's
+  state: feedback uploads with the id it answered, MCP app operations with
+  their input and the output it produced, and extension calls with their
+  params and result. Report outputs in ARI's shapes (`McpTool[]`,
+  `McpCallResult`, `McpResourceContents`) so the kit can compare them with
+  what your driver returned; your harness knows both protocols. Make each
+  output something only the native side could produce (the reference echo
+  tool numbers its calls), so a driver cannot answer from its own guess.
 
 Optional puppet members are needed only when your driver declares the
 matching capability: `startBackgroundTask` for `background.*`,
 `spawnSubagent` for `subagents.stop`, `nextSteer` and `completeHeld` for
-`turns.steer`, and `inspectSession` for `threads.fork`, `threads.compact`,
-`threads.injectHistory`, `threads.rollback`, `threads.unload` or
-`sessions.release`. Without them, the scenario fails unless you give a reason
+`turns.steer`, `inspectSession` for scenario 9 and for `threads.fork`,
+`threads.compact`, `threads.injectHistory`, `threads.rollback`,
+`threads.unload`, `sessions.release`, `background.stop` or `subagents.stop`,
+and `activity` for `sessions.feedbackUpload`, `tools.mcpApps` or any
+extension namespace. Without them, the check fails unless you give a reason
 (see [Applicability](#applicability)).
 
 ## Three shapes of harness
@@ -415,54 +442,75 @@ the poison's whole lifetime.
 | 6 | `settlement` | Nothing settles the turn (no `turn.terminal`, no `turn.upsert` with a settled status) from its start, through the tool result and a 36.5 s pause after it, until the provider completes it; then it completes. The clock is installed before the rig exists. | `runTool`, `complete` | never |
 | 7 | `steer-after-end` | A steer after the turn ended returns `prompt_required`. So does a steer that arrives after the provider ended the turn but before the driver heard (`completeHeld`): the driver steers, the provider refuses, and the host must still get `prompt_required`. The provider never sees either as a turn. | `complete`, `completeHeld` | `turns.steer` off; check `steer-after-end.race` |
 | 8 | `duplicate-always-options` | An approval with two `accept_always` options and a decline is an approval kind (not `user_input`), with no questions, keeping each native option id and an accepting or declining decision; answering with the second `accept_always` option sends that native option, not the first one with the same decision. | `requestApproval` | `approvals.command` and `approvals.fileChange` off, `requests.responseModes` without `live`, or no supervised runtime mode |
-| 9 | `session-replaced` | Resuming an available session keeps its thread, replaces nothing, and the thread runs a turn. Resuming a locked session, then a missing one, falls back to a fresh session, emits `session.replaced` with `contextLost: true`, and the replacement thread runs a turn. | `lockSession` | check `session-replaced.locked` |
-| 10 | `auth-states` | A stored unchecked credential is `configured` and Send works, even with the ambient account signed out; an unanswerable check is `unavailable` and Send works; an undecidable one is `unknown`; `reportRuntimeFailure` poisons only its own scope (`runtime_poison`, `unauthenticated`, the scope of the instance that failed, a short `poisonExpiresAt`, the other instance unchanged); after `poisonExpiresAt` the instance reports its verdict from before the failure and Send works; inherited credentials never reach the agent. | `ambientAuth` arrangements, `managedProfile` secrets, `inheritedCredentials` | `Instance.auth` left out; checks `auth-states.configured`, `.unavailable`, `.unknown`, `.poison`, `.inherited-credentials` |
+| 9 | `session-replaced` | Resuming an available session keeps its thread, replaces nothing, and the thread runs a turn whose prompt reaches the native session that still holds the earlier history. Resuming a locked session, then a missing one, falls back to a fresh session, emits `session.replaced` with `contextLost: true`, and the replacement thread runs a turn that reaches its own native session. | `lockSession`, `inspectSession` | checks `session-replaced.locked`, `session-replaced.native-history` |
+| 10 | `auth-states` | A stored unchecked credential is `configured` and Send works, even with the ambient account signed out; an unanswerable check is `unavailable` and Send works; an undecidable one is `unknown`; `reportRuntimeFailure` poisons only its own scope (`runtime_poison`, `unauthenticated`, the scope of the instance that failed, a short `poisonExpiresAt`, the other instance unchanged); `auth.state()` reports `unauthenticated` with `runtime_poison` right after the failure and still one second before `poisonExpiresAt`; after it, the instance reports its verdict from before the failure and Send works; inherited credentials never reach the agent. | `ambientAuth` arrangements, `managedProfile` secrets, `inheritedCredentials` | `Instance.auth` left out; checks `auth-states.configured`, `.unavailable`, `.unknown`, `.poison`, `.inherited-credentials` |
 | 11 | `symlinked-workspace` | A thread created in the real path reports that path as its cwd, and its tool paths lie inside it. A thread created through the symbolic link has the same id and cwd, and every event the same ids and paths. | `workspace().symlinkedCwd` | `symlinked-workspace` |
-| 12 | `side-effect-free-probe` | `probe()` and `probe({ deep: true })` return valid results, call no `secrets.set`, `secrets.delete`, `callbacks.register`, `coordination.acquire` or `hostTools.*`, spawn only the probe executables, and create, change or remove no file under the instance's paths at any moment while they run. | `watchInstanceFiles`, `probeExecutables` | check `side-effect-free-probe.files` |
+| 12 | `side-effect-free-probe` | `probe()` and `probe({ deep: true })` return valid results that report the agent `installed`, call no `secrets.set`, `secrets.delete`, `callbacks.register`, `coordination.acquire` or `hostTools.*`, spawn only the probe executables, and create, change or remove no file under the instance's paths at any moment while they run. | `watchInstanceFiles`, `probeExecutables` | check `side-effect-free-probe.files` |
 | 13 | `replay-from-seq` | `events({ fromSeq: 1 })` and `events({ fromSeq: middle })` replay exactly the live events (same `seq`, same ids, same bodies), and the replayed stream goes on live identically. | `say`, `runTool`, `complete` | never |
-| 14 | `capability-honesty` | Every capability-gated member the driver declares off is left out or rejects with `unsupported{capability}`; every one it declares on returns a valid result and has its effect. See below. | the optional puppet members, `inspectSession` and `exercise` its declarations need | checks `capability-honesty.<member>` and `capability-honesty.native-effects` |
+| 14 | `capability-honesty` | Every capability-gated member the driver declares off is left out or rejects with `unsupported{capability}`; every one it declares on returns a valid result, has its effect, and returns what the native side produced. See below. | the optional puppet members, `inspectSession`, `activity` and `exercise` its declarations need | checks `capability-honesty.<member>`, `capability-honesty.native-effects` and `capability-honesty.native-activity` |
 | 15 | `idempotent-responses` | Three responses with one `(requestId, responseKey)`, two of them concurrent, have one outcome and reach the agent once. A second request in the same session answered with the same `responseKey` is another pair and reaches the agent too. Under `full_access`, the reply the agent gets is the narrowest accepting option, whether the driver answers itself or hands the request to the host's `fullAccessAutoReply`. | `requestApproval` | as scenario 8; the `full_access` part is skipped with a note when `runtimePolicy.modes.full_access` is off |
 
 Scenario 14 checks the members below, with the capability paths that gate
 them (`GATED_MEMBERS` holds the table, and a test keeps it in step with
 `spec/v1/methods.json`). It calls your driver's own session, without
 `ari/host`'s guard, because the driver itself must be honest. A member
-declared on must return a valid result **and** have its effect; a
-well-shaped answer that does nothing fails. Before the checks, the thread has
-run two turns (the second is the queued turn, or a plain one when `queue` is
-off), with a background task and a subagent started in the first.
+declared on must return a valid result, have its effect, and return what the
+native side produced; a well-shaped answer that did nothing fails. Before the
+checks, the thread has run three turns ("Start the build.", then the queued
+turn or "Second task.", then "Third task."), with a background task and a
+subagent started in the first.
 
 | Member | Works when |
 |---|---|
-| `startTurn` steer | it is accepted and the agent receives the steer text |
-| `startTurn` queue | it is accepted and the agent starts the queued prompt after the active turn |
-| `backgroundTasks.list` | it lists the running task |
+| `startTurn` steer | it is accepted under the steered turn's id with `accepted: "steered"`, and the agent receives the steer text |
+| `startTurn` queue | it is accepted with `accepted: "queued"`, and the agent starts the queued prompt after the active turn |
+| `backgroundTasks.list` | it lists the running task, whose id the next two checks use |
 | `backgroundTasks.await` | it matches the running task |
-| `backgroundTasks.stop` | afterwards the task no longer runs, by `list` when declared, else by `background.updated` |
-| `stopSubagent` | the subagent's status settles (`completed`, `failed`, `cancelled` or `interrupted`) |
-| `readSnapshot` | the snapshot is of the thread and holds both turns that ran on it |
-| `forkThread` at latest | it returns a new thread, and that thread runs a turn |
-| `forkThread` from a turn | natively, the fork from the first turn holds fewer turns than the two-turn source |
-| `forkThread` from an item | it returns a valid thread |
-| `forkThread` into another directory | the fork reports `otherCwd` as its cwd, and its native session works there |
+| `backgroundTasks.stop` | the driver's list (or its `background.updated` events) no longer shows the task running, and natively the task stopped |
+| `stopSubagent` | the subagent's status settles (`completed`, `failed`, `cancelled` or `interrupted`), and natively the subagent stopped |
+| `readSnapshot` | the snapshot is of the thread, holds the three turns that ran, and has an item carrying each turn's prompt |
+| `forkThread` at latest | the fork is a new thread on its own native session (not the source's), natively holds exactly the source's prompts, and runs a turn that reaches that native session |
+| `forkThread` from a turn | as at latest, but forked from the second of the three turns: natively it holds the prompts before that turn or up to and including it (the proposal does not choose, so both pass); a blank fork or a fork at the latest turn fails |
+| `forkThread` from an item | as from a turn, for an item of the second turn |
+| `forkThread` into another directory | as at latest, and the fork reports `otherCwd` as its cwd and its native session works there |
 | `compactThread` | natively, the session's compaction count grew |
-| `injectHistory` | it returns a valid result, and natively the session received every injected message |
-| `uploadFeedback` | it returns a valid result (shape only) |
-| `mcpApps.listTools` | the list includes `exercise.mcpApp.tool` |
-| `mcpApps.callTool`, `mcpApps.readResource` | they return valid results (shape only) |
-| `ext` | a call in each declared namespace resolves (shape only); an undeclared namespace is `unsupported` |
-| `contextWindow` | it equals the catalog's `contextWindow` for the model, when the catalog gives one |
-| `canReuseContextUsage` | it is true for the same model on both sides |
-| `rollbackThread` to the start | the snapshot lists no turns, and natively the session holds none |
-| `unloadThread` | natively the session is no longer loaded, and `resumeThread` brings the thread back to run a turn |
-| `release` | in a fresh session with one finished turn and nothing running or pending, `canRelease()` turns true within the step timeout (one that stays false fails: release could never be exercised), `release()` resolves, natively the session is no longer loaded, and the thread then runs a turn |
+| `injectHistory` | it returns a valid result, and natively the session received each injected message, in order |
+| `uploadFeedback` | the agent took an upload during the call and answered the feedback id the driver returned |
+| `mcpApps.listTools` | the list includes `exercise.mcpApp.tool`, and the server listed the same tool names during the call |
+| `mcpApps.callTool` | the native tool ran during the call with the host's arguments, and the driver returned exactly what it produced |
+| `mcpApps.readResource` | the server served the resource during the call, and the driver returned exactly what it produced |
+| `ext` | a call in each declared namespace reached the agent with the host's params, and the driver returned the agent's result; an undeclared namespace is `unsupported` |
+| `contextWindow` | it returns a positive integer or `undefined` (shape only, see below) |
+| `canReuseContextUsage` | it returns a boolean (shape only, see below) |
+| `rollbackThread` to the start | the snapshot lists no turns, and natively the session holds no prompts |
+| `unloadThread` | natively the session is no longer loaded, and `resumeThread` brings the thread back, in the same Session or a fresh one from the same instance, to run a turn that reaches its native session |
+| `release` | in a fresh session with one finished turn and nothing running or pending, `canRelease()` turns true within the step timeout (one that stays false fails: release could never be exercised), `release()` resolves, natively the session is no longer loaded, and the thread then runs a turn that reaches it |
 
-"Natively" means read through `NativeAgent.inspectSession`. When your harness
-gives a reason under `capability-honesty.native-effects` instead, those
-native checks are skipped with a note, and the ARI-side checks still run.
-The kit checks `uploadFeedback`, `mcpApps.callTool`, `mcpApps.readResource`
-and `ext` for shape only, because what they should do depends on the vendor
-and the tool.
+"Natively" means read through `NativeAgent.inspectSession`; "the agent took",
+"the server served" and "the native tool ran" mean read through
+`NativeAgent.activity`. When your harness gives a reason under
+`capability-honesty.native-effects` or `capability-honesty.native-activity`
+instead, those checks are skipped with a note, and the ARI-side checks still
+run.
+
+### Checks that rest on shape alone
+
+Every other check in the kit compares a result with an effect the kit or the
+native side can see. These still check only that a value is well formed, for
+the reason given:
+
+| Scenario | What is checked for shape only | Why |
+|---|---|---|
+| 4 `turn-failed` | the failure's `message`, `code` and `retryable` | the provider words its own messages, and the proposal fixes no code or retry rule per class; the class and `resetAt` are checked |
+| 5 `process-exit` | the failure's class | the proposal names no class for a process exit; the turn must end `failed` with a valid failure |
+| 8 `duplicate-always-options` | each option's `scope` | both `always` options have the same reach here; scenario 15 checks scopes through the narrowest `full_access` reply |
+| 12 `side-effect-free-probe` | `ok`, `version` and a deep probe's `auth` | the kit cannot know the installed version, and inventory I asks scenario 12 only for the absence of side effects; `installed` is checked |
+| 14 `capability-honesty` | `contextWindow` | the proposal fixes only the type; a session's effective window may differ from the catalog's maximum, and the value has no effect the kit can observe |
+| 14 | `canReuseContextUsage` | the proposal fixes only the type; a driver may refuse reuse even for one model name, for example a rolling alias |
+| 14 | `backgroundTasks.await` beyond `matched` | `awaited: true` tells the driver the host now waits for the tasks; no native effect is common to every vendor |
+| 14 | the outcome `stopSubagent` returns | the stop itself is checked natively; the outcome's fields are the driver's report of it |
+| 14 | `readSnapshot`'s `requests` and its items other than the prompts | the kit's thread has no pending requests, and other items depend on what the vendor stores |
+| 14 | `planConfigChange` | it is not capability-gated, so inventory I's scenario 14 does not cover it |
 
 ### What the probe file check can see
 
@@ -519,13 +567,14 @@ always shows why:
    fails the scenario.
 
 The same rule covers checks inside a scenario. A check the harness cannot
-support (a missing `lockSession`, `completeHeld`, `inspectSession` or
-`watchInstanceFiles`, an auth state it cannot arrange) fails the scenario
+support (a missing `lockSession`, `completeHeld`, `inspectSession`,
+`activity` or `watchInstanceFiles`, an auth state it cannot arrange) fails the scenario
 unless `notApplicable` has a reason under the check's key. The check keys are
 `turn-failed.usage_limit`, `steer-after-end.race`, `session-replaced.locked`,
-`auth-states.configured`, `auth-states.unavailable`, `auth-states.unknown`,
-`auth-states.poison`, `auth-states.inherited-credentials`,
-`side-effect-free-probe.files`, `capability-honesty.native-effects`,
+`session-replaced.native-history`, `auth-states.configured`,
+`auth-states.unavailable`, `auth-states.unknown`, `auth-states.poison`,
+`auth-states.inherited-credentials`, `side-effect-free-probe.files`,
+`capability-honesty.native-effects`, `capability-honesty.native-activity`,
 `capability-honesty.background`, `capability-honesty.stopSubagent`,
 `capability-honesty.turns.steer`, `capability-honesty.mcpApps`,
 `capability-honesty.forkThread.crossCwd` and `capability-honesty.ext.<ns>`.
@@ -602,7 +651,11 @@ for a late steer, native option ids with their real reach, `session.replaced`
 on a locked or missing session, five auth states with a 30-second runtime
 poison per scope, a probe that only runs `--version`, forks into another
 directory, an unloaded thread that `resumeThread` loads again, and
-`unsupported` for everything declared off.
+`unsupported` for everything declared off. Its agent serves a native MCP
+server (`reference-tools`, with an `echo` tool that numbers its calls and a
+`reference://readme` resource that numbers its reads), a feedback endpoint
+and the `reference.echo` extension, and records what it served for
+`NativeAgent.activity`.
 
 Its config: `profile` is `"full"` (every optional feature declared and
 implemented) or `"minimal"` (all declared off, and no `auth`);
@@ -614,16 +667,20 @@ the host.
 virtual workspace and filesystem, so it works in a browser.
 `test/conformance/child-process-harness.ts` runs the same driver against the
 same agent as a real child process, with real files and a real symbolic link.
-Both implement every optional puppet member (`completeHeld` and
-`inspectSession` included) and pass all 15 scenarios.
+Both implement every optional puppet member (`completeHeld`,
+`inspectSession` and `activity` included) and pass all 15 scenarios.
 
 ## How the kit proves itself
 
-`test/conformance/broken-drivers.ts` holds 50 deliberately broken variants of
+`test/conformance/broken-drivers.ts` holds 66 deliberately broken variants of
 the reference driver. Each wraps the honest driver and adds one bug the way a
 production driver has broken; `test/conformance/broken.test.ts` asserts each
 fails its scenario for that reason, and that the honest driver passes the same
 scenarios. Many are bugs that return the right shape and skip the effect.
+`test/conformance/kit.test.ts` also asserts that honest answers the proposal
+allows pass: a context window below the catalog's, refused usage reuse, an
+unloaded thread that only a fresh Session can resume, and a fork from a turn
+that excludes that turn.
 
 | # | Variants | The bugs |
 |---|---|---|
@@ -635,12 +692,12 @@ scenarios. Many are bugs that return the right shape and skip the effect.
 | 6 | 3 | a 30-second quiet timer re-armed per event; a turn settled by a tool result; one 30-second timer made when the session opens and `refresh()`ed per event |
 | 7 | 2 | a late steer that starts a turn; the provider's "no active turn" refusal surfaced as an error unless the driver already heard the turn end |
 | 8 | 2 | duplicate `always` options turned into a question; the reply sent as the first option with the chosen decision |
-| 9 | 3 | a silent session swap; a placeholder thread no native session backs as the fallback; a remembered thread returned on resume without loading its native session |
-| 10 | 4 | a configured credential treated as signed out; inherited credentials passed to the agent; the poison reported under the ambient scope; a poisoned instance kept signed out after expiry |
+| 9 | 4 | a silent session swap; a placeholder thread no native session backs as the fallback; a remembered thread returned on resume without loading its native session; a resume onto a fresh native session under the old thread's id |
+| 10 | 6 | a configured credential treated as signed out; inherited credentials passed to the agent; the poison reported under the ambient scope; a poisoned instance kept signed out after expiry; a poisoned instance reported `configured` while the poison is active; a poison lifted after one second of an advertised thirty |
 | 11 | 2 | the workspace path reported as given; the requested directory ignored |
-| 12 | 3 | a probe that writes secrets and takes a lease; one that opens a native session; one that writes a scratch file under `tmpDir` and deletes it before returning (run with the child-process harness, on real files) |
+| 12 | 4 | a probe that writes secrets and takes a lease; one that opens a native session; one that writes a scratch file under `tmpDir` and deletes it before returning (run with the child-process harness, on real files); one that reports "not installed" without looking |
 | 13 | 1 | a replay that renumbers `seq` |
-| 14 | 18 | readSnapshot declared off but served; fork from an item declared on but refused; a cross-directory fork that stays in the source directory; a compaction that does nothing; `canRelease()` always false; a `release()` that parks nothing; a snapshot without the thread's turns; a fork no native session backs; a fork from a turn made at the latest turn; a rollback that only empties the returned snapshot; history reported consumed but never sent; an unload that unloads nothing; a background stop that stops nothing; an await that matches nothing; a subagent stop that stops nothing; no context window for a catalog model; context usage never reusable for the same model; an MCP server listed with no tools |
+| 14 | 30 | readSnapshot declared off but served; fork from an item declared on but refused; a cross-directory fork that stays in the source directory; a compaction that does nothing; `canRelease()` always false; a `release()` that parks nothing; a snapshot without the thread's turns; a steer accepted under another turn's id; a queued turn reported as started; a snapshot whose turns have no items; a fork no native session backs; a fork from a turn made at the latest turn; a rollback that only empties the returned snapshot; history reported consumed but never sent; an unload that unloads nothing; a background stop that stops nothing; an await that matches nothing; a subagent stop that stops nothing; blank forks at the latest turn and from a turn; a cross-directory fork under a thread id the driver never registered; the source thread returned as its own fork; placeholder messages injected instead of the host's; a background stop only in the driver's own list; a subagent stop only in the driver's events; a made-up feedback id; an MCP tool call, resource read and tool list answered without the server; an extension call answered with nothing; an MCP server listed with no tools |
 | 15 | 3 | responses that are not idempotent; an `always` option mislabelled as reaching once; responses cached by `responseKey` alone, so a second request answered with the same key never reaches the agent |
 
 Write your own the same way when you add a check: a wrapper around an honest

@@ -12,9 +12,9 @@
 import { callErrors } from "../../errors.ts";
 import type { Driver } from "../../runtime.ts";
 import type { FakeSpawnRequest } from "../fake-host.ts";
-import type { ConformanceHarness, ConformanceWorkspace, HarnessRig, NativeSessionState, NativeTurn } from "../harness.ts";
+import type { ConformanceHarness, ConformanceWorkspace, HarnessRig, NativeActivity, NativeSessionState, NativeTurn } from "../harness.ts";
 import { AsyncQueue, baseName } from "../util.ts";
-import { ReferenceAgent } from "./agent.ts";
+import { ReferenceAgent, referenceSessionState } from "./agent.ts";
 import { referenceDriver } from "./driver.ts";
 import type { ReferenceDriverConfig } from "./driver.ts";
 import { createMemoryProcess } from "./memory-process.ts";
@@ -146,11 +146,13 @@ export function referenceHarness(options: ReferenceHarnessOptions = {}): Conform
             }
             for (const store of stores.values()) {
               const stored = store.load(sessionId);
-              if (stored !== undefined) {
-                return { loaded: false, cwd: stored.cwd, turns: stored.turns.length, compactions: stored.compactions, injectedMessages: stored.injectedMessages };
-              }
+              if (stored !== undefined) return referenceSessionState(stored, false);
             }
             return undefined;
+          },
+          activity: async (): Promise<NativeActivity> => {
+            const served = agents.map((agent) => agent.activity());
+            return { feedback: served.flatMap((entry) => entry.feedback), mcp: served.flatMap((entry) => entry.mcp), extensions: served.flatMap((entry) => entry.extensions) };
           },
         },
         probeExecutables: ["reference-agent"],

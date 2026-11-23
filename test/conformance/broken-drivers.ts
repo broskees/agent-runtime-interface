@@ -501,6 +501,39 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
   },
   {
     scenario: 9,
+    bug: "resumes an available native session onto a fresh native session under the old thread's id, losing its history without saying so",
+    reason: /the turn on the thread .* resumed from an available native session did not reach the native session it names, which holds the prompts \["Remember the number 7\."\]/,
+    harness: () => {
+      // Threads by native id, across every session of the instance, as first seen.
+      const remembered = new Map<string, Thread>();
+      return brokenHarness("silent fresh session on resume", {
+        session: (session) => {
+          const aliases = new Map<string, string>();
+          const rewritten = rewriteEvents(session, (event, pass) => {
+            const body = event.body;
+            const nativeId = body.type === "thread.upsert" ? body.thread.native?.id : undefined;
+            if (body.type === "thread.upsert" && typeof nativeId === "string" && body.thread.cwd !== undefined && !remembered.has(nativeId)) remembered.set(nativeId, body.thread as Thread);
+            pass();
+          });
+          return override(rewritten.session, {
+            async resumeThread(input: Parameters<Session["resumeThread"]>[0]) {
+              const nativeId = "handle" in input.native ? input.native.handle : input.native.id;
+              const known = nativeId === null ? undefined : remembered.get(nativeId);
+              if (known === undefined || nativeId === null) return session.resumeThread(input);
+              // Only the first resume takes the shortcut; later ones (a locked session) go to the driver.
+              remembered.delete(nativeId);
+              const fresh = await session.createThread({ cwd: known.cwd, policy: input.policy ?? { mode: "approval_required", interaction: "default", cwd: known.cwd } });
+              aliases.set(known.id, fresh.id);
+              return known;
+            },
+            startTurn: (input: Parameters<Session["startTurn"]>[0]) => session.startTurn({ ...input, threadId: aliases.get(input.threadId) ?? input.threadId }),
+          });
+        },
+      });
+    },
+  },
+  {
+    scenario: 9,
     bug: "swaps in a fresh native session silently when the old one is locked or missing",
     reason: /timed out .* session\.replaced after resuming a locked native session/,
     harness: () =>
@@ -598,6 +631,50 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
       }),
   },
   {
+    scenario: 10,
+    bug: "reports a poisoned instance as configured while the poison is active, so Send is never blocked",
+    reason: /while the runtime auth poison is active, auth\.state\(\) reports "configured"; expected "unauthenticated"/,
+    harness: () =>
+      brokenHarness("poison never blocks", {
+        instance: (instance) => {
+          const auth = instance.auth!;
+          return override(instance, {
+            auth: override(auth, {
+              state: async (): Promise<AuthState> => {
+                const real = await auth.state();
+                return real.evidence === "runtime_poison" ? { ...real, status: "configured" } : real;
+              },
+            }),
+          });
+        },
+      }),
+  },
+  {
+    scenario: 10,
+    bug: "lifts a runtime auth poison after one second although it advertises a 30-second expiry",
+    reason: /\d+ s into a 30 s runtime auth poison, auth\.state\(\) reports "configured" with evidence "passive"; expected "unauthenticated" with evidence "runtime_poison" until poisonExpiresAt/,
+    harness: () =>
+      brokenHarness("poison lifts early", {
+        instance: (instance) => {
+          const auth = instance.auth!;
+          let poisonedAt: number | undefined;
+          return override(instance, {
+            auth: override(auth, {
+              reportRuntimeFailure: async (failure: Parameters<NonNullable<typeof auth.reportRuntimeFailure>>[0]) => {
+                poisonedAt = Date.now();
+                return auth.reportRuntimeFailure!(failure);
+              },
+              state: async (): Promise<AuthState> => {
+                const real = await auth.state();
+                if (real.evidence !== "runtime_poison" || poisonedAt === undefined || Date.now() - poisonedAt <= 1000) return real;
+                return { status: "configured", evidence: "passive", scope: real.scope };
+              },
+            }),
+          });
+        },
+      }),
+  },
+  {
     scenario: 11,
     bug: "ignores the requested working directory and runs every thread in one fixed directory",
     reason: /the thread created in \/workspace\/project reports cwd \/workspace\/other; the host asked for \/workspace\/project/,
@@ -680,6 +757,15 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
               return instance.probe(options);
             },
           }),
+      }),
+  },
+  {
+    scenario: 12,
+    bug: "answers probe() with a made-up \"not installed\" result without looking for the agent",
+    reason: /probe\(\) reports installed: false, but the rig's agent is installed: every other scenario runs it/,
+    harness: () =>
+      brokenHarness("probe says not installed", {
+        instance: (instance) => override(instance, { probe: async () => ({ ok: false, installed: false, checkedAt: new Date().toISOString() }) }),
       }),
   },
   {
@@ -779,8 +865,41 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
   },
   {
     scenario: 14,
+    bug: "declares steering and accepts a steer under a turn id that is not the steered turn's",
+    reason: /startTurn steer: steering turn .* returned \{"status":"accepted","turnId":"turn-made-up","accepted":"steered"\}; expected the steered turn's id with accepted "steered"/,
+    harness: () =>
+      brokenSession("steer under another turn id", (session) => ({
+        startTurn: async (input: Parameters<Session["startTurn"]>[0]) => {
+          const result = await session.startTurn(input);
+          return input.intent === "steer" && result.status === "accepted" ? { ...result, turnId: "turn-made-up" } : result;
+        },
+      })),
+  },
+  {
+    scenario: 14,
+    bug: "declares queueing and reports a queued turn as started",
+    reason: /startTurn queue: queueing behind the active turn .* returned .*"accepted":"started".*; expected accepted "queued"/,
+    harness: () =>
+      brokenSession("queued reported as started", (session) => ({
+        startTurn: async (input: Parameters<Session["startTurn"]>[0]) => {
+          const result = await session.startTurn(input);
+          return input.intent === "queue" && result.status === "accepted" ? { ...result, accepted: "started" as const } : result;
+        },
+      })),
+  },
+  {
+    scenario: 14,
+    bug: "declares thread snapshots and returns the thread's turns without any of their items",
+    reason: /readSnapshot: the snapshot of thread .* has no item carrying the prompt "Start the build\." of turn/,
+    harness: () =>
+      brokenSession("snapshot without items", (session) => ({
+        readSnapshot: async (threadId: string) => ({ ...(await session.readSnapshot!(threadId)), items: [] }),
+      })),
+  },
+  {
+    scenario: 14,
     bug: "declares forks and returns a well-formed thread that no native session backs",
-    reason: /forkThread at latest: the fork .* could not run a turn: not_found/,
+    reason: /forkThread at latest: the native agent has no native session behind thread thread-phantom-fork-1/,
     harness: () => {
       let forks = 0;
       return brokenSession("phantom fork", (session) => ({
@@ -796,7 +915,7 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
   {
     scenario: 14,
     bug: "declares forks from a turn but forks at the latest turn instead",
-    reason: /forkThread fromTurn: the fork from turn .* holds 2 native turns, as many as the source thread, where that turn was the first of 2: the fork point was ignored/,
+    reason: /forkThread fromTurn: the fork's native session holds the prompts \["Start the build\.","Queued follow-up\.","Third task\."\]; a fork from the second of 3 turns holds the prompts before it/,
     harness: () =>
       brokenSession("fork point ignored", (session) => ({
         forkThread: (input: Parameters<NonNullable<Session["forkThread"]>>[0]) => session.forkThread!(input.at.type === "turn" ? { ...input, at: { type: "latest" } } : input),
@@ -805,7 +924,7 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
   {
     scenario: 14,
     bug: "declares rollback and returns an emptied snapshot without rolling back the native session",
-    reason: /rollbackThread: the native session still holds 2 turns after a rollback to the start/,
+    reason: /rollbackThread: the native session still holds the prompts \["Start the build\.","Queued follow-up\.","Third task\."\] after a rollback to the start/,
     harness: () =>
       brokenSession("no-op rollback", (session) => ({
         rollbackThread: async (input: Parameters<NonNullable<Session["rollbackThread"]>>[0]) => ({ ...(await session.readSnapshot!(input.threadId)), turns: [], items: [] }),
@@ -814,7 +933,7 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
   {
     scenario: 14,
     bug: "declares history injection and reports it consumed without sending it to the agent",
-    reason: /injectHistory: the native session received 0 of the 2 injected messages/,
+    reason: /injectHistory: the native session received \[\]; the host injected \["Earlier, I asked about the parser\.","It tokenizes, then builds a tree\."\]/,
     harness: () => brokenSession("no-op injection", () => ({ injectHistory: async () => ({ consumed: true }) })),
   },
   {
@@ -843,15 +962,127 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
   },
   {
     scenario: 14,
-    bug: "declares context window reporting and reports no window for a catalog model",
-    reason: /contextWindow: the catalog gives reference-small a context window of 128000, but contextWindow\("reference-small"\) returned undefined/,
-    harness: () => brokenSession("no context window", () => ({ contextWindow: () => undefined })),
+    bug: "declares forks but answers a fork at the latest turn or from a turn with a blank thread in the source directory",
+    reason: /forkThread at latest: the fork's native session holds the prompts \[\]; the source held \["Start the build\.","Queued follow-up\.","Third task\."\]/,
+    harness: () =>
+      brokenSession("blank forks", (session) => ({
+        forkThread: async (input: Parameters<NonNullable<Session["forkThread"]>>[0]): Promise<Thread> => {
+          if (input.at.type === "item" || input.cwd !== undefined) return session.forkThread!(input);
+          const source = (await session.readSnapshot!(input.threadId)).thread;
+          const { appliedConfig: _applied, ...blank } = await session.createThread({ cwd: source.cwd, policy: { mode: "approval_required", interaction: "default", cwd: source.cwd } });
+          return { ...blank, forkedFrom: { threadId: input.threadId, ...(input.at.type === "turn" ? { turnId: input.at.turnId } : {}) } };
+        },
+      })),
   },
   {
     scenario: 14,
-    bug: "declares context-usage reuse and refuses it even between the same model",
-    reason: /canReuseContextUsage\("reference-small", "reference-small"\) returned false: usage from a model always applies to the same model/,
-    harness: () => brokenSession("never reuses usage", () => ({ canReuseContextUsage: () => false })),
+    bug: "declares forks into another directory but returns the fork under a thread id it never registered",
+    reason: /forkThread crossCwd: the fork .* could not run a turn: not_found/,
+    harness: () =>
+      brokenSession("unregistered cross-directory fork", (session) => ({
+        forkThread: async (input: Parameters<NonNullable<Session["forkThread"]>>[0]) => {
+          const fork = await session.forkThread!(input);
+          return input.cwd === undefined ? fork : { ...fork, id: `${fork.id}-unregistered` };
+        },
+      })),
+  },
+  {
+    scenario: 14,
+    bug: "declares forks but answers a fork at the latest turn with the source thread under a new id",
+    reason: /forkThread at latest: the fork .* names the source thread's native session/,
+    harness: () => {
+      const aliases = new Map<string, string>();
+      return brokenSession("fork is the source", (session) => ({
+        forkThread: async (input: Parameters<NonNullable<Session["forkThread"]>>[0]): Promise<Thread> => {
+          if (input.at.type !== "latest" || input.cwd !== undefined) return session.forkThread!(input);
+          const source = (await session.readSnapshot!(input.threadId)).thread;
+          const id = `${source.id}-fork`;
+          aliases.set(id, source.id);
+          return { ...source, id, forkedFrom: { threadId: source.id } };
+        },
+        startTurn: (input: Parameters<Session["startTurn"]>[0]) => session.startTurn({ ...input, threadId: aliases.get(input.threadId) ?? input.threadId }),
+      }));
+    },
+  },
+  {
+    scenario: 14,
+    bug: "declares history injection and sends the agent placeholder messages instead of the host's",
+    reason: /injectHistory: the native session received \["\(history\)","\(history\)"\]; the host injected \["Earlier, I asked about the parser\.","It tokenizes, then builds a tree\."\]/,
+    harness: () =>
+      brokenSession("placeholder history", (session) => ({
+        injectHistory: (input: Parameters<NonNullable<Session["injectHistory"]>>[0]) =>
+          session.injectHistory!({ ...input, messages: input.messages.map((message) => ({ ...message, content: [{ type: "text" as const, text: "(history)" }] })) }),
+      })),
+  },
+  {
+    scenario: 14,
+    bug: "declares background.stop and marks the task stopped in its own list without telling the agent",
+    reason: /backgroundTasks\.stop: the native agent still runs "watch the tests" after stop/,
+    harness: () =>
+      brokenSession("background stop only in the driver", (session) => {
+        const tasks = session.backgroundTasks!;
+        const stopped = new Set<string>();
+        return {
+          backgroundTasks: {
+            ...tasks,
+            stop: async (input: { threadId: string; taskId: string }) => {
+              stopped.add(input.taskId);
+            },
+            list: async (threadId: string, options?: { includeSubagents?: boolean }) =>
+              (await tasks.list(threadId, options)).map((task) => (stopped.has(task.id) ? { ...task, status: "stopped" } : task)),
+          },
+        };
+      }),
+  },
+  {
+    scenario: 14,
+    bug: "declares subagents.stop and reports the subagent cancelled without telling the agent",
+    reason: /stopSubagent: the native agent still runs subagent "reviewer" after stopSubagent/,
+    harness: () =>
+      brokenHarness("subagent stop only in the driver", {
+        session: (session) => {
+          const rewritten = rewriteEvents(session, (_event, pass) => pass());
+          return override(rewritten.session, {
+            async stopSubagent(input: { subagentId: string }) {
+              rewritten.inject({ type: "subagent.upsert", subagent: { id: input.subagentId, status: "cancelled" } });
+              return { status: "cancelled" };
+            },
+          });
+        },
+      }),
+  },
+  {
+    scenario: 14,
+    bug: "declares feedback upload and answers with a made-up feedback id without uploading",
+    reason: /uploadFeedback: the native agent received no feedback upload during the call; the driver answered \{"feedbackId":"fake-feedback"\}/,
+    harness: () => brokenSession("fake feedback", () => ({ uploadFeedback: async () => ({ feedbackId: "fake-feedback" }) })),
+  },
+  {
+    scenario: 14,
+    bug: "declares MCP apps and answers callTool with empty content without calling the tool",
+    reason: /mcpApps\.callTool: the native agent ran no call of tool "echo" on reference-tools during the call/,
+    harness: () => brokenSession("empty MCP tool call", (session) => ({ mcpApps: { ...session.mcpApps!, callTool: async () => ({ content: [] }) } })),
+  },
+  {
+    scenario: 14,
+    bug: "declares MCP apps and answers readResource with no contents without reading the resource",
+    reason: /mcpApps\.readResource: the native agent served no read of reference:\/\/readme from reference-tools during the call/,
+    harness: () => brokenSession("empty MCP resource", (session) => ({ mcpApps: { ...session.mcpApps!, readResource: async () => ({ contents: [] }) } })),
+  },
+  {
+    scenario: 14,
+    bug: "declares MCP apps and answers listTools from its own constant list without asking the server",
+    reason: /mcpApps\.listTools: the native agent served no tool list for reference-tools during the call/,
+    harness: () => brokenSession("constant MCP tool list", (session) => ({ mcpApps: { ...session.mcpApps!, listTools: async () => [{ name: "echo", description: "Returns its input." }] } })),
+  },
+  {
+    scenario: 14,
+    bug: "declares an extension namespace and answers its calls with nothing, without reaching the agent",
+    reason: /ext reference\.echo\.echo: the native agent received no extension call during the call/,
+    harness: () =>
+      brokenSession("silent extension", (session) => ({
+        ext: async (ns: string, method: string, params: unknown) => (ns === "reference.echo" ? undefined : session.ext!(ns, method, params)),
+      })),
   },
   {
     scenario: 14,

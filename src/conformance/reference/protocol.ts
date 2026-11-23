@@ -25,8 +25,10 @@
 //   tasks/stop { sessionId, taskId }                -> {}
 //   tasks/await { sessionId, taskIds }              -> { matched }
 //   subagent/stop { subagentId }                    -> { status }
-//   mcp/listTools { server }, mcp/callTool { server, tool, args }, mcp/readResource { server, uri }
-//   feedback/upload { sessionId }                   -> { feedbackId }
+//   mcp/listTools { server }                        -> { tools }
+//   mcp/callTool { server, tool, args }             -> { content }    (the echo tool numbers its calls)
+//   mcp/readResource { server, uri }                -> { contents }   (numbers its reads)
+//   feedback/upload { sessionId, reason? }          -> { feedbackId }
 //   ext/echo { params }                             -> params
 //
 // Agent to driver:
@@ -120,6 +122,7 @@ export interface StoredSession {
   readonly cwd: string;
   turns: StoredTurn[];
   readonly tasks: StoredTask[];
-  injectedMessages: number;
+  /** History messages injected with `session/inject`, in order. */
+  readonly injected: Array<{ readonly role: string; readonly text: string }>;
   compactions: number;
 }

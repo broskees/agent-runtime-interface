@@ -569,9 +569,9 @@ class ReferenceSession implements Session {
     return this.#request<{ status: string }>("subagent/stop", { subagentId: subagent.nativeId }, "subagent");
   }
 
-  async uploadFeedback(input: { threadId: string }): Promise<{ feedbackId: string }> {
+  async uploadFeedback(input: { threadId: string; reason?: string }): Promise<{ feedbackId: string }> {
     this.#require("sessions.feedbackUpload");
-    return this.#request<{ feedbackId: string }>("feedback/upload", { sessionId: this.#thread(input.threadId).nativeId }, "native session");
+    return this.#request<{ feedbackId: string }>("feedback/upload", { sessionId: this.#thread(input.threadId).nativeId, reason: input.reason }, "native session");
   }
 
   async ext(ns: string, method: string, params: unknown): Promise<unknown> {

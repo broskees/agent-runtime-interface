@@ -8,7 +8,7 @@
 
 import { JsonRpcError, JsonRpcPeer } from "../../driver-kit/json-rpc.ts";
 import { NdjsonDecoder, encodeNdjson } from "../../driver-kit/ndjson.ts";
-import type { NativeApproval, NativeFailure, NativeTool } from "../harness.ts";
+import type { NativeActivity, NativeApproval, NativeFailure, NativeSessionState, NativeTool } from "../harness.ts";
 import { AsyncQueue } from "../util.ts";
 import { REFERENCE_AGENT_VERSION, REFERENCE_ERRORS } from "./protocol.ts";
 import type {
@@ -58,6 +58,23 @@ function argument(argv: readonly string[], name: string): string | undefined {
   return index === -1 ? undefined : argv[index + 1];
 }
 
+/** A stored session as `NativeAgent.inspectSession` reports it. Subagents live only in a running agent. */
+export function referenceSessionState(
+  session: StoredSession,
+  loaded: boolean,
+  subagents: NativeSessionState["subagents"] = [],
+): NativeSessionState {
+  return {
+    loaded,
+    cwd: session.cwd,
+    prompts: session.turns.map((turn) => turn.prompt),
+    compactions: session.compactions,
+    injectedMessages: session.injected.map((message) => message.text),
+    backgroundTasks: session.tasks.map((task) => ({ title: task.title, running: task.status === "running" })),
+    subagents,
+  };
+}
+
 function joinPath(directory: string, path: string): string {
   if (path.startsWith("/")) return path;
   return directory.endsWith("/") ? `${directory}${path}` : `${directory}/${path}`;
@@ -83,7 +100,15 @@ export class ReferenceAgent {
   readonly #stopWaiters = new Map<string, Array<(how: "cancel" | "exit") => void>>();
   readonly #steers = new Map<string, AsyncQueue<string>>();
   readonly #approvals = new Map<string, Approval>();
-  readonly #subagents = new Map<string, { readonly sessionId: string; readonly turnId: string; status: string }>();
+  readonly #subagents = new Map<string, { readonly sessionId: string; readonly turnId: string; readonly name: string; status: string }>();
+  /** What the agent served outside any session's state, for `NativeAgent.activity`. */
+  readonly #activity: { feedback: Array<NativeActivity["feedback"][number]>; mcp: Array<NativeActivity["mcp"][number]>; extensions: Array<NativeActivity["extensions"][number]> } = {
+    feedback: [],
+    mcp: [],
+    extensions: [],
+  };
+  /** Numbers the echo tool's calls and the resource's reads, so each output is the agent's own. */
+  #served = 0;
   /** Turns that ended natively whose `turn_ended` message is held back, by turn id: sends it. */
   readonly #heldEnds = new Map<string, () => void>();
   #exited = false;
@@ -224,7 +249,7 @@ export class ReferenceAgent {
   async spawnSubagent(turnId: string, name: string): Promise<void> {
     const { session } = this.#turn(turnId);
     const subagentId = this.#store.nextId("subagent");
-    this.#subagents.set(subagentId, { sessionId: session.sessionId, turnId, status: "running" });
+    this.#subagents.set(subagentId, { sessionId: session.sessionId, turnId, name, status: "running" });
     this.#update(session, turnId, { type: "subagent_started", subagentId, name });
   }
 
@@ -252,10 +277,16 @@ export class ReferenceAgent {
   }
 
   /** The loaded native session `sessionId` as the conformance kit's `NativeAgent.inspectSession` reports it, or undefined. */
-  inspectSession(sessionId: string): { loaded: true; cwd: string; turns: number; compactions: number; injectedMessages: number } | undefined {
+  inspectSession(sessionId: string): NativeSessionState | undefined {
     const session = this.#sessions.get(sessionId);
     if (session === undefined || this.#exited) return undefined;
-    return { loaded: true, cwd: session.cwd, turns: session.turns.length, compactions: session.compactions, injectedMessages: session.injectedMessages };
+    const subagents = [...this.#subagents.values()].filter((subagent) => subagent.sessionId === sessionId).map((subagent) => ({ name: subagent.name, running: subagent.status === "running" }));
+    return referenceSessionState(session, true, subagents);
+  }
+
+  /** What the agent served outside any session's state, as the conformance kit's `NativeAgent.activity` reports it. */
+  activity(): NativeActivity {
+    return { feedback: [...this.#activity.feedback], mcp: [...this.#activity.mcp], extensions: [...this.#activity.extensions] };
   }
 
   async fail(turnId: string, failure: NativeFailure): Promise<void> {
@@ -364,7 +395,7 @@ export class ReferenceAgent {
           cwd: this.#options.realpath(String(params["cwd"])),
           turns: [],
           tasks: [],
-          injectedMessages: 0,
+          injected: [],
           compactions: 0,
         };
         this.#save(session);
@@ -415,7 +446,7 @@ export class ReferenceAgent {
           cwd: params["cwd"] === undefined ? source.cwd : this.#options.realpath(String(params["cwd"])),
           turns: JSON.parse(JSON.stringify(source.turns.slice(0, cut).filter((turn) => turn.status !== "queued" && turn.status !== "running"))) as StoredTurn[],
           tasks: [],
-          injectedMessages: source.injectedMessages,
+          injected: source.injected.map((message) => ({ ...message })),
           compactions: source.compactions,
         };
         this.#save(fork);
@@ -437,7 +468,8 @@ export class ReferenceAgent {
       }
       case "session/inject": {
         const session = this.#session(params);
-        session.injectedMessages += Array.isArray(params["messages"]) ? params["messages"].length : 0;
+        const messages = Array.isArray(params["messages"]) ? (params["messages"] as Array<{ role?: unknown; text?: unknown }>) : [];
+        for (const message of messages) session.injected.push({ role: String(message.role), text: String(message.text) });
         this.#save(session);
         return {};
       }
@@ -474,17 +506,37 @@ export class ReferenceAgent {
         }
         return { status: subagent.status };
       }
-      case "mcp/listTools":
-        return { tools: [{ name: "echo", description: "Returns its input." }] };
-      case "mcp/callTool":
-        return { content: [{ type: "text", text: JSON.stringify(params["args"] ?? {}) }] };
-      case "mcp/readResource":
-        return { contents: [{ uri: String(params["uri"]), text: "# Reference agent\n" }] };
-      case "feedback/upload":
+      case "mcp/listTools": {
+        const tools = [{ name: "echo", description: "Returns its input, numbered." }];
+        this.#activity.mcp.push({ operation: "listTools", server: String(params["server"]), output: tools });
+        return { tools };
+      }
+      case "mcp/callTool": {
+        this.#served += 1;
+        const args = params["args"] ?? {};
+        const result = { content: [{ type: "text", text: `echo ${this.#served}: ${JSON.stringify(args)}` }] };
+        this.#activity.mcp.push({ operation: "callTool", server: String(params["server"]), tool: String(params["tool"]), args, output: result });
+        return result;
+      }
+      case "mcp/readResource": {
+        this.#served += 1;
+        const uri = String(params["uri"]);
+        const result = { contents: [{ uri, mimeType: "text/markdown", text: `# Reference agent\n\nRead ${this.#served}.\n` }] };
+        this.#activity.mcp.push({ operation: "readResource", server: String(params["server"]), uri, output: result });
+        return result;
+      }
+      case "feedback/upload": {
         this.#session(params);
-        return { feedbackId: this.#store.nextId("feedback") };
-      case "ext/echo":
-        return params["params"] ?? null;
+        const feedbackId = this.#store.nextId("feedback");
+        const reason = params["reason"] === undefined ? undefined : String(params["reason"]);
+        this.#activity.feedback.push(reason === undefined ? { feedbackId } : { feedbackId, reason });
+        return { feedbackId };
+      }
+      case "ext/echo": {
+        const result = params["params"] ?? null;
+        this.#activity.extensions.push({ params: params["params"] ?? null, result });
+        return result;
+      }
       default:
         throw new JsonRpcError(-32601, `Method not found: ${method}`);
     }

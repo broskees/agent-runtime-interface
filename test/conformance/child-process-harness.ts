@@ -11,12 +11,13 @@ import * as childProcess from "node:child_process";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AsyncQueue } from "../../src/conformance/util.ts";
-import { referenceDriver } from "../../src/conformance/index.ts";
+import { referenceDriver, referenceSessionState } from "../../src/conformance/index.ts";
 import type {
   ConformanceHarness,
   ConformanceWorkspace,
   FakeSpawnRequest,
   HarnessRig,
+  NativeActivity,
   NativeSessionState,
   NativeTurn,
   ReferenceDriverConfig,
@@ -178,11 +179,19 @@ export function childProcessHarness(): ConformanceHarness<ReferenceDriverConfig>
             }
             for (const paths of instancePaths) {
               const stored = new FileReferenceStore(path.join(paths.stateDir, "sessions")).load(sessionId);
-              if (stored !== undefined) {
-                return { loaded: false, cwd: stored.cwd, turns: stored.turns.length, compactions: stored.compactions, injectedMessages: stored.injectedMessages };
-              }
+              if (stored !== undefined) return referenceSessionState(stored, false);
             }
             return undefined;
+          },
+          // Each live agent process reports what it served; the session under test keeps its agent alive while scenario 14 asks.
+          activity: async (): Promise<NativeActivity> => {
+            const served: NativeActivity[] = [];
+            for (const channel of channels) {
+              if (!channel.alive) continue;
+              const entry = await channel.call<NativeActivity>("activity").catch(() => undefined);
+              if (entry !== undefined) served.push(entry);
+            }
+            return { feedback: served.flatMap((entry) => entry.feedback), mcp: served.flatMap((entry) => entry.mcp), extensions: served.flatMap((entry) => entry.extensions) };
           },
         },
         probeExecutables: ["reference-agent"],

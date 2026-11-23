@@ -136,8 +136,10 @@ async function checkRuntimePoison(context: ScenarioContext): Promise<void> {
     context.check(Number.isFinite(expiresAt) && expiresAt > clock.now(), `a runtime auth poison needs a future poisonExpiresAt; got ${brief(poisoned.poisonExpiresAt)}`);
     const ttl = expiresAt - clock.now();
     context.check(ttl <= LONGEST_POISON_MS, `the runtime auth poison lasts ${Math.round(ttl / 1000)} s; it must be short-lived`);
+    // auth.state() is what callers read: while the poison lasts it must give the blocking verdict, not only say why.
     const stillPoisoned = await context.wait(managedAuth.state(), "auth.state() of the poisoned instance");
     context.check(stillPoisoned.evidence === "runtime_poison", `auth.state() right after the runtime failure reports evidence ${brief(stillPoisoned.evidence)}; expected "runtime_poison"`);
+    context.check(stillPoisoned.status === "unauthenticated", `while the runtime auth poison is active, auth.state() reports ${brief(stillPoisoned.status)}; expected "unauthenticated"`);
     context.check(stillPoisoned.scope === managedBefore.scope, `auth.state() right after the runtime failure names scope ${brief(stillPoisoned.scope)}; the failure was in scope ${brief(managedBefore.scope)}`);
     const ambientAfter = await context.wait(ambientAuth.state(), "auth.state() of the ambient instance");
     context.check(
@@ -145,8 +147,19 @@ async function checkRuntimePoison(context: ScenarioContext): Promise<void> {
       `a runtime auth failure of the managed profile changed the ambient instance's auth state from ${brief(ambientBefore)} to ${brief(ambientAfter)}`,
     );
 
+    // The poison holds until the expiry it advertised, not only at the moment it was reported.
+    const midway = Math.max(0, ttl - 1000);
+    await clock.pass(midway);
+    if (midway > 0) {
+      const lasting = await context.wait(managedAuth.state(), "auth.state() shortly before the poison expires");
+      context.check(
+        lasting.evidence === "runtime_poison" && lasting.status === "unauthenticated",
+        `${Math.round(midway / 1000)} s into a ${Math.round(ttl / 1000)} s runtime auth poison, auth.state() reports ${brief(lasting.status)} with evidence ${brief(lasting.evidence)}; expected "unauthenticated" with evidence "runtime_poison" until poisonExpiresAt`,
+      );
+    }
+
     // After the advertised expiry the instance is back where it was: the same verdict, and Send works.
-    await clock.pass(ttl + 1000);
+    await clock.pass(ttl + 1000 - midway);
     const expired = await context.wait(managedAuth.state(), "auth.state() after the poison expired");
     context.check(expired.evidence !== "runtime_poison", `auth.state() still reports runtime_poison ${Math.round((ttl + 1000) / 1000)} s later, after poisonExpiresAt`);
     context.check(
@@ -235,7 +248,11 @@ export const sideEffectFreeProbeScenario: Scenario = {
     } finally {
       if (watch !== undefined) written = await context.wait(watch.stop(), "the harness to stop watching the instance's files");
     }
-    for (const result of results) context.check(ProbeResultSchema.is(result), `probe() returned an invalid ProbeResult: ${brief(result)}`);
+    for (const result of results) {
+      context.check(ProbeResultSchema.is(result), `probe() returned an invalid ProbeResult: ${brief(result)}`);
+      // Every other scenario runs this rig's agent, so a probe that cannot find it did not look.
+      context.check(result.installed === true, `probe() reports installed: ${brief(result.installed)}, but the rig's agent is installed: every other scenario runs it`);
+    }
 
     const calls = created.host.callsSince(mark);
     const mutating = calls.filter((call) => {

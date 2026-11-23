@@ -18,9 +18,9 @@ import {
   referenceHarness,
 } from "../../src/conformance/index.ts";
 import type { ConformanceHarness, NodeTestContext, ReferenceDriverConfig } from "../../src/conformance/index.ts";
-import { isAriError } from "../../src/index.ts";
-import type { SpawnedProcess } from "../../src/index.ts";
-import { runScenario } from "./broken-drivers.ts";
+import { callErrors, isAriError } from "../../src/index.ts";
+import type { Session, SpawnedProcess } from "../../src/index.ts";
+import { brokenHarness, override, runScenario } from "./broken-drivers.ts";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 
@@ -60,6 +60,7 @@ function adjustedHarness(
     withoutLockSession?: boolean;
     withoutFileWatch?: boolean;
     withoutInspectSession?: boolean;
+    withoutActivity?: boolean;
     withoutCompleteHeld?: boolean;
   } = {},
 ): ConformanceHarness<ReferenceDriverConfig> {
@@ -68,7 +69,7 @@ function adjustedHarness(
     ...base,
     async setup(request) {
       const rig = await base.setup(request);
-      const { lockSession, inspectSession, ...otherNative } = rig.native;
+      const { lockSession, inspectSession, activity, ...otherNative } = rig.native;
       const { watchInstanceFiles: _watch, ...withoutWatch } = rig;
       const nextTurn = async () => {
         const { completeHeld: _held, ...turn } = await rig.native.nextTurn();
@@ -81,6 +82,7 @@ function adjustedHarness(
           nextTurn,
           ...(options.withoutLockSession === true ? {} : { lockSession }),
           ...(options.withoutInspectSession === true ? {} : { inspectSession }),
+          ...(options.withoutActivity === true ? {} : { activity }),
         },
       };
     },
@@ -134,6 +136,24 @@ describe("not applicable only for a declared capability or a stated reason", () 
     );
     assert.equal(inspectExcused.status, "passed", inspectExcused.reason);
     assert.ok(inspectExcused.notes.some((note) => /not checked \(capability-honesty\.native-effects\)/.test(note)), inspectExcused.notes.join("\n"));
+
+    const noActivity = await runScenario(adjustedHarness({ withoutActivity: true }), "capability-honesty");
+    assert.equal(noActivity.status, "failed");
+    assert.match(noActivity.reason ?? "", /the native agent has no activity; add it to the harness, or give a reason under capability-honesty\.native-activity/);
+    const activityExcused = await runScenario(
+      adjustedHarness({ withoutActivity: true, notApplicable: { "capability-honesty.native-activity": "the vendor's server keeps no record of MCP calls" } }),
+      "capability-honesty",
+    );
+    assert.equal(activityExcused.status, "passed", activityExcused.reason);
+
+    const noHistory = await runScenario(adjustedHarness({ withoutInspectSession: true }), "session-replaced");
+    assert.equal(noHistory.status, "failed");
+    assert.match(noHistory.reason ?? "", /the native agent has no inspectSession; add it to the harness, or give a reason under session-replaced\.native-history/);
+    const historyExcused = await runScenario(
+      adjustedHarness({ withoutInspectSession: true, notApplicable: { "session-replaced.native-history": "the vendor's sessions cannot be read back" } }),
+      "session-replaced",
+    );
+    assert.equal(historyExcused.status, "passed", historyExcused.reason);
   });
 
   test("a workspace without a symbolic link fails scenario 11 unless the harness gives a reason", async () => {
@@ -142,6 +162,60 @@ describe("not applicable only for a declared capability or a stated reason", () 
     const result = await runScenario(noLink, "symlinked-workspace");
     assert.equal(result.status, "failed");
     assert.match(result.reason ?? "", /no symlinkedCwd; give one, or a reason under symlinked-workspace/);
+  });
+});
+
+describe("scenario 14 accepts honest answers the proposal allows", () => {
+  /** The reference harness with some session members replaced. */
+  const honestVariation = (name: string, overrides: (session: Session) => Partial<Session>) =>
+    brokenHarness(name, { session: (session) => override(session, overrides(session)) });
+
+  test("a context window below the catalog's maximum, and usage that is not reused even for one model name", async () => {
+    const result = await runScenario(
+      honestVariation("effective limits", () => ({ contextWindow: () => 96_000, canReuseContextUsage: () => false })),
+      "capability-honesty",
+    );
+    assert.equal(result.status, "passed", result.reason);
+  });
+
+  test("an unloaded thread that only a fresh session can resume", async () => {
+    const result = await runScenario(
+      honestVariation("reattach from a fresh session", (session) => {
+        // The native handles of threads this session unloaded; this driver reattaches them only from a new session.
+        const unloaded = new Set<string>();
+        return {
+          unloadThread: async (threadId: string) => {
+            const { thread } = await session.readSnapshot!(threadId);
+            await session.unloadThread!(threadId);
+            unloaded.add(thread.handle ?? thread.native.id ?? "");
+          },
+          resumeThread: async (input: Parameters<Session["resumeThread"]>[0]) => {
+            const nativeId = "handle" in input.native ? input.native.handle : input.native.id;
+            if (nativeId !== null && unloaded.has(nativeId)) throw callErrors.invalidState("thread_unloaded", "Resume an unloaded thread from a new session");
+            return session.resumeThread(input);
+          },
+        };
+      }),
+      "capability-honesty",
+    );
+    assert.equal(result.status, "passed", result.reason);
+    assert.ok(result.notes.some((note) => /resumed in a fresh session; the same session refused: invalid_state/.test(note)), result.notes.join("\n"));
+  });
+
+  test("a fork from a turn that holds only the turns before it", async () => {
+    const result = await runScenario(
+      honestVariation("fork before the turn", (session) => ({
+        forkThread: async (input: Parameters<NonNullable<Session["forkThread"]>>[0]) => {
+          if (input.at.type !== "turn") return session.forkThread!(input);
+          const turns = (await session.readSnapshot!(input.threadId)).turns;
+          const index = turns.findIndex((turn) => turn.id === (input.at as { turnId: string }).turnId);
+          assert.ok(index > 0, "the scenario forks from a turn with history before it");
+          return session.forkThread!({ ...input, at: { type: "turn", turnId: turns[index - 1]!.id } });
+        },
+      })),
+      "capability-honesty",
+    );
+    assert.equal(result.status, "passed", result.reason);
   });
 });
 

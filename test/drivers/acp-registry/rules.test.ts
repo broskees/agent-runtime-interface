@@ -35,6 +35,7 @@ driverRuleTests({
         [
           ["fake-agent", true, true],
           ["npx-agent", false, false],
+          ["uvx-agent", false, false],
           ["zip-agent", false, false],
           ["unsigned-agent", false, false],
         ],

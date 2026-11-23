@@ -10,6 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { registryTarget } from "../../../src/drivers/acp-registry/index.ts";
 import type { RegistryIndex } from "../../../src/drivers/acp-registry/index.ts";
+export { fixtureFetch } from "../acp/fixture-fetch.ts";
 
 export const REGISTRY_URL = "https://registry.invalid/registry/v1/latest/registry.json";
 export const FAKE_AGENT_ID = "fake-agent";
@@ -47,6 +48,7 @@ export function registryIndex(sha256: string): RegistryIndex {
         distribution: { binary: { [TARGET]: { archive: ARCHIVE_URL, cmd: "./bin/fake-acp-agent", args: ["acp"], sha256 } } },
       },
       { id: "npx-agent", name: "Npx Agent", version: "2.0.0", description: "Shipped through npm", distribution: { npx: { package: "@example/npx-agent@2.0.0", args: ["--acp"] } } },
+      { id: "uvx-agent", name: "Uvx Agent", version: "2.1.0", description: "Shipped through PyPI", distribution: { uvx: { package: "uvx-agent@2.1.0" } } },
       {
         id: "zip-agent",
         name: "Zip Agent",
@@ -63,20 +65,6 @@ export function registryIndex(sha256: string): RegistryIndex {
       },
     ],
   };
-}
-
-/** A `fetch` that serves fixed responses by URL and records every URL asked for. */
-export function fixtureFetch(routes: { readonly [url: string]: unknown }): typeof globalThis.fetch & { readonly requested: string[] } {
-  const requested: string[] = [];
-  const fetchFunction = async (input: string | URL | Request): Promise<Response> => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    requested.push(url);
-    const body = routes[url];
-    if (body === undefined) return new Response("not found", { status: 404 });
-    if (body instanceof Uint8Array) return new Response(body, { status: 200 });
-    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-  };
-  return Object.assign(fetchFunction as typeof globalThis.fetch, { requested });
 }
 
 /** Lays an installed `fake-agent` out in an instance's cache, as the installer leaves it. */

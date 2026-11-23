@@ -140,6 +140,7 @@ interface TurnState {
   readonly id: string;
   readonly nativeId: string;
   readonly threadId: string;
+  readonly origin: "user" | "provider_initiated";
   readonly hostTag: string | undefined;
   /** Open items by native id. */
   readonly openItems: Map<string, Item>;
@@ -1120,6 +1121,7 @@ export class CodexSession implements Session {
       id,
       nativeId: native.id,
       threadId: thread.thread.id,
+      origin,
       hostTag,
       openItems: new Map(),
       fileChanges: new Map(),
@@ -1888,7 +1890,8 @@ export class CodexSession implements Session {
         id: turnId,
         threadId: thread.thread.id,
         native: strongRef(native.id),
-        origin: "user",
+        // Turns this session did not see start are taken as the host's; Codex keeps no origin in its history.
+        origin: live?.origin ?? "user",
         status: turnStatusFromCodex(native.status),
         ...(live?.hostTag === undefined ? {} : { hostTag: live.hostTag }),
         ...(startedAt === undefined ? {} : { startedAt }),
@@ -1904,12 +1907,6 @@ export class CodexSession implements Session {
   #emit(body: AriEventBody, envelope: { threadId?: string; turnId?: string; hostTag?: string } = {}): void {
     if (this.#sequencer.closed) return;
     this.#sequencer.emit({ body, ...envelope });
-  }
-
-  /** For tests and diagnostics: the frames of the current connection. */
-  async framesForDiagnostics(): Promise<ReadonlyArray<{ direction: string; frame: unknown }>> {
-    const connection = await this.#connection;
-    return connection?.frames ?? [];
   }
 }
 

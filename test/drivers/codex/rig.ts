@@ -108,6 +108,11 @@ export async function codexRig(
       await instance.dispose();
       world.dispose();
       fs.rmSync(root, { recursive: true, force: true });
+      // Every frame either side sent must validate against the vendored Codex schema.
+      if (world.validator.problems.length > 0) {
+        throw new Error(`frames the vendored Codex schema rejects: ${world.validator.problems.map((problem) => `${problem.direction} ${problem.message}`).join("; ")}`);
+      }
+      if (world.servers.length > 0 && world.validator.checked === 0) throw new Error("an app-server ran but the fake checked no frame");
     },
   };
 }

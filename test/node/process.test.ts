@@ -1,0 +1,360 @@
+// Process spawning in `ari/node`: a child's environment is the base minus
+// every stripped name or prefix plus explicit additions; `resolveExecutable`
+// searches a PATH the way spawn does, so it reports what spawn would run; and
+// disposing, aborting, `kill()`, a timeout or the child's own exit end the
+// child's whole process group, grandchildren included. `dispose()` returns
+// only once every child it spawned is gone.
+
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { describe, test } from "node:test";
+import { isAriError } from "../../src/index.ts";
+import type { SpawnedProcess } from "../../src/index.ts";
+import { buildChildEnvironment, createProcessService, resolveExecutable } from "../../src/node/index.ts";
+import { createSymlinkedRoot } from "../helpers/symlinked-root.ts";
+
+const NODE = process.execPath;
+
+async function readAll(stream: AsyncIterable<Uint8Array>): Promise<string> {
+  let text = "";
+  for await (const chunk of stream) text += Buffer.from(chunk).toString("utf8");
+  return text;
+}
+
+/** Reads `stream` until it has produced one complete line, and returns that line. */
+async function readFirstLine(stream: AsyncIterable<Uint8Array>): Promise<string> {
+  let text = "";
+  for await (const chunk of stream) {
+    text += Buffer.from(chunk).toString("utf8");
+    const newline = text.indexOf("\n");
+    if (newline !== -1) return text.slice(0, newline);
+  }
+  throw new Error(`the stream ended before a full line: ${JSON.stringify(text)}`);
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Pids of live processes whose command line has `token` as an argument. Zombies have no command line and do not count. */
+function processesWithArgument(token: string): number[] {
+  if (existsSync("/proc/self/cmdline")) {
+    const pids: number[] = [];
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        if (readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0").includes(token)) pids.push(Number(entry));
+      } catch {
+        // The process ended while being read.
+      }
+    }
+    return pids;
+  }
+  return execFileSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.split(/\s+/).includes(token))
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
+}
+
+async function waitUntilGone(pid: number, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return !isAlive(pid);
+}
+
+// A child that starts a grandchild, prints the grandchild's pid, and keeps
+// running. With `ignoreTerm`, both ignore SIGTERM, so only SIGKILL ends them.
+function parentOfGrandchildScript(options: { ignoreTerm?: boolean; exitAfterPrinting?: boolean } = {}): string {
+  const ignore = options.ignoreTerm === true ? "process.on('SIGTERM', () => {});" : "";
+  return [
+    "const { spawn } = require('node:child_process');",
+    ignore,
+    `const grandchild = spawn(process.execPath, ['-e', ${JSON.stringify(`${ignore} setInterval(() => {}, 1000);`)}], { stdio: 'ignore' });`,
+    "process.stdout.write(grandchild.pid + '\\n');",
+    options.exitAfterPrinting === true ? "setTimeout(() => process.exit(0), 50);" : "setInterval(() => {}, 1000);",
+  ].join("\n");
+}
+
+async function startParentOfGrandchild(
+  spawn: (request: { command: string; args: string[] }) => Promise<SpawnedProcess>,
+  options: { ignoreTerm?: boolean; exitAfterPrinting?: boolean } = {},
+): Promise<{ child: SpawnedProcess; grandchildPid: number }> {
+  const child = await spawn({ command: NODE, args: ["-e", parentOfGrandchildScript(options)] });
+  const grandchildPid = Number(await readFirstLine(child.stdout));
+  assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0, `grandchild pid: ${grandchildPid}`);
+  return { child, grandchildPid };
+}
+
+describe("ari/node process spawning", () => {
+  test("the child gets the base environment minus stripped names and prefixes, plus explicit additions", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "ari-process-home-"));
+    const service = createProcessService({
+      envPolicy: { stripAmbient: ["GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_API_KEY", "AWS_*"] },
+      baseEnv: {
+        PATH: process.env.PATH,
+        HOME: home,
+        GOOGLE_APPLICATION_CREDENTIALS: "/secret/adc.json",
+        GOOGLE_CLOUD_PROJECT: "not listed",
+        ANTHROPIC_API_KEY: "sk-ant-secret",
+        ANTHROPIC_API_KEY_HINT: "only the exact name is listed",
+        AWS_ACCESS_KEY_ID: "AKIA-secret",
+        AWS_SECRET_ACCESS_KEY: "aws-secret",
+        ARI_TEST_UNLISTED: "kept",
+      },
+    });
+    try {
+      const child = await service.spawn({
+        command: NODE,
+        args: ["-e", "process.stdout.write(JSON.stringify(process.env))"],
+        env: { ARI_TEST_ADDED: "added" },
+        stdin: "ignore",
+      });
+      const [output, exit] = await Promise.all([readAll(child.stdout), child.exited]);
+      assert.deepEqual(exit, { code: 0, signal: null });
+      const environment = JSON.parse(output) as Record<string, string>;
+      assert.equal("GOOGLE_APPLICATION_CREDENTIALS" in environment, false);
+      assert.equal("ANTHROPIC_API_KEY" in environment, false);
+      assert.equal("AWS_ACCESS_KEY_ID" in environment, false, "stripped by the AWS_* prefix");
+      assert.equal("AWS_SECRET_ACCESS_KEY" in environment, false, "stripped by the AWS_* prefix");
+      assert.equal(environment.GOOGLE_CLOUD_PROJECT, "not listed");
+      assert.equal(environment.ANTHROPIC_API_KEY_HINT, "only the exact name is listed");
+      assert.equal(environment.ARI_TEST_UNLISTED, "kept");
+      assert.equal(environment.ARI_TEST_ADDED, "added");
+      assert.equal(environment.HOME, home);
+    } finally {
+      await service.dispose();
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("an explicit addition is applied after stripping, so a driver can pass its own credential", () => {
+    const environment = buildChildEnvironment(
+      { ANTHROPIC_API_KEY: "ambient", GOOGLE_X: "ambient", KEEP: "1" },
+      { stripAmbient: ["ANTHROPIC_API_KEY", "GOOGLE_*"] },
+      { ANTHROPIC_API_KEY: "from-secrets" },
+    );
+    assert.deepEqual(environment, { KEEP: "1", ANTHROPIC_API_KEY: "from-secrets" });
+  });
+
+  test("the service never strips anything the policy does not list, and reports its policy", () => {
+    const service = createProcessService({ envPolicy: { stripAmbient: ["A_*"] }, baseEnv: {} });
+    assert.deepEqual(service.envPolicy, { stripAmbient: ["A_*"] });
+    assert.deepEqual(buildChildEnvironment({ A_1: "x", B_1: "y", UNSET: undefined }, service.envPolicy), { B_1: "y" });
+  });
+
+  test("resolveExecutable finds an executable on a given PATH and returns null when it is absent", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ari-resolve-"));
+    const otherDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "ari-resolve-other-"));
+    try {
+      const executable = path.join(directory, "fake-agent");
+      await fs.writeFile(executable, "#!/bin/sh\necho hi\n", { mode: 0o755 });
+      await fs.writeFile(path.join(directory, "not-executable"), "data", { mode: 0o644 });
+      await fs.mkdir(path.join(directory, "a-directory"));
+      const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH: otherDirectory } });
+      const searchPath = [path.join(directory, "missing"), otherDirectory, directory].join(path.delimiter);
+
+      assert.equal(await service.resolveExecutable("fake-agent", { path: searchPath }), executable);
+      assert.equal(await service.resolveExecutable("not-executable", { path: searchPath }), null);
+      assert.equal(await service.resolveExecutable("a-directory", { path: searchPath }), null);
+      assert.equal(await service.resolveExecutable("absent-agent", { path: searchPath }), null);
+      // Without `path`, the child environment's PATH is searched.
+      assert.equal(await service.resolveExecutable("fake-agent"), null);
+      const withDefaultPath = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH: directory } });
+      assert.equal(await withDefaultPath.resolveExecutable("fake-agent"), executable);
+      // A name with a directory part is checked as a path.
+      assert.equal(await resolveExecutable(executable, undefined), executable);
+      assert.equal(await resolveExecutable(path.join(directory, "absent-agent"), undefined), null);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+      await fs.rm(otherDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("an empty or relative PATH entry is the current directory, as for spawn, and resolveExecutable names what spawn runs", async () => {
+    const scratch = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ari-path-entries-")));
+    const previousDirectory = process.cwd();
+    const writeAdapter = async (directory: string, label: string, mode = 0o755): Promise<void> => {
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, "adapter"), `#!/bin/sh\necho ${label}\n`, { mode });
+    };
+    await writeAdapter(scratch, "current-directory");
+    await writeAdapter(path.join(scratch, "relative-bin"), "relative-bin");
+    await writeAdapter(path.join(scratch, "elsewhere"), "elsewhere");
+    await writeAdapter(path.join(scratch, "not-executable"), "not-executable", 0o644);
+    const elsewhere = path.join(scratch, "elsewhere");
+    const notExecutable = path.join(scratch, "not-executable");
+    const cases = [
+      { PATH: ":/usr/bin", expected: "current-directory" },
+      { PATH: "/usr/bin:", expected: "current-directory" },
+      { PATH: `/usr/bin::${elsewhere}`, expected: "current-directory" },
+      { PATH: `${elsewhere}::/usr/bin`, expected: "elsewhere" },
+      { PATH: "relative-bin:/usr/bin", expected: "relative-bin" },
+      { PATH: `${notExecutable}::${elsewhere}`, expected: "current-directory" },
+    ];
+    process.chdir(scratch);
+    try {
+      for (const { PATH, expected } of cases) {
+        const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH } });
+        const resolved = await service.resolveExecutable("adapter");
+        const child = await service.spawn({ command: "adapter", stdin: "ignore" });
+        const ran = (await readAll(child.stdout)).trim();
+        await service.dispose();
+        assert.equal(ran, expected, `spawn with PATH=${PATH}`);
+        const expectedFile = expected === "current-directory" ? path.join(scratch, "adapter") : path.join(scratch, expected, "adapter");
+        assert.equal(resolved, expectedFile, `resolveExecutable with PATH=${PATH}`);
+      }
+      // With no PATH at all, spawn and resolveExecutable both search /usr/bin:/bin.
+      const noPath = createProcessService({ envPolicy: { stripAmbient: ["PATH"] }, baseEnv: { PATH: elsewhere } });
+      const shell = await noPath.resolveExecutable("sh");
+      assert.ok(shell === "/usr/bin/sh" || shell === "/bin/sh", `sh resolved to ${shell}`);
+      assert.equal(await noPath.resolveExecutable("adapter"), null);
+      const child = await noPath.spawn({ command: "sh", args: ["-c", "echo ok"], stdin: "ignore" });
+      assert.equal((await readAll(child.stdout)).trim(), "ok");
+      await noPath.dispose();
+    } finally {
+      process.chdir(previousDirectory);
+      await fs.rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test("a PATH entry with `..` after a symbolic link is searched as the operating system reads it", async () => {
+    const layout = await createSymlinkedRoot("ari-path-symlink-");
+    try {
+      await fs.mkdir(layout.real("bin"), { recursive: true });
+      const realFile = layout.real("bin/ari-probe-adapter");
+      await fs.writeFile(realFile, "#!/bin/sh\necho release adapter\n", { mode: 0o755 });
+      const searchPath = `${layout.throughSymlink("bin")}:/usr/bin`;
+      const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH: searchPath } });
+      const byName = await service.spawn({ command: "ari-probe-adapter", stdin: "ignore" });
+      assert.equal((await readAll(byName.stdout)).trim(), "release adapter", "spawn finds the release's executable");
+      const fromBaseEnv = await service.resolveExecutable("ari-probe-adapter");
+      const fromOption = await service.resolveExecutable("ari-probe-adapter", { path: searchPath });
+      for (const resolved of [fromBaseEnv, fromOption]) {
+        assert.ok(resolved !== null, "resolveExecutable finds the executable spawn runs");
+        assert.equal(await fs.realpath(resolved), realFile, "the returned path names the release's executable");
+        const byPath = await service.spawn({ command: resolved, stdin: "ignore" });
+        assert.equal((await readAll(byPath.stdout)).trim(), "release adapter", "running the returned path runs the same file");
+      }
+      await service.dispose();
+    } finally {
+      await fs.rm(layout.root, { recursive: true, force: true });
+    }
+  });
+
+  test("disposing kills the child's whole process group, grandchild included", async () => {
+    const service = createProcessService({ envPolicy: { stripAmbient: [] } });
+    const { child, grandchildPid } = await startParentOfGrandchild(service.spawn);
+    assert.equal(isAlive(grandchildPid), true, "the grandchild runs before disposal");
+    await service.dispose();
+    assert.deepEqual(await child.exited, { code: null, signal: "SIGTERM" });
+    assert.equal(await waitUntilGone(child.pid!), true, "the child is gone");
+    assert.equal(await waitUntilGone(grandchildPid), true, "the grandchild is gone");
+    await assert.rejects(service.spawn({ command: NODE }), (error: unknown) => isAriError(error, "invalid_state"));
+  });
+
+  test("dispose() does not return while a child it spawned is alive, including one still starting", async () => {
+    for (const awaitSpawn of [false, true]) {
+      const token = `ari-dispose-${randomUUID()}`;
+      const service = createProcessService({ envPolicy: { stripAmbient: [] } });
+      const spawning = service.spawn({ command: NODE, args: ["-e", "setInterval(() => {}, 1000)", token] });
+      if (awaitSpawn) await spawning;
+      await service.dispose();
+      assert.deepEqual(processesWithArgument(token), [], `no child is alive when dispose() returns (spawn awaited: ${awaitSpawn})`);
+      const child = await spawning;
+      assert.equal(existsSync(`/proc/${child.pid}`) || isAlive(child.pid!), false, "the child is gone and reaped");
+      assert.equal((await child.exited).signal, "SIGTERM");
+    }
+  });
+
+  test("aborting the service's signal kills the child's whole process group", async () => {
+    const controller = new AbortController();
+    const service = createProcessService({ envPolicy: { stripAmbient: [] }, signal: controller.signal });
+    const { child, grandchildPid } = await startParentOfGrandchild(service.spawn);
+    assert.equal(isAlive(grandchildPid), true);
+    controller.abort();
+    assert.equal((await child.exited).signal, "SIGTERM");
+    assert.equal(await waitUntilGone(grandchildPid), true, "the grandchild is gone after abort");
+    await service.dispose();
+  });
+
+  test("a group that ignores SIGTERM gets SIGKILL after the grace period", async () => {
+    const service = createProcessService({ envPolicy: { stripAmbient: [] }, killGraceMs: 200 });
+    const { child, grandchildPid } = await startParentOfGrandchild(service.spawn, { ignoreTerm: true });
+    const started = Date.now();
+    await service.dispose();
+    assert.equal((await child.exited).signal, "SIGKILL");
+    assert.equal(await waitUntilGone(grandchildPid), true, "the grandchild is gone");
+    assert.ok(Date.now() - started >= 200, "SIGKILL waited for the grace period");
+  });
+
+  test("kill() without a signal ends the group; a timeout does too", async () => {
+    const service = createProcessService({ envPolicy: { stripAmbient: [] } });
+    try {
+      const first = await startParentOfGrandchild(service.spawn);
+      await first.child.kill();
+      assert.equal(await waitUntilGone(first.grandchildPid), true, "kill() ends the grandchild");
+
+      const timed = await service.spawn({ command: NODE, args: ["-e", parentOfGrandchildScript()], timeoutMs: 300 });
+      const grandchildPid = Number(await readFirstLine(timed.stdout));
+      assert.equal((await timed.exited).signal, "SIGTERM");
+      assert.equal(await waitUntilGone(grandchildPid), true, "the timeout ends the grandchild");
+    } finally {
+      await service.dispose();
+    }
+  });
+
+  test("a process the child leaves behind in its group is ended when the child exits", async () => {
+    const service = createProcessService({ envPolicy: { stripAmbient: [] } });
+    try {
+      const { child, grandchildPid } = await startParentOfGrandchild(service.spawn, { exitAfterPrinting: true });
+      assert.deepEqual(await child.exited, { code: 0, signal: null });
+      assert.equal(await waitUntilGone(grandchildPid), true, "the orphaned grandchild is gone");
+    } finally {
+      await service.dispose();
+    }
+  });
+
+  test("stdin, stdout and stderr are pipes the driver can use", async () => {
+    const service = createProcessService({ envPolicy: { stripAmbient: [] } });
+    try {
+      const child = await service.spawn({
+        command: NODE,
+        args: ["-e", "process.stdin.on('data', (d) => process.stdout.write(d.toString().toUpperCase())); process.stderr.write('ready')"],
+      });
+      await child.write("hello ");
+      await child.write(new TextEncoder().encode("world"));
+      await child.closeStdin();
+      const [stdout, stderr, exit] = await Promise.all([readAll(child.stdout), readAll(child.stderr), child.exited]);
+      assert.equal(stdout, "HELLO WORLD");
+      assert.equal(stderr, "ready");
+      assert.deepEqual(exit, { code: 0, signal: null });
+
+      const ignored = await service.spawn({ command: NODE, args: ["-e", ""], stdin: "ignore" });
+      await assert.rejects(ignored.write("x"), (error: unknown) => isAriError(error, "invalid_state"));
+      await ignored.exited;
+    } finally {
+      await service.dispose();
+    }
+  });
+
+  test("spawning a missing executable rejects with not_found, and a malformed request with validation", async () => {
+    const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH: "" } });
+    await assert.rejects(service.spawn({ command: "/nonexistent/ari-agent" }), (error: unknown) => isAriError(error, "not_found"));
+    await assert.rejects(service.spawn({ command: NODE, stdin: "inherit" }), (error: unknown) => isAriError(error, "validation"));
+    await assert.rejects(service.spawn({ command: NODE, timeoutMs: -1 }), (error: unknown) => isAriError(error, "validation"));
+    await service.dispose();
+  });
+});

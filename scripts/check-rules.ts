@@ -21,15 +21,18 @@
 //                            declared optional peer.
 //
 // Dynamic imports in dist/ whose specifier is not a string literal: the
-// checker resolves the specifier when it provably can (a literal, a `const`
-// bound once in the file to a literal, or a template literal that starts with
-// "./", "../" or "/" and so stays inside the package, also when tsc wrapped it
-// in its `__rewriteRelativeImportExtension` helper) and then applies the
-// rule above. Any other specifier is a violation, with one reviewed exception:
-// inside a Node-only subpath, an `ari-allow-dynamic-import: <reason>` comment
-// on the call or its statement allows it. That exception exists for loading a
-// module the host names at runtime (the `ari-driver` runner loads any driver
-// by module path). The command line prints every such exception.
+// checker resolves the specifier when it provably can, then applies the rule
+// above. Provable forms, also when tsc wrapped them in its
+// `__rewriteRelativeImportExtension` helper:
+//   - a `const` bound once in the file to a string literal;
+//   - a template literal that starts with "./", "../" or "/", which stays
+//     inside the package;
+//   - `pathToFileURL(x)` or `pathToFileURL(x).href`, with `pathToFileURL`
+//     imported from "node:url" or "url": a file URL names a file, never a
+//     package, whatever `x` holds. Use this to load a module the host names at
+//     runtime (the `ari-driver` runner loads any driver by module path).
+// Any other specifier, including a `require()` with a computed argument, is a
+// violation. No comment or other annotation overrides this.
 //
 // Usage: node scripts/check-rules.ts [--root <dir>]
 
@@ -54,20 +57,10 @@ export interface RuleViolation {
   readonly message: string;
 }
 
-/** A dynamic import allowed only by an `ari-allow-dynamic-import` comment. */
-export interface DynamicImportWaiver {
-  readonly file: string;
-  readonly line: number;
-  readonly expression: string;
-  readonly reason: string;
-}
-
 export interface CheckOptions {
   readonly root: string;
   /** Files the package tarball ships, relative to `root`. Defaults to `npm pack --dry-run`. */
   readonly tarballFiles?: readonly string[];
-  /** Called for each dynamic import allowed by an `ari-allow-dynamic-import` comment. */
-  readonly onWaiver?: (waiver: DynamicImportWaiver) => void;
 }
 
 /** Subpaths whose entries must stay browser-safe. */
@@ -82,9 +75,10 @@ export const SOURCE_EXTENSIONS = [".ts", ".mts", ".cts", ".tsx", ".js", ".mjs", 
 /** Built files rule dist-imports reads. */
 export const DIST_EXTENSIONS = [".js", ".mjs", ".cjs"];
 
-export const DYNAMIC_IMPORT_MARKER = "ari-allow-dynamic-import:";
-
 const TSC_REWRITE_HELPER = "__rewriteRelativeImportExtension";
+
+/** The specifier the checker assigns to a provable file URL; it counts as a local file. */
+const FILE_URL_SPECIFIER = "file:";
 
 // The banned host names, written so that this file does not match them.
 const HOST_NAME_PATTERNS: readonly RegExp[] = [
@@ -117,8 +111,6 @@ export interface ImportSite {
   readonly line: number;
   /** The argument's source text, for messages. */
   readonly expression: string;
-  /** The reason given in an `ari-allow-dynamic-import:` comment on this site, if any. */
-  readonly waiverReason: string | undefined;
 }
 
 function toPosix(relative: string): string {
@@ -157,39 +149,60 @@ function scriptKind(fileName: string): ts.ScriptKind {
   return ts.ScriptKind.JS;
 }
 
-/** Names bound in the file, each with the string value it provably holds (a `const` with a literal initializer), or undefined. */
-function bindingValues(source: ts.SourceFile): Map<string, Array<string | undefined>> {
-  const bindings = new Map<string, Array<string | undefined>>();
-  const bind = (name: ts.Node, value: string | undefined): void => {
+/** One binding of a name in a file. */
+interface Binding {
+  /** The string a `const` with a literal initializer provably holds. */
+  readonly value?: string;
+  /** For an import binding: the module and the imported name (`*` for a namespace, `default` for a default import). */
+  readonly importOf?: { readonly module: string; readonly name: string };
+}
+
+/** Every binding of every name in the file. A name bound more than once is never trusted. */
+function fileBindings(source: ts.SourceFile): Map<string, Binding[]> {
+  const bindings = new Map<string, Binding[]>();
+  const bind = (name: ts.Node, binding: Binding): void => {
     if (ts.isIdentifier(name)) {
       const list = bindings.get(name.text) ?? [];
-      list.push(value);
+      list.push(binding);
       bindings.set(name.text, list);
     } else if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
       for (const element of name.elements) {
-        if (ts.isBindingElement(element)) bind(element.name, undefined);
+        if (ts.isBindingElement(element)) bind(element.name, {});
       }
     }
+  };
+  const moduleOf = (node: ts.Node): string | undefined => {
+    let current: ts.Node | undefined = node;
+    while (current !== undefined && !ts.isImportDeclaration(current)) current = current.parent;
+    return current !== undefined && ts.isStringLiteral(current.moduleSpecifier) ? current.moduleSpecifier.text : undefined;
   };
   const visit = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node)) {
       const isConst = (ts.getCombinedNodeFlags(node) & ts.NodeFlags.Const) !== 0;
       const initializer = node.initializer;
       const literal = initializer !== undefined && ts.isStringLiteralLike(initializer) ? initializer.text : undefined;
-      bind(node.name, isConst ? literal : undefined);
+      bind(node.name, isConst && literal !== undefined ? { value: literal } : {});
     } else if (ts.isParameter(node) || ts.isBindingElement(node)) {
-      bind(node.name, undefined);
+      bind(node.name, {});
     } else if (
       (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassExpression(node)) &&
       node.name !== undefined
     ) {
-      bind(node.name, undefined);
+      bind(node.name, {});
     } else if (ts.isImportClause(node) && node.name !== undefined) {
-      bind(node.name, undefined);
-    } else if (ts.isNamespaceImport(node) || ts.isImportSpecifier(node) || ts.isImportEqualsDeclaration(node)) {
-      bind(node.name, undefined);
+      const module = moduleOf(node);
+      bind(node.name, module === undefined ? {} : { importOf: { module, name: "default" } });
+    } else if (ts.isNamespaceImport(node)) {
+      const module = moduleOf(node);
+      bind(node.name, module === undefined ? {} : { importOf: { module, name: "*" } });
+    } else if (ts.isImportSpecifier(node)) {
+      const module = moduleOf(node);
+      const imported = (node.propertyName ?? node.name).text;
+      bind(node.name, module === undefined ? {} : { importOf: { module, name: imported } });
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      bind(node.name, {});
     } else if (ts.isCatchClause(node) && node.variableDeclaration !== undefined) {
-      bind(node.variableDeclaration.name, undefined);
+      bind(node.variableDeclaration.name, {});
     }
     ts.forEachChild(node, visit);
   };
@@ -197,8 +210,30 @@ function bindingValues(source: ts.SourceFile): Map<string, Array<string | undefi
   return bindings;
 }
 
+function onlyBinding(bindings: Map<string, Binding[]>, name: string): Binding | undefined {
+  const list = bindings.get(name);
+  return list !== undefined && list.length === 1 ? list[0] : undefined;
+}
+
+function isNodeUrlModule(module: string): boolean {
+  return module === "node:url" || module === "url";
+}
+
+/** True when `callee` is node:url's `pathToFileURL`, imported by name or reached through a namespace or default import. */
+function isPathToFileUrl(callee: ts.Expression, bindings: Map<string, Binding[]>): boolean {
+  if (ts.isIdentifier(callee)) {
+    const importOf = onlyBinding(bindings, callee.text)?.importOf;
+    return importOf !== undefined && isNodeUrlModule(importOf.module) && importOf.name === "pathToFileURL";
+  }
+  if (ts.isPropertyAccessExpression(callee) && callee.name.text === "pathToFileURL" && ts.isIdentifier(callee.expression)) {
+    const importOf = onlyBinding(bindings, callee.expression.text)?.importOf;
+    return importOf !== undefined && isNodeUrlModule(importOf.module) && (importOf.name === "*" || importOf.name === "default");
+  }
+  return false;
+}
+
 /** The specifier an argument provably names, or undefined when that cannot be known statically. */
-function staticSpecifier(argument: ts.Expression, bindings: Map<string, Array<string | undefined>>): string | undefined {
+function staticSpecifier(argument: ts.Expression, bindings: Map<string, Binding[]>): string | undefined {
   if (ts.isStringLiteralLike(argument)) return argument.text;
   if (ts.isTemplateExpression(argument)) {
     const head = argument.head.text;
@@ -216,40 +251,11 @@ function staticSpecifier(argument: ts.Expression, bindings: Map<string, Array<st
   ) {
     return staticSpecifier(argument.arguments[0]!, bindings);
   }
-  if (ts.isIdentifier(argument)) {
-    const values = bindings.get(argument.text);
-    if (values !== undefined && values.length === 1) return values[0];
-  }
+  if (ts.isIdentifier(argument)) return onlyBinding(bindings, argument.text)?.value;
+  // `pathToFileURL(x)` or `pathToFileURL(x).href`: a file URL, which loads a file and never a package.
+  const fileUrlCall = ts.isPropertyAccessExpression(argument) && argument.name.text === "href" ? argument.expression : argument;
+  if (ts.isCallExpression(fileUrlCall) && isPathToFileUrl(fileUrlCall.expression, bindings)) return FILE_URL_SPECIFIER;
   return undefined;
-}
-
-function waiverReason(source: ts.SourceFile, nodes: readonly ts.Node[]): string | undefined {
-  const text = source.getFullText();
-  for (const node of nodes) {
-    // A comment on the same line as the token before `node` (for example inside
-    // `import(/* ... */ name)`) is a trailing comment of that token.
-    const ranges = [
-      ...(ts.getLeadingCommentRanges(text, node.getFullStart()) ?? []),
-      ...(ts.getTrailingCommentRanges(text, node.getFullStart()) ?? []),
-    ];
-    for (const range of ranges) {
-      const comment = text.slice(range.pos, range.end);
-      const index = comment.indexOf(DYNAMIC_IMPORT_MARKER);
-      if (index === -1) continue;
-      const reason = comment
-        .slice(index + DYNAMIC_IMPORT_MARKER.length)
-        .replace(/\*\/\s*$/, "")
-        .trim();
-      return reason;
-    }
-  }
-  return undefined;
-}
-
-function enclosingStatement(node: ts.Node): ts.Node | undefined {
-  let current: ts.Node | undefined = node.parent;
-  while (current !== undefined && !ts.isStatement(current)) current = current.parent;
-  return current;
 }
 
 /**
@@ -259,45 +265,32 @@ function enclosingStatement(node: ts.Node): ts.Node | undefined {
  */
 export function findImports(fileName: string, text: string): ImportSite[] {
   const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind(fileName));
-  const bindings = bindingValues(source);
+  const bindings = fileBindings(source);
   const sites: ImportSite[] = [];
   const lineOf = (node: ts.Node): number => source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
-  const add = (node: ts.Node, specifier: string | undefined, dynamic: boolean, typeOnly: boolean, argument: ts.Node, waiverNodes: ts.Node[]): void => {
-    sites.push({
-      specifier,
-      dynamic,
-      typeOnly,
-      line: lineOf(node),
-      expression: argument.getText(source),
-      waiverReason: waiverReason(source, waiverNodes),
-    });
+  const add = (node: ts.Node, specifier: string | undefined, dynamic: boolean, typeOnly: boolean, argument: ts.Node): void => {
+    sites.push({ specifier, dynamic, typeOnly, line: lineOf(node), expression: argument.getText(source) });
   };
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-      add(node, node.moduleSpecifier.text, false, node.importClause?.isTypeOnly === true, node.moduleSpecifier, []);
+      add(node, node.moduleSpecifier.text, false, node.importClause?.isTypeOnly === true, node.moduleSpecifier);
     } else if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) {
-      add(node, node.moduleSpecifier.text, false, node.isTypeOnly, node.moduleSpecifier, []);
+      add(node, node.moduleSpecifier.text, false, node.isTypeOnly, node.moduleSpecifier);
     } else if (
       ts.isImportEqualsDeclaration(node) &&
       ts.isExternalModuleReference(node.moduleReference) &&
       ts.isStringLiteral(node.moduleReference.expression)
     ) {
-      add(node, node.moduleReference.expression.text, false, node.isTypeOnly, node.moduleReference.expression, []);
+      add(node, node.moduleReference.expression.text, false, node.isTypeOnly, node.moduleReference.expression);
     } else if (ts.isCallExpression(node) && node.arguments.length > 0) {
       const argument = node.arguments[0]!;
       const isImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
       const isRequire = ts.isIdentifier(node.expression) && node.expression.text === "require";
       if (isImport || isRequire) {
         const specifier = staticSpecifier(argument, bindings);
-        const statement = enclosingStatement(node);
-        const unwrapped =
-          ts.isCallExpression(argument) && ts.isIdentifier(argument.expression) && argument.expression.text === TSC_REWRITE_HELPER
-            ? argument.arguments.slice(0, 1)
-            : [];
-        const waiverNodes = [argument, ...unwrapped, node, ...(statement === undefined ? [] : [statement])];
         // A `require` with a literal is a static load; one with a computed argument is as dynamic as `import()`.
         const dynamic = isImport || specifier === undefined;
-        add(node, specifier, dynamic, false, argument, waiverNodes);
+        add(node, specifier, dynamic, false, argument);
       }
     }
     ts.forEachChild(node, visit);
@@ -306,8 +299,9 @@ export function findImports(fileName: string, text: string): ImportSite[] {
   return sites;
 }
 
+/** A specifier that loads a file of this package or of the file system, never an installed package. */
 function isRelative(specifier: string): boolean {
-  return specifier.startsWith("./") || specifier.startsWith("../") || specifier.startsWith("/");
+  return specifier.startsWith("./") || specifier.startsWith("../") || specifier.startsWith("/") || specifier.startsWith(FILE_URL_SPECIFIER);
 }
 
 function isNodeBuiltin(specifier: string): boolean {
@@ -458,7 +452,7 @@ function nodeOnlyDistPrefixes(pkg: PackageJson): string[] {
   return prefixes;
 }
 
-function checkDistImports(root: string, pkg: PackageJson, onWaiver: ((waiver: DynamicImportWaiver) => void) | undefined): RuleViolation[] {
+function checkDistImports(root: string, pkg: PackageJson): RuleViolation[] {
   const optionalPeers = new Set(
     Object.keys(pkg.peerDependencies ?? {}).filter((name) => pkg.peerDependenciesMeta?.[name]?.optional === true),
   );
@@ -473,17 +467,10 @@ function checkDistImports(root: string, pkg: PackageJson, onWaiver: ((waiver: Dy
     };
     for (const site of findImports(file, fs.readFileSync(full, "utf8"))) {
       if (site.specifier === undefined) {
-        if (site.waiverReason !== undefined && site.waiverReason !== "" && inNodeOnlySubpath) {
-          onWaiver?.({ file, line: site.line, expression: site.expression, reason: site.waiverReason });
-          continue;
-        }
-        const why =
-          site.waiverReason === undefined
-            ? "the specifier must be a string literal, a const bound to one, or a template starting with ./ or ../"
-            : site.waiverReason === ""
-              ? `the "${DYNAMIC_IMPORT_MARKER}" comment gives no reason`
-              : `an "${DYNAMIC_IMPORT_MARKER}" comment only counts inside a Node-only subpath`;
-        violation(site.line, `loads a module chosen at runtime (${site.expression}); ${why}`);
+        violation(
+          site.line,
+          `loads a module chosen at runtime (${site.expression}); the specifier must provably be a string literal, a const bound to one, a template starting with ./ or ../, or node:url's pathToFileURL(...)`,
+        );
         continue;
       }
       if (isRelative(site.specifier)) continue;
@@ -520,18 +507,14 @@ export function checkRepository(options: CheckOptions): RuleViolation[] {
     ...checkHostNames(root, tarballFiles),
     ...checkBrowserSafeEntries(root, pkg),
     ...checkOptionalImports(root, pkg),
-    ...checkDistImports(root, pkg, options.onWaiver),
+    ...checkDistImports(root, pkg),
   ];
 }
 
 function main(argv: string[]): number {
   const rootIndex = argv.indexOf("--root");
   const root = rootIndex === -1 ? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..") : path.resolve(argv[rootIndex + 1] ?? ".");
-  const violations = checkRepository({
-    root,
-    onWaiver: (waiver) =>
-      process.stdout.write(`${waiver.file}:${waiver.line}: dynamic import(${waiver.expression}) allowed by comment: ${waiver.reason}\n`),
-  });
+  const violations = checkRepository({ root });
   if (violations.length === 0) {
     process.stdout.write("check:rules passed: all five repository rules hold.\n");
     return 0;

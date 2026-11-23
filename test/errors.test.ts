@@ -95,6 +95,51 @@ describe("call errors", () => {
     assert.deepEqual(JSON.parse(JSON.stringify(new AriError(extension))), extension);
   });
 
+  test("an optional field set to undefined is left out, as JSON.stringify leaves it out", () => {
+    const viaBuilder = callErrors.notFound({ resource: "session", id: undefined });
+    const viaConstructor = new AriError({ code: "transport", message: "Connection closed", retryable: undefined });
+    const viaSpread = callErrors.driverUnavailable({ package: "@cursor/sdk", binary: undefined, installHint: undefined });
+    const nestedMethod = callErrors.authRequired([{ id: "key", kind: "api_key", label: "API key", description: undefined, fields: undefined }]);
+    const nestedIssue = callErrors.validation([{ message: "bad", path: undefined }]);
+    const cases = [
+      ["not_found", viaBuilder],
+      ["transport", viaConstructor],
+      ["driver_unavailable", viaSpread],
+      ["auth_required", nestedMethod],
+      ["validation", nestedIssue],
+    ] as const;
+    for (const [code, error] of cases) {
+      const parsed: unknown = JSON.parse(JSON.stringify(error));
+      assert.equal(isCallError(parsed, code), true, code);
+      assert.deepEqual(error.callError, parsed, `${code}: the stored call error is exactly the wire form`);
+      assert.equal(JSON.stringify(error.callError).length, JSON.stringify(parsed).length, code);
+    }
+    assert.deepEqual(nestedMethod.toJSON(), { code: "auth_required", message: "Sign-in required", methods: [{ id: "key", kind: "api_key", label: "API key" }] });
+    assert.deepEqual(viaBuilder.toJSON(), { code: "not_found", message: "Not found: session", resource: "session" });
+  });
+
+  test("an extension error's data is kept in its wire form, and data JSON cannot carry is refused", () => {
+    const dated = new AriError({ code: "x:vendor.quota", message: "Quota", data: { at: new Date(0), skipped: undefined } });
+    assert.deepEqual(dated.callError, { code: "x:vendor.quota", message: "Quota", data: { at: "1970-01-01T00:00:00.000Z" } });
+    assert.throws(() => new AriError({ code: "x:vendor.big", message: "Big", data: 1n }), /cannot be serialized as JSON/);
+  });
+
+  test("the guards treat an undefined optional field as absent but an undefined required field as missing", () => {
+    const inProcess = { code: "transport", message: "Connection closed", retryable: undefined };
+    assert.equal(isCallError(inProcess, "transport"), true);
+    assert.deepEqual(toCallError(inProcess), inProcess);
+    assert.equal(isCallError({ code: "unsupported", message: "x", capability: undefined }), false);
+    assert.throws(() => new AriError({ code: "unsupported", message: "x", capability: undefined as unknown as string }), /Invalid call error at capability/);
+  });
+
+  test("a driver_unavailable payload missing both package and binary still throws, also when both are undefined", () => {
+    assert.throws(() => new AriError({ code: "driver_unavailable", message: "x" } as unknown as CallError), /Invalid call error/);
+    assert.throws(
+      () => new AriError({ code: "driver_unavailable", message: "x", package: undefined, binary: undefined } as unknown as CallError),
+      /Invalid call error/,
+    );
+  });
+
   test("an AriError converts back to data, and toCallError accepts both forms", () => {
     const error = callErrors.unsupported("turns.steer");
     assert.equal(isAriError(error, "unsupported"), true);
@@ -136,5 +181,12 @@ describe("failures", () => {
 
   test("a failure without retryable is rejected", () => {
     assert.equal(FailureSchema.is({ class: "unknown", message: "x" }), false);
+  });
+
+  test("a failure whose optional fields are undefined is valid; an undefined retryable is not", () => {
+    const failure: Failure = { class: "provider_error", message: "x", retryable: false, code: undefined, resetAt: undefined, detail: undefined };
+    assert.equal(isFailure(failure), true);
+    assert.equal(isFailure(JSON.parse(JSON.stringify(failure))), true);
+    assert.equal(isFailure({ class: "provider_error", message: "x", retryable: undefined }), false);
   });
 });

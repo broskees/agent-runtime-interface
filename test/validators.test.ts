@@ -181,6 +181,24 @@ describe("forward compatibility: unknown values validate and come back unchanged
   });
 });
 
+describe("undefined object fields", () => {
+  test("an undefined optional field counts as absent and an undefined required field as missing, as JSON and Ajv treat them", () => {
+    const ajvEvent = createSpecAjv().getSchema(defId("events.schema.json", "AriEvent"))!;
+    const withUndefinedOptionals = {
+      ...envelope({ type: "notice", level: "info", code: undefined, text: "hi" }),
+      threadId: undefined,
+      native: undefined,
+    };
+    assert.equal(validate(ari.AriEventSchema, withUndefinedOptionals).issues, undefined);
+    assert.equal(ajvEvent(withUndefinedOptionals), true);
+
+    const withUndefinedRequired = envelope({ type: "notice", level: "info", text: undefined });
+    const result = validate(ari.AriEventSchema, withUndefinedRequired);
+    assert.deepEqual(result.issues, [{ message: 'Missing required field "text"', path: ["body", "text"] }]);
+    assert.equal(ajvEvent(withUndefinedRequired), false);
+  });
+});
+
 describe("validator conveniences", () => {
   test("is() and parse() agree with validate()", () => {
     const good = envelope({ type: "notice", level: "info", text: "hi" });

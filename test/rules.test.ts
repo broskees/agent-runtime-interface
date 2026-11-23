@@ -186,7 +186,7 @@ describe("repository rules", () => {
     only(check(cjs), "dist-imports", "dist/drivers/sample/index.cjs");
   });
 
-  test("(e) a dynamic import whose specifier is not a literal is refused unless it provably resolves or carries a reviewed marker", () => {
+  test("(e) a dynamic import whose specifier is not provably a literal, a relative path or a file URL is refused", () => {
     const constBound = cleanFixture();
     write(constBound, "dist/node/index.js", 'const httpClientPackage = "undici";\nexport async function load() {\n  return import(httpClientPackage);\n}\n');
     only(check(constBound), "dist-imports", "dist/node/index.js");
@@ -203,13 +203,23 @@ describe("repository rules", () => {
     write(computed, "dist/drivers/sample/index.js", 'export async function load() {\n  return import("@cursor/" + "sdk");\n}\n');
     only(check(computed), "dist-imports", "dist/drivers/sample/index.js");
 
-    const markerInCore = cleanFixture();
-    write(markerInCore, "dist/helper.js", "export async function load(name) {\n  // ari-allow-dynamic-import: loads a host-chosen plugin\n  return import(name);\n}\n");
-    only(check(markerInCore), "dist-imports", "dist/helper.js");
+    // A comment no longer allows anything: the config value below may be a bare package name.
+    const commented = cleanFixture();
+    write(
+      commented,
+      "dist/wire/load-driver.js",
+      "export async function loadDriver(config) {\n  // ari-allow-dynamic-import: the host names the driver module\n  return import(config.driverModule);\n}\n",
+    );
+    only(check(commented), "dist-imports", "dist/wire/load-driver.js");
 
-    const markerWithoutReason = cleanFixture();
-    write(markerWithoutReason, "dist/node/index.js", "export async function load(name) {\n  // ari-allow-dynamic-import:\n  return import(name);\n}\n");
-    only(check(markerWithoutReason), "dist-imports", "dist/node/index.js");
+    // pathToFileURL only counts when it is node:url's own function.
+    const lookalike = cleanFixture();
+    write(
+      lookalike,
+      "dist/wire/load-driver.js",
+      "const pathToFileURL = (name) => ({ href: name });\nexport async function loadDriver(modulePath) {\n  return import(pathToFileURL(modulePath).href);\n}\n",
+    );
+    only(check(lookalike), "dist-imports", "dist/wire/load-driver.js");
   });
 
   test("(e) dynamic imports that provably stay inside the rules pass", () => {
@@ -229,27 +239,22 @@ describe("repository rules", () => {
     );
     write(
       root,
-      "dist/node/index.js",
+      "dist/wire/load-driver.js",
       [
-        "export async function loadModule(modulePath) {",
-        "  // ari-allow-dynamic-import: the runner loads a driver module the host names on its command line",
-        "  return import(modulePath);",
-        "}",
-        "export async function loadInline(modulePath) {",
-        "  return import(/* ari-allow-dynamic-import: same, written inline */ modulePath);",
-        "}",
-        "export async function loadAsEmitted(modulePath) {",
-        "  return import(__rewriteRelativeImportExtension(/* ari-allow-dynamic-import: as tsc emits the inline form */ modulePath));",
+        'import * as path from "node:path";',
+        'import { pathToFileURL } from "node:url";',
+        'import * as url from "node:url";',
+        'import { pathToFileURL as toFileUrl } from "url";',
+        "export async function loadDriver(modulePath) {",
+        "  // A file URL names a file, never a package, whatever the host passed.",
+        "  await import(pathToFileURL(path.resolve(modulePath)).href);",
+        "  await import(__rewriteRelativeImportExtension(pathToFileURL(modulePath).href));",
+        "  await import(url.pathToFileURL(modulePath).href);",
+        "  return import(toFileUrl(modulePath));",
         "}",
       ].join("\n"),
     );
-    const waivers: string[] = [];
-    assert.deepEqual(checkRepository({ root, tarballFiles: SHIPPED, onWaiver: (note) => waivers.push(`${note.file}:${note.line} ${note.reason}`) }), []);
-    assert.deepEqual(waivers, [
-      "dist/node/index.js:3 the runner loads a driver module the host names on its command line",
-      "dist/node/index.js:6 same, written inline",
-      "dist/node/index.js:9 as tsc emits the inline form",
-    ]);
+    assert.deepEqual(check(root), []);
   });
 
   test("the command line exits non-zero and names the file and rule", () => {

@@ -4,6 +4,11 @@
 // that scripts/codegen.ts allows in spec/v1, so a validator accepts exactly
 // what the normative schema accepts. It never copies or strips the input:
 // unknown fields, enum values and `x:` variants come back unchanged.
+//
+// Validators check JavaScript values that will be sent as JSON, so an object
+// field whose value is `undefined` counts as absent, as `JSON.stringify` drops
+// it and as Ajv treats it: an optional field may be `undefined`, and a
+// required field that is `undefined` is missing.
 
 import { AriError } from "./ari-error.ts";
 import type { StandardJSONSchemaV1, StandardSchemaV1 } from "./standard-schema.ts";
@@ -152,6 +157,11 @@ type Path = ReadonlyArray<string | number>;
 
 function issue(path: Path, message: string): ValidationIssue {
   return { message, path: [...path] };
+}
+
+/** True when `value` has field `key` with a value other than `undefined`. */
+function hasField(value: { readonly [key: string]: unknown }, key: string): boolean {
+  return Object.hasOwn(value, key) && value[key] !== undefined;
 }
 
 function isPlainObject(value: unknown): value is { readonly [key: string]: unknown } {
@@ -320,12 +330,13 @@ function validateObject(
   const properties = isPlainObject(keywords.properties) ? (keywords.properties as { readonly [key: string]: SchemaNode }) : {};
   if (Array.isArray(keywords.required)) {
     for (const key of keywords.required as string[]) {
-      if (!Object.hasOwn(value, key)) {
+      if (!hasField(value, key)) {
         issues.push(issue([...path, key], `Missing required field "${key}"`));
       }
     }
   }
   for (const [key, propertyValue] of Object.entries(value)) {
+    if (propertyValue === undefined) continue;
     const propertySchema = properties[key];
     if (propertySchema !== undefined) {
       issues.push(...validateNode(registry, propertySchema, propertyValue, [...path, key], baseId));
@@ -395,7 +406,7 @@ function discriminatorMatches(registry: Registry, branch: SchemaNode, value: unk
     const isDiscriminator = property.const !== undefined || typeof property.pattern === "string";
     if (!isDiscriminator) continue;
     sawDiscriminator = true;
-    if (!Object.hasOwn(value, key)) return false;
+    if (!hasField(value, key)) return false;
     if (validateNode(registry, property, value[key], [], propertyBaseId).length > 0) return false;
   }
   return sawDiscriminator;

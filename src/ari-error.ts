@@ -1,7 +1,8 @@
-// `AriError` is the throwable form of a call error. Its constructor checks the
-// call error against the `CallError` schema, so every AriError serializes to
-// data that `isCallError` (or any schema-based reader on the other side of
-// `ari/wire`) accepts again.
+// `AriError` is the throwable form of a call error. Its constructor keeps the
+// call error's JSON wire form (what `JSON.stringify` sends, so fields set to
+// `undefined` are left out) and checks that form against the `CallError`
+// schema. Every AriError therefore serializes to data that `isCallError`, or
+// any schema-based reader on the other side of `ari/wire`, accepts again.
 //
 // Import cycle: src/validation.ts throws AriError from `parse`, and this module
 // uses a generated validator, which src/validation.ts creates. The cycle is
@@ -18,18 +19,27 @@ export class AriError extends Error {
   readonly code: CallError["code"];
   readonly callError: CallError;
 
-  /** Throws a `TypeError` when `callError` is not a valid call error. */
+  /**
+   * Keeps the JSON wire form of `callError`. Throws a `TypeError` when that
+   * form is not a valid call error, or when `callError` cannot be serialized.
+   */
   constructor(callError: CallError) {
-    const result = CallErrorSchema["~standard"].validate(callError);
+    let wireForm: CallError;
+    try {
+      wireForm = JSON.parse(JSON.stringify(callError)) as CallError;
+    } catch (error) {
+      throw new TypeError(`Invalid call error: it cannot be serialized as JSON (${(error as Error).message})`);
+    }
+    const result = CallErrorSchema["~standard"].validate(wireForm);
     if (!(result instanceof Promise) && result.issues !== undefined) {
       const first = result.issues[0];
       const where = first?.path !== undefined && first.path.length > 0 ? ` at ${first.path.map(String).join(".")}` : "";
       throw new TypeError(`Invalid call error${where}: ${first?.message ?? "invalid value"}`);
     }
-    super(callError.message);
+    super(wireForm.message);
     this.name = "AriError";
-    this.code = callError.code;
-    this.callError = callError;
+    this.code = wireForm.code;
+    this.callError = wireForm;
   }
 
   toJSON(): CallError {

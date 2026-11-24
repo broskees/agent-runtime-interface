@@ -62,6 +62,22 @@ describe("ari/meta/muse", () => {
     assert.deepEqual(buildCliLaunch(MUSE_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env }), { command: "muse", args: [], env: { PATH: "/usr/bin", HOME: "/home/me" }, cwd: "/w", files: [] });
   });
 
+  test("the pinned SDK devDependency, the installed SDK, the lockfile and SOURCES.md name the same version and integrity", () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { devDependencies: { [name: string]: string }; peerDependencies: { [name: string]: string }; peerDependenciesMeta: { [name: string]: { optional?: boolean } } };
+    assert.equal(manifest.devDependencies["@muse-code/sdk"], "1.4.25");
+    assert.equal(manifest.peerDependencies["@muse-code/sdk"], "^1.4.25");
+    assert.equal(manifest.peerDependenciesMeta["@muse-code/sdk"]?.optional, true);
+    const installed = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "node_modules", "@muse-code", "sdk", "package.json"), "utf8")) as { version: string };
+    assert.equal(installed.version, "1.4.25");
+    const lock = fs.readFileSync(path.join(REPO_ROOT, "pnpm-lock.yaml"), "utf8");
+    const integrity = /'@muse-code\/sdk@1\.4\.25':\n\s+resolution: \{integrity: (sha512-[A-Za-z0-9+/=]+)\}/.exec(lock)?.[1];
+    assert.ok(integrity !== undefined, "pnpm-lock.yaml holds no @muse-code/sdk@1.4.25 entry");
+    const sources = fs.readFileSync(path.join(REPO_ROOT, "test", "drivers", "muse", "SOURCES.md"), "utf8");
+    assert.ok(sources.includes("`@muse-code/sdk` `1.4.25`"), "SOURCES.md does not name the pinned SDK version");
+    assert.ok(sources.includes(integrity), "SOURCES.md does not give the lockfile's integrity of the pinned SDK");
+    assert.ok(sources.includes("e6ef4a64473d"), "SOURCES.md does not name the SDK repository commit");
+  });
+
   test("docs/drivers/muse.md and changelogs/muse.md exist and describe the driver as built", () => {
     const docs = fs.readFileSync(path.join(REPO_ROOT, "docs", "drivers", "muse.md"), "utf8");
     const changelog = fs.readFileSync(path.join(REPO_ROOT, "changelogs", "muse.md"), "utf8");

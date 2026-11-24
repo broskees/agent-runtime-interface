@@ -189,8 +189,76 @@ describe("muse driver: Muse's protocol", () => {
       ]);
       assert.equal(rig.requests("userInput/answer")[0]!["userInputId"], request.native!.id);
       await until(() => opened.bodies("request.upsert").find((body) => body.request.id === request.id && body.request.status === "resolved"), "the question to resolve");
+      // A custom answer (requests.allowCustomAnswer) is free text for each question left unanswered.
+      const second = await native.askQuestions([{ id: "why", header: "Why", question: "Why Postgres?", options: [{ label: "Speed" }, { label: "Habit" }], selection: { mode: "single" } }]);
+      const followUp = await until(() => opened.bodies("request.upsert").find((body) => body.request.kind === "user_input" && body.request.id !== request.id)?.request, "the second question");
+      assert.equal(followUp.allowCustomAnswer, true);
+      await opened.session.respond({ requestId: followUp.id!, responseKey: "a2", custom: "It matches the other services." });
+      assert.deepEqual(await second.answers(), [{ questionId: "why", freeText: "It matches the other services." }]);
       await native.complete();
       await terminal(opened, turnIdOf(result));
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("approval subjects: a shell command is a command request, a file read is file_read, a write is file_change, a network host is permission", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const { result, native } = await start(rig, opened.session, thread, "Look around.");
+      const options = [
+        { optionId: "yes", label: "Allow once", decision: "accept" as const },
+        { optionId: "no", label: "Deny", decision: "decline" as const },
+      ];
+      const asked = [
+        { want: "command", handle: await native.approvalFor({ toolName: "shell", args: { command: "ls" }, subject: { kind: "shell", command: "ls", stages: [] }, options }) },
+        { want: "file_read", handle: await native.approvalFor({ toolName: "read_file", args: { path: "secrets.env" }, subject: { kind: "fileAccess", toolName: "read_file", path: "secrets.env", access: "read" }, options }) },
+        { want: "file_change", handle: await native.approvalFor({ toolName: "write_file", args: { path: "a.txt" }, subject: { kind: "fileAccess", toolName: "write_file", path: "a.txt", access: "write" }, options }) },
+        { want: "permission", handle: await native.approvalFor({ toolName: "web_fetch", args: { url: "https://example.com" }, subject: { kind: "network", toolName: "web_fetch", host: "example.com", port: 443, protocol: "https" }, options }) },
+      ];
+      const requests = await until(() => {
+        const found = opened.bodies("request.upsert").filter((body) => body.request.status === "pending");
+        return found.length === 4 ? found.map((body) => body.request) : undefined;
+      }, "four approvals");
+      assert.deepEqual(requests.map((request) => request.kind), asked.map((entry) => entry.want));
+      assert.deepEqual(requests[1]!.subject?.paths, [`${rig.cwd}/secrets.env`]);
+      assert.equal(requests[3]!.subject?.tool?.name, "web_fetch");
+      for (const [index, request] of requests.entries()) {
+        await opened.session.respond({ requestId: request.id!, responseKey: `k${index}`, optionId: index % 2 === 0 ? "yes" : "no" });
+        assert.equal(await asked[index]!.handle.nextReply(), index % 2 === 0 ? "yes" : "no");
+      }
+      await native.complete();
+      await terminal(opened, turnIdOf(result));
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("streaming: assistant text, reasoning summary and tool output reach item.delta on text, reasoning and output", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const { result, native } = await start(rig, opened.session, thread, "Think, then run.");
+      await native.think("Checking the tests first.");
+      await native.runTool({ name: "shell", input: { command: "npm test" }, output: "3 passing" });
+      await native.say("All good.");
+      await native.complete();
+      await terminal(opened, turnIdOf(result));
+      const deltas = opened.bodies("item.delta").map((body) => [body.field, body.chunk]);
+      assert.deepEqual(deltas, [
+        ["reasoning", "Checking the tests first."],
+        ["output", "3 passing"],
+        ["text", "All g"],
+        ["text", "ood."],
+      ]);
+      const items = new Map(opened.bodies("item.upsert").filter((body) => body.item.kind !== undefined).map((body) => [body.item.id, body.item.kind]));
+      assert.deepEqual([...items.values()], ["user_message", "reasoning", "command_execution", "assistant_message"]);
+      const command = opened.bodies("item.upsert").find((body) => body.item.kind === "command_execution")!.item;
+      assert.deepEqual(command.command, ["npm test"]);
+      assert.equal(command.cwd, rig.cwd);
     } finally {
       await rig.cleanup();
     }

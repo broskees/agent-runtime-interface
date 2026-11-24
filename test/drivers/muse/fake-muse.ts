@@ -50,6 +50,7 @@
 import type {
   ApprovalChoice,
   ApprovalMode,
+  ApprovalSubject,
   ApprovalRequestParams,
   ErrorKind,
   ErrorObject,
@@ -1065,13 +1066,20 @@ export class FakeMuseTurn implements NativeTurn {
   }
 
   async requestApproval(approval: NativeApproval): Promise<NativeApprovalHandle> {
-    const world = this.#world();
-    const approvalId = world.mint();
     const command = approval.command?.join(" ") ?? "";
     const path = approval.path === undefined ? undefined : approval.path.startsWith("/") ? approval.path : `${this.session.workspaceRoot}/${approval.path}`;
-    const toolName = approval.kind === "command" ? "shell" : "write_file";
-    const args = approval.kind === "command" ? JSON.stringify({ command }) : JSON.stringify({ path: approval.path ?? "" });
-    const item: Item = { itemId: world.mint(), kind: "toolCall", turnId: this.run.turnId, revision: 1, status: "inProgress", tool: toolName, callId: `call_${approvalId.slice(-6)}`, args, approvalId, recordedAt: new Date().toISOString() };
+    if (approval.kind === "command") {
+      return this.approvalFor({ toolName: "shell", args: { command }, subject: { kind: "shell", command, stages: [], workspaceRoot: this.session.workspaceRoot }, options: approval.options });
+    }
+    return this.approvalFor({ toolName: "write_file", args: { path: approval.path ?? "" }, subject: { kind: "fileAccess", toolName: "write_file", path: path ?? this.session.workspaceRoot, access: "write" }, options: approval.options });
+  }
+
+  /** An approval for any MSP subject (a file read, a network host, a tool), on a `toolCall` item of this run. */
+  async approvalFor(spec: { toolName: string; args: unknown; subject: ApprovalSubject; options: NativeApproval["options"] }): Promise<NativeApprovalHandle> {
+    const world = this.#world();
+    const approvalId = world.mint();
+    const args = JSON.stringify(spec.args);
+    const item: Item = { itemId: world.mint(), kind: "toolCall", turnId: this.run.turnId, revision: 1, status: "inProgress", tool: spec.toolName, callId: `call_${approvalId.slice(-6)}`, args, approvalId, recordedAt: new Date().toISOString() };
     this.host.openItem(this.session, this.run, item);
     const fake = this.host.askApproval(
       this.session,
@@ -1082,11 +1090,11 @@ export class FakeMuseTurn implements NativeTurn {
         taskId: world.mint(),
         itemId: item.itemId,
         toolCallId: item.callId!,
-        toolName,
+        toolName: spec.toolName,
         rawArgs: args,
-        subject: approval.kind === "command" ? { kind: "shell", command, stages: [], workspaceRoot: this.session.workspaceRoot } : { kind: "fileAccess", toolName, path: path ?? this.session.workspaceRoot, access: "write" },
+        subject: spec.subject,
         currentRequirementId: { approvalId, sourceIndex: 0 },
-        availableChoices: approval.options.map((option) => FakeMuseTurn.choice(option)),
+        availableChoices: spec.options.map((option) => FakeMuseTurn.choice(option)),
         protectedWrite: false,
         judgeEscalated: false,
       },

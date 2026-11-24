@@ -187,7 +187,8 @@ export class MuseHost {
 
   /** Sends a command; the connection adds `commandId` (or uses the one given) and checks the ack echoes it. */
   async command<M extends MuseCommandMethod>(method: M, params: MuseMethods[M]["params"], commandId?: string): Promise<MuseMethods[M]["result"]> {
-    const result = await this.#connection.command(method, params as unknown as Record<string, unknown>, { maxAttempts: 1, ...(commandId === undefined ? {} : { commandId }) });
+    // The SDK retries a refusal that admitted nothing (overloaded, backpressured) under the same commandId; nothing else is retried.
+    const result = await this.#connection.command(method, params as unknown as Record<string, unknown>, commandId === undefined ? undefined : { commandId });
     return result as unknown as MuseMethods[M]["result"];
   }
 

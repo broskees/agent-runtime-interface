@@ -11,12 +11,20 @@
 // the host process inherited: the instance's stored key, else the stored SDK
 // login (the user's ambient sign-in). A `CURSOR_API_KEY` in the instance's
 // environment is dropped like any inherited credential.
+//
+// State. The instance assumes it alone uses its state directory and the
+// Cursor agent store in it: its sessions coordinate their runs in memory
+// (agent-runs.ts), and a second instance there could expire this one's live
+// runs. The first session takes a lock file, `<stateDir>/cursor-instance.lock`;
+// another instance, in this process or a live other one, is refused with
+// `invalid_state`. A lock a dead process left is taken over. `dispose` removes it.
 
 import { callErrors } from "../../errors.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { AuthMethod, AuthState, InstanceStatus, ModelCatalog, OpenSessionInput, ProbeResult, UpdateAdvisory } from "../../generated/instance.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
 import { CURSOR_INSTALL_HINT, CURSOR_SDK_PACKAGE, CURSOR_TESTED_VERSIONS } from "./config.ts";
+import { AgentRuns } from "./agent-runs.ts";
 import type { CursorConfig } from "./config.ts";
 import { CreatedAgents } from "./created-agents.ts";
 import { IDENTITY_VERSION, callErrorFromSdk } from "./mapping.ts";
@@ -80,6 +88,54 @@ function errorName(error: unknown): unknown {
   return typeof error === "object" && error !== null ? (error as { name?: unknown }).name : undefined;
 }
 
+/** The lock files of the state directories this process's instances hold. */
+const HELD_STATE_LOCKS = new Set<string>();
+
+/** True when a process with this id is running (EPERM: it runs as another user). */
+function processRuns(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as { code?: unknown }).code === "EPERM";
+  }
+}
+
+/** Takes `<stateDir>/cursor-instance.lock` for this instance (see the top of this file), and returns its path. */
+async function lockStateDirectory(stateDir: string): Promise<string> {
+  const fs = await import("node:fs/promises");
+  const file = `${stateDir}/cursor-instance.lock`;
+  const refuse = (holder: string) =>
+    callErrors.invalidState(
+      "state_dir_in_use",
+      `${holder} is using the Cursor driver's state directory ${stateDir}. An instance needs that directory, and the Cursor agent store in it, to itself: a second one could expire its runs. Dispose the other instance first, or delete ${file} if no process uses it.`,
+    );
+  if (HELD_STATE_LOCKS.has(file)) throw refuse("Another Cursor instance of this process");
+  const contents = `${JSON.stringify({ pid: process.pid })}\n`;
+  try {
+    await fs.writeFile(file, contents, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "EEXIST") throw callErrors.invalidState("state_dir_unlockable", `The Cursor driver could not create ${file}: ${error instanceof Error ? error.message : String(error)}`);
+    let holder: unknown;
+    try {
+      holder = (JSON.parse(await fs.readFile(file, "utf8")) as { pid?: unknown }).pid;
+    } catch {
+      holder = undefined;
+    }
+    if (typeof holder === "number" && holder !== process.pid && processRuns(holder)) throw refuse(`Process ${holder}`);
+    // A dead process left it, or a process with this id before this one did (no instance here holds it): take it over.
+    await fs.writeFile(file, contents, { mode: 0o600 });
+  }
+  HELD_STATE_LOCKS.add(file);
+  return file;
+}
+
+async function unlockStateDirectory(file: string): Promise<void> {
+  HELD_STATE_LOCKS.delete(file);
+  const fs = await import("node:fs/promises");
+  await fs.rm(file, { force: true });
+}
+
 /** The account a session runs with: its API key and the auth scope that key belongs to. */
 export interface CursorAccount {
   readonly apiKey: string;
@@ -95,8 +151,10 @@ export class CursorInstance<Store> implements Instance {
   readonly #loadSdk: CursorSdkLoader<Store>;
   readonly #sessions = new Set<CursorSession<Store>>();
   readonly #createdAgents: CreatedAgents;
-  /** The agents a session of this instance is running a turn on. */
-  readonly #runningAgents = new Set<string>();
+  /** The runs the instance's sessions start and hold, one lock per agent. */
+  readonly #agentRuns = new AgentRuns();
+  /** The instance's lock file on its state directory, taken by the first session. */
+  #stateLock: Promise<string> | undefined;
   /** When each scope's runtime auth poison ends, in milliseconds since the epoch. */
   readonly #poison = new Map<string, number>();
   #runtime: Promise<CursorSdkRuntime<Store>> | undefined;
@@ -206,11 +264,12 @@ export class CursorInstance<Store> implements Instance {
   async openSession(input: OpenSessionInput): Promise<Session> {
     const runtime = await this.#sdkOrUnavailable();
     const account = await this.#account();
+    await this.#lockState();
     this.#store ??= new runtime.sdk.JsonlLocalAgentStore(`${this.#host.paths.stateDir}/cursor-agents`);
     this.#sessionCount += 1;
     const id = deriveId({ kind: "session", native: { id: null, strength: "none", ordinal: this.#sessionCount }, identityVersion: IDENTITY_VERSION, scope: this.id });
     const session = new CursorSession<Store>(
-      { host: this.#host, config: this.#config, sdk: runtime.sdk, store: this.#store, apiKey: account.apiKey, createdAgents: this.#createdAgents, runningAgents: this.#runningAgents },
+      { host: this.#host, config: this.#config, sdk: runtime.sdk, store: this.#store, apiKey: account.apiKey, createdAgents: this.#createdAgents, agentRuns: this.#agentRuns },
       input,
       id,
     );
@@ -221,6 +280,21 @@ export class CursorInstance<Store> implements Instance {
   async dispose(): Promise<void> {
     for (const session of this.#sessions) await session.close();
     this.#sessions.clear();
+    const locked = this.#stateLock;
+    this.#stateLock = undefined;
+    const file = await locked?.catch(() => undefined);
+    if (file !== undefined) await unlockStateDirectory(file);
+  }
+
+  #lockState(): Promise<string> {
+    if (this.#stateLock !== undefined) return this.#stateLock;
+    const locking = lockStateDirectory(this.#host.paths.stateDir);
+    this.#stateLock = locking;
+    // A refused lock is tried again by the next session.
+    locking.catch(() => {
+      if (this.#stateLock === locking) this.#stateLock = undefined;
+    });
+    return locking;
   }
 
   #sdk(): Promise<CursorSdkRuntime<Store>> {

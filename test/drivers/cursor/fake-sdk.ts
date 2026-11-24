@@ -435,9 +435,8 @@ export class FakeCursorWorld {
     if (typeof message !== "string" && (message.images ?? []).some((image) => "url" in image)) throw new Real.ConfigurationError("URL images are only supported for cloud SDK agents", { isRetryable: false });
     if (options?.mode !== undefined && options.mode !== "agent" && options.mode !== "plan") throw new Real.ConfigurationError(`Unknown mode ${String(options.mode)}`);
     const record = agent.record;
-    const runId = `run-00000000-0000-4000-9000-${String(this.#runCount + 1).padStart(12, "0")}`;
+    const runId = this.#nextRunId();
     const persist = await this.#reserve(agent, options ?? {}, model, runId, "agent.send");
-    this.#runCount += 1;
     const apiKey = this.#resolveKey(agent.options.apiKey);
     this.keysUsed.push({ call: "agent.send", apiKey });
     this.sends.push({ agentId: record.agentId, runId, message, options, apiKey });
@@ -449,6 +448,16 @@ export class FakeCursorWorld {
     record.activeRun = run;
     this.#runs.push(run);
     return run;
+  }
+
+  /**
+   * A deterministic run id, taken before any await, so runs started at the
+   * same time get distinct ids as the store's random ones are. A run the store
+   * then refuses leaves its number unused.
+   */
+  #nextRunId(): string {
+    this.#runCount += 1;
+    return `run-00000000-0000-4000-9000-${String(this.#runCount).padStart(12, "0")}`;
   }
 
   /**
@@ -476,9 +485,8 @@ export class FakeCursorWorld {
     const record = agent.record;
     if (record.finishedRuns === 0) throw new Real.ConfigurationError(`Agent ${record.agentId} has no saved conversation to summarize yet.`, { isRetryable: false });
     const model = agent.model ?? { id: "composer-2.5" };
-    const runId = `run-00000000-0000-4000-9000-${String(this.#runCount + 1).padStart(12, "0")}`;
+    const runId = this.#nextRunId();
     const persist = await this.#reserve(agent, {}, model, runId, "agent.summarize");
-    this.#runCount += 1;
     const run = new FakeRun(this, record, runId, "", model, true, undefined, persist, agent.options.tools);
     record.activeRun = run;
     void (async () => {

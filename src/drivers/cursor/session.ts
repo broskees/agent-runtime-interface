@@ -40,8 +40,13 @@
 //   a follow-up run, which the store refuses while the agent's last run is
 //   not terminal: that reservation, or a run a crashed process left. So a
 //   turn sends with `local.force`, which expires such a run first (the SDK's
-//   recovery path for wedged local agents), unless a session of this
-//   instance is running the agent, whose run is never expired.
+//   recovery path for wedged local agents). It does so under the agent's lock
+//   (agent-runs.ts), shared by the instance's sessions: while a run of this
+//   instance holds the agent or is being started on it, the turn is refused,
+//   so no live run is ever expired.
+// - A replacement agent (`session.replaced`) gets every host instruction the
+//   lost thread was given, once, at the top of its first prompt: none of them
+//   reached the new conversation.
 
 import { callErrors, toCallError } from "../../errors.ts";
 import { EventSequencer } from "../../driver-kit/sequencer.ts";
@@ -67,11 +72,12 @@ import type { HostToolServer } from "../../generated/host.ts";
 import type { Thread, ThreadSnapshot } from "../../generated/thread.ts";
 import type { HostServices, Session } from "../../runtime.ts";
 import { cursorCapabilities } from "./capabilities.ts";
+import type { AgentRuns, HeldRun } from "./agent-runs.ts";
 import type { CursorConfig } from "./config.ts";
 import type { CreatedAgents } from "./created-agents.ts";
 import { IDENTITY_VERSION, RunFold, callErrorFromSdk, failureFromRunError, planIdFor, threadIdFor, turnIdFor } from "./mapping.ts";
 import type { FoldSink } from "./mapping.ts";
-import type { CursorAgentOptions, CursorImage, CursorInteractionUpdate, CursorMcpServerConfig, CursorRun, CursorSdk, CursorSdkAgent, CursorSendOptions, CursorUserMessage } from "./sdk.ts";
+import type { CursorAgentOptions, CursorImage, CursorInteractionUpdate, CursorMcpServerConfig, CursorRun, CursorRunResult, CursorSdk, CursorSdkAgent, CursorSendOptions, CursorUserMessage } from "./sdk.ts";
 
 /** What the instance gives each session. */
 export interface CursorSessionContext<Store> {
@@ -84,8 +90,8 @@ export interface CursorSessionContext<Store> {
   readonly apiKey: string;
   /** The agents this instance created: the only ones `resumeThread` opens. */
   readonly createdAgents: CreatedAgents;
-  /** The agents a session of this instance is running a turn or a summary on, shared by its sessions. */
-  readonly runningAgents: Set<string>;
+  /** The runs the instance's sessions start and hold, with one lock per agent. */
+  readonly agentRuns: AgentRuns;
 }
 
 /**
@@ -111,6 +117,8 @@ interface ActiveTurn {
   readonly threadId: string;
   readonly hostTag: string | undefined;
   readonly run: CursorRun;
+  /** Frees the agent for the instance's next run; called once the run ended. */
+  readonly release: () => void;
   readonly fold: RunFold;
   /** True once the session stopped listening (it closed); the fold takes no more of the run's updates. */
   detached: boolean;
@@ -127,7 +135,9 @@ interface CursorThread {
   launchServers: LaunchMcpServer[];
   /** The host's tool server for this thread, sent with every run. */
   hostServer: HostToolServer | undefined;
-  /** Host instructions waiting for the thread's next prompt. */
+  /** Every host instruction the thread was given (launch and `context`, on creation and each resume), oldest first. */
+  readonly instructions: string[];
+  /** The ones not yet sent: they wait for the thread's next prompt. */
   pendingInstructions: string[];
   agent: CursorSdkAgent | undefined;
   opening: Promise<CursorSdkAgent> | undefined;
@@ -261,25 +271,37 @@ export class CursorSession<Store> implements Session {
     if (reopen && (thread.active !== undefined || thread.compacting || thread.opening !== undefined)) {
       throw callErrors.invalidState("turn_active", `Cursor sets an agent's tools when it opens the agent, so thread ${thread.thread.id} cannot change to ${policy.mode} while a run is going`);
     }
-    if (reopen) this.#closeAgent(thread);
-    thread.policy = policy;
-    thread.model = model;
-    thread.launchServers = mergedServers(thread.launchServers, launch.servers);
+    const servers = mergedServers(thread.launchServers, launch.servers);
     // The session's own launch instructions reached this thread when it was created or first resumed here.
-    thread.pendingInstructions.push(...instructionsOf(input.launch, undefined));
+    const added = instructionsOf(input.launch, undefined);
+    if (thread.opening !== undefined) await thread.opening.catch(() => undefined);
+    if (reopen) this.#closeAgent(thread);
     if (thread.agent === undefined) {
+      let agent: CursorSdkAgent;
       try {
-        await this.#agent(thread);
+        agent = await this.#context.sdk.Agent.resume(thread.agentId, this.#agentOptions(thread.cwd, model, policy, servers));
       } catch (error) {
         const failure = callErrorFromSdk(error, "Agent.resume");
         if (failure.code !== "not_found" || input.policy === undefined) throw failure;
-        return this.#replace(thread.agentId, failure, thread.cwd, policy, model, thread.launchServers, launch.instructions);
+        return this.#replace(thread.agentId, failure, thread.cwd, policy, model, servers, [...thread.instructions, ...added]);
+      }
+      thread.agent = agent;
+      if (thread.unloaded) {
+        thread.unloaded = false;
+        thread.thread = { ...thread.thread, status: "idle" };
+        this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, status: "idle" } }, { threadId: thread.thread.id });
       }
     }
+    // Only a resume that succeeded changes the thread.
+    thread.policy = policy;
+    thread.model = model;
+    thread.launchServers = servers;
+    thread.instructions.push(...added);
+    thread.pendingInstructions.push(...added);
     return { ...thread.thread, appliedConfig: { model } };
   }
 
-  /** The resumed agent is gone: a fresh agent, and `session.replaced` saying the old conversation is lost. */
+  /** The resumed agent is gone: a fresh agent, and `session.replaced` saying the old conversation is lost. `instructions` go at the top of its first prompt. */
   async #replace(previousId: string, failure: Error, cwd: string, policy: RuntimePolicy, model: string, servers: LaunchMcpServer[], instructions: string[]): Promise<AppliedThread> {
     let fresh: CursorSdkAgent;
     try {
@@ -309,20 +331,23 @@ export class CursorSession<Store> implements Session {
     this.#open();
     const thread = this.#thread(threadId);
     if (thread.active !== undefined || thread.compacting) throw callErrors.invalidState("turn_active", "Cursor summarizes a conversation only between runs");
-    if (this.#context.runningAgents.has(thread.agentId)) throw callErrors.invalidState("turn_active", `Another session is running agent ${thread.agentId}`);
     thread.compacting = true;
-    // A summary is a run in Cursor's store; no other session's forced send may expire it.
-    this.#context.runningAgents.add(thread.agentId);
     try {
       const agent = await this.#agent(thread);
-      let run: CursorRun;
+      // A summary is a run in Cursor's store, started and held like a turn's (agent-runs.ts). It cannot force.
+      let held: HeldRun<CursorRun>;
       try {
-        run = await agent.summarize();
+        held = await this.#context.agentRuns.start(thread.agentId, () => agent.summarize());
       } catch (error) {
         const failure = callErrorFromSdk(error, "agent.summarize");
         throw failure.code === "validation" ? callErrors.invalidState("nothing_to_compact", failure.message) : failure;
       }
-      const result = await run.wait();
+      let result: CursorRunResult;
+      try {
+        result = await held.value.wait();
+      } finally {
+        held.release();
+      }
       if (result.status === "error") {
         const failure = failureFromRunError(result.error);
         throw callErrors.protocol(failure.code ?? "summarize_failed", `Cursor could not summarize the conversation: ${failure.message}`);
@@ -330,7 +355,6 @@ export class CursorSession<Store> implements Session {
       if (result.status === "cancelled") throw callErrors.invalidState("compaction_cancelled", "The summary run was cancelled");
     } finally {
       thread.compacting = false;
-      this.#context.runningAgents.delete(thread.agentId);
     }
   }
 
@@ -383,6 +407,7 @@ export class CursorSession<Store> implements Session {
 
     if (thread.active !== undefined || thread.compacting) throw callErrors.invalidState("previous_turn_active", `Thread ${thread.thread.id} already runs a turn`);
     const model = this.#model(input.config, thread.model);
+    const sentPending = thread.pendingInstructions.length;
     const instructions = [...thread.pendingInstructions, ...instructionsOf(undefined, input.context)];
     const text = instructions.length === 0 ? prompt.text : `${instructions.join("\n\n")}\n\n${prompt.text}`;
     const message: string | CursorUserMessage = prompt.images.length === 0 ? text : { text, images: prompt.images };
@@ -402,20 +427,19 @@ export class CursorSession<Store> implements Session {
     };
     const agent = await this.#agent(thread);
     if (thread.active !== undefined) throw callErrors.invalidState("previous_turn_active", `Thread ${thread.thread.id} already runs a turn`);
-    // Expire a run Cursor's store still holds as active unless a session of this instance is running it (see the top of this file).
-    const running = this.#context.runningAgents;
-    const force = !running.has(thread.agentId);
-    if (force) running.add(thread.agentId);
-    let run: CursorRun;
+    // Under the agent's lock, and only when no run of this instance holds the agent: then any run
+    // Cursor's store still holds as active is one nothing here runs, and forcing expires it.
+    let held: HeldRun<CursorRun>;
     try {
-      run = await agent.send(message, force ? { ...options, local: { force: true } } : options);
+      held = await this.#context.agentRuns.start(thread.agentId, () => agent.send(message, { ...options, local: { force: true } }));
     } catch (error) {
-      if (force) running.delete(thread.agentId);
       throw callErrorFromSdk(error, "agent.send");
     }
-    thread.pendingInstructions = [];
+    const run = held.value;
+    // Instructions a resume added while this turn waited stay for the next prompt.
+    thread.pendingInstructions.splice(0, sentPending);
     thread.model = model;
-    const turn = this.#openTurn(thread, run, input, prompt.text, model);
+    const turn = this.#openTurn(thread, run, input, prompt.text, model, held.release);
     deliver = (update) => {
       if (!turn.detached && !turn.settled) turn.fold.consume(update);
     };
@@ -511,7 +535,8 @@ export class CursorSession<Store> implements Session {
       model,
       launchServers: servers,
       hostServer: undefined,
-      pendingInstructions: instructions,
+      instructions: [...instructions],
+      pendingInstructions: [...instructions],
       agent,
       opening: undefined,
       active: undefined,
@@ -589,7 +614,7 @@ export class CursorSession<Store> implements Session {
   // -------------------------------------------------------------------------
   // Runs
 
-  #openTurn(thread: CursorThread, run: CursorRun, input: StartTurnInput, promptText: string, model: string): ActiveTurn {
+  #openTurn(thread: CursorThread, run: CursorRun, input: StartTurnInput, promptText: string, model: string, release: () => void): ActiveTurn {
     const id = turnIdFor(thread.thread.id, run.id);
     const envelope: Envelope = { threadId: thread.thread.id, turnId: id, ...(input.hostTag === undefined ? {} : { hostTag: input.hostTag }) };
     const sink: FoldSink = {
@@ -612,7 +637,7 @@ export class CursorSession<Store> implements Session {
       },
       sink,
     );
-    const turn: ActiveTurn = { id, threadId: thread.thread.id, hostTag: input.hostTag, run, fold, detached: false, settled: false };
+    const turn: ActiveTurn = { id, threadId: thread.thread.id, hostTag: input.hostTag, run, release, fold, detached: false, settled: false };
     thread.active = turn;
     thread.thread = { ...thread.thread, status: "running" };
     this.#emit(
@@ -665,6 +690,9 @@ export class CursorSession<Store> implements Session {
       status = "failed";
       failure = failureFromRunError({ message: error instanceof Error ? error.message : String(error), ...(typeof (sdkError as { code?: unknown } | undefined)?.code === "string" ? { code: (sdkError as { code: string }).code } : {}) });
     }
+    // The run ended, and Cursor's store has it terminal: the instance may start the agent's next run. A closed
+    // session's turn settled earlier, but its run held the agent until now.
+    turn.release();
     if (turn.detached) return;
     this.#settle(thread, turn, status, failure);
   }
@@ -674,7 +702,6 @@ export class CursorSession<Store> implements Session {
     if (thread.active === turn) thread.active = undefined;
     if (turn.settled) return;
     turn.settled = true;
-    this.#context.runningAgents.delete(thread.agentId);
     thread.thread = { ...thread.thread, status: thread.unloaded ? "unloaded" : "idle" };
     const envelope: Envelope = { threadId: turn.threadId, turnId: turn.id, ...(turn.hostTag === undefined ? {} : { hostTag: turn.hostTag }) };
     turn.fold.finish(status);

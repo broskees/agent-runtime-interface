@@ -38,8 +38,15 @@ First release of the Cursor driver, tested against `@cursor/sdk` 1.4.2
   `invalid_state`.
 - Each turn sends with `local.force`, so an empty thread runs after a
   release, an unload, a closed session or a restart (Cursor's store reserves
-  the first run for the handle that created the agent), unless another
-  session of the instance is running the agent.
+  the first run for the handle that created the agent). The decision and the
+  send run under a per-agent lock shared by the instance's sessions: while a
+  run of the instance holds the agent or is being started on it, a turn is
+  refused with `invalid_state`, so no live run is expired.
+- An instance needs its state directory to itself: the first session takes
+  `<stateDir>/cursor-instance.lock`, and a second instance there is refused
+  with `invalid_state` (`state_dir_in_use`).
+- A replacement agent for a lost thread gets every host instruction the
+  thread was given, once, at the top of its first prompt.
 - Cursor's tools inherit the host process's environment, which the SDK gives
   no way to change; `envPolicy` does not reach them (see the driver's docs,
   "Limits").

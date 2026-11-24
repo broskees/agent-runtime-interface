@@ -48,6 +48,17 @@ loading the driver or the SDK.
   `~/.cursor/projects/<workspace>/sdk-agent-store`. Cursor finds a local agent
   by its working directory as well as its id, so a resume needs the thread's
   directory.
+- **The instance needs its state directory to itself.** The driver assumes
+  that no other process, and no other instance, uses the instance's state
+  directory or the Cursor agent store in it: its sessions coordinate their
+  runs in memory, and a second user of the store could have its live runs
+  expired (below). The first session takes a lock file,
+  `<stateDir>/cursor-instance.lock`, holding the process id. While another
+  instance of the same process, or another live process, holds it,
+  `openSession` fails `invalid_state` (`state_dir_in_use`). A lock a dead
+  process left is taken over, and `dispose()` removes it. The lock covers ARI
+  instances only: the user's own Cursor SDK code pointed at that store is not
+  seen.
 - **One run per turn.** `startTurn` calls `agent.send()`; the run's id is the
   turn's native id. Its updates reach the driver through `send({ onDelta })`
   (the SDK awaits the callback before it handles the next update); the run's
@@ -81,12 +92,19 @@ loading the driver or the SDK.
   while the agent's last run is not terminal: that reservation, when the
   creating handle closed before its first run (an empty thread released,
   unloaded, or left by a closed session or a restart), or a run a crashed
-  process left. So every turn sends with `local: { force: true }`, the SDK's
+  process left. So a turn sends with `local: { force: true }`, the SDK's
   recovery path for wedged local agents ("Expire the currently active
-  persisted run, if any, before starting this message"), unless a session of
-  the same instance is running the agent: that run is never expired, and the
-  other session's turn fails `invalid_state` (`previous_turn_active`) until it
-  ends. A summary run (`compactThread`) counts as running.
+  persisted run, if any, before starting this message"). Forcing must never
+  expire a live run, so the instance keeps one lock per agent, shared by all
+  its sessions, from the decision to force through the SDK's reservation of
+  the run (`send()` resolves after it). A run of the instance holds the agent
+  from that decision until `run.wait()` settles, when Cursor's store has the
+  run terminal. While a run holds the agent or is being started on it, a turn
+  on that agent from any session fails `invalid_state`
+  (`previous_turn_active`) and sends nothing. Otherwise the run it forces out
+  can only be one nothing in the instance runs. A summary run
+  (`compactThread`) is started and held the same way, but cannot force:
+  `summarize()` takes no options.
 - **Resume** is `Agent.resume(agentId, …)` with the same options as creation:
   the SDK keeps inline MCP servers, the tool allowlist and the model in memory
   only ("Pass them again on resume").
@@ -101,7 +119,11 @@ loading the driver or the SDK.
   - **A missing agent.** An agent the store does not hold for that directory
     fails with the SDK's `AgentNotFoundError`; with a `policy` the driver then
     creates a fresh agent and emits `session.replaced` with `contextLost:
-    true`.
+    true`. For a thread the session holds, the fresh agent's first prompt
+    carries every host instruction the thread was given, each once: its
+    creation `launch` and `context`, each resume's `launch`, and this one's.
+    None of them reached the new conversation, whether or not the lost one
+    had them.
   - **A thread the session holds.** A resume's `launch` instructions go at the
     top of the next prompt; its MCP servers join the thread's (a name given
     again takes the new definition) and go with every later run; its
@@ -360,18 +382,22 @@ which imports each `*.suite.ts` file of `test/drivers/cursor/`:
 
 - `conformance.suite.ts`: all 15 scenarios against the fake SDK. Scenarios 8
   and 15 do not apply (no approvals); the harness gives reasons for three
-  checks: a locked session (no store state makes a resume fail, and a run left
-  active is expired as above), a usage limit's reset time (Cursor reports
-  none) and inherited credentials in the agent's tools (see "Limits").
+  checks: a locked session (no store state makes a resume fail; a run left
+  active is expired, or the turn refused while the instance runs the agent),
+  a usage limit's reset time (Cursor reports none) and inherited credentials
+  in the agent's tools (see "Limits").
 - `fake-sdk.ts`: the fake. It creates and resumes agents with the real SDK,
   offline, in the real `JsonlLocalAgentStore`, and takes each run as the real
   SDK's storage preflight decides (`getRunForSend`, `local.force` included),
   marking it starting and terminal in that store; it fakes only the runs'
   work, and checks every update with the SDK's `InteractionUpdateSchema`.
 - `resume.suite.ts`: empty threads after release, unload, a closed session
-  and a restart; a run of another session never expired; policy and launch
-  changes on resume, applied or refused; agents the instance did not create
-  refused.
+  and a restart; a run of another session never expired, in either order
+  (the creating handle's turn while a resumed handle's forced send is still
+  before Cursor's reservation); distinct run ids for turns started at once;
+  policy and launch changes on resume, applied or refused; a replacement's
+  first prompt with every instruction once; agents the instance did not
+  create refused; the state-directory lock file.
 - `real-sdk.suite.ts`: the driver against the real SDK, offline: threads
   created, resumed and replaced, with every outbound connection refused.
 - `sdk-types.suite.ts`: the driver's SDK types against `@cursor/sdk` 1.4.2.

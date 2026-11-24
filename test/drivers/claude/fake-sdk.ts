@@ -71,6 +71,8 @@ export interface FakeTurn extends NativeTurn {
   proposeGoal(condition: string): Promise<void>;
   /** Streams a hook's started and response messages (`includeHookEvents`). */
   runHook(name: string, event: string, output: string): Promise<void>;
+  /** The API refuses the credential: an `authentication_failed` assistant error and a 401 result. */
+  failAuthentication(): Promise<void>;
 }
 
 /** Every call the driver made into the fake, oldest first. */
@@ -604,6 +606,17 @@ class FakeNativeTurn implements FakeTurn {
     this.lastText = text;
     this.#end();
     query.emit(this.#result({ is_error: true, api_error_status: status, result: text, terminal_reason: "api_error" }));
+    query.afterTurn();
+  }
+
+  async failAuthentication(): Promise<void> {
+    this.#live();
+    const query = this.#query;
+    const text = "Invalid API key · Please run /login";
+    query.assistant(betaMessage(`msg_${query.world.uuid()}`, [{ type: "text", text, citations: null }], "end_turn"), { error: "authentication_failed" });
+    this.lastText = text;
+    this.#end();
+    query.emit(this.#result({ is_error: true, api_error_status: 401, result: text, terminal_reason: "api_error" }));
     query.afterTurn();
   }
 

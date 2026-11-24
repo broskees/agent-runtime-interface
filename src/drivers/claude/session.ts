@@ -1389,7 +1389,8 @@ export class ClaudeSession implements Session {
     const id = requestIdFor(thread.thread.id, options.requestId);
     const item = turn?.items.get(options.toolUseID);
     const kind = requestKindFor(toolName);
-    const subagent = options.agentID === undefined ? undefined : thread.tasks.get(options.agentID);
+    // The agent id is the subagent's task id; Claude may ask before the driver has read that task's task_started.
+    const subagentId = options.agentID === undefined ? undefined : subagentIdFor(thread.thread.id, options.agentID);
     const answers = kind === "user_input" ? [] : approvalAnswers(options.suggestions, options.suppressAlwaysAllowRule === true);
     const fields = toolItemFields(toolName, input, thread.cwd);
     const request: Request = {
@@ -1400,7 +1401,7 @@ export class ClaudeSession implements Session {
         threadId: thread.thread.id,
         ...(turn === undefined ? {} : { turnId: turn.id }),
         ...(item === undefined ? {} : { itemId: item.id }),
-        ...(subagent === undefined ? {} : { subagentId: subagent.id }),
+        ...(subagentId === undefined ? {} : { subagentId }),
       },
       subject: {
         ...(fields.command === undefined || fields.command === null ? {} : { command: fields.command, cwd: thread.cwd }),

@@ -198,7 +198,13 @@ Rules every harness keeps:
   `optionId` and an ARI `decision` (`accept`, `accept_for_session`,
   `accept_always`, `decline`). Map the decision to your protocol's option kind
   and keep `optionId` as the native option id. The handle's `replies()` lists
-  every native option id the fake received for that approval, in order.
+  every option id the fake received for that approval, in order, as the kit
+  named them. When the protocol's options have no id of their own (Codex
+  app-server approvals offer decision values such as `"accept"` or an
+  exec-policy amendment), the harness cannot make the kit's string a native
+  id: it then returns `nativeOptionIds`, the native option id the driver will
+  see for each of the kit's option ids, and the scenarios look for and answer
+  with those. `nextReply()` and `replies()` still answer with the kit's ids.
 - **`runTool`'s `path` is workspace-relative.** Report it the way the vendor
   does, normally as an absolute path in the agent's own (canonical) working
   directory.

@@ -9,7 +9,7 @@ import type { RuntimeMode } from "../../generated/config.ts";
 import type { Item } from "../../generated/item.ts";
 import type { Request } from "../../generated/request.ts";
 import type { OpenedSession, ScenarioContext } from "../context.ts";
-import type { NativeApproval, NativeApprovalOption } from "../harness.ts";
+import type { NativeApproval, NativeApprovalHandle, NativeApprovalOption } from "../harness.ts";
 
 export interface Scenario {
   /** 1 to 15, the order of the acceptance criteria's inventory and of docs/conformance.md. */
@@ -51,6 +51,11 @@ export function approval(kind: NativeApproval["kind"], options: readonly NativeA
 export function supervisedMode(capabilities: Capabilities): RuntimeMode | undefined {
   const modes: RuntimeMode[] = ["approval_required", "auto_accept_edits", "read_only", "auto"];
   return modes.find((mode) => hasCapability(capabilities, `runtimePolicy.modes.${mode}`));
+}
+
+/** The native option id the driver sees for the kit's `optionId`: the harness's mapping when it gave one, else the id itself. */
+export function nativeOptionId(handle: Pick<NativeApprovalHandle, "nativeOptionIds">, optionId: string): string {
+  return handle.nativeOptionIds?.[optionId] ?? optionId;
 }
 
 /** Waits for a pending request that offers the native option `optionId`. */

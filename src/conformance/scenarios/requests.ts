@@ -8,7 +8,7 @@ import type { RespondInput } from "../../generated/session.ts";
 import { fullAccessAutoReply } from "../../host/approval-reviewer.ts";
 import { brief } from "../util.ts";
 import { describeError } from "./sessions.ts";
-import { APPROVAL_REQUEST_KINDS, approval, approvalKind, pendingRequestOffering, supervisedMode } from "./scenario.ts";
+import { APPROVAL_REQUEST_KINDS, approval, approvalKind, nativeOptionId, pendingRequestOffering, supervisedMode } from "./scenario.ts";
 import type { Scenario } from "./scenario.ts";
 
 const ACCEPTING = new Set(["accept", "accept_for_session", "accept_always"]);
@@ -53,11 +53,12 @@ export const duplicateAlwaysScenario: Scenario = {
     );
     context.check((request.questions ?? []).length === 0, `the approval was turned into questions: ${brief(request.questions)}`);
     const options = request.options ?? [];
-    for (const [optionId, accepting] of [
+    for (const [kitOptionId, accepting] of [
       ["allow-session", true],
       ["allow-prefix", true],
       ["reject", false],
     ] as const) {
+      const optionId = nativeOptionId(handle, kitOptionId);
       const option = options.find((candidate) => candidate.optionId === optionId);
       context.check(option !== undefined, `the request lost native option ${optionId}; options are ${brief(options)}`);
       const expected = accepting ? ACCEPTING : DECLINING;
@@ -65,7 +66,7 @@ export const duplicateAlwaysScenario: Scenario = {
     }
 
     // The second of the two accept_always options, so a driver that answers by decision alone sends the wrong one.
-    await context.wait(opened.session.respond({ requestId: request.id, responseKey: "duplicate-always-1", optionId: "allow-prefix" }), "respond");
+    await context.wait(opened.session.respond({ requestId: request.id, responseKey: "duplicate-always-1", optionId: nativeOptionId(handle, "allow-prefix") }), "respond");
     const reply = await context.wait(handle.nextReply(), "the native agent to get the reply");
     context.check(reply === "allow-prefix", `the provider got option ${brief(reply)}; the host chose "allow-prefix"`);
     await context.wait(native.complete(), "the native agent to complete the turn");
@@ -99,8 +100,8 @@ export const idempotentResponsesScenario: Scenario = {
       ),
       "the native agent to ask for an approval",
     );
-    const request = await pendingRequestOffering(context, opened, "approve-once");
-    const input: RespondInput = { requestId: request.id, responseKey: "idempotent-1", optionId: "approve-once" };
+    const request = await pendingRequestOffering(context, opened, nativeOptionId(handle, "approve-once"));
+    const input: RespondInput = { requestId: request.id, responseKey: "idempotent-1", optionId: nativeOptionId(handle, "approve-once") };
     const outcomes = await Promise.allSettled([
       context.wait(opened.session.respond(input), "the first respond"),
       context.wait(opened.session.respond({ ...input }), "a concurrent respond with the same key"),
@@ -124,10 +125,10 @@ export const idempotentResponsesScenario: Scenario = {
       ),
       "the native agent to ask for a second approval",
     );
-    const again = await pendingRequestOffering(context, opened, "approve-again");
+    const again = await pendingRequestOffering(context, opened, nativeOptionId(againHandle, "approve-again"));
     context.check(again.id !== request.id, `the second native approval reached the host as the first request ${request.id}`);
     await context.wait(
-      opened.session.respond({ requestId: again.id, responseKey: input.responseKey, optionId: "approve-again" }),
+      opened.session.respond({ requestId: again.id, responseKey: input.responseKey, optionId: nativeOptionId(againHandle, "approve-again") }),
       `a respond to a second request with the same responseKey "${input.responseKey}"`,
     );
     const againReply = await context.wait(againHandle.nextReply(), `the native agent to get the reply to a second request answered with the same responseKey "${input.responseKey}"`);
@@ -163,7 +164,7 @@ export const idempotentResponsesScenario: Scenario = {
     const outcome = await context.until((): { by: "driver"; optionId: string } | { by: "host"; request: Request } | undefined => {
       if (driverReply !== undefined) return { by: "driver", optionId: driverReply };
       for (const candidate of context.reduced(fullAccess).requests.values()) {
-        if (candidate.status === "pending" && (candidate.options ?? []).some((option) => option.optionId === "approve-once")) return { by: "host", request: candidate };
+        if (candidate.status === "pending" && (candidate.options ?? []).some((option) => option.optionId === nativeOptionId(fullHandle, "approve-once"))) return { by: "host", request: candidate };
       }
       return undefined;
     }, "the driver to answer the full_access approval or hand it to the host");
@@ -175,8 +176,8 @@ export const idempotentResponsesScenario: Scenario = {
       const autoReply = fullAccessAutoReply(outcome.request, "full-access-1");
       context.check(autoReply !== undefined, `the host found no accepting option to auto-reply with in ${brief(outcome.request.options)}`);
       context.check(
-        autoReply.optionId === "approve-once",
-        `by the scopes the driver reported (${brief(outcome.request.options)}), the narrowest accepting option is ${brief(autoReply.optionId)}; the provider's narrowest is "approve-once"`,
+        autoReply.optionId === nativeOptionId(fullHandle, "approve-once"),
+        `by the scopes the driver reported (${brief(outcome.request.options)}), the narrowest accepting option is ${brief(autoReply.optionId)}; the provider's narrowest is ${brief(nativeOptionId(fullHandle, "approve-once"))}`,
       );
       await context.wait(fullAccess.session.respond(autoReply), "respond with the full_access auto-reply");
       const sent = await context.wait(fullHandle.nextReply(), "the native agent to get the reply");

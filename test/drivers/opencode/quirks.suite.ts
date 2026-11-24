@@ -346,6 +346,73 @@ describe("subagents, questions, todo lists and steering", () => {
     assert.equal(rig.world.sessions.get(fork.native.id!)?.forkedFrom, child.childId, "OpenCode forked the subagent's own session");
   });
 
+  for (const generation of [1, 2] as const) {
+    test(`${generation}.x: reasoning streams as a reasoning item; read and other permissions are file_read and permission requests`, async () => {
+      const rig = await rigFor(generation);
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "r1", intent: "start", content: [{ type: "text", text: "Think first." }] });
+      assert.equal(started.status, "accepted");
+      if (started.status !== "accepted") return;
+      const native = await rig.nextTurn();
+      await native.think("Considering the options.");
+      const reasoning = await rig.until(opened.events, (event) => (event.body.type === "item.upsert" && event.body.item.reasoning === "Considering the options." ? event.body.item : undefined), "the reasoning item");
+      const opening = opened.events.find((event) => event.body.type === "item.upsert" && event.body.item.id === reasoning.id && event.body.item.kind !== undefined);
+      assert.equal(opening?.body.type === "item.upsert" ? opening.body.item.kind : undefined, "reasoning");
+      assert.ok(opened.events.some((event) => event.body.type === "item.delta" && event.body.itemId === reasoning.id && event.body.field === "reasoning"));
+
+      const file = `${rig.cwd}/secrets.env`;
+      const read = await native.requestPermission("read", file, { filePath: file });
+      const readRequest = await rig.until(opened.events, () => pendingRequest(opened.events), "the read request");
+      assert.equal(readRequest.kind, "file_read");
+      assert.deepEqual(readRequest.subject?.paths, [file]);
+      await opened.session.respond({ requestId: readRequest.id, responseKey: "read", optionId: "reject" });
+      assert.equal(await read.nextReply(), "reject");
+      const fetchHandle = await native.requestPermission("webfetch", "https://example.com", { url: "https://example.com" });
+      const fetchRequest = await rig.until(opened.events, () => {
+        for (const event of opened.events) if (event.body.type === "request.upsert" && event.body.request.status === "pending" && event.body.request.id !== readRequest.id) return event.body.request as Request;
+        return undefined;
+      }, "the webfetch request");
+      assert.equal(fetchRequest.kind, "permission");
+      assert.equal(fetchRequest.subject?.tool?.name, "webfetch");
+      await opened.session.respond({ requestId: fetchRequest.id, responseKey: "fetch", optionId: "once" });
+      assert.equal(await fetchHandle.nextReply(), "once");
+      await native.complete();
+      assert.equal((await rig.terminal(opened.events, started.turnId)).status, "completed");
+    });
+
+    test(`${generation}.x: a stdio MCP server becomes OpenCode's local config, an HTTP one its remote config`, async () => {
+      const rig = await rigFor(generation);
+      const opened = await rig.open({ launch: { mcpServers: [{ name: "local-tools", transport: "stdio", command: "node", args: ["server.js"], env: { TOKEN: "t" } }] } });
+      await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const server = [...rig.world.servers].find((candidate) => candidate.alive && candidate.mcp.has(rig.cwd))!;
+      const entries = server.mcp.get(rig.cwd)!;
+      assert.deepEqual(entries.get("local-tools"), { type: "local", command: ["node", "server.js"], environment: { TOKEN: "t" } });
+      const host = [...entries.entries()].find(([name]) => name.startsWith("host-tools-"))?.[1] as { type?: unknown } | undefined;
+      assert.equal(host?.type, "remote");
+      const sessions = rig.world.sessions.size;
+      await assert.rejects(opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch: { mcpServers: [{ name: "old-sse", transport: "sse", url: "http://127.0.0.1:1/sse" }] } }), (error: unknown) => isAriError(error, "unsupported"));
+      assert.equal(rig.world.sessions.size, sessions, "the refused thread left no session behind");
+    });
+
+    test(`${generation}.x: a free-text answer reaches OpenCode with the chosen options`, async () => {
+      const rig = await rigFor(generation);
+      const opened = await rig.open();
+      assert.equal(opened.session.capabilities().requests.allowCustomAnswer, true);
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "q2", intent: "start", content: [{ type: "text", text: "Ask me." }] });
+      assert.equal(started.status, "accepted");
+      const native = await rig.nextTurn();
+      const asked = await native.askQuestion({ text: "Which colour?", options: ["red", "blue"] });
+      const request = await rig.until(opened.events, () => pendingRequest(opened.events), "the question");
+      assert.equal(request.allowCustomAnswer, true);
+      const question = request.questions![0]!;
+      await opened.session.respond({ requestId: request.id, responseKey: "q", answers: { [question.id]: { text: "teal" } } });
+      assert.deepEqual(await asked.answers(), generation === 1 ? [["teal"]] : { choice: "teal" });
+      await native.complete();
+    });
+  }
+
   test("1.x: the todo list is a todo_list item of the turn", async () => {
     const rig = await rigFor(1);
     const opened = await rig.open();

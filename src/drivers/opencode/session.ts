@@ -826,9 +826,12 @@ export class OpencodeSession implements Session {
       const session = this.#input.config?.[key];
       return typeof session === "string" ? session : fallback;
     };
+    const mcpServers = [...(this.#input.launch?.mcpServers ?? []), ...(launch?.mcpServers ?? [])];
+    // Refused before any session exists: a transport OpenCode cannot take.
+    for (const server of mcpServers) mcpConfig(server);
     return {
       systemPrompts: [...systemPrompts(this.#input.launch, undefined), ...systemPrompts(launch, context)],
-      mcpServers: [...(this.#input.launch?.mcpServers ?? []), ...(launch?.mcpServers ?? [])],
+      mcpServers,
       model: pick("model", base?.model ?? this.#context.config.model),
       agent: pick("agent", base?.agent ?? this.#context.config.agent),
     };

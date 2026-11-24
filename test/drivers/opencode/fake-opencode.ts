@@ -324,6 +324,32 @@ export class FakeRun implements NativeTurn {
     }
   }
 
+  /** Streams reasoning: 1.x a `reasoning` part, 2.x `session.reasoning.*` (as text, by the part's ordinal). */
+  async think(text: string): Promise<void> {
+    const message = this.#assistantMessage();
+    const part: FakePart = { id: this.world.nextId("prt"), kind: "reasoning", text: "", start: Date.now() };
+    message.content.push(part);
+    const ordinal = message.content.length - 1;
+    if (this.world.generation === 1) {
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Part(this.session, message, part), time: Date.now() });
+      part.text = text;
+      this.#v1("message.part.delta", { sessionID: this.session.id, messageID: message.id, partID: part.id, field: "text", delta: text });
+      part.end = Date.now();
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Part(this.session, message, part), time: Date.now() });
+      return;
+    }
+    this.#v2("session.reasoning.started", { sessionID: this.session.id, assistantMessageID: message.id, ordinal }, true);
+    part.text = text;
+    this.#v2("session.reasoning.delta", { sessionID: this.session.id, assistantMessageID: message.id, ordinal, delta: text });
+    part.end = Date.now();
+    this.#v2("session.reasoning.ended", { sessionID: this.session.id, assistantMessageID: message.id, ordinal, text }, true);
+  }
+
+  /** A permission request for any OpenCode permission (`read`, `webfetch`, an MCP tool, ...), as the tool that needs it asks. */
+  async requestPermission(action: string, resource: string, metadata: { [key: string]: string }): Promise<NativeApprovalHandle> {
+    return this.server.askPermission(this, action, resource, metadata);
+  }
+
   /** The kit's neutral tool as the OpenCode tool that does it. */
   #nativeTool(tool: NativeTool): { name: string; input: Json } {
     const absolute = tool.path === undefined ? undefined : path.join(this.session.directory, tool.path);
@@ -765,6 +791,16 @@ export class FakeServer {
     this.#permissions.set(id, { id, sessionId: session.id, action, resources: [target], always, run, handle });
     if (v1) this.publishV1(session, "permission.asked", { id, sessionID: session.id, permission: action, patterns: [target], metadata, always });
     else this.publishV2(session, "permission.asked", { id, sessionID: session.id, action, resources: [target], save: always, metadata });
+    return handle;
+  }
+
+  askPermission(run: FakeRun, action: string, resource: string, metadata: { [key: string]: string }): FakeApprovalHandle {
+    const session = run.session;
+    const handle = new FakeApprovalHandle({ kind: "command", options: [] });
+    const id = this.world.nextId("per");
+    this.#permissions.set(id, { id, sessionId: session.id, action, resources: [resource], always: [resource], run, handle });
+    if (this.world.generation === 1) this.publishV1(session, "permission.asked", { id, sessionID: session.id, permission: action, patterns: [resource], metadata, always: [resource] });
+    else this.publishV2(session, "permission.asked", { id, sessionID: session.id, action, resources: [resource], save: [resource], metadata });
     return handle;
   }
 

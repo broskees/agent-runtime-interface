@@ -3982,6 +3982,92 @@ class CodexTransferredTokens:
         return out
 
 
+class OpencodePermissionEffect(OpenEnum):
+    """Open: a value this client does not know is kept as a member that is not recognized."""
+    ALLOW = "allow"
+    DENY = "deny"
+    ASK = "ask"
+
+
+@dataclass(kw_only=True)
+class OpencodePermissionRule:
+    """One rule: `action` is the permission or tool name (1.x `permission`, for example `bash`, `edit`, `read` or `<server>_<tool>` for an MCP tool), `resource` the pattern it applies to (1.x `pattern`); both take `*` and `?` wildcards."""
+    action: str
+    resource: str
+    effect: OpencodePermissionEffect
+
+    @classmethod
+    def from_json(cls, data: Any) -> OpencodePermissionRule:
+        data = require_object(data, "OpencodePermissionRule")
+        return cls(
+            action=required(data, "action", decode_str),
+            resource=required(data, "resource", decode_str),
+            effect=required(data, "effect", OpencodePermissionEffect.from_json),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        out["action"] = encode(self.action)
+        out["resource"] = encode(self.resource)
+        out["effect"] = encode(self.effect)
+        return out
+
+
+@dataclass(kw_only=True)
+class OpencodePermissionRulesGetParams:
+    thread_id: str
+
+    @classmethod
+    def from_json(cls, data: Any) -> OpencodePermissionRulesGetParams:
+        data = require_object(data, "OpencodePermissionRulesGetParams")
+        return cls(
+            thread_id=required(data, "threadId", decode_str),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        out["threadId"] = encode(self.thread_id)
+        return out
+
+
+@dataclass(kw_only=True)
+class OpencodePermissionRulesSetParams:
+    thread_id: str
+    rules: list[OpencodePermissionRule]
+
+    @classmethod
+    def from_json(cls, data: Any) -> OpencodePermissionRulesSetParams:
+        data = require_object(data, "OpencodePermissionRulesSetParams")
+        return cls(
+            thread_id=required(data, "threadId", decode_str),
+            rules=required(data, "rules", list_of(OpencodePermissionRule.from_json)),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        out["threadId"] = encode(self.thread_id)
+        out["rules"] = encode(self.rules)
+        return out
+
+
+@dataclass(kw_only=True)
+class OpencodePermissionRulesResult:
+    """Result of `get` and `set`: the thread's session rules as the server holds them."""
+    rules: list[OpencodePermissionRule]
+
+    @classmethod
+    def from_json(cls, data: Any) -> OpencodePermissionRulesResult:
+        data = require_object(data, "OpencodePermissionRulesResult")
+        return cls(
+            rules=required(data, "rules", list_of(OpencodePermissionRule.from_json)),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        out["rules"] = encode(self.rules)
+        return out
+
+
 @dataclass(kw_only=True)
 class FixtureDriver:
     """The driver that produced the recording."""

@@ -1,10 +1,12 @@
 // Replays one Claude recording: the recording's scenario runs through a fresh
 // driver from `createClaudeDriver({ loadSdk })` over the replay SDK, in a
-// fresh temp workspace laid out as the recorder lays it out (./run.ts). The
-// sequencer must have replayed every recorded frame when the scenario ends,
-// and the scenario's assertions must hold.
+// fresh temp workspace laid out as the recorder lays it out (./run.ts). When
+// the scenario ends, the sequencer must have matched every recorded outbound
+// frame and the driver must have taken every recorded inbound frame, and the
+// scenario's assertions must hold.
 
 import * as fs from "node:fs";
+import type { DiagnosticEntry } from "../../../src/generated/host.ts";
 import type { Recording } from "../format.ts";
 import { readRecording } from "../format.ts";
 import { createSanitiser } from "../sanitiser.ts";
@@ -21,23 +23,37 @@ export const REPLAY_CLAUDE_BINARY = "/ari-replay/claude";
 export interface ClaudeReplayResult {
   readonly run: ScenarioRun;
   readonly replay: ClaudeReplay;
+  /** What the driver logged to the host's diagnostics. */
+  readonly diagnostics: readonly DiagnosticEntry[];
 }
 
-export async function replayClaude(source: Recording | string, options: { readonly timeoutMs?: number } = {}): Promise<ClaudeReplayResult> {
+export interface ClaudeReplayOptions {
+  /** How long the scenario waits for any one thing; 30 s by default. */
+  readonly timeoutMs?: number;
+  /** After the scenario, how long replay waits with no frame taken before it calls a delivered frame never taken; 500 ms by default. */
+  readonly idleMs?: number;
+  /** The replay's environment (HOME, PATH, USER, LOGNAME); process.env by default. */
+  readonly env?: { readonly [name: string]: string | undefined };
+  /** The OS user name; os.userInfo().username by default. */
+  readonly user?: string;
+}
+
+export async function replayClaude(source: Recording | string, options: ClaudeReplayOptions = {}): Promise<ClaudeReplayResult> {
   const recording = typeof source === "string" ? await readRecording(source) : source;
   const header = recording.header;
   if (header.driver !== "claude") throw new Error(`${recording.file}: the recording is of driver ${header.driver}, not claude`);
   const scenario = scenarioNamed(header.scenario);
   const layout = createClaudeLayout(`ari-claude-replay-${scenario.name}-`);
   try {
-    const replay = createClaudeReplaySdk(recording, { workspace: layout.root, sanitise: createSanitiser({ workspace: layout.root, env: process.env }) });
-    let run: ScenarioRun;
+    const env = options.env ?? process.env;
+    const replay = createClaudeReplaySdk(recording, { workspace: layout.root, sanitise: createSanitiser({ workspace: layout.root, env, ...(options.user === undefined ? {} : { user: options.user }) }) });
+    let result: { run: ScenarioRun; diagnostics: readonly DiagnosticEntry[] };
     try {
-      run = await runClaudeScenario({
+      result = await runClaudeScenario({
         scenario,
         runtime: { sdk: replay.sdk, version: header.sdkVersion, claudeCodeVersion: header.vendorVersion, bundledExecutable: REPLAY_CLAUDE_BINARY },
         layout,
-        sourceEnv: process.env,
+        sourceEnv: env,
         model: header.model,
         timeoutMs: options.timeoutMs ?? 30_000,
         native: replay.progress,
@@ -48,9 +64,11 @@ export async function replayClaude(source: Recording | string, options: { readon
       // Otherwise a drift explains a failed run better than whatever the driver made of it.
       throw replay.sequencer.failure ?? error;
     }
+    // The driver may still be taking the last frames (the end of a closed stream); wait until it has taken all, or stops taking.
+    await replay.sequencer.whenTaken(options.idleMs ?? 500);
     replay.sequencer.finish();
-    checkScenario(run, claudeNativeAnswers(replay.sequencer.matchedOutbound()));
-    return { run, replay };
+    checkScenario(result.run, claudeNativeAnswers(replay.sequencer.matchedOutbound()));
+    return { run: result.run, replay, diagnostics: result.diagnostics };
   } finally {
     fs.rmSync(layout.root, { recursive: true, force: true });
   }

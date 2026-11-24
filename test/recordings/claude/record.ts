@@ -54,6 +54,8 @@ export interface RecordClaudeOptions {
   readonly log?: (line: string) => void;
   /** The recording date; today when left out. */
   readonly date?: string;
+  /** The OS user name the sanitiser replaces; os.userInfo().username when left out. */
+  readonly user?: string;
 }
 
 export interface ClaudeRecordOutcome {
@@ -148,7 +150,7 @@ async function recordOne(scenario: Scenario, options: RecordClaudeOptions): Prom
     const tap = tapClaudeSdk(runtime.sdk, (frame) => frames.push(frame));
     let run;
     try {
-      run = await runClaudeScenario({
+      ({ run } = await runClaudeScenario({
         scenario,
         runtime: { ...runtime, sdk: tap.sdk },
         layout,
@@ -156,7 +158,7 @@ async function recordOne(scenario: Scenario, options: RecordClaudeOptions): Prom
         model,
         ...(apiKey === undefined ? {} : { apiKey }),
         timeoutMs: options.timeoutMs ?? 300_000,
-      });
+      }));
     } finally {
       if (!(await tap.settled(10_000))) failed(new Error(`a query of scenario ${scenario.name} was still streaming 10 s after the driver closed it`));
     }
@@ -175,7 +177,7 @@ async function recordOne(scenario: Scenario, options: RecordClaudeOptions): Prom
   }
   let file: string | undefined;
   if (frames.length > 0 && runtime !== undefined) {
-    const sanitise = createSanitiser({ workspace: layout.root, env: options.env });
+    const sanitise = createSanitiser({ workspace: layout.root, env: options.env, ...(options.user === undefined ? {} : { user: options.user }) });
     file = path.join(options.outDir, `${scenario.name}.ndjson`);
     await writeRecording(
       file,

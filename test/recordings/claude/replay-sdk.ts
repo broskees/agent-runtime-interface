@@ -8,8 +8,16 @@
 // the next recorded frame. The sequencer hands back each recorded inbound
 // frame when it is due: a message into its query's stream, the end or error
 // of a stream, the result of a call, a `canUseTool` call into the driver's
-// callback, or the abort of one. Inbound frames get the replay's own
-// workspace where the recording says <WORKSPACE>.
+// callback, the abort of one, or a line for the driver's `stderr` callback.
+// Inbound frames get the replay's own workspace where the recording says
+// <WORKSPACE>.
+//
+// Each inbound frame is reported taken only when the driver takes it: a
+// stream item when the driver's `next()` returns it, a result when the
+// driver's call settles with it, a callback when it is called. A query's
+// stream gives nothing after its end or error, so an extra recorded end or
+// message, or a stream the driver never reads, stays untaken and fails
+// `finish()`.
 
 import type {
   CanUseTool,
@@ -57,7 +65,7 @@ class ReplayState {
   constructor(recording: Recording, workspace: string, sanitise: Sanitiser) {
     this.#sanitise = sanitise;
     this.#workspace = workspace;
-    this.sequencer = new ReplaySequencer({ recording, ignored: CLAUDE_IGNORED_FIELDS, deliver: (frame) => this.#deliver(frame) });
+    this.sequencer = new ReplaySequencer({ recording, ignored: CLAUDE_IGNORED_FIELDS, deliver: (frame, line) => this.#deliver(frame, line) });
   }
 
   /** Sends an outbound frame, in the recording's placeholder form, to the sequencer. */
@@ -75,22 +83,25 @@ class ReplayState {
     return query;
   }
 
-  #deliver(frame: Frame): void {
+  #deliver(frame: Frame, line: number): void {
+    const taken = (): void => this.sequencer.taken(line);
     switch (frame.kind) {
       case "message":
-        this.#query(frame).push(this.#restore(frame["message"]) as SDKMessage);
+        this.#query(frame).push({ kind: "message", message: this.#restore(frame["message"]) as SDKMessage, taken });
         return;
       case "end":
-        this.#query(frame).end(undefined);
+        this.#query(frame).push({ kind: "end", taken });
         return;
       case "error":
-        this.#query(frame).end(errorFrom(frame["error"]));
+        this.#query(frame).push({ kind: "error", error: errorFrom(frame["error"]), taken });
         return;
       case "result": {
         const id = Number(frame["id"]);
         const pending = this.#pending.get(id);
         if (pending === undefined) throw new Error(`no call with id ${id} is waiting for this result`);
         this.#pending.delete(id);
+        // The driver is awaiting this call: settling it hands the driver the result.
+        taken();
         if (frame["error"] !== undefined) pending.reject(errorFrom(frame["error"]));
         else pending.resolve(this.#restore(frame["value"]));
         return;
@@ -105,6 +116,7 @@ class ReplayState {
         const options = this.#restore(frame["options"]) as Omit<Parameters<CanUseTool>[2], "signal">;
         // Called after this delivery returns: the sequencer must not be re-entered.
         queueMicrotask(() => {
+          taken();
           canUseTool(String(frame["toolName"]), this.#restore(frame["input"]) as Record<string, unknown>, { ...options, signal: controller.signal }).then(
             (result: PermissionResult | null) => this.#answer({ dir: "out", kind: "permission", id, query: query.id, result: jsonSafe(result) }),
             (error: unknown) => this.#answer({ dir: "out", kind: "permission", id, query: query.id, error: errorJson(error) }),
@@ -115,7 +127,21 @@ class ReplayState {
       case "can_use_tool_abort": {
         const controller = this.#permissions.get(String(frame["id"]));
         if (controller === undefined) throw new Error(`no canUseTool call ${JSON.stringify(frame["id"])} to abort`);
-        queueMicrotask(() => controller.abort());
+        queueMicrotask(() => {
+          taken();
+          controller.abort();
+        });
+        return;
+      }
+      case "stderr": {
+        const query = this.#query(frame);
+        const stderr = query.options.stderr;
+        if (stderr === undefined) throw new Error(`the recording writes to stderr, but the driver gave query ${query.id} no stderr callback`);
+        const data = this.#restore(String(frame["data"]));
+        queueMicrotask(() => {
+          taken();
+          stderr(data);
+        });
         return;
       }
       default:
@@ -158,13 +184,20 @@ class ReplayState {
   }
 }
 
+/** One recorded item of a query's stream, with how to report that the driver took it. */
+type StreamItem =
+  | { readonly kind: "message"; readonly message: SDKMessage; readonly taken: () => void }
+  | { readonly kind: "end"; readonly taken: () => void }
+  | { readonly kind: "error"; readonly error: Error; readonly taken: () => void };
+
 /** One replayed `query()`. Members the driver does not call throw. */
 class ReplayQuery implements Query {
   readonly id: string;
   readonly options: Options;
   readonly #state: ReplayState;
-  readonly #buffer: SDKMessage[] = [];
-  #ended: { error: Error | undefined } | undefined;
+  readonly #items: StreamItem[] = [];
+  /** Set once the driver took the stream's end or error, or stopped reading: nothing more is handed out. */
+  #closed = false;
   #wake: (() => void) | undefined;
 
   constructor(state: ReplayState, id: string, options: Options) {
@@ -173,26 +206,20 @@ class ReplayQuery implements Query {
     this.options = options;
   }
 
-  push(message: SDKMessage): void {
-    this.#buffer.push(message);
-    this.#wake?.();
-  }
-
-  end(error: Error | undefined): void {
-    this.#ended ??= { error };
+  push(item: StreamItem): void {
+    this.#items.push(item);
     this.#wake?.();
   }
 
   async next(): Promise<IteratorResult<SDKMessage, void>> {
     for (;;) {
-      const message = this.#buffer.shift();
-      if (message !== undefined) return { value: message, done: false };
-      if (this.#ended !== undefined) {
-        if (this.#ended.error !== undefined) {
-          const error = this.#ended.error;
-          this.#ended = { error: undefined };
-          throw error;
-        }
+      if (this.#closed) return { value: undefined, done: true };
+      const item = this.#items.shift();
+      if (item !== undefined) {
+        item.taken();
+        if (item.kind === "message") return { value: item.message, done: false };
+        this.#closed = true;
+        if (item.kind === "error") throw item.error;
         return { value: undefined, done: true };
       }
       await new Promise<void>((resolve) => {
@@ -204,13 +231,19 @@ class ReplayQuery implements Query {
     }
   }
 
+  /** The driver stops reading: what the recording still holds for this stream is never taken. */
+  #stop(): void {
+    this.#closed = true;
+    this.#wake?.();
+  }
+
   async return(): Promise<IteratorResult<SDKMessage, void>> {
-    this.end(undefined);
+    this.#stop();
     return { value: undefined, done: true };
   }
 
   async throw(error: unknown): Promise<IteratorResult<SDKMessage, void>> {
-    this.end(undefined);
+    this.#stop();
     throw error;
   }
 
@@ -219,7 +252,7 @@ class ReplayQuery implements Query {
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
-    this.end(undefined);
+    this.#stop();
   }
 
   // Control requests the driver calls.

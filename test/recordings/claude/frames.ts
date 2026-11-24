@@ -13,6 +13,7 @@
 //   in  can_use_tool        the SDK called the driver's canUseTool
 //   in  can_use_tool_abort  the SDK aborted that call's signal before the driver answered
 //   out permission          the driver's answer to canUseTool, or the error it threw
+//   in  stderr              the SDK called the driver's stderr callback with a chunk
 
 import type { Options, Query } from "@anthropic-ai/claude-agent-sdk";
 import type * as ClaudeAgentSdk from "@anthropic-ai/claude-agent-sdk";
@@ -42,6 +43,7 @@ export const CLAUDE_FRAME_KINDS: ReadonlyArray<{ readonly kind: string; readonly
   { kind: "can_use_tool", dir: "in" },
   { kind: "can_use_tool_abort", dir: "in" },
   { kind: "permission", dir: "out" },
+  { kind: "stderr", dir: "in" },
 ];
 
 /** The Query control methods the driver calls that answer with a promise. */

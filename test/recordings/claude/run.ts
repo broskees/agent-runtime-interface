@@ -22,6 +22,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createFakeHost } from "../../../src/conformance/fake-host.ts";
+import type { DiagnosticEntry } from "../../../src/generated/host.ts";
 import { createClaudeDriver } from "../../../src/drivers/claude/index.ts";
 import type { ClaudeDriverConfig } from "../../../src/drivers/claude/index.ts";
 import type { HostServices } from "../../../src/runtime.ts";
@@ -80,8 +81,14 @@ export interface ClaudeScenarioInput {
   readonly native?: NativeProgress;
 }
 
+export interface ClaudeScenarioResult {
+  readonly run: ScenarioRun;
+  /** What the driver logged to the host's diagnostics, among it each stderr line from Claude Code. */
+  readonly diagnostics: readonly DiagnosticEntry[];
+}
+
 /** A host with no tool server for threads: the recorded session gets no MCP server at all. */
-function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrubPrefixes: readonly string[]): HostServices<ClaudeDriverConfig> {
+function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrubPrefixes: readonly string[]): HostServices<ClaudeDriverConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[] } {
   const base = path.join(layout.root, "instances", CLAUDE_RECORDER_INSTANCE_ID);
   const paths = { stateDir: path.join(base, "state"), cacheDir: path.join(base, "cache"), tmpDir: path.join(base, "tmp") };
   for (const directory of Object.values(paths)) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -102,7 +109,7 @@ function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrub
 }
 
 /** Plays `scenario` through a fresh driver over `runtime`. */
-export async function runClaudeScenario(input: ClaudeScenarioInput): Promise<ScenarioRun> {
+export async function runClaudeScenario(input: ClaudeScenarioInput): Promise<ClaudeScenarioResult> {
   const driver = createClaudeDriver({ loadSdk: async () => input.runtime, newUuid: fixedUuids() });
   const host = recorderHost(input.layout, input.apiKey, driver.cliManifest?.envScrubPrefixes ?? []);
   const instance = await driver.create(host, {
@@ -111,12 +118,13 @@ export async function runClaudeScenario(input: ClaudeScenarioInput): Promise<Sce
     environment: claudeInstanceEnvironment(input.layout, input.sourceEnv),
   });
   try {
-    return await runScenario(input.scenario, {
+    const run = await runScenario(input.scenario, {
       openSession: () => instance.openSession({}),
       cwd: input.layout.cwd,
       timeoutMs: input.timeoutMs,
       ...(input.native === undefined ? {} : { native: input.native }),
     });
+    return { run, diagnostics: host.diagnosticEntries };
   } finally {
     await instance.dispose();
   }

@@ -16,9 +16,11 @@ import { CLAUDE_IGNORED_FIELDS, claudeNativeAnswers } from "../../recordings/cla
 import { recordClaude } from "../../recordings/claude/record.ts";
 import type { ClaudeRecordOutcome } from "../../recordings/claude/record.ts";
 import { replayClaude } from "../../recordings/claude/replay.ts";
-import { encodeRecording, readRecording } from "../../recordings/format.ts";
-import type { Frame, Recording } from "../../recordings/format.ts";
-import { SCENARIOS, SCENARIO_NAMES, checkScenario } from "../../recordings/scenarios.ts";
+import { createClaudeReplaySdk } from "../../recordings/claude/replay-sdk.ts";
+import { createSanitiser } from "../../recordings/sanitiser.ts";
+import { encodeRecording, parseRecording, readRecording } from "../../recordings/format.ts";
+import type { Frame, Recording, RecordingMetadata } from "../../recordings/format.ts";
+import { SCENARIOS, SCENARIO_NAMES, checkScenario, settledItems } from "../../recordings/scenarios.ts";
 import type { ScenarioName, ScenarioRun } from "../../recordings/scenarios.ts";
 import { ReplayDriftError } from "../../recordings/sequencer.ts";
 import { puppetRuntime, startPuppet } from "./puppets.ts";
@@ -195,6 +197,32 @@ test("the scenario checks reject a run that breaks what the scenario promises", 
     events: [...denied.run.events, { ...commandItem, body: { type: "item.upsert", item: { id: commandItemId, status: "completed", output: `${SCENARIOS[3]!.marker!}\n` } } }],
   };
   reject("approval_denied", leaked, denied.frames, /no completed command or tool item's output holds the marker/);
+  // The marker streamed as an output delta while the item was open, and a settling upsert that sets only the status: the reducer keeps the streamed output.
+  const opening = denied.run.events.indexOf(commandItem);
+  const streamed: ScenarioRun = {
+    ...denied.run,
+    events: [
+      ...denied.run.events.slice(0, opening + 1),
+      { ...commandItem, body: { type: "item.delta", itemId: commandItemId, field: "output", chunk: `${SCENARIOS[3]!.marker!}\n` } },
+      ...denied.run.events.slice(opening + 1).filter((event) => !(event.body.type === "item.upsert" && event.body.item.id === commandItemId)),
+      { ...commandItem, body: { type: "item.upsert", item: { id: commandItemId, status: "completed" } } },
+    ],
+  };
+  const reduced = settledItems(streamed.events).find((entry) => entry.item.id === commandItemId)!.item;
+  assert.equal(reduced.status, "completed");
+  assert.equal(reduced.output, `${SCENARIOS[3]!.marker!}\n`, "the ARI reducer appends the streamed output");
+  reject("approval_denied", streamed, denied.frames, /no completed command or tool item's output holds the marker/);
+  // An assistant message whose text only streamed still counts as text, as a host shows it.
+  const simpleText = simple.run.events.find((event) => event.body.type === "item.upsert" && event.body.item.kind === "assistant_message")!;
+  const simpleTextId = (simpleText.body as { item: { id: string } }).item.id;
+  const deltasOnly: ScenarioRun = {
+    ...simple.run,
+    events: simple.run.events.map((event) =>
+      event.body.type === "item.upsert" && event.body.item.id === simpleTextId ? { ...event, body: { ...event.body, item: { ...event.body.item, text: undefined } as typeof event.body.item } } : event,
+    ),
+  };
+  assert.ok(simple.run.events.some((event) => event.body.type === "item.delta" && event.body.itemId === simpleTextId), "the fake streams its text");
+  checkScenario(deltasOnly, claudeNativeAnswers(simple.frames));
   const interrupt = runs.get("interrupt")!;
   reject("interrupt", withTerminal(interrupt.run, "completed"), interrupt.frames, /the turn ended interrupted/);
   const { interrupted: _interrupted, ...notInterrupted } = interrupt.run;
@@ -202,6 +230,63 @@ test("the scenario checks reject a run that breaks what the scenario promises", 
   const resume = runs.get("resume")!;
   reject("resume", { ...resume.run, events: [...resume.run.events, { ...resume.run.events.at(-1)!, body: { type: "session.replaced", reason: "test", contextLost: true } }] }, resume.frames, /no session\.replaced/);
   reject("resume", { ...resume.run, sessionIds: resume.run.sessionIds.slice(0, 1) }, resume.frames, /resumed in a second session/);
+});
+
+for (const [recordedAs, replayedAs] of [
+  ["user", "root"],
+  ["root", "user"],
+] as const) {
+  test(`recordings made on an account named ${recordedAs} keep the SDK's protocol words and replay on an account named ${replayedAs}`, async () => {
+    const home = fs.mkdtempSync(path.join(DIRECTORY, `home-${recordedAs}-`));
+    const outcomes = await recordClaude({
+      outDir: path.join(DIRECTORY, `account-${recordedAs}`),
+      source: "fake",
+      env: { HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin", USER: recordedAs, LOGNAME: recordedAs },
+      user: recordedAs,
+      loadSdk: async (scenario) => puppetRuntime(startPuppet(scenario)),
+      timeoutMs: 20_000,
+    });
+    for (const outcome of outcomes) {
+      assert.equal(outcome.error, undefined, `${outcome.scenario}: ${outcome.error?.message}`);
+      const text = fs.readFileSync(outcome.file!, "utf8");
+      assert.ok(text.includes('"role":"user"') && text.includes('"type":"user"') && text.includes('"type":"assistant"'), `${outcome.scenario}: the protocol words are intact`);
+      assert.ok(!text.includes('"<USER>"'), `${outcome.scenario}: no whole value became the user placeholder`);
+      await replayClaude(outcome.file!, { user: replayedAs, env: { ...process.env, USER: replayedAs, LOGNAME: replayedAs } });
+    }
+  });
+}
+
+test("what Claude Code writes to stderr is recorded as an inbound frame and handed to the driver's stderr callback on replay", async () => {
+  const home = fs.mkdtempSync(path.join(DIRECTORY, "home-stderr-"));
+  const line = "claude-code: a warning on stderr\n";
+  const [outcome] = await recordClaude({
+    scenarios: ["simple"],
+    outDir: path.join(DIRECTORY, "stderr"),
+    source: "fake",
+    env: { HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
+    loadSdk: async (scenario) =>
+      puppetRuntime(
+        startPuppet(scenario, {
+          onTurn: (_turn, _index, world) => {
+            const stderr = world.queries.at(-1)!.options.stderr;
+            assert.ok(stderr !== undefined, "the driver gives Claude Code a stderr callback");
+            stderr(line);
+          },
+        }),
+      ),
+    timeoutMs: 20_000,
+  });
+  assert.equal(outcome!.error, undefined, outcome!.error?.message);
+  const recording = await readRecording(outcome!.file!);
+  assert.deepEqual(
+    recording.frames.filter((entry) => entry.frame.kind === "stderr").map((entry) => entry.frame),
+    [{ dir: "in", kind: "stderr", query: "q1", data: line }],
+  );
+  const { diagnostics } = await replayClaude(recording);
+  assert.ok(
+    diagnostics.some((entry) => entry.msg === "claude: claude-code: a warning on stderr"),
+    `the driver logged the replayed stderr line: ${JSON.stringify(diagnostics.map((entry) => entry.msg))}`,
+  );
 });
 
 // Drift.
@@ -266,6 +351,61 @@ for (const name of SCENARIO_NAMES) {
     });
   });
 }
+
+for (const name of SCENARIO_NAMES) {
+  for (const [label, extra] of [
+    ["an extra end of the stream", (query: string): Frame => ({ dir: "in", kind: "end", query })],
+    ["an extra message", (query: string): Frame => ({ dir: "in", kind: "message", query, message: { type: "system", subtype: "status", status: null, uuid: "00000000-0000-4000-8000-0000000000ff", session_id: "a11ce000-0000-4000-8000-000000000001" } })],
+  ] as const) {
+    test(`${name}: replay fails, naming the file, the line and the frame, when the recording holds ${label} the driver never takes`, async () => {
+      const recording = await recordingOf(name);
+      const lastQuery = String(recording.frames.at(-1)!.frame["query"]);
+      const frame = extra(lastQuery);
+      const { file } = editedCopy(recording, label.replace(/ /g, "-"), (frames) => frames.push(frame));
+      const line = recording.frames.at(-1)!.line + 1;
+      await assert.rejects(replayClaude(file, { timeoutMs: 10_000 }), (error: unknown) =>
+        assertDrift(error, file, line, [
+          /replay drift: the scenario ended with 1 recorded inbound frame\(s\) the driver never took/,
+          new RegExp(`not taken \\(line ${line}\\): ${escape(JSON.stringify(frame))}`),
+        ]),
+      );
+    });
+  }
+}
+
+test("at the replay SDK, a query the driver starts but never reads leaves its recorded message and end untaken, and finish names them", async () => {
+  const frames: Frame[] = [
+    { dir: "out", kind: "query", query: "q1", prompt: "stream", options: {} },
+    { dir: "in", kind: "message", query: "q1", message: { type: "system", subtype: "init", uuid: "00000000-0000-4000-8000-000000000001", session_id: "s" } },
+    { dir: "in", kind: "end", query: "q1" },
+  ];
+  const metadata: RecordingMetadata = { driver: "claude", vendor: "claude-code", vendorVersion: "2.1.330", sdk: "@anthropic-ai/claude-agent-sdk", sdkVersion: "0.3.330", model: "haiku", scenario: "simple", recorded: "2026-11-24", source: "fake" };
+  const file = path.join(DIRECTORY, "copies", "never-read.ndjson");
+  const recording = parseRecording(encodeRecording(metadata, frames), file);
+  const noPrompts = async function* (): AsyncGenerator<never> {};
+  for (const reads of [0, 1]) {
+    const replay = createClaudeReplaySdk(recording, { workspace: DIRECTORY, sanitise: createSanitiser({ workspace: DIRECTORY, env: {} }) });
+    const query = replay.sdk.query({ prompt: noPrompts(), options: {} });
+    for (let index = 0; index < reads; index += 1) assert.equal((await query.next()).done, false);
+    assert.equal(await replay.sequencer.whenTaken(100), false);
+    assert.equal(replay.sequencer.done(), false);
+    const line = 3 + reads;
+    assert.throws(
+      () => replay.sequencer.finish(),
+      (error: unknown) =>
+        assertDrift(error, file, line, [/the driver never took/, new RegExp(`not taken \\(line ${line}\\): ${escape(JSON.stringify(frames[line - 2]))}`)]),
+    );
+  }
+  // A driver that reads to the end takes everything.
+  const replay = createClaudeReplaySdk(recording, { workspace: DIRECTORY, sanitise: createSanitiser({ workspace: DIRECTORY, env: {} }) });
+  const query = replay.sdk.query({ prompt: noPrompts(), options: {} });
+  assert.equal((await query.next()).done, false);
+  assert.equal((await query.next()).done, true);
+  assert.equal((await query.next()).done, true, "the stream gives nothing after its end");
+  assert.equal(await replay.sequencer.whenTaken(100), true);
+  replay.sequencer.finish();
+  assert.equal(replay.sequencer.done(), true);
+});
 
 function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

@@ -11,6 +11,10 @@
 //                  xox[baprs]-, AKIA<16 capitals and digits>, or "Bearer "
 //                  followed by 20 or more token characters.
 //
+// Each line is checked as it stands and, when it is JSON, in every string and
+// key it decodes to, so a value JSON escapes (a $HOME holding a quote or a
+// backslash, a path written with \/) is still found.
+//
 // test/recordings/sanitiser.ts replaces all of these before a recorder
 // writes, so a finding means a recording was written some other way.
 //
@@ -26,7 +30,8 @@ export interface RecordingFinding {
   /** Path relative to the root, with forward slashes. */
   readonly file: string;
   readonly line: number;
-  readonly column: number;
+  /** The column in the line as written, or undefined when only a decoded JSON string holds the match. */
+  readonly column: number | undefined;
   readonly rule: RecordingScanRule;
   readonly what: string;
 }
@@ -66,17 +71,46 @@ function machineHomePattern(home: string | undefined): Pattern | undefined {
   return { rule: "machine-home", what: `a path starting with this machine's $HOME`, pattern: new RegExp(`${PATH_START}${escapeRegExp(trimmed)}(?![A-Za-z0-9._~-])`, "g") };
 }
 
-/** Every finding in one file's text. */
+/** Every string and object key a JSON line decodes to, or none when the line is not JSON. */
+function decodedStrings(lineText: string): string[] {
+  let value: unknown;
+  try {
+    value = JSON.parse(lineText);
+  } catch {
+    return [];
+  }
+  const strings: string[] = [];
+  const walk = (each: unknown): void => {
+    if (typeof each === "string") strings.push(each);
+    else if (Array.isArray(each)) each.forEach(walk);
+    else if (typeof each === "object" && each !== null) {
+      for (const [key, entry] of Object.entries(each)) {
+        strings.push(key);
+        walk(entry);
+      }
+    }
+  };
+  walk(value);
+  return strings;
+}
+
+function firstMatch(pattern: RegExp, text: string): RegExpExecArray | null {
+  pattern.lastIndex = 0;
+  return pattern.exec(text);
+}
+
+/** Every finding in one file's text: at most one per line and pattern. */
 export function scanRecordingText(text: string, file: string, options: { home?: string } = {}): RecordingFinding[] {
   const patterns = [...RECORDING_SCAN_PATTERNS];
   const home = machineHomePattern(options.home);
   if (home !== undefined) patterns.push(home);
   const findings: RecordingFinding[] = [];
   text.split("\n").forEach((lineText, index) => {
+    const decoded = decodedStrings(lineText);
     for (const { rule, what, pattern } of patterns) {
-      pattern.lastIndex = 0;
-      const match = pattern.exec(lineText);
-      if (match !== null) findings.push({ file, line: index + 1, column: match.index + 1, rule, what });
+      const raw = firstMatch(pattern, lineText);
+      if (raw !== null) findings.push({ file, line: index + 1, column: raw.index + 1, rule, what });
+      else if (decoded.some((string) => firstMatch(pattern, string) !== null)) findings.push({ file, line: index + 1, column: undefined, rule, what: `${what} (in a decoded JSON string)` });
     }
   });
   return findings;
@@ -113,7 +147,7 @@ function main(argv: readonly string[]): number {
   const root = rootIndex === -1 ? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..") : path.resolve(argv[rootIndex + 1] ?? ".");
   const home = process.env["HOME"];
   const { files, findings } = scanRecordings(root, home === undefined ? {} : { home });
-  for (const finding of findings) process.stderr.write(`${finding.file}:${finding.line}:${finding.column}: ${finding.rule}: ${finding.what}\n`);
+  for (const finding of findings) process.stderr.write(`${finding.file}:${finding.line}:${finding.column === undefined ? "" : `${finding.column}:`} ${finding.rule}: ${finding.what}\n`);
   if (findings.length > 0) {
     process.stderr.write(`check-recordings: ${findings.length} finding(s) in ${new Set(findings.map((finding) => finding.file)).size} of ${files.length} recording file(s)\n`);
     return 1;

@@ -15,8 +15,9 @@
 
 import assert from "node:assert/strict";
 import { EventGrammar } from "../../src/host/event-grammar.ts";
+import { reduceEvents } from "../../src/host/reducer.ts";
 import type { AriEvent } from "../../src/generated/events.ts";
-import type { ItemKind } from "../../src/generated/item.ts";
+import type { Item, ItemKind } from "../../src/generated/item.ts";
 import type { Request } from "../../src/generated/request.ts";
 import type { RuntimePolicy } from "../../src/generated/config.ts";
 import type { Session } from "../../src/runtime.ts";
@@ -372,21 +373,37 @@ export async function runScenario(scenario: Scenario, host: ScenarioHost): Promi
 
 type Body<T extends AriEvent["body"]["type"]> = Extract<AriEvent["body"], { type: T }>;
 
-/** Every item of the run, its upserts folded in order. */
-export function foldItems(events: readonly AriEvent[]): Map<string, { [field: string]: unknown }> {
-  const items = new Map<string, { [field: string]: unknown }>();
+/** One item as a host holds it once the run is over, with the session and turn it belongs to. */
+export interface SettledItem {
+  readonly item: Item;
+  readonly sessionId: string;
+  readonly turnId: string | undefined;
+}
+
+/**
+ * Every item of the run as the ARI reducer (`reduceEvents` of ari/host) builds
+ * it from each session's events: upserts applied in order and each
+ * `item.delta` appended while its item is open, so the checks see exactly
+ * what a host shows. An item's turn is its own `turnId`, else the turn its
+ * events' envelopes name.
+ */
+export function settledItems(events: readonly AriEvent[]): SettledItem[] {
+  const sessions = new Map<string, AriEvent[]>();
   for (const event of events) {
-    if (event.body.type !== "item.upsert") continue;
-    const patch = event.body.item;
-    const item = items.get(patch.id) ?? {};
-    for (const [field, value] of Object.entries(patch)) {
-      if (value === null) delete item[field];
-      else item[field] = value;
-    }
-    if (item["turnId"] === undefined && event.turnId !== undefined) item["turnId"] = event.turnId;
-    items.set(patch.id, item);
+    const own = sessions.get(event.sessionId) ?? [];
+    own.push(event);
+    sessions.set(event.sessionId, own);
   }
-  return items;
+  const settled: SettledItem[] = [];
+  for (const [sessionId, own] of sessions) {
+    const envelopeTurns = new Map<string, string>();
+    for (const event of own) {
+      const itemId = event.body.type === "item.upsert" ? event.body.item.id : event.body.type === "item.delta" ? event.body.itemId : undefined;
+      if (itemId !== undefined && event.turnId !== undefined && !envelopeTurns.has(itemId)) envelopeTurns.set(itemId, event.turnId);
+    }
+    for (const item of reduceEvents(own).items.values()) settled.push({ item, sessionId, turnId: item.turnId ?? envelopeTurns.get(item.id) });
+  }
+  return settled;
 }
 
 const TOOL_ITEM_KINDS: ReadonlySet<string> = new Set(["command_execution", "tool_call", "mcp_tool_call", "dynamic_tool_call"]);
@@ -403,21 +420,28 @@ function hostTerminals(run: ScenarioRun): AriEvent[] {
   });
 }
 
-/** The settled assistant messages of one turn with their text. */
-function assistantTexts(run: ScenarioRun, turnId: string): string[] {
-  return [...foldItems(run.events).values()]
-    .filter((item) => item["kind"] === "assistant_message" && item["turnId"] === turnId && item["status"] === "completed")
-    .map((item) => (typeof item["text"] === "string" ? item["text"] : ""));
+/** The items of one host turn, as the reducer built them in the session the turn ran in. */
+function turnItems(run: ScenarioRun, index: number): Item[] {
+  const turnId = run.turnIds[index];
+  const sessionId = run.turnSessions[index];
+  return settledItems(run.events)
+    .filter((entry) => entry.turnId === turnId && entry.sessionId === sessionId)
+    .map((entry) => entry.item);
+}
+
+/** The settled assistant messages of one host turn, with their text. */
+function assistantTexts(run: ScenarioRun, index: number): string[] {
+  return turnItems(run, index)
+    .filter((item) => item.kind === "assistant_message" && item.status === "completed")
+    .map((item) => item.text ?? "");
 }
 
 function requestsOfKind(run: ScenarioRun, kind: string): HostRequest[] {
   return run.requests.filter((entry) => entry.request.kind === kind);
 }
 
-function toolOutput(item: { [field: string]: unknown }): string {
-  const output = item["output"];
-  if (typeof output === "string") return output;
-  return output === undefined ? "" : JSON.stringify(output);
+function toolOutput(item: Item): string {
+  return item.output ?? "";
 }
 
 /** Asserts what the scenario promises. `native` is what reached the native side, from the driver's kit. */
@@ -431,7 +455,7 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
     case "simple": {
       assert.equal(ends.length, 1, `${where}: exactly one turn.terminal`);
       assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`);
-      assert.ok(assistantTexts(run, firstTurn!).some((text) => text.trim() !== ""), `${where}: a settled assistant message with non-empty text`);
+      assert.ok(assistantTexts(run, 0).some((text) => text.trim() !== ""), `${where}: a settled assistant message with non-empty text`);
       return;
     }
     case "multi_turn":
@@ -449,7 +473,7 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
         `${where}: both turns completed`,
       );
       assert.deepEqual([...new Set(own.map((event) => event.threadId))], [run.threadId], `${where}: both turns ran on one thread`);
-      const second = assistantTexts(run, run.turnIds[1]!).join("\n");
+      const second = assistantTexts(run, 1).join("\n");
       assert.ok(second.toLowerCase().includes(scenario.word!), `${where}: the second turn's text ${JSON.stringify(second)} contains ${JSON.stringify(scenario.word)}`);
       if (scenario.name === "resume") {
         assert.equal(run.sessionIds.length, 2, `${where}: the thread was resumed in a second session`);
@@ -470,16 +494,16 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
       assert.ok(commands.every((entry) => entry.optionId !== undefined), `${where}: the host answered every command request`);
       const answer = allowed ? native.find((entry) => entry.decision === "accept" && entry.scope === "once") : native.find((entry) => entry.decision === "decline");
       assert.ok(answer !== undefined, `${where}: the host's ${allowed ? "allow-once" : "decline"} answer reached the native side as a recorded outbound frame (native answers: ${JSON.stringify(native)})`);
-      const tools = [...foldItems(run.events).values()].filter((item) => TOOL_ITEM_KINDS.has(String(item["kind"])) && item["turnId"] === firstTurn);
+      const tools = turnItems(run, 0).filter((item) => TOOL_ITEM_KINDS.has(item.kind));
       assert.equal(ends.length, 1, `${where}: the turn reached a terminal`);
       if (allowed) {
         assert.ok(
-          tools.some((item) => item["status"] === "completed"),
-          `${where}: a command or tool item completed (items: ${JSON.stringify(tools.map((item) => [item["kind"], item["status"]]))})`,
+          tools.some((item) => item.status === "completed"),
+          `${where}: a command or tool item completed (items: ${JSON.stringify(tools.map((item) => [item.kind, item.status]))})`,
         );
         assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`);
       } else {
-        const leaked = tools.filter((item) => item["status"] === "completed" && toolOutput(item).includes(scenario.marker!));
+        const leaked = tools.filter((item) => item.status === "completed" && toolOutput(item).includes(scenario.marker!));
         assert.deepEqual(leaked, [], `${where}: no completed command or tool item's output holds the marker`);
       }
       return;

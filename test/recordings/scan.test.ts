@@ -13,7 +13,7 @@ import { recordingFiles, scanRecordingText, scanRecordings } from "../../scripts
 import { REPO_ROOT } from "../helpers/spec.ts";
 import { encodeRecording, parseRecording } from "./format.ts";
 import type { Frame, RecordingMetadata } from "./format.ts";
-import { PLACEHOLDERS, createSanitiser } from "./sanitiser.ts";
+import { PLACEHOLDERS, createSanitiser, userNames } from "./sanitiser.ts";
 
 const METADATA: RecordingMetadata = {
   driver: "claude",
@@ -138,7 +138,7 @@ test("check:recordings exits non-zero naming the file and line, never the matche
   }
 });
 
-test("the sanitiser replaces the workspace, $HOME, the user name and the credential values with fixed placeholders, and emails", () => {
+test("the sanitiser replaces the workspace, $HOME, the user name in paths and the credential values with fixed placeholders, and emails", () => {
   const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-sanitiser-")));
   try {
     const env = {
@@ -149,14 +149,14 @@ test("the sanitiser replaces the workspace, $HOME, the user name and the credent
       ANTHROPIC_AUTH_TOKEN: "auth-token-value-0123456789",
       CLAUDE_CODE_OAUTH_TOKEN: "oauth-token-value-0123456789",
     };
-    const sanitise = createSanitiser({ workspace, env });
+    const sanitise = createSanitiser({ workspace, env, user: "recorder" });
     const frame = {
       dir: "out",
       kind: "query",
       options: {
         cwd: `${workspace}/cwd`,
         env: { PATH: env.PATH, HOME: `${workspace}/home`, ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY, [`${env.HOME}/key`]: "a path as a key" },
-        text: `recorder ran in ${env.HOME}/projects as recorder; token ${env.ANTHROPIC_AUTH_TOKEN} and ${env.CLAUDE_CODE_OAUTH_TOKEN}; mail recorder@example.org; recorders stay`,
+        text: `ran in ${env.HOME}/projects and /srv/recorder/cache and C:\\Users\\recorder\\x and ~recorder/notes; token ${env.ANTHROPIC_AUTH_TOKEN} and ${env.CLAUDE_CODE_OAUTH_TOKEN}; mail recorder@example.org; recorders stay`,
       },
     };
     assert.deepEqual(sanitise(frame), {
@@ -165,11 +165,71 @@ test("the sanitiser replaces the workspace, $HOME, the user name and the credent
       options: {
         cwd: `${PLACEHOLDERS.workspace}/cwd`,
         env: { PATH: PLACEHOLDERS.path, HOME: `${PLACEHOLDERS.workspace}/home`, ANTHROPIC_API_KEY: "<ANTHROPIC_API_KEY>", [`${PLACEHOLDERS.home}/key`]: "a path as a key" },
-        text: "<USER> ran in <HOME>/projects as <USER>; token <ANTHROPIC_AUTH_TOKEN> and <CLAUDE_CODE_OAUTH_TOKEN>; mail <EMAIL>; recorders stay",
+        text: "ran in <HOME>/projects and /srv/<USER>/cache and C:\\Users\\<USER>\\x and ~<USER>/notes; token <ANTHROPIC_AUTH_TOKEN> and <CLAUDE_CODE_OAUTH_TOKEN>; mail <EMAIL>; recorders stay",
       },
     });
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("the sanitiser never turns a protocol word into the user placeholder, whatever the account is named", () => {
+  for (const user of ["user", "root", "assistant", "system", "text", "default"]) {
+    const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: user, LOGNAME: user }, user });
+    const frame: Frame = {
+      dir: "in",
+      kind: "message",
+      query: "q1",
+      message: { type: user, role: user, subtype: user, content: [{ type: "text", text: `the ${user} said ${user}`, media_type: `text/${user}` }], settingSources: [user], [user]: user },
+    };
+    assert.deepEqual(sanitise(frame), frame, `account ${user}: no value or key changes`);
+    assert.equal(sanitise(`/var/lib/${user}/x`), "/var/lib/<USER>/x", `account ${user}: a path segment is replaced`);
+  }
+});
+
+test("the user names are the OS user's (os.userInfo), and USER and LOGNAME too when they differ", () => {
+  const osName = os.userInfo().username;
+  assert.ok(osName !== "", "the OS has a user name");
+  assert.deepEqual(userNames({ env: { USER: "stale-user", LOGNAME: "other-login" } }), [osName, "stale-user", "other-login"].filter((name, index, all) => all.indexOf(name) === index));
+  assert.deepEqual(userNames({ env: { USER: osName, LOGNAME: osName } }), [osName]);
+  const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: "stale-user", LOGNAME: "other-login" } });
+  assert.equal(sanitise(`/srv/${osName}/a /srv/stale-user/b /srv/other-login/c`), "/srv/<USER>/a /srv/<USER>/b /srv/<USER>/c");
+});
+
+test("a $HOME holding a quote, a backslash and a space is found by the scan through JSON's escaping, and the sanitiser removes it", () => {
+  // A child of a plain temp dir: Bun 1.3.14's realpath and mkdtemp take a backslash for a separator.
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-scan-escaped-")));
+  const home = path.join(base, 'home "Lab" \\ dir');
+  fs.mkdirSync(home);
+  try {
+    assert.ok(home.includes('"') && home.includes("\\") && home.includes(" "), home);
+    const line = JSON.stringify({ dir: "in", kind: "message", text: `${home}/config/file` });
+    assert.ok(!line.includes(home), "JSON escapes the quote and the backslash");
+    const findings = scanRecordingText(line, "escaped.ndjson", { home });
+    assert.deepEqual(
+      findings.map((finding) => [finding.line, finding.rule]),
+      [[1, "machine-home"]],
+    );
+    // A path JSON writes with \/ is decoded too.
+    assert.deepEqual(
+      scanRecordingText('{"text":"\\/home\\/alice\\/x"}', "slashes.ndjson").map((finding) => finding.rule),
+      ["home-path"],
+    );
+    const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: home } });
+    const text = encodeRecording(METADATA, [sanitise({ dir: "in", kind: "message", query: "q1", text: `${home}/config/file`, [`${home}/key`]: home } as Frame)]);
+    assert.deepEqual(scanRecordingText(text, "sanitised.ndjson", { home }), []);
+    assert.ok(text.includes('"text":"<HOME>/config/file"'), text);
+    const root = tempRepo({ "test/drivers/claude/recordings/escaped.ndjson": encodeRecording(METADATA, [{ dir: "in", kind: "message", query: "q1", text: `${home}/x` }]) });
+    try {
+      const environment = { ...scanEnvironment(), HOME: home };
+      const failed = spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "check-recordings.ts"), "--root", root], { encoding: "utf8", env: environment });
+      assert.equal(failed.status, 1, failed.stderr);
+      assert.match(failed.stderr, /test\/drivers\/claude\/recordings\/escaped\.ndjson:2: machine-home: a path starting with this machine's \$HOME \(in a decoded JSON string\)/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
   }
 });
 

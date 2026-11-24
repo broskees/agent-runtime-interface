@@ -3,7 +3,8 @@
 // traffic in both directions as frames (./frames.ts): the `query()` options,
 // each prompt the driver streams, each control call and SDK session call
 // with its result, each message the query yields, the end of each stream,
-// and each `canUseTool` call with the driver's answer.
+// each `canUseTool` call with the driver's answer, and each line Claude Code
+// writes to the driver's `stderr` callback.
 //
 // A frame is recorded when it crosses the boundary: an outbound frame when
 // the driver makes the call (a prompt when the driver writes it), an inbound
@@ -120,7 +121,19 @@ export function tapClaudeSdk(sdk: ClaudeSdkModule, record: (frame: Frame) => voi
       record({ dir: "out", kind: "query", query: queryId, prompt: streaming ? "stream" : { text: params.prompt }, options: queryOptionsFrame(driverOptions) });
       const prompt =
         typeof params.prompt === "string" ? params.prompt : pullPrompts(params.prompt, (message) => record({ dir: "out", kind: "prompt", query: queryId, message: jsonSafe(message) }));
-      const options: Options = { ...driverOptions, ...(driverOptions.canUseTool === undefined ? {} : { canUseTool: tapCanUseTool(queryId, driverOptions.canUseTool) }) };
+      const driverStderr = driverOptions.stderr;
+      const options: Options = {
+        ...driverOptions,
+        ...(driverOptions.canUseTool === undefined ? {} : { canUseTool: tapCanUseTool(queryId, driverOptions.canUseTool) }),
+        ...(driverStderr === undefined
+          ? {}
+          : {
+              stderr: (data: string) => {
+                record({ dir: "in", kind: "stderr", query: queryId, data });
+                driverStderr(data);
+              },
+            }),
+      };
       open.add(queryId);
       return tapQuery(queryId, sdk.query({ prompt, options }));
     },

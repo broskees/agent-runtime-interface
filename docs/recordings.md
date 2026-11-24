@@ -89,6 +89,7 @@ session functions alike, from 1.
 | in | `can_use_tool` | `id`, `query`, `toolName`, `input`, `options` | Claude Code called the driver's `canUseTool`. `options` leave out the abort signal. Ids are `p1`, `p2`, ... |
 | in | `can_use_tool_abort` | `id`, `query` | Claude Code aborted that call's signal before the driver answered |
 | out | `permission` | `id`, `query`, `result` or `error` | the driver's answer to `canUseTool` |
+| in | `stderr` | `query`, `data` | Claude Code wrote `data` to its stderr, and the SDK passed it to the driver's `stderr` callback |
 
 An outbound frame is recorded when the driver makes the call. A prompt is
 recorded when the driver writes it: the tap and the replay SDK both read the
@@ -137,9 +138,21 @@ Replay fails, naming the recording file, the line and both frames, when:
   names the first field that differs);
 - the driver sends a frame after the last recorded one;
 - the scenario ends while recorded frames remain;
+- the scenario ends while a recorded inbound frame was never taken by the
+  driver (see below);
 - the scenario waits too long for something (a recorded inbound frame is
   missing, for example). The message names the next recorded frame and the
   last frame replayed.
+
+An inbound frame counts as replayed only once the driver has taken it, not
+when the sequencer hands it to the replay SDK. For Claude: a message, the end
+or the error of a stream when the driver's `next()` returns it; a call's
+result when the driver's call settles with it; a `canUseTool` call, an abort
+or a `stderr` line when the driver's callback runs. A stream gives nothing
+after its end, so a recording with an extra end or message, or a driver that
+starts a query and never reads it, fails. After the scenario, replay waits
+until the driver has taken every delivered frame, or has taken none for half
+a second.
 
 Before it compares, replay runs the driver's frame through the sanitiser with
 its own workspace, `$HOME` and `PATH`. Before it delivers, it puts its own
@@ -167,7 +180,7 @@ replaces, in every string and object key:
 | a string that is exactly the value of `PATH` | `<PATH>` |
 | `$HOME`, and its real path | `<HOME>` |
 | the values of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` | `<ANTHROPIC_API_KEY>`, `<ANTHROPIC_AUTH_TOKEN>`, `<CLAUDE_CODE_OAUTH_TOKEN>` |
-| the OS user name, as a whole word | `<USER>` |
+| the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ), where it is a whole segment of a path | `<USER>` |
 | email addresses | `<EMAIL>` |
 | another home directory: `/home/<name>`, `/Users/<name>`, `/root` | `<OTHER_HOME>` |
 | a token the scan looks for | `<TOKEN>` |
@@ -175,10 +188,23 @@ replaces, in every string and object key:
 Exact values go first, longest first, so a path inside the workspace is
 replaced whole.
 
+The user name is replaced only inside a path: a string part that starts with
+`/`, `\`, `~` or a drive letter, where the name is a whole segment, as in
+`/srv/<name>/x`, `C:\Users\<name>` or `~<name>/x`. It is not replaced where a
+string is nothing but the name, or where the name is a word of free text.
+There a name cannot be told apart from a word of the protocol: an account
+named `user`, `root` or `system` would otherwise turn Claude Code's
+`type: "user"` and `role: "user"` into the placeholder. The recording would
+then hold values the SDK never sent and would not replay on another account.
+`test/drivers/claude/replay.test.ts` records on accounts named `user` and
+`root` and replays on the other.
+
 `pnpm run check:recordings` (`scripts/check-recordings.ts`) is a step of both
-`gate` and `gate:bun`. It scans every file under `test/drivers/*/recordings/`.
-It fails, naming the file, the line and the rule but never the matched text,
-on:
+`gate` and `gate:bun`. It scans every file under `test/drivers/*/recordings/`,
+each line as written and, when the line is JSON, every string and key it
+decodes to. So a `$HOME` holding a quote or a backslash, which JSON escapes,
+is still found. It fails, naming the file, the line and the rule but never
+the matched text, on:
 
 - a path starting `/home/`, `/Users/` or `/root/`;
 - a path starting with the scanning machine's `$HOME`;
@@ -237,6 +263,10 @@ The sources for these choices (Claude Code and Agent SDK docs, read
 - Managed policy settings (for example `/etc/claude-code/managed-settings.json`)
   load from the machine in all cases. The recorder cannot turn them off; a
   machine with such a file records under it.
+- Server-managed settings that Anthropic serves to an eligible organization
+  credential, and endpoint-managed policy on the machine, can still reach a
+  recorded session: the SDK cannot turn either off ("What settingSources does
+  not control").
 
 ### How Claude Code finds the sign-in
 

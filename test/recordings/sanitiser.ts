@@ -10,7 +10,14 @@
 //   - the values of ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and
 //     CLAUDE_CODE_OAUTH_TOKEN with <ANTHROPIC_API_KEY> and so on;
 //   - email addresses with <EMAIL>;
-//   - the OS user name, as a whole word, with <USER>;
+//   - the OS user name (os.userInfo().username, and the values of USER and
+//     LOGNAME where they differ) with <USER>, only where it is a whole
+//     segment of a path (/srv/<name>/x, C:\Users\<name>, ~<name>/x).
+//     Nowhere else: a string that is just the name, or the name as a word in
+//     free text, cannot be told apart from a protocol word. An account named
+//     `user` or `root` would otherwise turn Claude Code's `type: "user"` and
+//     `role: "user"` into placeholders, and the recording would not replay
+//     on another account;
 // then the rest of what the scan (scripts/check-recordings.ts) refuses:
 //   - another user's home directory (/home/<name>, /Users/<name>, /root)
 //     with <OTHER_HOME>;
@@ -38,9 +45,9 @@ export const PLACEHOLDERS = {
 export interface SanitiserInput {
   /** The recording's temp workspace. */
   readonly workspace: string;
-  /** The environment the recorder (or the replay) runs in: HOME, PATH, the user and the credential variables come from it. */
+  /** The environment the recorder (or the replay) runs in: HOME, PATH, USER, LOGNAME and the credential variables come from it. */
   readonly env: { readonly [name: string]: string | undefined };
-  /** The OS user name; defaults to the env's USER or LOGNAME, then os.userInfo(). */
+  /** The OS user name; os.userInfo().username when left out. USER and LOGNAME are replaced too when they differ from it. */
   readonly user?: string;
 }
 
@@ -52,10 +59,6 @@ function realPath(value: string): string {
   } catch {
     return value;
   }
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function osUser(): string | undefined {
@@ -78,6 +81,25 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
 ];
 const BEARER_PATTERN = /Bearer [A-Za-z0-9._~+/=-]{20,}/g;
 
+// A filesystem path inside a string: it starts with /, \, ~ or a drive letter, at the
+// start of the string or after a character that cannot be part of a path, and runs
+// to the next space, quote, bracket or separator of a list.
+const PATH_TOKEN = /(?<![A-Za-z0-9._~-])(?:[A-Za-z]:[\\/]|[/\\~])[^\s"'`<>|,;()[\]{}]*/g;
+
+/** The user names the sanitiser replaces: the OS user's, and USER and LOGNAME when they differ. */
+export function userNames(input: Pick<SanitiserInput, "env" | "user">): string[] {
+  const names = [input.user ?? osUser(), input.env["USER"], input.env["LOGNAME"]];
+  return [...new Set(names.filter((name): name is string => name !== undefined && name !== "" && !/[/\\\s]/.test(name)))];
+}
+
+/** `path` with every segment that is one of `names` (or `~` and one of them) replaced by <USER>. */
+function withoutUserSegments(path: string, names: ReadonlySet<string>): string {
+  return path
+    .split(/([/\\:])/)
+    .map((segment) => (names.has(segment) ? PLACEHOLDERS.user : segment.startsWith("~") && names.has(segment.slice(1)) ? `~${PLACEHOLDERS.user}` : segment))
+    .join("");
+}
+
 /** Builds the sanitiser for one recording (or one replay). */
 export function createSanitiser(input: SanitiserInput): Sanitiser {
   const exact: Array<{ value: string; placeholder: string }> = [];
@@ -93,8 +115,7 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
   add(input.env["HOME"], PLACEHOLDERS.home);
   for (const name of SECRET_VARIABLES) add(input.env[name], `<${name}>`);
   exact.sort((a, b) => b.value.length - a.value.length);
-  const user = input.user ?? input.env["USER"] ?? input.env["LOGNAME"] ?? osUser();
-  const userPattern = user === undefined || user === "" ? undefined : new RegExp(`(?<![A-Za-z0-9_.-])${escapeRegExp(user)}(?![A-Za-z0-9_-])`, "g");
+  const users = new Set(userNames(input));
 
   const text = (value: string): string => {
     if (searchPath !== undefined && value === searchPath) return PLACEHOLDERS.path;
@@ -102,7 +123,7 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
     for (const entry of exact) result = result.split(entry.value).join(entry.placeholder);
     // Emails before the user name: a user name inside an address would otherwise break the address apart and keep its domain.
     result = result.replace(EMAIL_PATTERN, PLACEHOLDERS.email);
-    if (userPattern !== undefined) result = result.replace(userPattern, PLACEHOLDERS.user);
+    if (users.size > 0) result = result.replace(PATH_TOKEN, (token) => withoutUserSegments(token, users));
     result = result.replace(OTHER_HOME_PATTERN, (_match, before: string) => `${before}${PLACEHOLDERS.otherHome}`);
     for (const pattern of TOKEN_PATTERNS) result = result.replace(pattern, PLACEHOLDERS.token);
     result = result.replace(BEARER_PATTERN, `Bearer ${PLACEHOLDERS.token}`);

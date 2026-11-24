@@ -6,6 +6,12 @@
 // delivered. It knows nothing of the transport: a replay SDK or a replay
 // HTTP server hands it frames and receives deliveries.
 //
+// A delivered inbound frame is not yet replayed: it counts only once the
+// transport reports, with `taken(line)`, that the driver took it (read the
+// message off the stream, received the call's result, had its callback
+// called). `finish()` fails on a recorded frame the driver never took, so a
+// tape with an extra inbound frame, or a driver that stops reading, fails.
+//
 // Every failure names the recording file, the line, and both frames. The
 // first failure sticks: later sends rethrow it, so a driver that swallows an
 // error still fails the replay.
@@ -80,7 +86,11 @@ export interface ReplaySequencerOptions {
   readonly recording: Recording;
   /** The fields to leave out of the comparison; only those of the recording's driver apply. */
   readonly ignored: readonly IgnoredField[];
-  /** Hands one recorded inbound frame to the driver's side. It must not call back into `send` synchronously. */
+  /**
+   * Hands one recorded inbound frame to the driver's side, which calls
+   * `taken(line)` once the driver has taken it. It must not call back into
+   * `send` synchronously.
+   */
   readonly deliver: (frame: Frame, line: number) => void;
 }
 
@@ -93,6 +103,9 @@ export class ReplaySequencer {
   #lastLine: number | undefined;
   readonly #listeners = new Set<() => void>();
   readonly #matched: Frame[] = [];
+  /** Inbound frames delivered that the driver has not taken yet, by line, oldest first. */
+  readonly #untaken = new Map<number, Frame>();
+  #takes = 0;
 
   constructor(options: ReplaySequencerOptions) {
     this.recording = options.recording;
@@ -146,6 +159,7 @@ export class ReplaySequencer {
       if (next === undefined || next.frame.dir !== "in") break;
       this.#position += 1;
       this.#lastLine = next.line;
+      this.#untaken.set(next.line, next.frame);
       try {
         this.#deliver(next.frame, next.line);
       } catch (error) {
@@ -194,31 +208,96 @@ export class ReplaySequencer {
     this.#deliverDue();
   }
 
-  /** True when every recorded frame has been matched or delivered. */
+  /** The driver took the inbound frame on `line`. */
+  taken(line: number): void {
+    if (!this.#untaken.delete(line)) {
+      const entry = this.recording.frames.find((each) => each.line === line);
+      this.#fail(new ReplayDriftError(this.recording.file, line, `replay handed the driver a frame it was not holding (taken twice, or never delivered)\n  recorded (line ${line}): ${showFrame(entry?.frame)}`));
+      return;
+    }
+    this.#takes += 1;
+    this.#changed();
+  }
+
+  /** The first inbound frame delivered that the driver has not taken. */
+  #firstUntaken(): { line: number; frame: Frame } | undefined {
+    for (const [line, frame] of this.#untaken) return { line, frame };
+    return undefined;
+  }
+
+  /**
+   * Resolves true once the driver has taken every delivered inbound frame,
+   * or false once it has taken none for `idleMs` while some remain.
+   */
+  whenTaken(idleMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let takes = this.#takes;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (value: boolean): void => {
+        clearTimeout(timer);
+        remove();
+        resolve(value);
+      };
+      const arm = (): void => {
+        clearTimeout(timer);
+        timer = setTimeout(() => (this.#takes === takes ? finish(false) : arm()), idleMs);
+      };
+      const check = (): void => {
+        if (this.#untaken.size === 0 || this.#failure !== undefined) return finish(this.#untaken.size === 0);
+        if (this.#takes !== takes) {
+          takes = this.#takes;
+          arm();
+        }
+      };
+      const remove = this.onChange(check);
+      arm();
+      check();
+    });
+  }
+
+  /** True when every recorded frame has been matched, or delivered and taken. */
   done(): boolean {
-    return this.#position >= this.recording.frames.length;
+    return this.#position >= this.recording.frames.length && this.#untaken.size === 0;
   }
 
   /** Where replay stands, for a report that the scenario stopped making progress. */
   describe(what: string): string {
     const next = this.#frameAt(this.#position);
     const last = this.#last();
+    const untaken = this.#firstUntaken();
     const line = next?.line ?? (last?.line ?? 1) + 1;
-    return `${this.recording.file}:${line}: replay stalled: ${what}\n  next recorded (line ${next?.line ?? "end"}): ${showFrame(next?.frame)}\n  last replayed (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}`;
+    return (
+      `${this.recording.file}:${line}: replay stalled: ${what}\n  next recorded (line ${next?.line ?? "end"}): ${showFrame(next?.frame)}\n  last replayed (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}` +
+      (untaken === undefined ? "" : `\n  delivered, not yet taken by the driver (line ${untaken.line}): ${showFrame(untaken.frame)}`)
+    );
   }
 
-  /** Throws a ReplayDriftError unless every recorded frame was replayed. Call it when the scenario has ended. */
+  /**
+   * Throws a ReplayDriftError unless every recorded frame was replayed: every
+   * outbound frame matched and every inbound frame taken by the driver. Call
+   * it when the scenario has ended, after `whenTaken`.
+   */
   finish(): void {
     if (this.#failure !== undefined) throw this.#failure;
     const next = this.#frameAt(this.#position);
-    if (next === undefined) return;
     const last = this.#last();
-    const left = this.recording.frames.length - this.#position;
+    if (next !== undefined) {
+      const left = this.recording.frames.length - this.#position;
+      throw this.#fail(
+        new ReplayDriftError(
+          this.recording.file,
+          next.line,
+          `replay drift: the scenario ended with ${left} recorded frame(s) not replayed\n  next recorded (line ${next.line}): ${showFrame(next.frame)}\n  last replayed (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}`,
+        ),
+      );
+    }
+    const untaken = this.#firstUntaken();
+    if (untaken === undefined) return;
     throw this.#fail(
       new ReplayDriftError(
         this.recording.file,
-        next.line,
-        `replay drift: the scenario ended with ${left} recorded frame(s) not replayed\n  next recorded (line ${next.line}): ${showFrame(next.frame)}\n  last replayed (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}`,
+        untaken.line,
+        `replay drift: the scenario ended with ${this.#untaken.size} recorded inbound frame(s) the driver never took\n  not taken (line ${untaken.line}): ${showFrame(untaken.frame)}\n  last recorded (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}`,
       ),
     );
   }

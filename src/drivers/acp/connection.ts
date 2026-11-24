@@ -103,7 +103,12 @@ export class AcpConnection {
   static async open(
     host: HostServices<unknown>,
     launch: AcpLaunch,
-    options: { readonly maxProtocolVersion: AcpVersion; readonly timeoutMs: number },
+    options: {
+      readonly maxProtocolVersion: AcpVersion;
+      readonly timeoutMs: number;
+      /** Told the protocol version the agent answered `initialize` with, before the driver accepts or refuses it. */
+      readonly onAnswer?: (protocolVersion: unknown) => void;
+    },
     handlers: AcpConnectionHandlers,
   ): Promise<AcpConnection> {
     let process: SpawnedProcess;
@@ -125,7 +130,7 @@ export class AcpConnection {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const handshake = await Promise.race([
-        connection.#initialize(options.maxProtocolVersion),
+        connection.#initialize(options.maxProtocolVersion, options.onAnswer),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(callErrors.transport(`The ACP agent did not answer initialize within ${options.timeoutMs} ms`)), options.timeoutMs);
         }),
@@ -150,7 +155,7 @@ export class AcpConnection {
   }
 
   /** Sends `initialize` asking for `maxVersion` and takes the version the agent answers with. */
-  async #initialize(maxVersion: AcpVersion): Promise<AcpHandshake> {
+  async #initialize(maxVersion: AcpVersion, onAnswer: ((protocolVersion: unknown) => void) | undefined): Promise<AcpHandshake> {
     const info = { name: "ari", title: "ARI", version: ARI_VERSION };
     const params: V1.InitializeRequest | V2.InitializeRequest =
       maxVersion === 2
@@ -163,6 +168,7 @@ export class AcpConnection {
           } satisfies V1.InitializeRequest);
     const result = (await this.peer.request("initialize", params)) as V1.InitializeResponse | V2.InitializeResponse;
     const version = result.protocolVersion;
+    onAnswer?.(version);
     if (version !== 1 && version !== 2) {
       throw callErrors.protocol("unsupported_protocol_version", `The ACP agent answered initialize with protocol version ${String(version)}; this driver speaks 1 and 2`);
     }

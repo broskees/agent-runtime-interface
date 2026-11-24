@@ -34,6 +34,13 @@ export interface DriverMeta {
 
 const DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema";
 
+/** The ACP protocol versions every ACP driver is tested against. `status()` gives an advisory after an agent answers `initialize` with another. */
+export const ACP_TESTED_PROTOCOL_VERSIONS: readonly number[] = [1, 2];
+/** `ACP_TESTED_PROTOCOL_VERSIONS` as the range an advisory states. */
+export const ACP_TESTED_PROTOCOL_RANGE = "1 - 2";
+/** The ACP schema release the drivers are tested at (vendor-schemas/acp/). */
+export const ACP_TESTED_SCHEMA_RELEASE = "schema-v2.0.0-beta.3";
+
 /** The config every ACP-based driver shares. Flavors add their own fields. */
 export interface AcpBaseConfig {
   /** The newest ACP protocol version to request in `initialize`. The agent may answer with an older one. */
@@ -122,7 +129,7 @@ export const meta: DriverMeta = {
     ...ACP_BASE_FORM_HINTS,
   },
   testedVersions: {
-    range: "1 - 2",
-    what: "ACP protocol versions 1 and 2, schema release schema-v2.0.0-beta.3 (@agentclientprotocol/sdk 2.9.1)",
+    range: ACP_TESTED_PROTOCOL_RANGE,
+    what: `ACP protocol versions 1 and 2 at schema release ${ACP_TESTED_SCHEMA_RELEASE} (@agentclientprotocol/sdk 2.9.1); the driver runs any agent, so the protocol is its vendor, and status() gives an advisory after an agent answers initialize with another protocol version`,
   },
 };

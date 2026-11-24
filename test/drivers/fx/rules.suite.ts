@@ -12,9 +12,10 @@ driverRuleTests({
   config: { ...FX_DEFAULT_CONFIG },
   executable: "fx",
   protocol: 1,
-  agentArgs: ["--config-options", JSON.stringify(FX_OPTIONS_V1), "--print-version", "fx 0.9.0"],
+  agentArgs: ["--config-options", JSON.stringify(FX_OPTIONS_V1)],
   missing: { config: { ...FX_DEFAULT_CONFIG }, binary: "fx" },
-  reportedVersion: "0.9.0",
+  // fx's tested range is >=0.0.13 <0.0.18 (docs/drivers/fx.md, "Tested versions").
+  versions: { tested: "fx 0.0.17", testedVersion: "0.0.17", untested: "fx 0.0.12", untestedVersion: "0.0.12" },
   session: acpSessionMembers(false),
   instance: acpInstanceMembers(),
   launch: "fx acp",

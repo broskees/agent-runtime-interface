@@ -70,7 +70,18 @@ const instance = await acpDriver.create(host, {
   turn ends; a v2 whole-message update (`agent_message`) carries the finished
   message, so it settles it and replaces what the chunks built. A tool call is
   one item: created by its first `tool_call` (v1) or `tool_call_update`
-  (v2), patched by later ones. Tool kinds map to item kinds (`read` to
+  (v2), patched by later ones with ACP v2's patch rule (`ToolCallUpdate` in
+  the vendored schema): an omitted field keeps its value, `null` clears it
+  (a `null` title or `locations` clears the item's `title` or `paths`), a
+  value replaces it. The item's `output` is the agent's `rawOutput` when it
+  sent one, else the text of the tool's content; its `tool` field always
+  carries the stored input and `rawOutput` (as `result`), because an ARI
+  patch replaces `tool` whole. A v2 `user_message` replaces a user message's
+  content and a `user_message_chunk` appends to it (`UserMessage`): the
+  first one in a turn the host started is the agent's copy of the prompt, so
+  it updates the turn's user item (a redaction reaches the host); later ones
+  open their own user items. v1 user chunks only echo the prompt and are
+  ignored. Tool kinds map to item kinds (`read` to
   `file_read`, `edit`/`delete`/`move` to `file_change`, `search` to
   `file_search`, `execute` to `command_execution`, `fetch` to `web_search`,
   others to `tool_call`); diff content becomes `changes` (with diff text
@@ -93,6 +104,19 @@ const instance = await acpDriver.create(host, {
   `system`), else at the top of the thread's first prompt; `launch.developerPrompt`
   and `context.developer` always go at the top of the first prompt (channel
   `first_user_message`). Without them, the driver adds no text of its own.
+  `resumeThread` does the same with its `launch`: `system` goes in the
+  `systemPrompt` of `session/resume` or `session/load` (both versions take
+  one) or of the `session/new` that replaces a session the agent could not
+  open, and the rest goes at the top of the first prompt after the resume.
+- **Resume.** v2 and v1 agents that advertise it get `session/resume`; v1
+  agents that only load get `session/load`, whose replayed history is not
+  reported as live output. ACP v2 sends the session's current state after
+  any replay and before the resume response ([current-state
+  synchronization](https://agentclientprotocol.com/protocol/v2/session-setup.md#current-state-synchronization));
+  the driver applies it once the thread is registered, so work already
+  `running` becomes a `provider_initiated` turn that the agent's later `idle`
+  settles. An agent that cannot resume the session gets a fresh one, with
+  `session.replaced` and `contextLost: true`.
 - **Host tools.** `launch.mcpServers` go to `session/new` under exactly the
   names the host gave them. ACP fixes a session's MCP servers in
   `session/new`, before an ARI thread id exists, so the driver does not call
@@ -113,7 +137,7 @@ declares. "Agent" means it depends on what the agent advertises in
 
 | Capability | §1.2 ACP base | This driver | Source for the difference |
 |---|---|---|---|
-| Switch model mid-session | – | Y | ACP session config options: `session/set_config_option` changes a running session's model option ([v1](https://agentclientprotocol.com/protocol/v1/session-config-options.md), [v2](https://agentclientprotocol.com/protocol/v2/session-config-options.md)) |
+| Switch model mid-session | – | agent | ACP has no model method; `session/set_config_option` changes a running session's option in the `model` category ([v1](https://agentclientprotocol.com/protocol/v1/session-config-options.md), [v2](https://agentclientprotocol.com/protocol/v2/session-config-options.md)). Declared while a thread's agent offers such an option; `capabilities.updated` reports the change |
 | Switch runtime mode mid-session | – | – | |
 | Read thread snapshot | – | – | |
 | Roll back thread | Y | – | ACP defines no rollback method in v1 or v2 (the `x-method` tables of `vendor-schemas/acp/schema-v2.0.0-beta.3`); host checkpoints stay in the host (proposal §16) |
@@ -121,7 +145,7 @@ declares. "Agent" means it depends on what the agent advertises in
 | Fork into another directory | (not in §1.2) | config, then agent | The RFD lets an agent refuse a fork into a different `cwd`; `crossCwd` starts from `forkAcrossDirectories`, and turns off (with `capabilities.updated`) when the agent refuses one |
 | Fork from a subagent thread | – | – | |
 | Steer an active turn | – | – | |
-| Steer by interrupt + restart | Y | – | A host fallback, not a provider capability (proposal §6: unsupported steers go to `planFallback`) |
+| Steer by interrupt + restart | Y | – | ACP has no method that changes a running prompt: the client cancels it with `session/cancel` and, once the turn ends, sends another `session/prompt` ([v1 prompt turn, "Cancellation"](https://agentclientprotocol.com/protocol/v1/prompt-turn.md#cancellation)). The host does that through `interruptTurn` and `startTurn` (its `planFallback`), so the driver declares no steering |
 | Queued messages / interrupt | Y/Y | –/Y | v1 has no queue; a v2 agent may insert a prompt into running work ([prompt lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle.md)), which is not a separate queued turn; the host queues |
 | Streams tool output | Y | Y | |
 | Streams plan text | – | – | |
@@ -135,9 +159,10 @@ declares. "Agent" means it depends on what the agent advertises in
 | Subagents / exposes child thread IDs | –/– | –/– | |
 | Wait for / close subagents | –/– | –/– | |
 | Accepts system / developer context | –/– | agent/first message | v1 `sessionCapabilities.systemPrompt` and v2 `session.systemPrompt` (schema `SessionSystemPromptCapabilities`) |
-| Can generate summaries | Y | – | ACP has no summary method |
+| Can generate summaries | Y | – | Neither version's method list has a summary request ([v1 overview](https://agentclientprotocol.com/protocol/v1/overview.md), [v2 overview](https://agentclientprotocol.com/protocol/v2/overview.md), "Agent"); a compaction summary comes only when the agent compacts on its own ([v1 prompt turn, "Session compaction"](https://agentclientprotocol.com/protocol/v1/prompt-turn.md#session-compaction)) |
 | Native turn / item / request ID strength | weak/weak/weak | none/weak/weak | ACP has no turn id ([prompt lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle.md)) |
 | Policy enforcement | client-boundary | `client_boundary` for every mode | |
+| Session model | (not in §1.2) | `process_per_session` | `openSession` starts one agent process for the ARI session, and its threads share it (an ACP connection holds many sessions: [v2 session setup](https://agentclientprotocol.com/protocol/v2/session-setup.md)). None of the four named `SessionModel` values says that; the schema allows other strings |
 
 Runtime modes: `approval_required` and `full_access` are supported, both
 `client_boundary`; the others are declared off. `requests.allowCustomAnswer`
@@ -160,9 +185,18 @@ Importing the driver starts nothing. With `command` not found, `create()`
 succeeds, `status()` reports `unavailable` with a `driver_unavailable` error
 naming the binary, and `openSession` rejects with `driver_unavailable`.
 `probe()` only resolves the executable and runs it with `versionArgs`.
-The base driver runs any agent, so it declares no tested agent versions and
-gives no version advisory; it is tested against ACP protocol versions 1 and
-2 at schema release `schema-v2.0.0-beta.3`.
+
+## Tested versions
+
+The base driver runs any agent, so its vendor is the protocol: it is tested
+against ACP protocol versions 1 and 2 at schema release
+`schema-v2.0.0-beta.3` (`testedVersions.range` is `1 - 2`). The driver
+cannot speak another version, so an agent that answers `initialize` with one
+fails `openSession` with a `protocol` error, and from then on `status()`
+gives an `untested_version` advisory naming the version it answered
+(`testedRange: "1 - 2"`). Every flavor gives the same protocol advisory; a
+flavor with a fixed vendor CLI also gives one for a release outside its own
+range. `test/drivers/acp/driver-rules.ts` checks both for all six drivers.
 
 ## Tests
 
@@ -173,6 +207,9 @@ gives no version advisory; it is tested against ACP protocol versions 1 and
   fork constraints, `dependsOn`, native option ids, `_meta` passthrough.
 - `test/drivers/acp/standalone.suite.ts`: the self-contained fake agent under
   real `ari/node` host services.
+- `test/drivers/acp/frames.suite.ts`: every recording the ACP suites make
+  (conformance, protocol, rules, flavor and standalone runs) checked against
+  ACP's schema, with the number of recordings per test file pinned.
 - `test/drivers/acp/SOURCES.md`: where the fakes' protocol comes from.
 
 ## Not done
@@ -182,3 +219,6 @@ gives no version advisory; it is tested against ACP protocol versions 1 and
   `current_mode_update` arrives as `x:acp.update`.
 - A v1 agent that can neither resume nor load sessions gets a fresh session on
   resume, with `session.replaced` and `contextLost: true`.
+- A v2 tool call's `kind` and `status` reset by `null` are not applied: an
+  ARI item keeps the kind it opened with, and ACP agents do not move a tool
+  call back to `pending`.

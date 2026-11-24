@@ -3,7 +3,7 @@
 // Registry (https://agentclientprotocol.com/get-started/registry).
 
 import type { Icon, JsonSchema } from "../generated/common.ts";
-import { ACP_BASE_CONFIG_PROPERTIES, ACP_BASE_DEFAULTS, ACP_BASE_FORM_HINTS } from "./acp.ts";
+import { ACP_BASE_CONFIG_PROPERTIES, ACP_BASE_DEFAULTS, ACP_BASE_FORM_HINTS, ACP_TESTED_PROTOCOL_RANGE, ACP_TESTED_SCHEMA_RELEASE } from "./acp.ts";
 import type { AcpBaseConfig, DriverMeta } from "./acp.ts";
 
 export interface AcpRegistryConfig extends AcpBaseConfig {
@@ -57,5 +57,8 @@ export const meta: DriverMeta = {
     agentVersion: { label: "Version", advanced: true },
     ...ACP_BASE_FORM_HINTS,
   },
-  testedVersions: { range: "1.x", what: "registry index format 1.0.0 (the index served on 2026-11-23, 46 agents); each agent's own version is whatever the index lists" },
+  testedVersions: {
+    range: ACP_TESTED_PROTOCOL_RANGE,
+    what: `ACP protocol versions 1 and 2 at schema release ${ACP_TESTED_SCHEMA_RELEASE}, with each agent at the version the registry index lists (index format 1.0.0, as served on 2026-11-23 with 46 agents); status() gives an advisory after an agent answers another protocol version, or when the index lists another version than the one installed`,
+  },
 };

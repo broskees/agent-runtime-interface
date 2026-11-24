@@ -86,10 +86,20 @@ export interface AcpSessionSettings {
   readonly policyConfig?: (policy: RuntimePolicy) => ConfigValues;
   /** Told the config options each time the agent sends a new list. */
   readonly onConfigOptions?: (options: readonly ConfigOption[]) => void;
+  /** Told the protocol version an agent answered `initialize` with, including one the driver refuses. */
+  readonly onProtocolAnswer?: (protocolVersion: unknown) => void;
 }
 
 type AcpConfigOption = V1.SessionConfigOption | V2.SessionConfigOption;
 type ToolCallContent = V1.ToolCallContent | V2.ToolCallContent;
+type SystemPrompt = V1.SystemPrompt | V2.SystemPrompt;
+type FileChanges = ReturnType<typeof toolFileChanges>;
+
+/** How host instructions reach the agent for one thread: on the request that opens its session, or in its first prompt. */
+interface Instructions {
+  readonly systemPrompt: SystemPrompt | undefined;
+  readonly firstMessage: string[];
+}
 
 interface MessageState {
   readonly itemId: string;
@@ -98,14 +108,24 @@ interface MessageState {
   settled: boolean;
 }
 
+/** A tool call as the agent's patches left it. ACP v2 (`ToolCallUpdate`): an omitted field keeps its value, `null` clears it, a value replaces it. */
 interface ToolState {
   readonly itemId: string;
   readonly kind: ItemKind;
   name: string;
   input: unknown;
+  /** The agent's `rawOutput`; undefined when it sent none or cleared it. */
+  rawOutput: unknown;
   output: string;
+  truncated: boolean;
   content: ToolCallContent[];
+  changes: FileChanges;
   settled: boolean;
+}
+
+interface UserMessageState {
+  readonly itemId: string;
+  text: string;
 }
 
 interface TurnState {
@@ -122,6 +142,10 @@ interface TurnState {
   anonymousRun: string | undefined;
   readonly tools: Map<string, ToolState>;
   readonly plans: Map<string, { readonly itemId: string; settled: boolean }>;
+  /** The user item the driver opened for the host's prompt, until the agent's own message for it (v2 `user_message`) claims it. */
+  unclaimedPrompt: UserMessageState | undefined;
+  /** v2 user messages by the agent's message id. */
+  readonly userMessages: Map<string, UserMessageState>;
   nextItemOrdinal: number;
   nextRequestOrdinal: number;
 }
@@ -134,6 +158,8 @@ interface ThreadState {
   readonly mcp: readonly LaunchMcpServer[];
   /** Host instructions for the first prompt (the `first_user_message` channel), sent once. */
   pendingInstructions: string[];
+  /** The system prompt the session was opened with, sent again when the agent loads the session after a restart. */
+  systemPrompt: SystemPrompt | undefined;
   readonly options: Map<string, { readonly acp: AcpConfigOption; readonly ari: ConfigOption }>;
   active: TurnState | undefined;
   /** The connection generation that has this ACP session loaded. */
@@ -210,6 +236,11 @@ export class AcpSession implements Session {
   readonly #turnKeys = new Map<string, Promise<StartTurnResult>>();
   /** Native sessions whose history the agent is replaying for `session/load`; their updates are not live output. */
   readonly #replaying = new Set<string>();
+  /**
+   * v2: native sessions being resumed whose current-state snapshot arrived (it ends any replay). The snapshot and the
+   * live updates after it wait here until the session's thread is registered, then are applied in order.
+   */
+  readonly #resumed = new Map<string, Array<V1.SessionNotification | V2.UpdateSessionNotification>>();
   #capabilities: Capabilities | undefined;
   #forkAcrossDirectories: boolean;
   #connection: Promise<AcpConnection> | undefined;
@@ -254,21 +285,10 @@ export class AcpSession implements Session {
     const cwd = await this.#settings.canonicalPath(input.cwd);
     const launch = this.#launchFor(input.launch);
     const servers = this.#mcpFor(launch);
-    const systemTexts = [...(launch.appendSystemPrompt ?? []), ...(input.context?.system === undefined ? [] : [input.context.system])].filter((text) => text !== "");
-    const developerTexts = [...(launch.developerPrompt ?? []), ...(input.context?.developer === undefined ? [] : [input.context.developer])].filter((text) => text !== "");
-    const takesSystem = agentTakesSystemPrompt(agent.handshake);
-    const systemPrompt = takesSystem && systemTexts.length > 0 ? { mode: "append" as const, content: [{ type: "text" as const, text: systemTexts.join("\n\n") }] } : undefined;
-    const params = { cwd, mcpServers: mcpServers(agent.version, servers), ...(systemPrompt === undefined ? {} : { systemPrompt }) };
-    const created =
-      agent.version === 1
-        ? await agent.requestV1("session/new", params as V1.NewSessionRequest).catch((error: unknown) => {
-            throw callErrorFrom(error, "session/new");
-          })
-        : await agent.requestV2("session/new", params as V2.NewSessionRequest).catch((error: unknown) => {
-            throw callErrorFrom(error, "session/new");
-          });
+    const instructions = this.#instructions(agent, launch, input.context);
+    const created = await this.#newNative(agent, cwd, servers, instructions.systemPrompt);
     const state = this.#register(created.sessionId, cwd, input.policy, servers, input.title);
-    state.pendingInstructions = takesSystem ? developerTexts : [...systemTexts, ...developerTexts];
+    this.#giveInstructions(state, instructions);
     this.#passMeta(created._meta, "session/new", "result", created.sessionId);
     this.#setOptions(state, created.configOptions ?? undefined);
     const commands = (created as V2.NewSessionResponse).availableCommands;
@@ -291,13 +311,19 @@ export class AcpSession implements Session {
     }
     const cwd = await this.#settings.canonicalPath(givenCwd);
     const policy: RuntimePolicy = input.policy ?? known?.policy ?? { mode: "approval_required", interaction: "default", cwd };
-    const servers = this.#mcpFor(this.#launchFor(input.launch));
+    const launch = this.#launchFor(input.launch);
+    const servers = this.#mcpFor(launch);
+    // The host's launch instructions reach a resumed session as they reach a new one: `system` on the request that
+    // opens it (session/resume and session/load take a system prompt too), the rest in its first prompt.
+    const instructions = this.#instructions(agent, launch, undefined);
     let reason: string;
     try {
-      const resumed = await this.#resumeNative(agent, nativeId, cwd, servers);
+      const resumed = await this.#resumeNative(agent, nativeId, cwd, servers, instructions.systemPrompt ?? known?.systemPrompt);
       const state = known ?? this.#register(nativeId, cwd, { ...policy, cwd }, servers, undefined);
       state.generation = this.#generation;
+      this.#giveInstructions(state, instructions);
       if (known !== undefined) this.#emit({ type: "thread.upsert", thread: state.thread }, { threadId: state.thread.id });
+      this.#applyResumed(state);
       this.#passMeta(resumed?._meta, "session/resume", "result", nativeId);
       this.#setOptions(state, resumed?.configOptions ?? undefined);
       await this.#applyConfig(state, this.#withPolicy(input.policy, input.config));
@@ -309,13 +335,14 @@ export class AcpSession implements Session {
     }
     // The agent could not resume the session (it is missing, locked by another process, or the agent cannot
     // resume at all): start a fresh one, and say so, because the old context is gone.
-    const fresh = await this.#newNative(agent, cwd, servers);
+    const fresh = await this.#newNative(agent, cwd, servers, instructions.systemPrompt);
     const threadId = deriveId({ kind: "thread", native: strong(fresh.sessionId), identityVersion: ACP_IDENTITY_VERSION });
     this.#emit(
       { type: "session.replaced", previousNativeId: nativeId, reason: `The ACP agent could not resume session ${nativeId}: ${reason}`, contextLost: true, showRuntimeNote: true },
       { threadId },
     );
     const state = this.#register(fresh.sessionId, cwd, { ...policy, cwd }, servers, undefined);
+    this.#giveInstructions(state, instructions);
     this.#setOptions(state, fresh.configOptions ?? undefined);
     await this.#applyConfig(state, this.#withPolicy(policy, input.config));
     return { ...state.thread, appliedConfig: this.#currentConfig(state) };
@@ -527,7 +554,8 @@ export class AcpSession implements Session {
 
   #refreshCapabilities(): void {
     if (this.#current === undefined) return;
-    const base = acpCapabilities(this.#current.handshake, { forkAcrossDirectories: this.#forkAcrossDirectories });
+    const offersModel = [...this.#threads.values()].some((thread) => [...thread.options.values()].some((entry) => entry.ari.category === "model"));
+    const base = acpCapabilities(this.#current.handshake, { forkAcrossDirectories: this.#forkAcrossDirectories, offersModel });
     const next = this.#settings.adjustCapabilities?.(base) ?? base;
     const changed = this.#capabilities !== undefined && JSON.stringify(next) !== JSON.stringify(this.#capabilities);
     this.#capabilities = next;
@@ -590,8 +618,8 @@ export class AcpSession implements Session {
     return blocks;
   }
 
-  async #newNative(agent: AcpConnection, cwd: string, servers: readonly LaunchMcpServer[]): Promise<V1.NewSessionResponse | V2.NewSessionResponse> {
-    const params = { cwd, mcpServers: mcpServers(agent.version, servers) };
+  async #newNative(agent: AcpConnection, cwd: string, servers: readonly LaunchMcpServer[], systemPrompt: SystemPrompt | undefined): Promise<V1.NewSessionResponse | V2.NewSessionResponse> {
+    const params = { cwd, mcpServers: mcpServers(agent.version, servers), ...(systemPrompt === undefined ? {} : { systemPrompt }) };
     try {
       return agent.version === 1 ? await agent.requestV1("session/new", params as V1.NewSessionRequest) : await agent.requestV2("session/new", params as V2.NewSessionRequest);
     } catch (error) {
@@ -599,9 +627,18 @@ export class AcpSession implements Session {
     }
   }
 
-  /** Loads a stored native session into the running agent, without replaying its history as live output. */
-  async #resumeNative(agent: AcpConnection, nativeId: string, cwd: string, servers: readonly LaunchMcpServer[]): Promise<{ _meta?: { [key: string]: unknown } | null; configOptions?: AcpConfigOption[] | null } | undefined> {
-    const params = { sessionId: nativeId, cwd, mcpServers: mcpServers(agent.version, servers) };
+  /**
+   * Loads a stored native session into the running agent, without replaying its history as live output. A v2 agent's
+   * current-state snapshot, and what follows it, is held for `#applyResumed` once the caller has registered the thread.
+   */
+  async #resumeNative(
+    agent: AcpConnection,
+    nativeId: string,
+    cwd: string,
+    servers: readonly LaunchMcpServer[],
+    systemPrompt: SystemPrompt | undefined,
+  ): Promise<{ _meta?: { [key: string]: unknown } | null; configOptions?: AcpConfigOption[] | null } | undefined> {
+    const params = { sessionId: nativeId, cwd, mcpServers: mcpServers(agent.version, servers), ...(systemPrompt === undefined ? {} : { systemPrompt }) };
     this.#replaying.add(nativeId);
     try {
       if (agent.version === 2) return await agent.requestV2("session/resume", params as V2.ResumeSessionRequest);
@@ -609,20 +646,48 @@ export class AcpSession implements Session {
       if (method === undefined) throw callErrors.unsupported("acp.session/resume", "The ACP agent cannot resume or load sessions");
       if (method === "session/resume") return await agent.requestV1("session/resume", params as V1.ResumeSessionRequest);
       return (await agent.requestV1("session/load", params as V1.LoadSessionRequest)) ?? undefined;
+    } catch (error) {
+      this.#resumed.delete(nativeId);
+      throw error;
     } finally {
       this.#replaying.delete(nativeId);
     }
+  }
+
+  /** Applies, in order, what a v2 agent sent from its resume snapshot on, now that the session's thread is registered. */
+  #applyResumed(thread: ThreadState): void {
+    const held = this.#resumed.get(thread.nativeId);
+    if (held === undefined) return;
+    this.#resumed.delete(thread.nativeId);
+    const version = this.#current?.version ?? this.#settings.maxProtocolVersion;
+    for (const params of held) this.#onUpdate(version, params);
+  }
+
+  /** How the host's instructions reach the agent: `system` on the request that opens the session when the agent takes a system prompt, the rest in the first prompt. */
+  #instructions(agent: AcpConnection, launch: LaunchContext, context: { readonly system?: string; readonly developer?: string } | undefined): Instructions {
+    const systemTexts = [...(launch.appendSystemPrompt ?? []), ...(context?.system === undefined ? [] : [context.system])].filter((text) => text !== "");
+    const developerTexts = [...(launch.developerPrompt ?? []), ...(context?.developer === undefined ? [] : [context.developer])].filter((text) => text !== "");
+    if (!agentTakesSystemPrompt(agent.handshake)) return { systemPrompt: undefined, firstMessage: [...systemTexts, ...developerTexts] };
+    const systemPrompt: SystemPrompt | undefined = systemTexts.length === 0 ? undefined : { mode: "append", content: [{ type: "text", text: systemTexts.join("\n\n") }] };
+    return { systemPrompt, firstMessage: developerTexts };
+  }
+
+  /** Keeps a thread's system prompt for reloads, and queues its first-message instructions once. */
+  #giveInstructions(thread: ThreadState, instructions: Instructions): void {
+    thread.systemPrompt = instructions.systemPrompt ?? thread.systemPrompt;
+    thread.pendingInstructions = [...new Set([...thread.pendingInstructions, ...instructions.firstMessage])];
   }
 
   /** Loads a thread's session again after the agent process was restarted. */
   async #ensureLoaded(agent: AcpConnection, thread: ThreadState): Promise<void> {
     if (thread.generation === this.#generation) return;
     try {
-      await this.#resumeNative(agent, thread.nativeId, thread.cwd, thread.mcp);
+      await this.#resumeNative(agent, thread.nativeId, thread.cwd, thread.mcp, thread.systemPrompt);
     } catch (error) {
       throw callErrors.invalidState("native_session_lost", `The ACP agent could not load session ${thread.nativeId} again after a restart: ${error instanceof Error ? error.message : String(error)}`);
     }
     thread.generation = this.#generation;
+    this.#applyResumed(thread);
   }
 
   #register(nativeId: string, cwd: string, policy: RuntimePolicy, servers: readonly LaunchMcpServer[], title: string | undefined, forkedFrom?: Thread["forkedFrom"]): ThreadState {
@@ -644,6 +709,7 @@ export class AcpSession implements Session {
       policy,
       mcp: servers,
       pendingInstructions: [],
+      systemPrompt: undefined,
       options: new Map(),
       active: undefined,
       generation: this.#generation,
@@ -662,6 +728,8 @@ export class AcpSession implements Session {
     const mapped = [...thread.options.values()].map((entry) => entry.ari);
     this.#settings.onConfigOptions?.(mapped);
     this.#emit({ type: "config.updated", options: mapped }, { threadId: thread.thread.id });
+    // switchModel follows whether the agent offers a model option.
+    this.#refreshCapabilities();
   }
 
   /** The host's config values, after the values a flavor derives from the policy (the host's own values win). */
@@ -719,6 +787,8 @@ export class AcpSession implements Session {
       anonymousRun: undefined,
       tools: new Map(),
       plans: new Map(),
+      unclaimedPrompt: undefined,
+      userMessages: new Map(),
       nextItemOrdinal: 1,
       nextRequestOrdinal: 0,
     };
@@ -743,10 +813,9 @@ export class AcpSession implements Session {
     );
     if (host.text !== undefined) {
       const promptNative: NativeRef = { id: null, strength: "none", ordinal: 0 };
-      this.#emit(
-        { type: "item.upsert", item: { id: deriveId({ kind: "item", native: promptNative, identityVersion: ACP_IDENTITY_VERSION, scope: id }), kind: "user_message", native: promptNative, status: "completed", turnId: id, text: host.text } },
-        envelope,
-      );
+      const promptId = deriveId({ kind: "item", native: promptNative, identityVersion: ACP_IDENTITY_VERSION, scope: id });
+      turn.unclaimedPrompt = { itemId: promptId, text: host.text };
+      this.#emit({ type: "item.upsert", item: { id: promptId, kind: "user_message", native: promptNative, status: "completed", turnId: id, text: host.text } }, envelope);
     }
     return turn;
   }
@@ -850,18 +919,27 @@ export class AcpSession implements Session {
     this.#emit({ type: "item.upsert", item: { id: message.itemId, [field]: text, ...(settles ? { status: "completed" } : {}) } }, envelope);
   }
 
+  /** The item's `tool` field, whole: an ARI patch replaces it, so it always carries the stored input and result. */
+  #toolInvocation(tool: ToolState): { name: string; input?: unknown; result?: unknown } {
+    return { name: tool.name, ...(tool.input === undefined ? {} : { input: tool.input }), ...(tool.rawOutput === undefined ? {} : { result: tool.rawOutput }) };
+  }
+
+  /**
+   * A tool call update, applied as a patch (ACP v2 `ToolCallUpdate`; v1 updates carry only the fields that changed):
+   * an omitted field keeps its value, `null` clears it, a value replaces it, and `[]` clears a collection.
+   */
   #tool(turn: TurnState, update: AcpToolCall, appendContent?: ToolCallContent): void {
     this.#endMessages(turn);
     const envelope = this.#turnEnvelope(turn);
     const limit = this.#input.payloadLimits?.maxToolOutputBytes;
     const withDiffs = this.#input.emitDiffs !== false;
     let tool = turn.tools.get(update.toolCallId);
-    const content = appendContent !== undefined ? [...(tool?.content ?? []), appendContent] : update.content === undefined ? tool?.content : (update.content ?? []);
-    const rawOutput = update.rawOutput;
+    const content = appendContent !== undefined ? [...(tool?.content ?? []), appendContent] : update.content === undefined ? (tool?.content ?? []) : (update.content ?? []);
+    const rawOutput = update.rawOutput === undefined ? tool?.rawOutput : (update.rawOutput ?? undefined);
     const outputText = rawOutput === undefined ? toolContentText(content) : typeof rawOutput === "string" ? rawOutput : JSON.stringify(rawOutput);
     const output = limit === undefined ? { text: outputText, truncated: false } : truncateUtf8(outputText, limit);
     const changes = toolFileChanges(content, withDiffs);
-    const paths = update.locations === undefined || update.locations === null ? undefined : update.locations.map((location) => location.path);
+    const paths = update.locations === undefined ? undefined : (update.locations ?? []).map((location) => location.path);
     if (tool === undefined) {
       const kind = toolItemKind(update.kind);
       const native = strong(update.toolCallId);
@@ -869,9 +947,12 @@ export class AcpSession implements Session {
         itemId: this.#itemId(turn, native),
         kind,
         name: update.title ?? update.name ?? "tool",
-        input: update.rawInput,
+        input: update.rawInput ?? undefined,
+        rawOutput,
         output: output.text,
-        content: [...(content ?? [])],
+        truncated: output.truncated,
+        content: [...content],
+        changes,
         settled: false,
       };
       turn.tools.set(update.toolCallId, tool);
@@ -887,10 +968,10 @@ export class AcpSession implements Session {
             status,
             turnId: turn.id,
             ...(update.title === undefined || update.title === null ? {} : { title: update.title }),
-            tool: { name: tool.name, ...(tool.input === undefined ? {} : { input: tool.input }), ...(rawOutput === undefined ? {} : { result: rawOutput }) },
+            tool: this.#toolInvocation(tool),
             ...(output.text === "" ? {} : { output: output.text }),
             ...(output.truncated ? { truncated: true } : {}),
-            ...(paths === undefined ? {} : { paths }),
+            ...(paths === undefined || paths.length === 0 ? {} : { paths }),
             ...(changes.length === 0 ? {} : { changes }),
           },
         },
@@ -899,28 +980,82 @@ export class AcpSession implements Session {
       return;
     }
     const patch: ItemPatch = { id: tool.itemId };
-    if (update.title !== undefined && update.title !== null) {
+    let toolChanged = false;
+    if (update.title !== undefined) {
+      // A new title also names the tool; a cleared title leaves the name it had.
       patch.title = update.title;
-      tool.name = update.title;
+      if (update.title !== null && update.title !== tool.name) {
+        tool.name = update.title;
+        toolChanged = true;
+      }
     }
-    if (update.rawInput !== undefined) tool.input = update.rawInput;
-    if (update.title !== undefined || update.rawInput !== undefined || rawOutput !== undefined) {
-      patch.tool = { name: tool.name, ...(tool.input === undefined ? {} : { input: tool.input }), ...(rawOutput === undefined ? {} : { result: rawOutput }) };
+    if (update.rawInput !== undefined) {
+      tool.input = update.rawInput ?? undefined;
+      toolChanged = true;
     }
-    if (content !== undefined) tool.content = [...content];
+    if (update.rawOutput !== undefined) {
+      tool.rawOutput = rawOutput;
+      toolChanged = true;
+    }
+    if (toolChanged) patch.tool = this.#toolInvocation(tool);
+    tool.content = [...content];
     if (output.text !== tool.output) {
       tool.output = output.text;
       patch.output = output.text;
-      if (output.truncated) patch.truncated = true;
     }
-    if (paths !== undefined) patch.paths = paths;
-    if (changes.length > 0) patch.changes = changes;
+    if (output.truncated !== tool.truncated) {
+      tool.truncated = output.truncated;
+      patch.truncated = output.truncated;
+    }
+    if (paths !== undefined) patch.paths = paths.length === 0 ? null : paths;
+    if (JSON.stringify(changes) !== JSON.stringify(tool.changes)) {
+      tool.changes = changes;
+      patch.changes = changes.length === 0 ? null : changes;
+    }
     if (update.status !== undefined && update.status !== null && !tool.settled) {
       const status = toolItemStatus(update.status);
       patch.status = status;
       tool.settled = TERMINAL_ITEM_STATUSES.has(status);
     }
     if (Object.keys(patch).length > 1) this.#emit({ type: "item.upsert", item: patch }, envelope);
+  }
+
+  /**
+   * v2 user message upserts (`UserMessage`): a `user_message` with `content` replaces the message, a chunk appends to
+   * it. The first one in a turn the host started is the agent's copy of the host's prompt, so it updates that user
+   * item rather than opening another; later ones open their own user items.
+   */
+  #userMessage(turn: TurnState, update: { sessionUpdate: string; messageId?: unknown; content?: unknown }): void {
+    const messageId = typeof update.messageId === "string" ? update.messageId : undefined;
+    if (messageId === undefined) return;
+    const envelope = this.#turnEnvelope(turn);
+    const whole = update.sessionUpdate === "user_message";
+    const incoming = whole ? contentText((update.content ?? []) as V2.ContentBlock[]) : contentText([update.content as V2.ContentBlock]);
+    let message = turn.userMessages.get(messageId);
+    if (message === undefined && turn.unclaimedPrompt !== undefined) {
+      message = turn.unclaimedPrompt;
+      turn.unclaimedPrompt = undefined;
+      turn.userMessages.set(messageId, message);
+      // A new message id starts empty: a chunk's text is the whole message so far.
+      const text = whole && update.content === undefined ? message.text : incoming;
+      if (text !== message.text) {
+        message.text = text;
+        this.#emit({ type: "item.upsert", item: { id: message.itemId, text } }, envelope);
+      }
+      return;
+    }
+    if (message === undefined) {
+      this.#endMessages(turn);
+      const native: NativeRef = { id: messageId, strength: "weak", fingerprint: "user_message" };
+      message = { itemId: this.#itemId(turn, native), text: incoming };
+      turn.userMessages.set(messageId, message);
+      this.#emit({ type: "item.upsert", item: { id: message.itemId, kind: "user_message", native, status: "completed", turnId: turn.id, text: incoming } }, envelope);
+      return;
+    }
+    const text = whole ? (update.content === undefined ? message.text : incoming) : message.text + incoming;
+    if (text === message.text) return;
+    message.text = text;
+    this.#emit({ type: "item.upsert", item: { id: message.itemId, text } }, envelope);
   }
 
   #plan(turn: TurnState, planId: string | null, kind: "todo_list" | "proposed_plan", payload: { todos?: ReturnType<typeof todos>; plan?: string }, removed = false): void {
@@ -987,6 +1122,18 @@ export class AcpSession implements Session {
   }
 
   #onUpdate(version: AcpVersion, params: V1.SessionNotification | V2.UpdateSessionNotification): void {
+    const held = this.#resumed.get(params.sessionId);
+    if (held !== undefined) {
+      held.push(params);
+      return;
+    }
+    if (version === 2 && this.#replaying.has(params.sessionId) && (params.update as { sessionUpdate?: unknown }).sessionUpdate === "state_update") {
+      // ACP v2: resume sends the session's current state after any replay and before its response. It and the
+      // updates after it are live; they wait until the thread is registered (`#applyResumed`).
+      this.#replaying.delete(params.sessionId);
+      this.#resumed.set(params.sessionId, [params]);
+      return;
+    }
     const threadId = this.#threadsByNative.get(params.sessionId);
     const thread = threadId === undefined ? undefined : this.#threads.get(threadId);
     const update = params.update as { sessionUpdate: string; _meta?: unknown; toolCallId?: unknown; messageId?: unknown };
@@ -1006,8 +1153,9 @@ export class AcpSession implements Session {
     switch (update.sessionUpdate) {
       case "user_message_chunk":
       case "user_message":
-        // The agent echoes the prompt; the driver reported it when the turn started.
-        return;
+        // v1 has no message upserts: the agent echoes the prompt, which the driver reported when the turn started.
+        if (version === 1) return;
+        break;
       case "available_commands_update": {
         const commands = (params.update as { availableCommands: Array<V1.AvailableCommand | V2.AvailableCommand> }).availableCommands;
         this.#emit({ type: "commands.updated", commands: slashCommands(commands) }, { threadId: thread.thread.id });
@@ -1039,6 +1187,10 @@ export class AcpSession implements Session {
       return;
     }
     switch (update.sessionUpdate) {
+      case "user_message_chunk":
+      case "user_message":
+        this.#userMessage(turn, params.update as { sessionUpdate: string; messageId?: unknown; content?: unknown });
+        return;
       case "agent_message_chunk":
       case "agent_thought_chunk": {
         const chunk = params.update as V1.ContentChunk | V2.ContentChunk;
@@ -1239,7 +1391,11 @@ export class AcpSession implements Session {
     const opened = await AcpConnection.open(
       this.#host,
       launch,
-      { maxProtocolVersion: this.#settings.maxProtocolVersion, timeoutMs: this.#input.handshakeTimeoutMs ?? 120_000 },
+      {
+        maxProtocolVersion: this.#settings.maxProtocolVersion,
+        timeoutMs: this.#input.handshakeTimeoutMs ?? 120_000,
+        ...(this.#settings.onProtocolAnswer === undefined ? {} : { onAnswer: this.#settings.onProtocolAnswer }),
+      },
       {
         onNotification: (method, params) => {
           if (connection !== undefined) this.#onNotification(connection, method, params);

@@ -16,7 +16,7 @@ import type { AriEvent } from "../../../src/index.ts";
 import { createCoordination, createNodeHostServices } from "../../../src/node/index.ts";
 import type { HostServices } from "../../../src/runtime.ts";
 import { checkFrames } from "./frames.ts";
-import { recorded } from "./harness.ts";
+import { recorded, registerRecording } from "./harness.ts";
 import type { RecordedFrame } from "./harness.ts";
 import { until } from "./rig.ts";
 
@@ -51,6 +51,7 @@ for (const maxProtocolVersion of [1, 2] as const) {
         envPolicy: { stripAmbient: [] },
       });
       const frames: RecordedFrame[] = [];
+      registerRecording(`standalone v${maxProtocolVersion} ${answer}`, frames);
       let spawned = 0;
       const host: HostServices<AcpDriverConfig> = {
         ...node,

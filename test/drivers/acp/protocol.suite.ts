@@ -294,3 +294,126 @@ test("policy enforcement is declared client_boundary for every runtime mode", as
     }
   }
 });
+
+/** An item as a host holds it after applying its upserts in order: an omitted field is unchanged, null clears it, a value replaces it whole. */
+function folded(events: readonly AriEvent[], itemId: string): { [field: string]: unknown } {
+  const item: { [field: string]: unknown } = {};
+  for (const patch of itemUpserts(events, itemId)) {
+    for (const [field, value] of Object.entries(patch)) {
+      if (value === null) delete item[field];
+      else item[field] = value;
+    }
+  }
+  return item;
+}
+
+test("switchModel is declared only while the agent offers a model option, and capabilities.updated says when it changes", async () => {
+  const plain = await openRig({ name: "no model option", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
+  try {
+    const { session } = await plain.open();
+    assert.equal(session.capabilities().sessions.switchModel, false, "no thread yet, so no model option");
+    const thread = await session.createThread({ cwd: plain.cwd, policy: plain.policy() });
+    assert.equal(session.capabilities().sessions.switchModel, false, "the agent offers no model option");
+    assert.equal((await session.planConfigChange({ threadId: thread.id, changes: { model: "other" } })).type, "reject");
+  } finally {
+    await plain.cleanup();
+  }
+  const offering = await openRig({ name: "model option", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--config-options", JSON.stringify(V2_OPTIONS)] });
+  try {
+    const { session, waitFor } = await offering.open();
+    assert.equal(session.capabilities().sessions.switchModel, false);
+    const thread = await session.createThread({ cwd: offering.cwd, policy: offering.policy() });
+    await waitFor((event) => event.body.type === "capabilities.updated" && event.body.capabilities.sessions.switchModel === true, "capabilities.updated with switchModel true");
+    assert.equal(session.capabilities().sessions.switchModel, true);
+    assert.deepEqual(await session.planConfigChange({ threadId: thread.id, changes: { model: "claude" } }), { type: "apply_next_turn" });
+  } finally {
+    await offering.cleanup();
+  }
+});
+
+test("each ARI session runs its own agent process, and declares sessionModel process_per_session", async () => {
+  const rig = await openRig({ name: "session model", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
+  try {
+    const first = await rig.open();
+    const second = await rig.open();
+    assert.equal(rig.harness.spawns.length, 2, "one agent process per session");
+    assert.equal(first.session.capabilities().sessionModel, "process_per_session");
+    assert.equal(second.session.capabilities().sessionModel, "process_per_session");
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+test("v2: tool patches keep an omitted field and clear a null one (ToolCallUpdate)", async () => {
+  const rig = await openRig({ name: "v2 tool patches", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
+  try {
+    const { session, events, waitFor } = await rig.open();
+    const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    await session.startTurn({ threadId: thread.id, clientTurnKey: "k1", intent: "start", content: [{ type: "text", text: "Look around" }] });
+    const native = (await rig.nextTurn()) as FakeNativeTurn;
+    const location = `${rig.cwd}/README.md`;
+    await native.raw({ sessionUpdate: "tool_call_update", toolCallId: "t-1", title: "Inspect workspace", kind: "read", status: "in_progress", locations: [{ path: location }], rawOutput: "workspace details" });
+    const opened = await waitFor((event) => event.body.type === "item.upsert" && event.body.item.kind === "file_read", "the tool item");
+    const toolId = opened.body.type === "item.upsert" ? opened.body.item.id : "";
+    // A status-only completion changes the status and nothing else.
+    await native.raw({ sessionUpdate: "tool_call_update", toolCallId: "t-1", status: "completed" });
+    let item = await until(() => (folded(events, toolId)["status"] === "completed" ? folded(events, toolId) : undefined), "the tool to complete");
+    assert.equal(item["output"], "workspace details", "the omitted rawOutput keeps the output");
+    assert.deepEqual(item["tool"], { name: "Inspect workspace", result: "workspace details" });
+    assert.equal(item["title"], "Inspect workspace");
+    assert.deepEqual(item["paths"], [location]);
+    // null clears the title and the locations; the omitted rawOutput stays.
+    await native.raw({ sessionUpdate: "tool_call_update", toolCallId: "t-1", title: null, locations: null });
+    item = await until(() => ("title" in folded(events, toolId) ? undefined : folded(events, toolId)), "the title to be cleared");
+    assert.equal(item["paths"], undefined, "null locations clear the paths");
+    assert.equal(item["output"], "workspace details");
+    assert.deepEqual((item["tool"] as { result?: unknown }).result, "workspace details", "the omitted rawOutput keeps tool.result");
+    assert.equal(item["status"], "completed");
+    await native.complete();
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+test("v2: a user_message upsert replaces the user item's content, and a later chunk appends to it (UserMessage)", async () => {
+  const rig = await openRig({ name: "v2 user messages", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
+  try {
+    const { session, events, waitFor } = await rig.open();
+    const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    const started = await session.startTurn({ threadId: thread.id, clientTurnKey: "k1", intent: "start", content: [{ type: "text", text: "Begin." }] });
+    assert.ok(started.status === "accepted" && started.providerMessageId !== undefined);
+    const messageId = started.status === "accepted" ? started.providerMessageId! : "";
+    const native = (await rig.nextTurn()) as FakeNativeTurn;
+    const userItem = await waitFor((event) => event.body.type === "item.upsert" && event.body.item.kind === "user_message", "the user item");
+    const userId = userItem.body.type === "item.upsert" ? userItem.body.item.id : "";
+    assert.equal(folded(events, userId)["text"], "Begin.");
+    await native.raw({ sessionUpdate: "user_message", messageId, content: [{ type: "text", text: "[redacted]" }] });
+    await until(() => (folded(events, userId)["text"] === "[redacted]" ? true : undefined), "the user item to be replaced with [redacted]");
+    await native.raw({ sessionUpdate: "user_message_chunk", messageId, content: { type: "text", text: " (edited)" } });
+    await until(() => (folded(events, userId)["text"] === "[redacted] (edited)" ? true : undefined), "the chunk to be appended");
+    const userItems = new Set(events.flatMap((event) => (event.body.type === "item.upsert" && event.body.item.kind === "user_message" ? [event.body.item.id] : [])));
+    assert.equal(userItems.size, 1, "the agent's copy of the prompt is the same item, not a second one");
+    await native.complete();
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+test("v2: resume applies the agent's current-state snapshot: work already running becomes a provider-initiated turn that the agent's idle settles", async () => {
+  const rig = await openRig({ name: "v2 resume snapshot", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--resume-state", "running"] });
+  try {
+    const first = await rig.open();
+    const created = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    await first.session.close();
+    const { session, waitFor } = await rig.open();
+    const thread = await session.resumeThread({ native: { handle: created.handle! }, policy: rig.policy() });
+    const opened = await waitFor((event) => event.body.type === "turn.upsert" && event.body.turn.origin === "provider_initiated", "a provider-initiated turn for the running work");
+    const turnId = opened.body.type === "turn.upsert" ? opened.body.turn.id : "";
+    assert.equal(opened.threadId, thread.id);
+    await rig.harness.sessionUpdate(created.native.id!, { sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+    const terminal = await waitFor((event) => event.body.type === "turn.terminal" && event.body.turnId === turnId, "the turn to settle on idle");
+    assert.equal(terminal.body.type === "turn.terminal" && terminal.body.status, "completed");
+  } finally {
+    await rig.cleanup();
+  }
+});

@@ -29,3 +29,5 @@ import "./acp-registry/registry.suite.ts";
 import "./antigravity/conformance.suite.ts";
 import "./antigravity/rules.suite.ts";
 import "./antigravity/antigravity.suite.ts";
+// Last: it checks the frames every suite above recorded.
+import "./acp/frames.suite.ts";

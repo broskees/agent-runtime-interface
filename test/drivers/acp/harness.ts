@@ -90,6 +90,34 @@ class PuppetChannel {
   }
 }
 
+/** One recording of wire frames, and the test file that made it. */
+export interface Recording {
+  /** The test file that asked for the harness, such as `test/drivers/acp/protocol.suite.ts`. */
+  readonly source: string;
+  readonly name: string;
+  readonly frames: readonly RecordedFrame[];
+}
+
+/**
+ * Every recording the ACP suites made in this process. `acpHarness` (and so
+ * every rig) adds its own; a test that records frames another way calls
+ * `registerRecording`. `frames.suite.ts` checks them all against ACP's schema.
+ */
+export const ACP_RECORDINGS: Recording[] = [];
+
+/** The test file that called into this module: the first stack frame under test/drivers/ outside the harness and the rig. */
+function callerFile(): string {
+  for (const line of (new Error().stack ?? "").split("\n")) {
+    const file = /(test\/drivers\/[^\s:()]+\.ts)/.exec(line)?.[1];
+    if (file !== undefined && !file.endsWith("/acp/harness.ts") && !file.endsWith("/acp/rig.ts")) return file;
+  }
+  return "unknown";
+}
+
+export function registerRecording(name: string, frames: readonly RecordedFrame[]): void {
+  ACP_RECORDINGS.push({ source: callerFile(), name, frames });
+}
+
 /** A native turn of the fake agent, with one step beyond the kit's: sending any `session/update` as is. */
 export interface FakeNativeTurn extends NativeTurn {
   raw(update: { readonly [key: string]: unknown }): Promise<void>;
@@ -170,6 +198,8 @@ export interface AcpHarness<Config> extends ConformanceHarness<Config> {
   readonly frames: RecordedFrame[];
   /** Every spawn the fake hosts asked for, with the environment the child got. */
   readonly spawns: FakeSpawnRequest[];
+  /** Has the agent process that holds `sessionId` send a `session/update` outside any prompt, such as an agent's own state change. */
+  sessionUpdate(sessionId: string, update: { readonly [key: string]: unknown }): Promise<void>;
   cleanup(): void;
 }
 
@@ -182,11 +212,20 @@ export function acpHarness<Config>(options: AcpHarnessOptions<Config>): AcpHarne
   const created = createConformanceWorkspace(`ari-acp-${options.driver.kind}-`);
   const frames: RecordedFrame[] = [];
   const spawns: FakeSpawnRequest[] = [];
+  const allChannels: PuppetChannel[] = [];
   let connections = 0;
+  ACP_RECORDINGS.push({ source: callerFile(), name: options.name, frames });
   return {
     name: options.name,
     frames,
     spawns,
+    sessionUpdate: async (sessionId, update) => {
+      for (const channel of [...allChannels].reverse()) {
+        if (!channel.alive) continue;
+        if (await channel.call<boolean>("sessionUpdate", sessionId, update).catch(() => false)) return;
+      }
+      throw new Error(`no live agent process holds session ${sessionId}`);
+    },
     notApplicable: { ...NOT_APPLICABLE, ...(options.notApplicable ?? {}) },
     workspace: async () => created.workspace,
     cleanup: created.cleanup,
@@ -212,6 +251,7 @@ export function acpHarness<Config>(options: AcpHarnessOptions<Config>): AcpHarne
         child.once("exit", () => children.delete(child));
         const channel = new PuppetChannel(child, (turn) => turns.push(childTurn(channel, turn)));
         channels.push(channel);
+        allChannels.push(channel);
         connections += 1;
         return recorded(toSpawnedProcess(child), connections, frames);
       };

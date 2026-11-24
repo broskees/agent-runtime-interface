@@ -64,6 +64,8 @@ export interface FrameCheck {
   readonly extension: number;
   /** Checked frames by direction, method and role, for coverage assertions. */
   readonly seen: ReadonlySet<string>;
+  /** Checked frames by protocol version, direction, method and role, such as `v2 client session/fork Request`. */
+  readonly seenByVersion: ReadonlySet<string>;
   /** Every frame that broke the schema, described. */
   readonly problems: readonly string[];
 }
@@ -78,6 +80,7 @@ function isObject(value: unknown): value is Json {
 export function checkFrames(frames: readonly RecordedFrame[]): FrameCheck {
   const problems: string[] = [];
   const seen = new Set<string>();
+  const seenByVersion = new Set<string>();
   let checked = 0;
   let extension = 0;
   // Per connection: the negotiated version, and the method of each pending request by sender and id.
@@ -93,6 +96,7 @@ export function checkFrames(frames: readonly RecordedFrame[]): FrameCheck {
     const validate = acpSchemas(version).validator(name);
     checked += 1;
     seen.add(`${where.split(" ")[0]} ${method} ${role}`);
+    seenByVersion.add(`v${version} ${where.split(" ")[0]} ${method} ${role}`);
     if (!validate(value)) problems.push(`${where}: ${method} ${role.toLowerCase()} breaks v${version} ${name}: ${JSON.stringify(validate.errors?.slice(0, 3))} in ${JSON.stringify(value).slice(0, 400)}`);
   };
 
@@ -134,7 +138,15 @@ export function checkFrames(frames: readonly RecordedFrame[]): FrameCheck {
     let version = versions.get(frame.connection) ?? request.version;
     if (request.method === "initialize" && isObject(message["result"])) {
       const negotiated = message["result"]["protocolVersion"];
-      version = negotiated === 1 ? 1 : 2;
+      if (negotiated !== 1 && negotiated !== 2) {
+        // Neither schema defines another version, so its answer must match one of their InitializeResponse shapes.
+        const shapes = ([1, 2] as const).filter((candidate) => acpSchemas(candidate).validator("InitializeResponse")(message["result"]));
+        checked += 1;
+        if (shapes.length === 0) problems.push(`${where}: an initialize answer with protocol version ${JSON.stringify(negotiated)} matches neither the v1 nor the v2 InitializeResponse`);
+        versions.set(frame.connection, request.version);
+        continue;
+      }
+      version = negotiated;
       versions.set(frame.connection, version);
     }
     if ("error" in message) {
@@ -150,5 +162,5 @@ export function checkFrames(frames: readonly RecordedFrame[]): FrameCheck {
     // The handler of the request is the side that answers it.
     check(version, frame.from === "agent" ? "agent" : "client", request.method, "Response", message["result"], where);
   }
-  return { checked, extension, seen, problems };
+  return { checked, extension, seen, seenByVersion, problems };
 }

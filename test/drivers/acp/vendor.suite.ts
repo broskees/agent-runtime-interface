@@ -105,4 +105,9 @@ test("the frame checker rejects frames that break ACP's schema", () => {
   assert.match(checkFrames(unknown).problems.join("\n"), /defines no request session\/teleport/);
   const wrongResult = [...good, { connection: 1, from: "agent" as const, message: { jsonrpc: "2.0", id: 2, result: { stopReason: "finished-ish" } } }];
   assert.match(checkFrames(wrongResult).problems.join("\n"), /session\/prompt response breaks v1 PromptResponse/);
+  // An answer with a protocol version neither schema defines must still have one of their InitializeResponse shapes.
+  const ask = { connection: 1, from: "client" as const, message: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 2, info: { name: "c", version: "1" }, capabilities: {} } } };
+  assert.deepEqual(checkFrames([ask, { connection: 1, from: "agent" as const, message: { jsonrpc: "2.0", id: 1, result: { protocolVersion: 3 } } }]).problems, []);
+  const shapeless = checkFrames([ask, { connection: 1, from: "agent" as const, message: { jsonrpc: "2.0", id: 1, result: { protocolVersion: 3, agentCapabilities: "all" } } }]);
+  assert.match(shapeless.problems.join("\n"), /protocol version 3 matches neither the v1 nor the v2 InitializeResponse/);
 });

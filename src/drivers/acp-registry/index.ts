@@ -10,10 +10,15 @@
 //   tar.bz2 and bare-file downloads are refused with an error that says so
 //   (docs/drivers/acp-registry.md has the counts for the index of 2026-11-23);
 // - a running session holds an installer lease on its agent's version until
-//   its process exits, so cleanup never removes it underneath.
+//   its process exits, so cleanup never removes it underneath;
+// - the driver is tested against ACP protocol versions 1 and 2, and each agent
+//   at the version the registry lists: `status()` gives an advisory when the
+//   index the instance last read (through `subProviders.list` or `set`, or a
+//   session start) does not list the installed version. `status()` itself
+//   reads nothing from the network.
 
 import { callErrors } from "../../errors.ts";
-import type { SubProvider } from "../../generated/instance.ts";
+import type { SubProvider, UpdateAdvisory } from "../../generated/instance.ts";
 import { ACP_REGISTRY_CONFIG_SCHEMA, ACP_REGISTRY_DEFAULT_CONFIG, meta } from "../../meta/acp-registry.ts";
 import type { AcpRegistryConfig } from "../../meta/acp-registry.ts";
 import type { Driver, Instance } from "../../runtime.ts";
@@ -95,10 +100,14 @@ export function createAcpRegistryDriver(options: AcpRegistryDriverOptions = {}):
   const platform = options.platform ?? { os: process.platform, arch: process.arch };
   const target = registryTarget(platform.os, platform.arch);
 
-  const readIndex = async (url: string): Promise<RegistryIndex> => {
-    const response = await fetchImplementation(url, { headers: { accept: "application/json" } });
+  /** The index each instance read last, for `status()`'s advisory. */
+  const lastIndex = new WeakMap<object, RegistryIndex>();
+  const readIndex = async (context: AcpFlavorContext<AcpRegistryConfig>): Promise<RegistryIndex> => {
+    const response = await fetchImplementation(context.config.registryUrl, { headers: { accept: "application/json" } });
     if (!response.ok) throw callErrors.transport(`The ACP Registry answered ${response.status}`);
-    return parseIndex(await response.json());
+    const index = parseIndex(await response.json());
+    lastIndex.set(context, index);
+    return index;
   };
 
   /** The agent an instance runs: what `subProviders.set` chose, else its config. */
@@ -130,11 +139,29 @@ export function createAcpRegistryDriver(options: AcpRegistryDriverOptions = {}):
       return { kind: "known", installed: true, version };
     },
 
+    advisory(context, version): UpdateAdvisory | undefined {
+      const index = lastIndex.get(context);
+      const { agentId } = selection(context);
+      if (index === undefined || version === undefined || agentId === "") return undefined;
+      const listed = index.agents.find((candidate) => candidate.id === agentId)?.version;
+      if (listed === version) return undefined;
+      if (listed === undefined) {
+        return { kind: "untested_version", message: `The ACP Registry no longer lists ${agentId}; the installed ${version} is untested`, currentVersion: version };
+      }
+      return {
+        kind: "untested_version",
+        message: `The ACP Registry lists ${agentId} ${listed}, not the installed ${version}; install the listed version with subProviders.set`,
+        currentVersion: version,
+        latestVersion: listed,
+        testedRange: listed,
+      };
+    },
+
     async launch(context) {
       const { agentId, agentVersion } = selection(context);
       const version = await installedVersion(context, agentId, agentVersion);
       if (version === undefined) throw callErrors.driverUnavailable({ package: agentId }, `The registry agent ${agentId} is not installed; install it with subProviders.set`);
-      const agent = (await readIndex(context.config.registryUrl)).agents.find((candidate) => candidate.id === agentId);
+      const agent = (await readIndex(context)).agents.find((candidate) => candidate.id === agentId);
       const build = agent?.distribution.binary?.[target];
       if (agent === undefined || build === undefined) throw callErrors.notFound({ resource: "registry agent", id: agentId, message: `The ACP Registry no longer lists a ${target} build of ${agentId}` });
       // The lease keeps cleanup away from this version until the agent process exits.
@@ -148,7 +175,7 @@ export function createAcpRegistryDriver(options: AcpRegistryDriverOptions = {}):
     decorateInstance(instance: Instance, context) {
       instance.subProviders = {
         list: async (): Promise<SubProvider[]> => {
-          const index = await readIndex(context.config.registryUrl);
+          const index = await readIndex(context);
           const chosen = selection(context);
           const providers: SubProvider[] = [];
           for (const agent of index.agents) {
@@ -166,7 +193,7 @@ export function createAcpRegistryDriver(options: AcpRegistryDriverOptions = {}):
           return providers;
         },
         set: async (input) => {
-          const index = await readIndex(context.config.registryUrl);
+          const index = await readIndex(context);
           const agent = index.agents.find((candidate) => candidate.id === input.providerId);
           if (agent === undefined) throw callErrors.notFound({ resource: "registry agent", id: input.providerId });
           const installable = installableBuild(agent, target);

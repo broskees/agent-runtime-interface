@@ -19,6 +19,8 @@
 //   --config-options <json> session config options to offer, in the version's shape
 //   --meta                  put vendor _meta on initialize, updates and tool calls
 //   --print-version <text>  the version --version prints
+//   --answer-protocol <n>   answer initialize with protocol version n (in the --protocol version's shape)
+//   --resume-state <state>  v2: the current state a resume reports (default idle), as if work were already running
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -70,6 +72,8 @@ if (flag("--version")) {
 }
 
 const version = option("--protocol") === "1" ? 1 : 2;
+const answeredProtocol = option("--answer-protocol") === undefined ? version : Number(option("--answer-protocol"));
+const resumeState = option("--resume-state") ?? "idle";
 const store = option("--store") ?? fs.mkdtempSync(path.join(process.env["TMPDIR"] ?? "/tmp", "fake-acp-"));
 const configOptionsArg = option("--config-options");
 fs.mkdirSync(store, { recursive: true });
@@ -241,7 +245,7 @@ function buildV1(): acp1.AgentApp {
   return acp1
     .agent({ name: "fake-acp-agent" })
     .onRequest("initialize", async () => ({
-      protocolVersion: 1,
+      protocolVersion: answeredProtocol,
       agentCapabilities: capabilitiesV1,
       agentInfo: { name: "fake-acp-agent", version: "1.4.2" },
       authMethods: [],
@@ -293,7 +297,7 @@ function buildV2(): acp2.AgentApp {
   return acp2
     .agent({ name: "fake-acp-agent" })
     .onRequest("initialize", async () => ({
-      protocolVersion: 2,
+      protocolVersion: answeredProtocol,
       info: { name: "fake-acp-agent", version: "1.4.2" },
       capabilities: capabilitiesV2,
       authMethods: [],
@@ -306,7 +310,7 @@ function buildV2(): acp2.AgentApp {
     .onRequest("session/resume", async ({ params, client: context }) => {
       resume(params.sessionId, params.cwd);
       // Every successful resume is preceded by the session's current state.
-      await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "state_update", state: "idle" } });
+      await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "state_update", state: resumeState } as acp2.SessionUpdate });
       return { configOptions: optionsOf(params.sessionId) as acp2.SessionConfigOption[] };
     })
     .onRequest("session/fork", async ({ params }) => {
@@ -449,6 +453,12 @@ const puppet: { [method: string]: (...args: never[]) => unknown } = {
   finishCancelled: (turnId: string) => liveTurn(turnId).finish("cancelled"),
   exitProcess: () => process.exit(3),
   rawUpdate: (turnId: string, value: { [key: string]: unknown }) => update(liveTurn(turnId).sessionId, value),
+  // An update outside any prompt, for a session this process holds; false when it holds none.
+  sessionUpdate: async (sessionId: string, value: { [key: string]: unknown }) => {
+    if (!loaded.has(sessionId)) return false;
+    await update(sessionId, value);
+    return true;
+  },
   inspectSession: (sessionId: string) => inspect(sessionId),
   activity: () => activity,
 };

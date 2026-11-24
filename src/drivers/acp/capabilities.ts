@@ -40,6 +40,8 @@ export function v1ResumeMethod(handshake: AcpHandshake): "session/resume" | "ses
 
 export interface AcpCapabilityOptions {
   readonly forkAcrossDirectories: boolean;
+  /** Some thread's agent offers a config option in the `model` category, so `session/set_config_option` can change the model. */
+  readonly offersModel: boolean;
 }
 
 export function acpCapabilities(handshake: AcpHandshake, options: AcpCapabilityOptions): Capabilities {
@@ -49,7 +51,8 @@ export function acpCapabilities(handshake: AcpHandshake, options: AcpCapabilityO
     ariVersion: ARI_VERSION,
     sessions: {
       multipleThreads: true,
-      switchModel: true,
+      // ACP has no model method: the model changes only through a config option the agent offers.
+      switchModel: options.offersModel,
       switchRuntimeMode: false,
       pendingRequestsSurviveRestart: false,
       release: false,
@@ -110,7 +113,8 @@ export function acpCapabilities(handshake: AcpHandshake, options: AcpCapabilityO
     },
     background: { list: false, stop: false, await: false, tasksEndWithProcess: true },
     mcp: { acceptsHostServers: acceptedMcpTransports(handshake.version, handshake.agentCapabilities), scope: "session" },
-    sessionModel: "process_per_instance",
+    // One agent process per ARI session, holding all of that session's threads (driver.ts `openSession`).
+    sessionModel: "process_per_session",
     externallyOwned: false,
     diffs: { emits: true, canDisable: true },
     contextWindowReporting: false,

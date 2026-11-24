@@ -13,6 +13,7 @@ import type { CallError } from "../../generated/errors.ts";
 import type { InstanceStatus, ModelCatalog, OpenSessionInput, ProbeResult, UpdateAdvisory } from "../../generated/instance.ts";
 import type { CreateInstanceRequest, Driver, HostServices, Instance, Session } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
+import { ACP_TESTED_PROTOCOL_RANGE, ACP_TESTED_PROTOCOL_VERSIONS, ACP_TESTED_SCHEMA_RELEASE } from "../../meta/acp.ts";
 import type { AcpBaseConfig } from "../../meta/acp.ts";
 import type { AcpLaunch } from "./connection.ts";
 import { AcpSession } from "./session.ts";
@@ -45,8 +46,14 @@ export interface AcpFlavor<Config extends AcpBaseConfig> {
   readonly configSchema: JsonSchema;
   defaultConfig(): Config;
   readonly cliManifest?: CliLaunchManifest;
-  /** The vendor versions the driver is tested against. `status()` gives an advisory outside them. */
+  /**
+   * The vendor releases the driver is tested against, for a flavor with a fixed vendor CLI. `status()` gives an
+   * advisory outside them. Every ACP driver is also tested against ACP protocol versions 1 and 2, which `status()`
+   * checks for all of them.
+   */
   readonly testedRange?: TestedRange;
+  /** The flavor's own advisory for the version `probe()` found, checked after the protocol and `testedRange`. */
+  advisory?(context: AcpFlavorContext<Config>, version: string | undefined): UpdateAdvisory | undefined;
   /** Identifies the account and launch, for `continuationKey` and `bindingKey`. Never secret. */
   launchIdentity(config: Config): string;
   /** What `probe()` looks at. It must not install, write or start anything but the version command. */
@@ -128,6 +135,8 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
   #sessionCount = 0;
   /** The agent's model option from the latest session, which is all ACP says about models. */
   #modelOption: ConfigOption | undefined;
+  /** The protocol version the agent answered `initialize` with, in the latest session that started an agent. */
+  #answeredProtocol: unknown;
 
   constructor(flavor: AcpFlavor<Config>, context: AcpFlavorContext<Config>) {
     this.#flavor = flavor;
@@ -161,14 +170,25 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
   }
 
   #advisory(version: string | undefined): UpdateAdvisory | undefined {
+    const answered = this.#answeredProtocol;
+    if (answered !== undefined && !ACP_TESTED_PROTOCOL_VERSIONS.includes(answered as number)) {
+      return {
+        kind: "untested_version",
+        message: `The ${this.#flavor.metadata.displayName} agent answered ACP protocol version ${String(answered)}; this driver is tested against ACP protocol versions 1 and 2 (${ACP_TESTED_SCHEMA_RELEASE}) and cannot start a session with it`,
+        currentVersion: String(answered),
+        testedRange: ACP_TESTED_PROTOCOL_RANGE,
+      };
+    }
     const range = this.#flavor.testedRange;
-    if (range === undefined || version === undefined || inTestedRange(version, range)) return undefined;
-    return {
-      kind: "untested_version",
-      message: `${this.#flavor.metadata.displayName} ${version} is outside the versions this driver is tested against (${rangeText(range)})`,
-      currentVersion: version,
-      testedRange: rangeText(range),
-    };
+    if (range !== undefined && version !== undefined && !inTestedRange(version, range)) {
+      return {
+        kind: "untested_version",
+        message: `${this.#flavor.metadata.displayName} ${version} is outside the versions this driver is tested against (${rangeText(range)})`,
+        currentVersion: version,
+        testedRange: rangeText(range),
+      };
+    }
+    return this.#flavor.advisory?.(this.#context, version);
   }
 
   /** Finds the agent and asks it for its version. Nothing else: no install, no session, no file. */
@@ -214,6 +234,9 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
         configDependencies: config.configDependencies,
         launch: () => this.#flavor.launch(this.#context, input),
         canonicalPath: canonicalDirectory,
+        onProtocolAnswer: (protocolVersion) => {
+          this.#answeredProtocol = protocolVersion;
+        },
         onConfigOptions: (options) => {
           const model = options.find((option) => option.category === "model");
           if (model !== undefined) this.#modelOption = model;

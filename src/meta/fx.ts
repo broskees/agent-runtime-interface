@@ -40,5 +40,8 @@ export const meta: DriverMeta = {
   metadata: { displayName: "fx", icon: FX_ICON, multipleInstances: true, hasDefaultInstance: false },
   configSchema: FX_CONFIG_SCHEMA,
   formHints: { command: { label: "fx executable", placeholder: "fx", description: "All fx instances on this machine share its fx login." }, ...ACP_BASE_FORM_HINTS },
-  testedVersions: { range: "*", what: "fx's ACP launch (`fx acp`) and its provider, model, mode and effort config options; no fx release was available to test against, so status() gives no version advisory" },
+  testedVersions: {
+    range: ">=0.0.13 <0.0.18",
+    what: "fx 0.0.13 to 0.0.17: the releases whose ACP launch (`fx acp`) and provider, model, mode and effort options the fake reproduces, from a public fx client that names fx 0.0.13 and 0.0.14 and postdates 0.0.17; no fx binary ran (docs/drivers/fx.md)",
+  },
 };

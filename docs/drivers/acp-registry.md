@@ -56,8 +56,23 @@ instead of the registry's zip.
 
 ## Tested versions
 
-Registry index format `1.0.0`. Each agent's own version is whatever the
-index lists, and `status()` reports the installed version with no advisory.
+The driver runs whichever agent the user picks, so it is tested against the
+protocol and the registry: ACP protocol versions 1 and 2 at schema release
+`schema-v2.0.0-beta.3` (`testedVersions.range` is `1 - 2`), registry index
+format `1.0.0`, and each agent at the version the index lists. `status()`
+reports the installed version and gives an `untested_version` advisory:
+
+- after the agent answered `initialize` with another protocol version, as
+  for the [ACP base driver](acp.md#tested-versions);
+- when the index the instance last read (through `subProviders.list` or
+  `set`, or a session start) lists another version of the agent than the
+  installed one (`latestVersion` and `testedRange` give the listed version),
+  or no longer lists the agent. `status()` reads nothing from the network
+  itself, so before the instance has read the index it gives no such
+  advisory.
+
+`test/drivers/acp-registry/registry.suite.ts` checks the listed-version
+advisory, and `test/drivers/acp-registry/rules.suite.ts` the protocol one.
 
 ## Capabilities
 
@@ -69,18 +84,19 @@ with the differences in the last rows.
 
 | Capability | §1.2 ACP base | This driver | Source for the difference |
 |---|---|---|---|
-| Switch model mid-session | – | Y | ACP session config options (`session/set_config_option`) |
+| Switch model mid-session | – | agent | ACP has no model method; `session/set_config_option` changes an option in the `model` category. Declared while the agent offers one, with `capabilities.updated` on a change ([acp.md](acp.md#capabilities)) |
 | Roll back thread | Y | – | ACP defines no rollback method |
 | Fork thread / fork from a turn | –/– | agent/– | Draft `session/fork`, declared when the agent advertises it |
-| Steer by interrupt + restart | Y | – | A host fallback (`planFallback`), not a provider capability |
+| Steer by interrupt + restart | Y | – | ACP has no method that changes a running prompt: cancel with `session/cancel`, then a new `session/prompt` ([v1 prompt turn, "Cancellation"](https://agentclientprotocol.com/protocol/v1/prompt-turn.md#cancellation)); the host does that through `planFallback` |
 | Queued messages / interrupt | Y/Y | –/Y | ACP has no native queue; the host queues |
 | MCP tools | – | Y | `session/new` takes `mcpServers` |
 | Structured questions | Y | – | The driver does not advertise ACP elicitation |
 | Todo list / proposed plan | Y/– | Y/v2 | v2 markdown plans |
 | Accepts system / developer context | –/– | agent/first message | `systemPrompt` capability of `session/new` |
-| Can generate summaries | Y | – | ACP has no summary method |
+| Can generate summaries | Y | – | Neither ACP version's method list has a summary request ([v1 overview](https://agentclientprotocol.com/protocol/v1/overview.md), [v2 overview](https://agentclientprotocol.com/protocol/v2/overview.md)) |
 | ID strength (turn / item / request) | weak/weak/weak | none/weak/weak | ACP has no turn id |
 | Policy enforcement | client-boundary | `client_boundary` | |
+| Session model | (not in §1.2) | `process_per_session` | One agent process per ARI session, shared by its threads ([acp.md](acp.md#capabilities)) |
 | Sub-providers | (not in §1.2) | list, set, disable | The ACP Agent Registry RFD's manifest and index (https://agentclientprotocol.com/rfds/acp-agent-registry.md) |
 
 ## Optional members

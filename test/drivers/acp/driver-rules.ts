@@ -73,6 +73,9 @@ export const OPTIONAL_INSTANCE_MEMBERS = [
 
 export type Outcome = "absent" | "unsupported" | "supported";
 
+/** The ACP protocol versions every ACP driver is tested against, as status() advisories and the generic drivers' metadata state them. */
+export const ACP_TESTED_PROTOCOL_RANGE = "1 - 2";
+
 export interface DriverProfile<Config> {
   readonly kind: string;
   readonly driver: Driver<Config>;
@@ -85,9 +88,9 @@ export interface DriverProfile<Config> {
   readonly hostOptions?: (instanceId: string, paths: HostPaths) => Partial<FakeHostOptions<Config>>;
   /** A config whose agent is not installed, and what the error must name. */
   readonly missing: { readonly config: Config; readonly binary?: string; readonly package?: string };
-  /** Version lines the fake prints for `--version`: one inside the tested range and one outside. */
+  /** For a driver with a vendor release range: version lines the fake prints for `--version`, one inside the range and one outside. */
   readonly versions?: { readonly tested: string; readonly testedVersion: string; readonly untested: string; readonly untestedVersion: string };
-  /** The version status() reports when the driver has no tested range to judge. */
+  /** For a driver that runs any agent (its tested range is the ACP protocol versions): the version status() reports. */
   readonly reportedVersion?: string;
   /** What the driver does with each optional member; `supported` members are exercised below. */
   readonly session: { readonly [member in (typeof OPTIONAL_SESSION_MEMBERS)[number]]: Outcome };
@@ -233,14 +236,18 @@ export function driverRuleTests<Config>(profile: DriverProfile<Config>): void {
     }
   });
 
-  test(`${kind}: with its agent present, status() reports the version found${profile.versions === undefined ? "" : ", and an advisory outside the tested range"}`, async () => {
+  test(`${kind}: with its agent present, status() reports the version found, and an advisory outside the tested ${profile.versions === undefined ? "ACP protocol versions" : "release range"}`, async () => {
+    assert.ok((profile.versions === undefined) !== (profile.reportedVersion === undefined), "the profile names a release range or a reported version, not both");
     if (profile.versions === undefined) {
+      // A driver that runs any agent is tested against ACP protocol versions; a session that negotiated one of them leaves no advisory.
+      assert.equal(profile.meta.testedVersions.range, ACP_TESTED_PROTOCOL_RANGE);
       const rig = await openRig(rigOptions(profile));
       try {
+        await rig.open();
         const status = await rig.instance.status();
         assert.equal(status.state, "ready");
         assert.equal(status.version, profile.reportedVersion);
-        assert.equal(status.advisory, undefined, "a driver with no tested range gives no advisory");
+        assert.equal(status.advisory, undefined);
       } finally {
         await rig.cleanup();
       }
@@ -266,6 +273,74 @@ export function driverRuleTests<Config>(profile: DriverProfile<Config>): void {
       }
     }
   });
+
+  test(`${kind}: an agent that answers an ACP protocol version outside 1 and 2 cannot start a session, and status() gives an advisory that names it`, async () => {
+    // A release-range driver's agent prints a version inside its range, so the only advisory can be the protocol's.
+    // The fake speaks v1 here: the SDK's v2 agent refuses to answer with any version but 2.
+    const rig = await openRig({ ...rigOptions(profile, ["--answer-protocol", "3", ...(profile.versions === undefined ? [] : ["--print-version", profile.versions.tested])]), protocol: 1 });
+    try {
+      assert.equal((await rig.instance.status()).advisory, undefined, "no session has negotiated yet");
+      await assert.rejects(rig.instance.openSession({}), (error) => isAriError(error, "protocol"));
+      const status = await rig.instance.status();
+      assert.equal(status.state, "ready");
+      assert.equal(status.advisory?.kind, "untested_version");
+      assert.equal(status.advisory?.currentVersion, "3");
+      assert.equal(status.advisory?.testedRange, ACP_TESTED_PROTOCOL_RANGE);
+      assert.match(status.advisory?.message ?? "", /protocol version 3/);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  for (const systemPrompt of [true, false]) {
+    test(`${kind}: on resume, the host's launch instructions reach the agent through the channels the driver lists, for a resumed session and for the fresh one that replaces a lost session (agent ${systemPrompt ? "takes" : "does not take"} a system prompt)`, async () => {
+      const rig = await openRig(rigOptions(profile, systemPrompt ? ["--system-prompt"] : []));
+      try {
+        const first = await rig.open();
+        const kept = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+        const lost = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+        await first.session.close();
+        // The agent can no longer open `lost`, so resuming it starts a fresh session.
+        await rig.rig.native.lockSession!(lost);
+        const { session, waitFor } = await rig.open({ launch: { appendSystemPrompt: ["ARI_RESUME_SYSTEM"], developerPrompt: ["ARI_RESUME_DEVELOPER"] } });
+        const resumed = await session.resumeThread({ native: { handle: kept.handle! }, policy: rig.policy() });
+        const replaced = await session.resumeThread({ native: { handle: lost.handle! }, policy: rig.policy() });
+        assert.equal(resumed.native.id, kept.native.id);
+        assert.notEqual(replaced.native.id, lost.native.id, "a fresh session replaced the lost one");
+        for (const thread of [resumed, replaced]) {
+          for (const text of ["Begin.", "Again."]) {
+            const started = await session.startTurn({ threadId: thread.id, clientTurnKey: `${thread.id}:${text}`, intent: "start", content: [{ type: "text", text }] });
+            assert.equal(started.status, "accepted");
+            const native = await rig.nextTurn();
+            await native.complete();
+            await waitFor((event) => event.body.type === "turn.terminal" && started.status === "accepted" && event.body.turnId === started.turnId, `turn.terminal of "${text}"`);
+          }
+        }
+        const sent = rig.harness.frames.filter((frame) => frame.from === "client").map((frame) => frame.message as { method?: string; params?: { [key: string]: unknown } });
+        const reopened = sent.find((message) => (message.method === "session/resume" || message.method === "session/load") && message.params?.["sessionId"] === kept.native.id)!.params!;
+        const fresh = sent.filter((message) => message.method === "session/new").at(-1)!.params!;
+        for (const [nativeId, opening] of [
+          [resumed.native.id, reopened],
+          [replaced.native.id, fresh],
+        ] as const) {
+          const prompts = sent.filter((message) => message.method === "session/prompt" && message.params?.["sessionId"] === nativeId).map((message) => JSON.stringify(message.params?.["prompt"]));
+          assert.equal(prompts.length, 2);
+          if (systemPrompt) {
+            assert.match(JSON.stringify(opening["systemPrompt"]), /ARI_RESUME_SYSTEM/, "system: on the request that opens the session");
+            assert.doesNotMatch(prompts[0]!, /ARI_RESUME_SYSTEM/);
+          } else {
+            assert.equal(opening["systemPrompt"], undefined);
+            assert.match(prompts[0]!, /ARI_RESUME_SYSTEM/, "first_user_message: in the first prompt");
+          }
+          assert.match(prompts[0]!, /ARI_RESUME_DEVELOPER/, "first_user_message: in the first prompt");
+          assert.match(prompts[0]!, /Begin\./);
+          assert.doesNotMatch(prompts[1]!, /ARI_RESUME_/, "only the first prompt carries the instructions");
+        }
+      } finally {
+        await rig.cleanup();
+      }
+    });
+  }
 
   test(`${kind}: without launch context or host context, the frames that create a thread and start a turn carry no text the driver wrote`, async () => {
     const rig = await openRig(rigOptions(profile, ["--system-prompt"]));
@@ -345,7 +420,10 @@ export function driverRuleTests<Config>(profile: DriverProfile<Config>): void {
     const validate = ajv.compile(meta.configSchema as object);
     assert.ok(validate(driver.defaultConfig()), JSON.stringify(validate.errors));
     assert.ok(!validate({ ...(driver.defaultConfig() as object), unknownField: true }), "the schema refuses unknown fields");
-    assert.ok(meta.testedVersions.range.length > 0 && meta.testedVersions.what.length > 0, "the driver declares the vendor versions it is tested against");
+    // The declared range is the one status() judges by (the advisory tests above): a release range, or the ACP protocol versions.
+    if (profile.versions !== undefined) assert.match(meta.testedVersions.range, /^>=\d+\.\d+\.\d+ <\d+\.\d+\.\d+$/, "a vendor release range");
+    else assert.equal(meta.testedVersions.range, ACP_TESTED_PROTOCOL_RANGE, "the ACP protocol versions");
+    assert.ok(meta.testedVersions.what.length > 0, "the driver says what was tested");
     if (driver.cliManifest !== undefined) assert.deepEqual(validateCliManifest(driver.cliManifest), driver.cliManifest);
     const docs = fs.readFileSync(path.join(REPO_ROOT, "docs", "drivers", `${kind}.md`), "utf8");
     assert.ok(docs.includes(`ari/drivers/${kind}`) && docs.includes(profile.launch), `docs/drivers/${kind}.md describes the driver and its launch`);

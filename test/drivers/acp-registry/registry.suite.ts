@@ -10,7 +10,7 @@ import { ACP_REGISTRY_DEFAULT_CONFIG, createAcpRegistryDriver, installableBuild,
 import { isAriError } from "../../../src/index.ts";
 import { createAdapterInstaller } from "../../../src/node/installer.ts";
 import { openRig, until } from "../acp/rig.ts";
-import { ARCHIVE_URL, FAKE_AGENT_ID, REGISTRY_URL, TARGET, agentArchive, fixtureFetch, registryIndex } from "./fixtures.ts";
+import { ARCHIVE_URL, FAKE_AGENT_ID, REGISTRY_URL, TARGET, agentArchive, fixtureFetch, preinstall, registryIndex } from "./fixtures.ts";
 
 const archive = agentArchive();
 const config = { ...ACP_REGISTRY_DEFAULT_CONFIG, registryUrl: REGISTRY_URL, maxProtocolVersion: 2 as const };
@@ -118,4 +118,44 @@ test("registry platform names and installable builds follow the registry's distr
   const index = registryIndex(archive.sha256);
   assert.ok("build" in installableBuild(index.agents[0]!, TARGET));
   assert.ok("reason" in installableBuild(index.agents[0]!, "plan9-mips"));
+});
+
+test("status() gives an advisory when the registry index the instance last read lists another version of the agent than the one installed", async () => {
+  const index = registryIndex(archive.sha256);
+  for (const [listedVersion, advised] of [
+    ["1.0.0", false],
+    ["1.1.0", true],
+  ] as const) {
+    const listing = { ...index, agents: index.agents.map((agent) => (agent.id === FAKE_AGENT_ID ? { ...agent, version: listedVersion } : agent)) };
+    const fetch = fixtureFetch({ [REGISTRY_URL]: listing });
+    const rig = await openRig({
+      name: "acp-registry advisory",
+      driver: createAcpRegistryDriver({ fetch }),
+      config: { ...config, agentId: FAKE_AGENT_ID },
+      executable: "fake-acp-agent",
+      protocol: 2,
+      hostOptions: (_instanceId, paths) => {
+        preinstall(paths.cacheDir);
+        return {};
+      },
+    });
+    try {
+      const before = await rig.instance.status();
+      assert.equal(before.version, "1.0.0", "the installed version");
+      assert.equal(before.advisory, undefined, "status() reads no index itself");
+      assert.deepEqual(fetch.requested, []);
+      await rig.instance.subProviders!.list(rig.cwd);
+      const after = await rig.instance.status();
+      if (!advised) assert.equal(after.advisory, undefined, "the index lists the installed version");
+      else {
+        assert.equal(after.advisory?.kind, "untested_version");
+        assert.equal(after.advisory?.currentVersion, "1.0.0");
+        assert.equal(after.advisory?.latestVersion, "1.1.0");
+        assert.equal(after.advisory?.testedRange, "1.1.0");
+        assert.match(after.advisory?.message ?? "", /subProviders\.set/);
+      }
+    } finally {
+      await rig.cleanup();
+    }
+  }
 });

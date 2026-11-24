@@ -18,6 +18,8 @@ export const fxDriver: Driver<FxConfig> = createAcpDriver<FxConfig>({
   configSchema: FX_CONFIG_SCHEMA,
   defaultConfig: () => ({ ...FX_DEFAULT_CONFIG, configDependencies: { ...FX_CONFIG_DEPENDENCIES } }),
   cliManifest: FX_CLI_MANIFEST,
+  // docs/drivers/fx.md, "Tested versions": the fx releases the fake's ACP surface comes from.
+  testedRange: { min: "0.0.13", below: "0.0.18" },
   launchIdentity: (config) => config.command,
   probeTarget: async ({ config }) => ({ kind: "command", command: config.command, versionArgs: ["--version"] }),
   launch: async ({ config }) => ({ command: config.command, args: ["acp"], env: {} }),

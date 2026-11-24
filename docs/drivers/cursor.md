@@ -74,12 +74,45 @@ loading the driver or the SDK.
   `nothing_to_compact`).
 - **Unload and release** close agent handles (`agent.close()`, which frees the
   SDK's local executor). The next use reopens the agent with `Agent.resume`.
+- **Runs and Cursor's store.** `Agent.create` stores a queued first run, which
+  only the handle it returned can take (`index.js`, the local store's
+  `createAgent` and the agent's `getRunForSend`). Any other handle gets a
+  follow-up run, and the store refuses one ("Agent … already has active run")
+  while the agent's last run is not terminal: that reservation, when the
+  creating handle closed before its first run (an empty thread released,
+  unloaded, or left by a closed session or a restart), or a run a crashed
+  process left. So every turn sends with `local: { force: true }`, the SDK's
+  recovery path for wedged local agents ("Expire the currently active
+  persisted run, if any, before starting this message"), unless a session of
+  the same instance is running the agent: that run is never expired, and the
+  other session's turn fails `invalid_state` (`previous_turn_active`) until it
+  ends. A summary run (`compactThread`) counts as running.
 - **Resume** is `Agent.resume(agentId, …)` with the same options as creation:
   the SDK keeps inline MCP servers, the tool allowlist and the model in memory
-  only ("Pass them again on resume"). An agent the store does not hold for that
-  directory fails with the SDK's `AgentNotFoundError`; with a `policy` the
-  driver then creates a fresh agent and emits `session.replaced` with
-  `contextLost: true`.
+  only ("Pass them again on resume").
+  - **Only the instance's own agents.** The driver records each agent it
+    creates in `<stateDir>/cursor-created-agents.json` (ids only) and resumes
+    only those. Any other agent the store holds, for example one the user made
+    with Cursor's own SDK in the instance's store, is refused with
+    `validation` and left untouched: the driver writes host launch
+    instructions into the next prompt, which Cursor keeps in that agent's
+    conversation. `Agent.resume` only reads the agent's row, so the driver
+    uses it to tell such an agent from a missing one.
+  - **A missing agent.** An agent the store does not hold for that directory
+    fails with the SDK's `AgentNotFoundError`; with a `policy` the driver then
+    creates a fresh agent and emits `session.replaced` with `contextLost:
+    true`.
+  - **A thread the session holds.** A resume's `launch` instructions go at the
+    top of the next prompt; its MCP servers join the thread's (a name given
+    again takes the new definition) and go with every later run; its
+    `config.model` goes with the next run. A `policy.mode` change between
+    `read_only` and `full_access` closes the agent and reopens it with the
+    tools of the new mode; while a run or a summary is going it fails
+    `invalid_state` (`turn_active`). A resume Cursor cannot apply fails before
+    anything changes: another working directory is `invalid_state`
+    (`cwd_changed`), because Cursor keeps a local agent in the directory it
+    was created in; a mode Cursor lacks is `unsupported`; dynamic tools are
+    `unsupported`. A released or unloaded thread reopens during the resume.
 
 ## Host instructions and host tools
 
@@ -101,7 +134,7 @@ loading the driver or the SDK.
   server, with the launch servers, on every run (`send({ mcpServers })`, which
   the SDK documents as replacing the creation-time servers for that run). A
   run Cursor starts itself (the summary run of `compactThread`) has only the
-  launch servers. `alwaysLoad` has nothing to set: Cursor's inline server
+  launch servers. A resume's servers join the thread's, as above. `alwaysLoad` has nothing to set: Cursor's inline server
   config has no tool-search setting. A `read_only` thread offers the model no
   MCP tools (below).
 - **Where Cursor writes them.** The driver writes no `LaunchContext` value to
@@ -201,9 +234,9 @@ where it has no row. Every difference names its source: the docs page
 |---|---|---|---|
 | `sessions.multipleThreads` | `true` | not in §1.2 | One SDK agent per thread, all in the host's process. |
 | `sessions.switchModel` | `true` | Y | `send({ model })` is sticky (docs, "Per-run model override"). |
-| `sessions.switchRuntimeMode` | `false` | – | The tool allowlist that enforces `read_only` is set when the agent handle opens (`AgentOptions.tools`). |
+| `sessions.switchRuntimeMode` | `false` | – | The tool allowlist that enforces `read_only` is set when the agent handle opens (`AgentOptions.tools`), so a turn's `policy` cannot change the mode. A `resumeThread` can: the driver reopens the agent (above). |
 | `sessions.pendingRequestsSurviveRestart` | `false` | not in §1.2 | No requests. |
-| `sessions.release` | `true` | not in §1.2 | `agent.close()` frees the local executor; `Agent.resume` reopens the agent. |
+| `sessions.release` | `true` | not in §1.2 | `agent.close()` frees the local executor; `Agent.resume` reopens the agent, and its next run expires the reservation a closed creating handle left (`send({ local: { force: true } })`). |
 | `sessions.feedbackUpload` | `false` | not in §1.2 | |
 | `sessions.contextUsageReuse` | `false` | not in §1.2 | |
 | `threads.createEmpty` | `true` | not in §1.2 | `Agent.create` stores the agent before its first run (`index.js` `createAgent`). |
@@ -211,7 +244,7 @@ where it has no row. Every difference names its source: the docs page
 | `threads.rollback` | `false` | – | |
 | `threads.compact` | `true` | not in §1.2 | `agent.summarize()` (`agent.d.ts`). |
 | `threads.injectHistory` | `false` | not in §1.2 | |
-| `threads.unload` | `true` | not in §1.2 | `agent.close()`, then `Agent.resume`. |
+| `threads.unload` | `true` | not in §1.2 | `agent.close()`, then `Agent.resume`, as for `sessions.release`. |
 | `threads.exposesNativeIds` | `true` | not in §1.2 | The agent id. |
 | `threads.fork.supported` | `false` | – | |
 | `threads.fork.fromTurn` | `false` | – | |
@@ -301,10 +334,17 @@ out.
 
 ## Limits
 
-- The SDK runs inside the host's process, so its shell tools inherit the host's
-  `process.env` (`977.js` builds every shell environment from `process.env`).
-  The driver keeps inherited credentials from signing in, by always passing
-  `apiKey`, but cannot hide the host's environment from the agent's tools.
+- **Inherited credentials reach Cursor's tools.** The SDK runs inside the
+  host's process, and its local executor spawns the shell tool, its command
+  runner and its git and hg helpers with the host's `process.env`
+  (`{ ...process.env, ... }` in `977.js`). The SDK's only override,
+  `resourceProviderOptions.overrideShellExecutor`, replaces the `shellArgs`
+  executor alone: the streaming and background shells are built on the same
+  core executor and are always registered, and no option sets the native
+  environment. So the driver cannot apply the host's `envPolicy` inside
+  Cursor. A host that must keep credentials from the agent starts the process
+  that runs this driver without them. The driver keeps inherited credentials
+  from signing in to Cursor, by always passing `apiKey`.
 - Cursor writes its transcripts and MCP descriptors under its data directory
   (see "Where Cursor writes them"); only `CURSOR_DATA_DIR` moves it.
 - No snapshots, so a host that reloads a thread keeps its own history.
@@ -320,12 +360,18 @@ which imports each `*.suite.ts` file of `test/drivers/cursor/`:
 
 - `conformance.suite.ts`: all 15 scenarios against the fake SDK. Scenarios 8
   and 15 do not apply (no approvals); the harness gives reasons for three
-  checks: a locked session (Cursor's store has no lock), a usage limit's reset
-  time (Cursor reports none) and inherited credentials in the agent's
-  environment (the host's own `process.env`).
+  checks: a locked session (no store state makes a resume fail, and a run left
+  active is expired as above), a usage limit's reset time (Cursor reports
+  none) and inherited credentials in the agent's tools (see "Limits").
 - `fake-sdk.ts`: the fake. It creates and resumes agents with the real SDK,
-  offline, in the real `JsonlLocalAgentStore`; it fakes only the runs, and
-  checks every update with the SDK's `InteractionUpdateSchema`.
+  offline, in the real `JsonlLocalAgentStore`, and takes each run as the real
+  SDK's storage preflight decides (`getRunForSend`, `local.force` included),
+  marking it starting and terminal in that store; it fakes only the runs'
+  work, and checks every update with the SDK's `InteractionUpdateSchema`.
+- `resume.suite.ts`: empty threads after release, unload, a closed session
+  and a restart; a run of another session never expired; policy and launch
+  changes on resume, applied or refused; agents the instance did not create
+  refused.
 - `real-sdk.suite.ts`: the driver against the real SDK, offline: threads
   created, resumed and replaced, with every outbound connection refused.
 - `sdk-types.suite.ts`: the driver's SDK types against `@cursor/sdk` 1.4.2.

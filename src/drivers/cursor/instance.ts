@@ -18,6 +18,7 @@ import type { AuthMethod, AuthState, InstanceStatus, ModelCatalog, OpenSessionIn
 import type { HostServices, Instance, Session } from "../../runtime.ts";
 import { CURSOR_INSTALL_HINT, CURSOR_SDK_PACKAGE, CURSOR_TESTED_VERSIONS } from "./config.ts";
 import type { CursorConfig } from "./config.ts";
+import { CreatedAgents } from "./created-agents.ts";
 import { IDENTITY_VERSION, callErrorFromSdk } from "./mapping.ts";
 import type { CursorSdkLoader, CursorSdkRuntime } from "./sdk.ts";
 import { CursorSession } from "./session.ts";
@@ -93,6 +94,9 @@ export class CursorInstance<Store> implements Instance {
   readonly #config: CursorConfig;
   readonly #loadSdk: CursorSdkLoader<Store>;
   readonly #sessions = new Set<CursorSession<Store>>();
+  readonly #createdAgents: CreatedAgents;
+  /** The agents a session of this instance is running a turn on. */
+  readonly #runningAgents = new Set<string>();
   /** When each scope's runtime auth poison ends, in milliseconds since the epoch. */
   readonly #poison = new Map<string, number>();
   #runtime: Promise<CursorSdkRuntime<Store>> | undefined;
@@ -105,6 +109,7 @@ export class CursorInstance<Store> implements Instance {
     this.#host = host;
     this.#config = config;
     this.#loadSdk = loadSdk;
+    this.#createdAgents = new CreatedAgents(host.paths.stateDir);
     // Cursor agents live in this instance's own store, so only this instance can continue its threads.
     this.continuationKey = `cursor:${instanceId}`;
     this.bindingKey = `cursor:${instanceId}:${config.model}`;
@@ -204,7 +209,11 @@ export class CursorInstance<Store> implements Instance {
     this.#store ??= new runtime.sdk.JsonlLocalAgentStore(`${this.#host.paths.stateDir}/cursor-agents`);
     this.#sessionCount += 1;
     const id = deriveId({ kind: "session", native: { id: null, strength: "none", ordinal: this.#sessionCount }, identityVersion: IDENTITY_VERSION, scope: this.id });
-    const session = new CursorSession<Store>({ host: this.#host, config: this.#config, sdk: runtime.sdk, store: this.#store, apiKey: account.apiKey }, input, id);
+    const session = new CursorSession<Store>(
+      { host: this.#host, config: this.#config, sdk: runtime.sdk, store: this.#store, apiKey: account.apiKey, createdAgents: this.#createdAgents, runningAgents: this.#runningAgents },
+      input,
+      id,
+    );
     this.#sessions.add(session);
     return session;
   }

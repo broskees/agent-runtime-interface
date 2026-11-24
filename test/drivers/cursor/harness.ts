@@ -99,10 +99,11 @@ export function cursorHarness(): ConformanceHarness<CursorConfig> & { cleanup():
   return {
     name: "cursor (fake @cursor/sdk 1.4.2, in process)",
     notApplicable: {
-      "session-replaced.locked": "Cursor's local agent store has no lock: Agent.resume reads the agent's row and opens it, whoever else holds it (@cursor/sdk index.js resumeAgent)",
+      "session-replaced.locked":
+        "Cursor's local agent store has no lock that makes a resume fail: Agent.resume only reads the agent's row (@cursor/sdk index.js resumeAgent). A run another handle left active blocks only the next run (createFollowUpRun: already has active run); the driver expires such a run with send's local.force unless a session of this instance runs the agent, and then refuses the turn with invalid_state (resume.suite.ts). No state makes a resumed agent unusable, so nothing needs replacing",
       "turn-failed.usage_limit": "Cursor's RunError carries only a message and a code, no reset time (@cursor/sdk run.d.ts); quirks.suite.ts checks the usage_limit class",
       "auth-states.inherited-credentials":
-        "The SDK runs Cursor's agent inside the host's process, whose shell tools inherit the host's process.env (977.js); the driver's part, an explicit apiKey on every SDK call, is tested in auth.suite.ts",
+        "Cursor's agent runs inside the host's Node process, and its local executor spawns the shell tool, its command runner and its git and hg helpers with that process's environment ({ ...process.env, ... } in @cursor/sdk 977.js). The SDK's only override, resourceProviderOptions.overrideShellExecutor, replaces the shellArgs executor alone: the streaming and background shells are built on the same core executor and always registered (977.js, the local resource provider), and no option sets the native environment. So the driver cannot apply envPolicy inside Cursor; the host must start the process that runs the driver without the credentials it would strip. The driver's own part, an explicit apiKey on every SDK call so the SDK never reads CURSOR_API_KEY, is tested in auth.suite.ts",
     },
     cleanup,
     workspace: async () => workspace,

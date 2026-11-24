@@ -66,12 +66,15 @@ export interface CursorAgentOptions<Store> {
 /**
  * `SendOptions`: per-run overrides. `mcpServers` replaces the creation-time
  * servers for the run. `onDelta` receives every raw interaction update of the
- * run, and the SDK awaits it before it handles the next one.
+ * run, and the SDK awaits it before it handles the next one. `local.force`
+ * expires the agent's active persisted run, if any, before this run starts
+ * (`LocalSendOptions.force`).
  */
 export interface CursorSendOptions {
   model?: CursorModelSelection;
   mode?: CursorMode;
   mcpServers?: Record<string, CursorMcpServerConfig>;
+  local?: { force?: boolean };
   onDelta?: (args: { update: CursorInteractionUpdate }) => void;
 }
 

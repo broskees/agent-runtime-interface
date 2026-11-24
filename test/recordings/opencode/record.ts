@@ -74,12 +74,12 @@ export interface RecordOpencodeOptions {
 
 export interface OpencodeRecordOutcome {
   readonly scenario: ScenarioName;
-  /** The recording written, when the run reached the server at all. */
+  /** The recording written, when the run reached the server at all and the write succeeded. */
   readonly file?: string;
   readonly frames: number;
   /**
    * Why the scenario failed: its run, its assertions, the model check, the
-   * sign-in copy-back. With more than one failure, an AggregateError whose
+   * sign-in copy-back, the recording's write. With more than one failure, an AggregateError whose
    * message names each, in the order they happened.
    */
   readonly error?: Error;
@@ -89,6 +89,16 @@ export interface OpencodeRecordOutcome {
   readonly workspaceKept: boolean;
   /** The recovery file this scenario added refreshed sign-ins to, when one could not go back to the user's database. */
   readonly recoveryFile?: string;
+}
+
+/** The recorder could not write a scenario's recording (an output directory it cannot use, a full disk): the recorder stops, since the next scenario would fail the same way. */
+export class RecordingNotWrittenError extends Error {
+  readonly file: string;
+  constructor(file: string, cause: unknown) {
+    super(`the recorder could not write the recording ${file}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "RecordingNotWrittenError";
+    this.file = file;
+  }
 }
 
 /** Each failure of a scenario, in order. */
@@ -221,27 +231,33 @@ async function recordOne(scenario: Scenario, options: RecordOpencodeOptions): Pr
     }
     if (!workspaceKept) fs.rmSync(layout.root, { recursive: true, force: true });
   }
-  const error = errors.length <= 1 ? errors[0] : new AggregateError(errors, `${errors.length} failures:\n${errors.map((each, index) => `  ${index + 1}. ${each.message}`).join("\n")}`);
   let file: string | undefined;
   if (frames.length > 0 && model !== undefined) {
-    const sanitise = createSanitiser({ workspace: layout.root, env: options.env, protocolWords: OPENCODE_PROTOCOL_WORDS, ...(options.user === undefined ? {} : { user: options.user }) });
-    file = path.join(options.outDir, `${scenario.name}.ndjson`);
-    await writeRecording(
-      file,
-      {
-        driver: "opencode",
-        vendor: OPENCODE_VENDOR_NAME,
-        vendorVersion,
-        sdk: OPENCODE_SDK_NAME,
-        sdkVersion: opencodeClientVersion(),
-        model,
-        scenario: scenario.name,
-        recorded: options.date ?? today(),
-        source: options.source,
-      },
-      frames.map((frame) => sanitise(frame)),
-    );
+    const target = path.join(options.outDir, `${scenario.name}.ndjson`);
+    // A failed write joins the scenario's other failures, so none of them, nor where a refreshed sign-in went, is lost with it.
+    try {
+      const sanitise = createSanitiser({ workspace: layout.root, env: options.env, protocolWords: OPENCODE_PROTOCOL_WORDS, ...(options.user === undefined ? {} : { user: options.user }) });
+      await writeRecording(
+        target,
+        {
+          driver: "opencode",
+          vendor: OPENCODE_VENDOR_NAME,
+          vendorVersion,
+          sdk: OPENCODE_SDK_NAME,
+          sdkVersion: opencodeClientVersion(),
+          model,
+          scenario: scenario.name,
+          recorded: options.date ?? today(),
+          source: options.source,
+        },
+        frames.map((frame) => sanitise(frame)),
+      );
+      file = target;
+    } catch (reason) {
+      failed(new RecordingNotWrittenError(target, reason));
+    }
   }
+  const error = errors.length <= 1 ? errors[0] : new AggregateError(errors, `${errors.length} failures:\n${errors.map((each, index) => `  ${index + 1}. ${each.message}`).join("\n")}`);
   log(`${scenario.name}: ${error === undefined ? "passed" : `FAILED: ${error.message}`}${file === undefined ? ", nothing recorded" : `, ${frames.length} frames in ${file}`}`);
   return {
     scenario: scenario.name,
@@ -256,8 +272,9 @@ async function recordOne(scenario: Scenario, options: RecordOpencodeOptions): Pr
 
 /**
  * Records each scenario in turn. A failed scenario does not stop the others,
- * but two failures stop them all: a model the server does not offer, and a
- * refreshed sign-in the recorder could keep nowhere but in the workspace.
+ * but three failures stop them all: a model the server does not offer, a
+ * refreshed sign-in the recorder could keep nowhere but in the workspace, and
+ * a recording it could not write.
  */
 export async function recordOpencode(options: RecordOpencodeOptions): Promise<OpencodeRecordOutcome[]> {
   const names = options.scenarios ?? SCENARIOS.map((scenario) => scenario.name);
@@ -267,7 +284,7 @@ export async function recordOpencode(options: RecordOpencodeOptions): Promise<Op
     if (scenario === undefined) throw new Error(`no scenario is named ${JSON.stringify(name)}`);
     const outcome = await recordOne(scenario, options);
     outcomes.push(outcome);
-    if (outcome.workspaceKept || failuresOf(outcome).some((failure) => failure instanceof OpencodeModelChoiceError)) break;
+    if (outcome.workspaceKept || failuresOf(outcome).some((failure) => failure instanceof OpencodeModelChoiceError || failure instanceof RecordingNotWrittenError)) break;
   }
   return outcomes;
 }

@@ -26,7 +26,7 @@ import { startTurnAfterItsText } from "../../recordings/late-start-turn.ts";
 import { FRAME_FORMAT_FIELDS } from "../../recordings/sanitiser.ts";
 import { SCENARIOS, SCENARIO_NAMES, checkScenario } from "../../recordings/scenarios.ts";
 import type { ScenarioName } from "../../recordings/scenarios.ts";
-import { ReplayDriftError } from "../../recordings/sequencer.ts";
+import { ReplayDriftError, showFrame } from "../../recordings/sequencer.ts";
 import { fakeOpencodeServers } from "./puppets.ts";
 import type { FakeOpencodeServer, OpencodePuppetOptions } from "./puppets.ts";
 
@@ -81,6 +81,24 @@ function editedCopy(recording: Recording, label: string, edit: (frames: Frame[])
 
 function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * `frames` with each HTTP answer in the run of inbound frames around
+ * `index` moved to the run's start or to its end, the events keeping their
+ * order. The server sends its answers and its events over different
+ * connections, so a recording can hold them in either order; a test that
+ * depends on the order fixes it with this.
+ */
+function withAnswers(frames: readonly Frame[], index: number, where: "first" | "last"): Frame[] {
+  let start = index;
+  while (start > 0 && frames[start - 1]!.dir === "in") start -= 1;
+  let end = index;
+  while (end + 1 < frames.length && frames[end + 1]!.dir === "in") end += 1;
+  const run = frames.slice(start, end + 1);
+  const answers = run.filter((frame) => frame.kind === "response" && frame["stream"] !== true);
+  const events = run.filter((frame) => !answers.includes(frame));
+  return [...frames.slice(0, start), ...(where === "first" ? [...answers, ...events] : [...events, ...answers]), ...frames.slice(end + 1)];
 }
 
 const framesOf = (recording: Recording, kind: string): Frame[] => recording.frames.filter((entry) => entry.frame.kind === kind).map((entry) => entry.frame);
@@ -284,22 +302,34 @@ for (const name of SCENARIO_NAMES) {
     );
   });
 
-  test(`${name}: OpenCode replay fails, naming the file, the line and both frames, when a recorded inbound frame is removed`, async () => {
+  test(`${name}: OpenCode replay fails, naming the file, the line and both frames, when a recorded inbound frame is removed, whichever order the HTTP answers and the events around it hold`, async () => {
     const recording = await recordingOf(name);
     // The event that ends the first turn's execution: without it the turn never ends.
-    const index = recording.frames.findIndex((entry) => entry.frame.kind === "event" && /^session\.execution\.(succeeded|failed|interrupted)$/.test(String((entry.frame["event"] as { type: string }).type)));
-    const removed = recording.frames[index]!;
-    const { file } = editedCopy(recording, "removed-terminal", (frames) => frames.splice(index, 1));
-    await assert.rejects(replayOpencode(file, { timeoutMs: 4_000 }), (error: unknown) => {
-      assert.ok(error instanceof Error, String(error));
-      const match = new RegExp(`^${escape(file)}:(\\d+): replay stalled: the ${name} scenario waited 4000 ms for turn\\.terminal`).exec(error.message);
-      assert.ok(match !== null, error.message.slice(0, 600));
-      // The copy lost one line, so the frame after the removed one now sits on its line.
-      assert.equal(Number(match[1]), removed.line, error.message.slice(0, 600));
-      assert.match(error.message, new RegExp(`next recorded \\(line ${removed.line}\\): \\{"dir":"out"`));
-      assert.match(error.message, new RegExp(`last replayed \\(line ${removed.line - 1}\\): \\{"dir":"in"`));
-      return true;
+    const terminal = recording.frames.find((entry) => entry.frame.kind === "event" && /^session\.execution\.(succeeded|failed|interrupted)$/.test(String((entry.frame["event"] as { type: string }).type)))!.frame;
+    const original = recording.frames.map((entry) => entry.frame);
+    const removals = (["first", "last"] as const).map(async (where) => {
+      // The HTTP answer around the terminal event comes first, or last: both orders are recordings the server can produce.
+      const ordered = withAnswers(original, original.indexOf(terminal), where);
+      const whole = editedCopy(recording, `answers-${where}`, (frames) => frames.splice(0, frames.length, ...structuredClone(ordered)));
+      await replayOpencode(whole.file);
+      const gap = ordered.indexOf(terminal);
+      const { file } = editedCopy(recording, `answers-${where}-removed-terminal`, (frames) => frames.splice(0, frames.length, ...structuredClone(ordered.filter((frame) => frame !== terminal))));
+      // Replay delivers every inbound frame after the gap, then waits at the next outbound frame for a driver that waits for the missing event.
+      const copy = await readRecording(file);
+      const stall = copy.frames.findIndex((entry, position) => position >= gap && entry.frame.dir === "out");
+      const next = copy.frames[stall]!;
+      const last = copy.frames[stall - 1]!;
+      assert.equal(last.frame.dir, "in", `answers ${where}: replay delivered the frames after the gap`);
+      await assert.rejects(replayOpencode(file, { timeoutMs: 4_000 }), (error: unknown) => {
+        assert.ok(error instanceof Error, String(error));
+        const shown = error.message.slice(0, 1200);
+        assert.ok(error.message.startsWith(`${file}:${next.line}: replay stalled: the ${name} scenario waited 4000 ms for turn.terminal`), `answers ${where}: ${shown}`);
+        assert.ok(error.message.includes(`\n  next recorded (line ${next.line}): ${showFrame(next.frame)}\n`), `answers ${where}: ${shown}`);
+        assert.ok(error.message.includes(`\n  last replayed (line ${last.line}): ${showFrame(last.frame)}`), `answers ${where}: ${shown}`);
+        return true;
+      });
     });
+    await Promise.all(removals);
   });
 
   for (const [label, extra] of [
@@ -325,20 +355,29 @@ for (const name of SCENARIO_NAMES) {
   }
 }
 
-test("OpenCode replay fails, naming the file, the line and both frames around the gap, when a recording holds the response to a request it lacks", async () => {
+test("OpenCode replay fails, naming the file, the line and both frames around the gap, when a recording holds the response to a request it lacks, whichever order that response and the events after it hold", async () => {
   const recording = await recordingOf("simple");
-  const index = recording.frames.findIndex((entry) => entry.frame.kind === "request" && entry.frame["path"] === "/api/session");
-  const removed = recording.frames[index]!;
-  const before = recording.frames[index - 1]!;
-  const { file } = editedCopy(recording, "skipped-request", (frames) => frames.splice(index, 1));
-  // The copy lost one line: the request's response now sits on the request's line, and the frame before it is unchanged.
-  await assert.rejects(replayOpencode(file, { timeoutMs: 10_000 }), (error: unknown) =>
-    assertDrift(error, file, removed.line, [
-      new RegExp(`replay could not deliver the recorded frame: the frame answers exchange ${String(removed.frame["id"])}, which the driver has not started`),
-      new RegExp(`recorded \\(line ${removed.line}\\): \\{"dir":"in","kind":"response","id":${String(removed.frame["id"])}`),
-      new RegExp(`last replayed \\(line ${before.line}\\): ${escape(JSON.stringify(before.frame))}`),
-    ]),
-  );
+  const original = recording.frames.map((entry) => entry.frame);
+  const request = original.find((frame) => frame.kind === "request" && frame["path"] === "/api/session")!;
+  for (const where of ["first", "last"] as const) {
+    // The session's answer comes before the session.created event, or after it: the server can send either.
+    const ordered = withAnswers(original, original.indexOf(request) + 1, where);
+    const gap = ordered.indexOf(request);
+    const { file } = editedCopy(recording, `answers-${where}-skipped-request`, (frames) => frames.splice(0, frames.length, ...structuredClone(ordered.filter((frame) => frame !== request))));
+    // Replay delivers the inbound frames after the gap until it meets the answer to the request the tape lacks.
+    const copy = await readRecording(file);
+    const orphan = copy.frames.findIndex((entry, position) => position >= gap && entry.frame.kind === "response" && entry.frame["id"] === request["id"]);
+    assert.ok(copy.frames.slice(gap, orphan).every((entry) => entry.frame.dir === "in"), `answers ${where}: only inbound frames lie between the gap and the orphaned answer`);
+    const answer = copy.frames[orphan]!;
+    const last = copy.frames[orphan - 1]!;
+    await assert.rejects(replayOpencode(file, { timeoutMs: 10_000 }), (error: unknown) =>
+      assertDrift(error, file, answer.line, [
+        new RegExp(`replay could not deliver the recorded frame: the frame answers exchange ${String(request["id"])}, which the driver has not started`),
+        new RegExp(`\\n  recorded \\(line ${answer.line}\\): ${escape(showFrame(answer.frame))}\\n`),
+        new RegExp(`\\n  last replayed \\(line ${last.line}\\): ${escape(showFrame(last.frame))}$`),
+      ]),
+    );
+  }
 });
 
 test("approval_allowed: OpenCode replay fails when the event with the command's result is removed: the command's output never reaches the host", async () => {

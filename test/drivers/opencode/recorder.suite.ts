@@ -17,7 +17,7 @@ import { DEFAULT_OPENCODE_RECORDINGS } from "../../../scripts/record-opencode.ts
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { opencodeDataDirectory, recoveryFileFor, userDatabaseFile } from "../../recordings/opencode/credentials.ts";
-import { OpencodeModelChoiceError, describeOpencodeRun, failuresOf, recordOpencode } from "../../recordings/opencode/record.ts";
+import { OpencodeModelChoiceError, RecordingNotWrittenError, describeOpencodeRun, failuresOf, recordOpencode } from "../../recordings/opencode/record.ts";
 import type { OpencodeRecordOutcome, RecordOpencodeOptions } from "../../recordings/opencode/record.ts";
 import { replayOpencode } from "../../recordings/opencode/replay.ts";
 import { OPENCODE_SERVE_ARGS, opencodeServeEnvironment, startOpencodeServe } from "../../recordings/opencode/serve.ts";
@@ -320,8 +320,7 @@ test("after a run that fails, the refreshed sign-in still goes back and the temp
 });
 
 /** The recording function against the fake in this process, with the recorder's environment `env`. */
-async function recordInProcess(env: RecordOpencodeOptions["env"], scenarios: readonly ScenarioName[], startServer?: RecordOpencodeOptions["startServer"]): Promise<{ outDir: string; outcomes: OpencodeRecordOutcome[]; servers: FakeOpencodeServer[]; log: string[] }> {
-  const outDir = fs.mkdtempSync(path.join(DIRECTORY, "out-"));
+async function recordInProcess(env: RecordOpencodeOptions["env"], scenarios: readonly ScenarioName[], startServer?: RecordOpencodeOptions["startServer"], outDir = fs.mkdtempSync(path.join(DIRECTORY, "out-"))): Promise<{ outDir: string; outcomes: OpencodeRecordOutcome[]; servers: FakeOpencodeServer[]; log: string[] }> {
   const servers: FakeOpencodeServer[] = [];
   const log: string[] = [];
   const outcomes = await recordOpencode({ scenarios, outDir, source: "fake", env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", ...env }, startServer: startServer ?? fakeOpencodeServers(servers), timeoutMs: 20_000, log: (line) => log.push(line) });
@@ -398,15 +397,15 @@ async function setCredential(file: string, id: string, value: string): Promise<v
 }
 
 /** The recording function against fresh fakes in this process; `onScenario` runs at the first turn of each scenario, given its number (from 0) and the database copy its server opens. */
-async function recordWithSignInChanges(env: { [name: string]: string }, scenarios: readonly ScenarioName[], onScenario: (number: number, copy: string) => Promise<void>, crash = false): Promise<{ outDir: string; outcomes: OpencodeRecordOutcome[] }> {
+async function recordWithSignInChanges(env: { [name: string]: string }, scenarios: readonly ScenarioName[], onScenario: (number: number, copy: string) => Promise<void>, crash = false, outDir: string = fs.mkdtempSync(path.join(DIRECTORY, "out-"))): Promise<{ outDir: string; outcomes: OpencodeRecordOutcome[] }> {
   const servers: FakeOpencodeServer[] = [];
   let started = -1;
-  const { outDir, outcomes } = await recordInProcess({ ...env, ARI_RECORD_OPENCODE_MODEL: "fake/fake-small" }, scenarios, async (input) => {
+  const { outcomes } = await recordInProcess({ ...env, ARI_RECORD_OPENCODE_MODEL: "fake/fake-small" }, scenarios, async (input) => {
     started += 1;
     const number = started;
     const copy = path.join(input.env["XDG_DATA_HOME"]!, "opencode", "opencode.db");
     return fakeOpencodeServers(servers, { crash, onTurn: async (_run, index) => (index === 0 ? onScenario(number, copy) : undefined) })(input);
-  });
+  }, outDir);
   return { outDir, outcomes };
 }
 
@@ -514,6 +513,58 @@ for (const [label, blockRecovery] of [
       } else {
         assert.equal(outcome!.recoveryFile, kept);
         assert.ok(outcome!.error!.message.includes(`it kept the refreshed value(s) in ${kept}`), outcome!.error!.message);
+        assert.ok(ending.includes(kept), ending);
+        assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: "crd_0001", value: "refreshed-by-the-recorded-server" }]);
+      }
+    } finally {
+      if (outcome?.workspaceKept === true) fs.rmSync(outcome.workspace, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const [label, blockRecovery] of [
+  ["kept in the recovery file", false],
+  ["kept only in the workspace", true],
+] as const) {
+  test(`when the recording cannot be written either, the recorder stops and still names a refreshed sign-in ${label}`, async () => {
+    const { database, env } = await seedHome();
+    const kept = recoveryFileFor(database);
+    if (blockRecovery) {
+      fs.mkdirSync(kept);
+      fs.writeFileSync(path.join(kept, "occupied"), "");
+    }
+    // The output directory is a file: no recording can be written there.
+    const outDir = path.join(fs.mkdtempSync(path.join(DIRECTORY, "out-file-")), "not-a-directory");
+    fs.writeFileSync(outDir, "");
+    // OpenCode refreshes the copy while another OpenCode changes the user's row.
+    const { outcomes } = await recordWithSignInChanges(
+      env,
+      ["simple", "multi_turn"],
+      async (_number, copy) => {
+        await setCredential(copy, "crd_0001", "refreshed-by-the-recorded-server");
+        await setCredential(database, "crd_0001", "changed-by-another-opencode");
+      },
+      false,
+      outDir,
+    );
+    assert.equal(outcomes.length, 1, "the run stopped: no other scenario ran");
+    const [outcome] = outcomes;
+    try {
+      assert.equal(outcome!.file, undefined, "no recording was written");
+      const failures = failuresOf(outcome!);
+      assert.ok(
+        failures.some((failure) => failure instanceof RecordingNotWrittenError && failure.file === path.join(outDir, "simple.ndjson")),
+        `the write's failure is reported: ${outcome!.error?.message}`,
+      );
+      const message = outcome!.error!.message;
+      const ending = describeOpencodeRun(outcomes, outDir).join("\n");
+      if (blockRecovery) {
+        assert.equal(outcome!.workspaceKept, true);
+        assert.ok(message.includes(`the recorder kept the workspace ${outcome!.workspace}`), message);
+        assert.ok(ending.includes(outcome!.workspace), ending);
+      } else {
+        assert.equal(outcome!.recoveryFile, kept);
+        assert.ok(message.includes(`it kept the refreshed value(s) in ${kept}`), message);
         assert.ok(ending.includes(kept), ending);
         assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: "crd_0001", value: "refreshed-by-the-recorded-server" }]);
       }

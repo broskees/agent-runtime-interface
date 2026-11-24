@@ -638,8 +638,10 @@ eight short turns.
 
 The recorder writes `test/drivers/opencode/recordings/<scenario>.ndjson`, one
 file per scenario, also for a scenario whose checks failed (it says which,
-and exits 1). Its last lines name every recovery file and every kept
-workspace; see "How OpenCode finds the sign-in". Without `ARI_LIVE_RECORD=1` it exits 2 before it loads anything
+and exits 1). When it cannot write a recording (an output directory it cannot
+use, for example), it stops after that scenario. Its last lines name every
+recovery file and every kept workspace, whatever else failed; see "How
+OpenCode finds the sign-in". Without `ARI_LIVE_RECORD=1` it exits 2 before it loads anything
 or starts any process; without a model the server offers it exits 2 before
 the first prompt.
 

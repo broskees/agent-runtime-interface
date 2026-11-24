@@ -6,7 +6,11 @@
 // checked: requests and responses against the vendored OpenAPI document of
 // its version, 1.x events against that document's `Event` schema, 2.x events
 // against `OpenCodeEvent` of `@opencode/protocol` 2.1.2. Each mismatch is
-// recorded in `world.violations`; tests assert there are none.
+// recorded in `world.violations`; tests assert there are none. The events and
+// response bodies it builds are also typed by the pinned SDKs
+// (`@opencode-ai/sdk` 1.19.6 `Event`, `Session`, `Message`, `Part`, ...;
+// `@opencode/client` 2.1.2 `OpenCodeEvent`, `SessionInfo`, ...), so the type
+// check rejects a shape the SDKs do not have.
 //
 // One `FakeWorld` is one machine's OpenCode database: sessions outlive any
 // server process, and every fake server of a rig reads the same sessions. Each
@@ -25,6 +29,8 @@ import { AsyncQueue } from "../../../src/conformance/util.ts";
 import { OpenApiValidator } from "./openapi.ts";
 import type { MatchedOperation } from "./openapi.ts";
 import { v2EventChecker } from "./v2-events.ts";
+import type * as V1 from "@opencode-ai/sdk/v2";
+import type * as V2 from "@opencode/client";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const VENDOR_SCHEMAS = path.resolve(HERE, "../../../vendor-schemas/opencode");
@@ -33,6 +39,13 @@ export type Generation = 1 | 2;
 export const FAKE_VERSIONS: { readonly [generation in Generation]: string } = { 1: "1.19.6", 2: "2.1.2" };
 
 type Json = { [key: string]: unknown };
+
+// Every event the fake sends is typed by the pinned SDK of its generation.
+type V1EventType = V1.Event["type"];
+type V1Properties<T extends V1EventType> = Extract<V1.Event, { type: T }>["properties"];
+type V2EventType = V2.OpenCodeEvent["type"];
+type V2Data<T extends V2EventType> = Extract<V2.OpenCodeEvent, { type: T }>["data"];
+type V1Error = NonNullable<V1.AssistantMessage["error"]>;
 type Rule = { action: string; resource: string; effect: "allow" | "deny" | "ask" };
 
 /** OpenCode's wildcard match (1.x and 2.x `util/wildcard.ts`). */
@@ -79,8 +92,8 @@ interface FakeMessage {
   steer: boolean;
   readonly parentId?: string;
   readonly content: Array<FakePart | FakeTool>;
-  error?: { readonly v1: Json; readonly v2: Json };
-  finish?: string;
+  error?: { readonly v1: V1Error; readonly v2: V2.SessionStructuredError };
+  finish?: "stop";
   system?: string;
 }
 
@@ -259,9 +272,17 @@ export class FakeRun implements NativeTurn {
     return this.server.world;
   }
 
-  /** Emits now, or holds the event while a completion is held back. */
-  #publish(type: string, properties: Json, durable = false, created?: number): void {
-    const send = () => this.server.publish(this.session, type, properties, durable, created);
+  /** Emits a 1.x event now, or holds it while a completion is held back. */
+  #v1<T extends V1EventType>(type: T, properties: V1Properties<T>): void {
+    this.#later(() => this.server.publishV1(this.session, type, properties));
+  }
+
+  /** Emits a 2.x event now, or holds it while a completion is held back. */
+  #v2<T extends V2EventType>(type: T, data: V2Data<T>, durable = false, created?: number): void {
+    this.#later(() => this.server.publishV2(this.session, type, data, durable, created));
+  }
+
+  #later(send: () => void): void {
     if (this.#held !== undefined) this.#held.push(send);
     else send();
   }
@@ -272,8 +293,8 @@ export class FakeRun implements NativeTurn {
     const message: FakeMessage = { id: this.world.nextId("msg"), role: "assistant", created: now, text: "", steer: false, parentId: this.userMessageId, content: [] };
     this.session.messages.push(message);
     this.#assistant = message;
-    if (this.world.generation === 1) this.#publish("message.updated", { sessionID: this.session.id, info: this.server.v1Message(this.session, message) });
-    else this.#publish("session.step.started", { sessionID: this.session.id, assistantMessageID: message.id, agent: this.session.agent, model: { ...this.session.model }, started: now }, true);
+    if (this.world.generation === 1) this.#v1("message.updated", { sessionID: this.session.id, info: this.server.v1Message(this.session, message) });
+    else this.#v2("session.step.started", { sessionID: this.session.id, assistantMessageID: message.id, agent: this.session.agent, model: { ...this.session.model }, started: now }, true);
     return message;
   }
 
@@ -285,21 +306,21 @@ export class FakeRun implements NativeTurn {
     const chunks = text.length <= 4 ? [text] : [text.slice(0, Math.ceil(text.length / 2)), text.slice(Math.ceil(text.length / 2))];
     if (this.world.generation === 1) {
       // A text part opens empty, streams deltas, and closes with its full text and end time (1.x `session/processor.ts`).
-      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Part(this.session, message, part), time: Date.now() });
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Part(this.session, message, part), time: Date.now() });
       for (const chunk of chunks) {
         part.text += chunk;
-        this.#publish("message.part.delta", { sessionID: this.session.id, messageID: message.id, partID: part.id, field: "text", delta: chunk });
+        this.#v1("message.part.delta", { sessionID: this.session.id, messageID: message.id, partID: part.id, field: "text", delta: chunk });
       }
       part.end = Date.now();
-      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Part(this.session, message, part), time: Date.now() });
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Part(this.session, message, part), time: Date.now() });
     } else {
-      this.#publish("session.text.started", { sessionID: this.session.id, assistantMessageID: message.id, ordinal }, true);
+      this.#v2("session.text.started", { sessionID: this.session.id, assistantMessageID: message.id, ordinal }, true);
       for (const chunk of chunks) {
         part.text += chunk;
-        this.#publish("session.text.delta", { sessionID: this.session.id, assistantMessageID: message.id, ordinal, delta: chunk });
+        this.#v2("session.text.delta", { sessionID: this.session.id, assistantMessageID: message.id, ordinal, delta: chunk });
       }
       part.end = Date.now();
-      this.#publish("session.text.ended", { sessionID: this.session.id, assistantMessageID: message.id, ordinal, text: part.text }, true);
+      this.#v2("session.text.ended", { sessionID: this.session.id, assistantMessageID: message.id, ordinal, text: part.text }, true);
     }
   }
 
@@ -317,21 +338,21 @@ export class FakeRun implements NativeTurn {
     const entry: FakeTool = { id: this.world.nextId("prt"), callId: this.world.nextId("call"), tool: native.name, input: native.input, status: "pending", start: Date.now() };
     message.content.push(entry);
     if (this.world.generation === 1) {
-      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
       entry.status = "running";
-      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
       entry.status = "completed";
       entry.output = tool.output;
       entry.end = Date.now();
-      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
     } else {
-      this.#publish("session.tool.input.started", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, name: entry.tool }, true);
+      this.#v2("session.tool.input.started", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, name: entry.tool }, true);
       entry.status = "running";
-      this.#publish("session.tool.called", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, input: entry.input, executed: true }, true);
+      this.#v2("session.tool.called", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, input: entry.input, executed: true }, true);
       entry.status = "completed";
       entry.output = tool.output;
       entry.end = Date.now();
-      this.#publish("session.tool.success", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, content: [{ type: "text", text: tool.output }], executed: true }, true);
+      this.#v2("session.tool.success", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, content: [{ type: "text", text: tool.output }], executed: true }, true);
     }
   }
 
@@ -350,23 +371,24 @@ export class FakeRun implements NativeTurn {
     const entry: FakeTool = { id: this.world.nextId("prt"), callId: this.world.nextId("call"), tool: v1 ? "bash" : "shell", input: { command, description: command }, status: "pending", start: Date.now() };
     message.content.push(entry);
     if (v1) {
-      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
       entry.status = "running";
       const half = output.slice(0, Math.ceil(output.length / 2));
-      this.#publish("message.part.updated", { sessionID: this.session.id, part: { ...this.server.v1Tool(this.session, message, entry), state: { status: "running", input: entry.input, title: command, metadata: { output: half, description: command }, time: { start: entry.start } } }, time: Date.now() });
+      const streaming: V1.ToolPart = { ...this.server.v1Tool(this.session, message, entry), state: { status: "running", input: entry.input, title: command, metadata: { output: half, description: command }, time: { start: entry.start } } };
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: streaming, time: Date.now() });
       entry.status = "completed";
       entry.output = output;
       entry.end = Date.now();
-      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
+      this.#v1("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
       return;
     }
-    this.#publish("session.tool.input.started", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, name: entry.tool }, true);
+    this.#v2("session.tool.input.started", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, name: entry.tool }, true);
     entry.status = "running";
-    this.#publish("session.tool.called", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, input: entry.input, executed: true }, true);
+    this.#v2("session.tool.called", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, input: entry.input, executed: true }, true);
     entry.status = "completed";
     entry.output = output;
     entry.end = Date.now();
-    this.#publish("session.tool.success", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, content: [{ type: "text", text: output }], executed: true }, true);
+    this.#v2("session.tool.success", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, content: [{ type: "text", text: output }], executed: true }, true);
   }
 
   /** A question from the agent (OpenCode's `question` tool), answered through the driver. */
@@ -381,7 +403,7 @@ export class FakeRun implements NativeTurn {
 
   /** 1.x: the agent's todo list changed (`todo.updated`, written by the `todowrite` tool). */
   async todos(entries: ReadonlyArray<{ readonly content: string; readonly status: string }>): Promise<void> {
-    this.#publish("todo.updated", { sessionID: this.session.id, todos: entries.map((entry) => ({ content: entry.content, status: entry.status, priority: "medium" })) });
+    this.#v1("todo.updated", { sessionID: this.session.id, todos: entries.map((entry) => ({ content: entry.content, status: entry.status, priority: "medium" })) });
   }
 
   /** A permission request from a subagent's own session, while this run waits for the subagent. */
@@ -401,7 +423,7 @@ export class FakeRun implements NativeTurn {
     this.#steers.push(text);
   }
 
-  #end(how: "succeeded" | { v1: Json; v2: Json; at?: number } | "interrupted"): void {
+  #end(how: "succeeded" | { v1: V1Error; v2: V2.SessionStructuredError; at?: number } | "interrupted"): void {
     const message = this.#assistantMessage();
     message.completed = Date.now();
     if (how === "succeeded") message.finish = "stop";
@@ -411,18 +433,18 @@ export class FakeRun implements NativeTurn {
     this.server.endRun(this);
     const id = this.session.id;
     if (this.world.generation === 1) {
-      if (message.error !== undefined) this.#publish("session.error", { sessionID: id, error: message.error.v1 });
-      this.#publish("message.updated", { sessionID: id, info: this.server.v1Message(this.session, message) });
+      if (message.error !== undefined) this.#v1("session.error", { sessionID: id, error: message.error.v1 });
+      this.#v1("message.updated", { sessionID: id, info: this.server.v1Message(this.session, message) });
       // `SessionStatus.set` idle publishes the status and then `session.idle` (1.x `session/status.ts`).
-      this.#publish("session.status", { sessionID: id, status: { type: "idle" } });
-      this.#publish("session.idle", { sessionID: id });
+      this.#v1("session.status", { sessionID: id, status: { type: "idle" } });
+      this.#v1("session.idle", { sessionID: id });
     } else {
       if (how === "succeeded") {
-        this.#publish("session.step.ended", { sessionID: id, assistantMessageID: message.id, finish: "stop", cost: 0, tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } }, true);
-        this.#publish("session.execution.succeeded", { sessionID: id }, true);
-      } else if (how === "interrupted") this.#publish("session.execution.interrupted", { sessionID: id, reason: "user" }, true);
+        this.#v2("session.step.ended", { sessionID: id, assistantMessageID: message.id, finish: "stop", cost: 0, tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } }, true);
+        this.#v2("session.execution.succeeded", { sessionID: id }, true);
+      } else if (how === "interrupted") this.#v2("session.execution.interrupted", { sessionID: id, reason: "user" }, true);
       // OpenCode builds the structured error (its retryAfterMs counts from then) and publishes it at once.
-      else this.#publish("session.execution.failed", { sessionID: id, error: how.v2 }, true, how.at);
+      else this.#v2("session.execution.failed", { sessionID: id, error: how.v2 }, true, how.at);
     }
     this.#steers.end();
   }
@@ -539,7 +561,7 @@ export class FakeServer {
   // ---------------------------------------------------------------------------
   // Shapes
 
-  v1Session(session: FakeSession): Json {
+  v1Session(session: FakeSession): V1.Session {
     return {
       id: session.id,
       slug: session.id.slice(4, 12),
@@ -554,7 +576,7 @@ export class FakeServer {
     };
   }
 
-  v2Session(session: FakeSession): Json {
+  v2Session(session: FakeSession): V2.SessionInfo {
     return {
       id: session.id,
       ...(session.parentId === undefined ? {} : { parentID: session.parentId }),
@@ -571,7 +593,7 @@ export class FakeServer {
     };
   }
 
-  v1Message(session: FakeSession, message: FakeMessage): Json {
+  v1Message(session: FakeSession, message: FakeMessage): V1.Message {
     if (message.role === "user") {
       return { id: message.id, sessionID: session.id, role: "user", time: { created: message.created }, agent: session.agent, model: { providerID: session.model.providerID, modelID: session.model.id }, ...(message.system === undefined ? {} : { system: message.system }) };
     }
@@ -593,12 +615,12 @@ export class FakeServer {
     };
   }
 
-  v1Part(session: FakeSession, message: FakeMessage, part: FakePart): Json {
+  v1Part(session: FakeSession, message: FakeMessage, part: FakePart): V1.TextPart | V1.ReasoningPart {
     return { id: part.id, sessionID: session.id, messageID: message.id, type: part.kind, text: part.text, time: { start: part.start, ...(part.end === undefined ? {} : { end: part.end }) } };
   }
 
-  v1Tool(session: FakeSession, message: FakeMessage, tool: FakeTool): Json {
-    const state =
+  v1Tool(session: FakeSession, message: FakeMessage, tool: FakeTool): V1.ToolPart {
+    const state: V1.ToolState =
       tool.status === "pending"
         ? { status: "pending", input: {}, raw: "" }
         : tool.status === "running"
@@ -609,12 +631,12 @@ export class FakeServer {
     return { id: tool.id, sessionID: session.id, messageID: message.id, type: "tool", callID: tool.callId, tool: tool.tool, state };
   }
 
-  v1Parts(session: FakeSession, message: FakeMessage): Json[] {
+  v1Parts(session: FakeSession, message: FakeMessage): V1.Part[] {
     if (message.role === "user") return [{ id: `prt_${message.id.slice(4)}`, sessionID: session.id, messageID: message.id, type: "text", text: message.text }];
     return message.content.map((entry) => ("kind" in entry ? this.v1Part(session, message, entry) : this.v1Tool(session, message, entry)));
   }
 
-  v2Message(session: FakeSession, message: FakeMessage): Json {
+  v2Message(session: FakeSession, message: FakeMessage): V2.SessionMessageUser | V2.SessionMessageAssistant {
     if (message.role === "user") return { id: message.id, ...(message.steer ? { metadata: { "ari.steer": true } } : {}), time: { created: message.created }, text: message.text, type: "user" };
     return {
       id: message.id,
@@ -622,14 +644,14 @@ export class FakeServer {
       type: "assistant",
       agent: session.agent,
       model: { ...session.model },
-      content: message.content.map((entry) =>
+      content: message.content.map((entry): V2.SessionMessageAssistant["content"][number] =>
         "kind" in entry
           ? { type: entry.kind, text: entry.text }
           : {
               type: "tool",
               id: entry.callId,
               name: entry.tool,
-              state: entry.status === "completed" ? { status: "completed", input: entry.input, content: [{ type: "text", text: entry.output ?? "" }] } : { status: "running", input: entry.input, metadata: {} },
+              state: entry.status === "completed" ? { status: "completed", input: entry.input as { [key: string]: V2.JsonValue }, content: [{ type: "text", text: entry.output ?? "" }] } : { status: "running", input: entry.input as { [key: string]: V2.JsonValue }, metadata: {} },
               time: { created: entry.start, ...(entry.end === undefined ? {} : { completed: entry.end }) },
             },
       ),
@@ -641,26 +663,31 @@ export class FakeServer {
   // ---------------------------------------------------------------------------
   // Events
 
-  /** Sends an event to every subscriber of the session's directory (1.x) or to every subscriber (2.x). */
-  publish(session: FakeSession | undefined, type: string, properties: Json, durable = false, created = Date.now()): void {
+  /** Sends a 1.x event, typed by `@opencode-ai/sdk` 1.19.6's `Event`, to the subscribers of the session's directory. */
+  publishV1<T extends V1EventType>(session: FakeSession, type: T, properties: V1Properties<T>): void {
+    this.#send(session, { id: this.world.nextId("evt"), type, properties } as unknown as V1.Event);
+  }
+
+  /** Sends a 2.x event, typed by `@opencode/client` 2.1.2's `OpenCodeEvent`, to every subscriber. */
+  publishV2<T extends V2EventType>(session: FakeSession, type: T, data: V2Data<T>, durable = false, created = Date.now()): void {
+    const event = {
+      id: this.world.nextId("evt"),
+      created,
+      type,
+      ...(durable ? { durable: { aggregateID: session.id, seq: this.#seq(session.id), version: type === "session.tool.success" || type === "session.tool.failed" ? 2 : 1 } } : {}),
+      location: { directory: session.directory },
+      data,
+    };
+    this.#send(session, event as unknown as V2.OpenCodeEvent);
+  }
+
+  #send(session: FakeSession, event: V1.Event | V2.OpenCodeEvent): void {
     if (!this.alive) return;
-    const directory = session?.directory;
-    const event: Json =
-      this.world.generation === 1
-        ? { id: this.world.nextId("evt"), type, properties }
-        : {
-            id: this.world.nextId("evt"),
-            created,
-            type,
-            ...(durable && session !== undefined ? { durable: { aggregateID: session.id, seq: this.#seq(session.id), version: type === "session.tool.success" || type === "session.tool.failed" ? 2 : 1 } } : {}),
-            ...(directory === undefined ? {} : { location: { directory } }),
-            data: properties,
-          };
     this.world.checkEvent(event);
-    this.world.frames.push({ server: this.number, direction: "event", operation: type, body: event });
+    this.world.frames.push({ server: this.number, direction: "event", operation: event.type, body: event });
     const frame = `event: message\ndata: ${JSON.stringify(event)}\n\n`;
     for (const subscriber of this.#subscribers) {
-      if (this.world.generation === 1 && subscriber.directory !== directory) continue;
+      if (this.world.generation === 1 && subscriber.directory !== session.directory) continue;
       subscriber.response.write(frame);
     }
   }
@@ -683,11 +710,11 @@ export class FakeServer {
     if (delivery === "steer") {
       // 2.x: a steer with `resume: false` waits in the inbox; a running execution takes it at its next step.
       this.#inbox.set(message.id, { sessionId: session.id, text, steer: true });
-      this.publish(session, "session.inbox.enqueued", { sessionID: session.id, inboxID: message.id, item: { type: "user", payload: { text, metadata: { "ari.steer": true } }, delivery: "steer" } }, true);
+      this.publishV2(session, "session.inbox.enqueued", { sessionID: session.id, inboxID: message.id, item: { type: "user", payload: { text, metadata: { "ari.steer": true } }, delivery: "steer" } }, true);
       if (running !== undefined && !running.ended) {
         this.#inbox.delete(message.id);
         session.messages.push(message);
-        this.publish(session, "session.inbox.delivered", { sessionID: session.id, inboxID: message.id }, true);
+        this.publishV2(session, "session.inbox.delivered", { sessionID: session.id, inboxID: message.id }, true);
         running.steered(text);
         return { messageId: message.id, joined: true };
       }
@@ -696,14 +723,14 @@ export class FakeServer {
     session.messages.push(message);
     session.updated = now;
     if (this.world.generation === 1) {
-      this.publish(session, "message.updated", { sessionID: session.id, info: this.v1Message(session, message) });
-      this.publish(session, "message.part.updated", { sessionID: session.id, part: this.v1Parts(session, message)[0]!, time: now });
+      this.publishV1(session, "message.updated", { sessionID: session.id, info: this.v1Message(session, message) });
+      this.publishV1(session, "message.part.updated", { sessionID: session.id, part: this.v1Parts(session, message)[0]!, time: now });
       if (running !== undefined && !running.ended) return { messageId: message.id, joined: true };
-      this.publish(session, "session.status", { sessionID: session.id, status: { type: "busy" } });
+      this.publishV1(session, "session.status", { sessionID: session.id, status: { type: "busy" } });
     } else {
-      this.publish(session, "session.inbox.enqueued", { sessionID: session.id, inboxID: message.id, item: { type: "user", payload: { text }, delivery: "steer" } }, true);
-      this.publish(session, "session.execution.started", { sessionID: session.id }, true);
-      this.publish(session, "session.inbox.delivered", { sessionID: session.id, inboxID: message.id }, true);
+      this.publishV2(session, "session.inbox.enqueued", { sessionID: session.id, inboxID: message.id, item: { type: "user", payload: { text }, delivery: "steer" } }, true);
+      this.publishV2(session, "session.execution.started", { sessionID: session.id }, true);
+      this.publishV2(session, "session.inbox.delivered", { sessionID: session.id, inboxID: message.id }, true);
     }
     const run = new FakeRun(this, session, text, message.id);
     this.#runs.set(session.id, run);
@@ -736,8 +763,8 @@ export class FakeServer {
     const id = this.world.nextId("per");
     const metadata = approval.kind === "command" ? { command: target } : { filepath: target };
     this.#permissions.set(id, { id, sessionId: session.id, action, resources: [target], always, run, handle });
-    if (v1) this.publish(session, "permission.asked", { id, sessionID: session.id, permission: action, patterns: [target], metadata, always });
-    else this.publish(session, "permission.asked", { id, sessionID: session.id, action, resources: [target], save: always, metadata });
+    if (v1) this.publishV1(session, "permission.asked", { id, sessionID: session.id, permission: action, patterns: [target], metadata, always });
+    else this.publishV2(session, "permission.asked", { id, sessionID: session.id, action, resources: [target], save: always, metadata });
     return handle;
   }
 
@@ -751,12 +778,12 @@ export class FakeServer {
       const id = this.world.nextId("que");
       this.#questions.set(id, { id, sessionId: session.id, run });
       this.#answerWaiters.set(id, resolveAnswers);
-      this.publish(session, "question.asked", { id, sessionID: session.id, questions: [{ question: question.text, header: "Question", options: question.options.map((label) => ({ label, description: label })), custom: true }] });
+      this.publishV1(session, "question.asked", { id, sessionID: session.id, questions: [{ question: question.text, header: "Question", options: question.options.map((label) => ({ label, description: label })), custom: true }] });
     } else {
       const id = this.world.nextId("frm");
       this.#questions.set(id, { id, sessionId: session.id, run });
       this.#answerWaiters.set(id, resolveAnswers);
-      this.publish(session, "form.created", { form: { id, sessionID: session.id, title: question.text, fields: [{ key: "choice", type: "string", title: question.text, options: question.options.map((value) => ({ value, label: value })), custom: true }] } });
+      this.publishV2(session, "form.created", { form: { id, sessionID: session.id, title: question.text, fields: [{ key: "choice", type: "string", title: question.text, options: question.options.map((value) => ({ value, label: value })), custom: true }] } });
     }
     return { answers: () => answered };
   }
@@ -770,19 +797,19 @@ export class FakeServer {
     this.world.sessions.set(child.id, child);
     this.known.add(child.id);
     if (this.world.generation === 1) {
-      this.publish(child, "session.created", { sessionID: child.id, info: this.v1Session(child) });
-      this.publish(child, "session.status", { sessionID: child.id, status: { type: "busy" } });
+      this.publishV1(child, "session.created", { sessionID: child.id, info: this.v1Session(child) });
+      this.publishV1(child, "session.status", { sessionID: child.id, status: { type: "busy" } });
     } else {
-      this.publish(child, "session.created", { sessionID: child.id, projectID: "global", location: { directory: child.directory }, parentID: parent.id, slug: child.id.slice(4, 12), title: name, version: this.world.version }, true);
-      this.publish(child, "session.execution.started", { sessionID: child.id }, true);
+      this.publishV2(child, "session.created", { sessionID: child.id, projectID: "global", location: { directory: child.directory }, parentID: parent.id, slug: child.id.slice(4, 12), title: name, version: this.world.version }, true);
+      this.publishV2(child, "session.execution.started", { sessionID: child.id }, true);
     }
     return {
       childId: child.id,
       finish: async () => {
         if (this.world.generation === 1) {
-          this.publish(child, "session.status", { sessionID: child.id, status: { type: "idle" } });
-          this.publish(child, "session.idle", { sessionID: child.id });
-        } else this.publish(child, "session.execution.succeeded", { sessionID: child.id }, true);
+          this.publishV1(child, "session.status", { sessionID: child.id, status: { type: "idle" } });
+          this.publishV1(child, "session.idle", { sessionID: child.id });
+        } else this.publishV2(child, "session.execution.succeeded", { sessionID: child.id }, true);
       },
     };
   }
@@ -796,8 +823,8 @@ export class FakeServer {
     const action = v1 ? "bash" : "shell";
     const target = (approval.command ?? ["true"]).join(" ");
     this.#permissions.set(id, { id, sessionId, action, resources: [target], always: [target], run, handle });
-    if (v1) this.publish(session, "permission.asked", { id, sessionID: sessionId, permission: action, patterns: [target], metadata: { command: target }, always: [target] });
-    else this.publish(session, "permission.asked", { id, sessionID: sessionId, action, resources: [target], save: [target], metadata: { command: target } });
+    if (v1) this.publishV1(session, "permission.asked", { id, sessionID: sessionId, permission: action, patterns: [target], metadata: { command: target }, always: [target] });
+    else this.publishV2(session, "permission.asked", { id, sessionID: sessionId, action, resources: [target], save: [target], metadata: { command: target } });
     return handle;
   }
 
@@ -806,8 +833,8 @@ export class FakeServer {
     if (pending === undefined) return false;
     this.#permissions.delete(id);
     const session = this.world.sessions.get(pending.sessionId)!;
-    if (this.world.generation === 1) this.publish(session, "permission.replied", { sessionID: pending.sessionId, requestID: id, reply });
-    else this.publish(session, "permission.replied", { sessionID: pending.sessionId, requestID: id, reply });
+    if (this.world.generation === 1) this.publishV1(session, "permission.replied", { sessionID: pending.sessionId, requestID: id, reply });
+    else this.publishV2(session, "permission.replied", { sessionID: pending.sessionId, requestID: id, reply });
     if (reply === "always") {
       // 1.x keeps the grant for the directory's instance; 2.x saves it for the project (both reach every session there).
       const grants = pending.always.map((resource) => ({ action: pending.action, resource, effect: "allow" as const }));
@@ -922,11 +949,11 @@ export class FakeServer {
     const directory = url.searchParams.get("directory") ?? process.cwd();
     switch (matched.operationId) {
       case "global.health":
-        return { status: 200, body: { healthy: true, version: this.world.version } };
+        return { status: 200, body: { healthy: true, version: this.world.version } satisfies V1.GlobalHealthResponses[200] };
       case "session.create": {
         const rules = Array.isArray(body?.["permission"]) ? (body["permission"] as Json[]).map((rule) => ({ action: String(rule["permission"]), resource: String(rule["pattern"]), effect: rule["action"] as Rule["effect"] })) : [];
         const session = this.#createSession(directory, typeof body?.["title"] === "string" ? body["title"] : undefined, rules);
-        this.publish(session, "session.created", { sessionID: session.id, info: this.v1Session(session) });
+        this.publishV1(session, "session.created", { sessionID: session.id, info: this.v1Session(session) });
         return { status: 200, body: this.v1Session(session) };
       }
       case "session.get": {
@@ -940,13 +967,13 @@ export class FakeServer {
         if (session === undefined) return this.#notFound(`Session ${sessionId}`);
         if (Array.isArray(body?.["permission"])) session.rules = (body["permission"] as Json[]).map((rule) => ({ action: String(rule["permission"]), resource: String(rule["pattern"]), effect: rule["action"] as Rule["effect"] }));
         session.updated = Date.now();
-        this.publish(session, "session.updated", { sessionID: session.id, info: this.v1Session(session) });
+        this.publishV1(session, "session.updated", { sessionID: session.id, info: this.v1Session(session) });
         return { status: 200, body: this.v1Session(session) };
       }
       case "session.messages": {
         const session = this.#session(sessionId!);
         if (session === undefined) return this.#notFound(`Session ${sessionId}`);
-        return { status: 200, body: session.messages.map((message) => ({ info: this.v1Message(session, message), parts: this.v1Parts(session, message) })) };
+        return { status: 200, body: session.messages.map((message) => ({ info: this.v1Message(session, message), parts: this.v1Parts(session, message) })) satisfies V1.SessionMessagesResponses[200] };
       }
       case "session.prompt_async": {
         const session = this.#session(sessionId!);
@@ -972,7 +999,7 @@ export class FakeServer {
         const source = this.#session(sessionId!);
         if (source === undefined) return this.#notFound(`Session ${sessionId}`);
         const fork = this.#fork(source, typeof body?.["messageID"] === "string" ? body["messageID"] : undefined);
-        this.publish(fork, "session.created", { sessionID: fork.id, info: this.v1Session(fork) });
+        this.publishV1(fork, "session.created", { sessionID: fork.id, info: this.v1Session(fork) });
         return { status: 200, body: this.v1Session(fork) };
       }
       case "session.revert": {
@@ -988,10 +1015,10 @@ export class FakeServer {
         this.world.cleanup(session);
         // A summary is a run of its own: busy, the compaction, idle; the call answers when it is done (1.x `handlers/session.ts` `summarize`).
         session.compactions += 1;
-        this.publish(session, "session.status", { sessionID: session.id, status: { type: "busy" } });
-        this.publish(session, "session.compacted", { sessionID: session.id });
-        this.publish(session, "session.status", { sessionID: session.id, status: { type: "idle" } });
-        this.publish(session, "session.idle", { sessionID: session.id });
+        this.publishV1(session, "session.status", { sessionID: session.id, status: { type: "busy" } });
+        this.publishV1(session, "session.compacted", { sessionID: session.id });
+        this.publishV1(session, "session.status", { sessionID: session.id, status: { type: "idle" } });
+        this.publishV1(session, "session.idle", { sessionID: session.id });
         return { status: 200, body: true };
       }
       case "permission.reply": {
@@ -1007,8 +1034,8 @@ export class FakeServer {
         if (pending === undefined) return { status: 404, body: { name: "QuestionNotFoundError", data: { message: "not found" } } };
         this.#questions.delete(id);
         const session = this.world.sessions.get(pending.sessionId)!;
-        if (matched.operationId === "question.reply") this.publish(session, "question.replied", { sessionID: session.id, requestID: id, answers: (body?.["answers"] ?? []) as unknown[] });
-        else this.publish(session, "question.rejected", { sessionID: session.id, requestID: id });
+        if (matched.operationId === "question.reply") this.publishV1(session, "question.replied", { sessionID: session.id, requestID: id, answers: (body?.["answers"] ?? []) as string[][] });
+        else this.publishV1(session, "question.rejected", { sessionID: session.id, requestID: id });
         this.#answerWaiters.get(id)?.(matched.operationId === "question.reply" ? body?.["answers"] : null);
         return { status: 200, body: true };
       }
@@ -1016,22 +1043,22 @@ export class FakeServer {
         const entries = this.mcp.get(directory) ?? new Map<string, Json>();
         entries.set(String(body?.["name"]), (body?.["config"] ?? {}) as Json);
         this.mcp.set(directory, entries);
-        return { status: 200, body: Object.fromEntries([...entries.keys()].map((name) => [name, { status: "connected" }])) };
+        return { status: 200, body: Object.fromEntries([...entries.keys()].map((name) => [name, { status: "connected" as const }])) satisfies V1.McpAddResponses[200] };
       }
       case "mcp.disconnect": {
         this.mcp.get(directory)?.delete(matched.pathParams["name"]!);
         return { status: 200, body: true };
       }
       case "config.providers":
-        return { status: 200, body: { providers: [this.#v1Provider()], default: { fake: "fake-small" } } };
+        return { status: 200, body: { providers: [this.#v1Provider()], default: { fake: "fake-small" } } satisfies V1.ConfigProvidersResponses[200] };
       default:
         this.world.violation(`the fake does not serve ${matched.operationId}`);
         return { status: 400, body: { _tag: "BadRequest" } };
     }
   }
 
-  #v1Provider(): Json {
-    const model = (id: string, name: string, context: number) => ({
+  #v1Provider(): V1.Provider {
+    const model = (id: string, name: string, context: number): V1.Model => ({
       id,
       providerID: "fake",
       api: { id, url: "http://127.0.0.1/fake", npm: "@ai-sdk/openai-compatible" },
@@ -1053,7 +1080,7 @@ export class FakeServer {
     const sessionId = matched.pathParams["sessionID"];
     switch (matched.operationId) {
       case "server.info":
-        return { status: 200, body: { version: this.world.version, pid: 4242, urls: [this.url], paths: { tmp: "/tmp/opencode" } } };
+        return { status: 200, body: { version: this.world.version, pid: 4242, urls: [this.url], paths: { tmp: "/tmp/opencode" } } satisfies V2.ServerInfo };
       case "session.create": {
         const location = (body?.["location"] ?? {}) as Json;
         const rules = Array.isArray(body?.["permissions"]) ? (body["permissions"] as Rule[]).map((rule) => ({ ...rule })) : [];
@@ -1062,7 +1089,7 @@ export class FakeServer {
           ...(model === undefined || model === null ? {} : { model: { providerID: String(model["providerID"]), id: String(model["id"]) } }),
           ...(typeof body?.["agent"] === "string" ? { agent: body["agent"] } : {}),
         });
-        this.publish(session, "session.created", { sessionID: session.id, projectID: "global", location: { directory: session.directory }, slug: session.id.slice(4, 12), title: session.title, permissions: rules, version: this.world.version }, true);
+        this.publishV2(session, "session.created", { sessionID: session.id, projectID: "global", location: { directory: session.directory }, slug: session.id.slice(4, 12), title: session.title, permissions: rules, version: this.world.version }, true);
         return { status: 200, body: { data: this.v2Session(session) } };
       }
       case "session.get": {
@@ -1076,12 +1103,12 @@ export class FakeServer {
         if (session === undefined) return this.#notFound(sessionId!);
         if (Array.isArray(body?.["permissions"])) {
           session.rules = (body["permissions"] as Rule[]).map((rule) => ({ ...rule }));
-          this.publish(session, "session.permissions", { sessionID: session.id, permissions: session.rules }, true);
+          this.publishV2(session, "session.permissions", { sessionID: session.id, permissions: session.rules }, true);
         }
         return { status: 204 };
       }
       case "session.active":
-        return { status: 200, body: { data: Object.fromEntries([...this.#runs.entries()].filter(([, run]) => !run.ended).map(([id]) => [id, { type: "running" }])) } };
+        return { status: 200, body: { data: Object.fromEntries([...this.#runs.entries()].filter(([, run]) => !run.ended).map(([id]) => [id, { type: "running" as const }])) satisfies V2.SessionActiveOutput } };
       case "session.prompt": {
         const session = this.#session(sessionId!);
         if (session === undefined) return this.#notFound(sessionId!);
@@ -1090,7 +1117,7 @@ export class FakeServer {
         const system = [...session.instructions.values()].join("\n\n");
         const started = this.#startRun(session, text, system === "" ? undefined : system, steer ? "steer" : "prompt");
         const metadata = steer ? { metadata: { "ari.steer": true } } : {};
-        return { status: 200, body: { data: { id: started.messageId, sessionID: session.id, time: { created: Date.now() }, type: "user", payload: { text, ...metadata }, delivery: "steer" } } };
+        return { status: 200, body: { data: { id: started.messageId, sessionID: session.id, time: { created: Date.now() }, type: "user", payload: { text, ...metadata }, delivery: "steer" } satisfies V2.SessionPromptOutput } };
       }
       case "session.switchModel": {
         const session = this.#session(sessionId!);
@@ -1108,13 +1135,13 @@ export class FakeServer {
       case "session.interrupt": {
         const run = sessionId === undefined ? undefined : this.#runs.get(sessionId);
         run?.requestStop("cancel");
-        return { status: 200, body: { interrupted: run !== undefined && !run.ended } };
+        return { status: 200, body: { interrupted: run !== undefined && !run.ended } satisfies V2.SessionInterruptOutput };
       }
       case "session.fork": {
         const source = this.#session(sessionId!);
         if (source === undefined) return this.#notFound(sessionId!);
         const fork = this.#fork(source, typeof body?.["before"] === "string" ? body["before"] : undefined);
-        this.publish(fork, "session.created", { sessionID: fork.id, projectID: "global", location: { directory: fork.directory }, slug: fork.id.slice(4, 12), title: fork.title, permissions: fork.rules, version: this.world.version }, true);
+        this.publishV2(fork, "session.created", { sessionID: fork.id, projectID: "global", location: { directory: fork.directory }, slug: fork.id.slice(4, 12), title: fork.title, permissions: fork.rules, version: this.world.version }, true);
         return { status: 200, body: { data: this.v2Session(fork) } };
       }
       case "session.compact": {
@@ -1124,13 +1151,13 @@ export class FakeServer {
         // A compaction is admitted to the inbox and runs as an execution of its own.
         return {
           status: 200,
-          body: { data: { id, sessionID: session.id, time: { created: Date.now() }, type: "compaction", payload: {}, delivery: "steer" } },
+          body: { data: { id, sessionID: session.id, time: { created: Date.now() }, type: "compaction", payload: {}, delivery: "steer" } satisfies V2.SessionCompactOutput },
           after: () => {
             session.compactions += 1;
-            this.publish(session, "session.execution.started", { sessionID: session.id }, true);
-            this.publish(session, "session.compaction.started", { sessionID: session.id, reason: "manual", inputID: id }, true);
-            this.publish(session, "session.compaction.ended", { sessionID: session.id, reason: "manual", text: "Summary of the conversation." }, true);
-            this.publish(session, "session.execution.succeeded", { sessionID: session.id }, true);
+            this.publishV2(session, "session.execution.started", { sessionID: session.id }, true);
+            this.publishV2(session, "session.compaction.started", { sessionID: session.id, reason: "manual", inputID: id }, true);
+            this.publishV2(session, "session.compaction.ended", { sessionID: session.id, reason: "manual", text: "Summary of the conversation." }, true);
+            this.publishV2(session, "session.execution.succeeded", { sessionID: session.id }, true);
           },
         };
       }
@@ -1139,7 +1166,7 @@ export class FakeServer {
         if (session === undefined) return this.#notFound(sessionId!);
         if (this.#runs.has(session.id)) return { status: 409, body: { _tag: "SessionBusyError", sessionID: session.id, message: "busy" } };
         session.revert = String(body?.["messageID"]);
-        return { status: 200, body: { data: { messageID: session.revert } } };
+        return { status: 200, body: { data: { messageID: session.revert } satisfies V2.SessionRevertStageOutput } };
       }
       case "session.revert.commit": {
         const session = this.#session(sessionId!);
@@ -1153,7 +1180,7 @@ export class FakeServer {
         if (entry === undefined) return { status: 409, body: { _tag: "ConflictError", message: "The inbox item was delivered" } };
         this.#inbox.delete(id);
         const session = this.world.sessions.get(entry.sessionId)!;
-        this.publish(session, "session.inbox.cancelled", { sessionID: session.id, inboxID: id }, true);
+        this.publishV2(session, "session.inbox.cancelled", { sessionID: session.id, inboxID: id }, true);
         return { status: 204 };
       }
       case "experimental.session.instructions.entry.put":
@@ -1171,15 +1198,15 @@ export class FakeServer {
         if (pending === undefined) return { status: 404, body: { _tag: "FormNotFoundError", formID: id, message: "not found" } };
         this.#questions.delete(id);
         const session = this.world.sessions.get(pending.sessionId)!;
-        if (matched.operationId === "session.form.reply") this.publish(session, "form.replied", { id, sessionID: session.id, answer: (body?.["answer"] ?? {}) as Json });
-        else this.publish(session, "form.cancelled", { id, sessionID: session.id });
+        if (matched.operationId === "session.form.reply") this.publishV2(session, "form.replied", { id, sessionID: session.id, answer: (body?.["answer"] ?? {}) as Extract<V2.OpenCodeEvent, { type: "form.replied" }>["data"]["answer"] });
+        else this.publishV2(session, "form.cancelled", { id, sessionID: session.id });
         this.#answerWaiters.get(id)?.(matched.operationId === "session.form.reply" ? body?.["answer"] : null);
         return { status: 204 };
       }
       case "session.message.list": {
         const session = this.#session(sessionId!);
         if (session === undefined) return this.#notFound(sessionId!);
-        return { status: 200, body: { data: session.messages.map((message) => this.v2Message(session, message)), cursor: {} } };
+        return { status: 200, body: { data: session.messages.map((message) => this.v2Message(session, message)), cursor: {} } satisfies V2.MessageListOutput };
       }
       case "session.permission.reply": {
         const decision = body?.["decision"];
@@ -1198,7 +1225,7 @@ export class FakeServer {
       }
       case "model.list": {
         const directory = url.searchParams.get("location[directory]") ?? process.cwd();
-        const model = (id: string, name: string, context: number) => ({
+        const model = (id: string, name: string, context: number): V2.ModelInfo => ({
           id,
           modelID: id,
           providerID: "fake",
@@ -1211,7 +1238,7 @@ export class FakeServer {
           enabled: true,
           limit: { context, output: 4096 },
         });
-        return { status: 200, body: { location: { directory }, data: [model("fake-small", "Fake Small", 128000), model("fake-large", "Fake Large", 200000)] } };
+        return { status: 200, body: { location: { directory }, data: [model("fake-small", "Fake Small", 128000), model("fake-large", "Fake Large", 200000)] } satisfies V2.ModelListOutput };
       }
       default:
         this.world.violation(`the fake does not serve ${matched.operationId}`);

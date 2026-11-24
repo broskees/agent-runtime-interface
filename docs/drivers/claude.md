@@ -334,3 +334,9 @@ SDK (`sdk-types.ts`, which `sdk-types.test.ts` also compiles with planted
 mistakes to show each is caught), the conformance harness and suite, and the tests for
 the driver's quirks, launch context, availability, capability honesty and
 metadata. `SOURCES.md` lists the vendor sources and pinned versions.
+
+`replay.test.ts` and `recorder.test.ts` cover the native recorder
+(`pnpm run record:claude`): they record the six recording scenarios from the
+fake SDK, replay them through a fresh driver, and check the recorder keeps the
+user's Claude setup out. [docs/recordings.md](../recordings.md) describes the
+format and says how to record against the real Claude Code.

@@ -201,8 +201,8 @@ For OpenCode: a response, an event, the end of a stream or a dropped
 connection when the replay server has written it to a connection the driver
 still holds open. Nothing reaches a connection the driver closed, so an event
 or an end recorded after the driver's `close` of its stream, or a response
-to a request the driver gave up, fails. After the scenario, replay also waits
-until the driver has closed its event streams, or half a second.
+to a request the driver gave up, fails. After the scenario, replay first waits
+until the driver's event streams have closed, or 5 seconds.
 
 Before it compares, replay runs the driver's frame through the sanitiser with
 its own workspace, `$HOME` and `PATH`. Before it delivers, it puts its own
@@ -504,7 +504,10 @@ in.
   one that fails, the recorder writes each credential whose value changed in
   the copy back to the user's database, so a rotated token is never lost.
   When the user's row also changed meanwhile, the recorder leaves it as it is
-  and reports the scenario failed.
+  and reports the scenario failed. Whenever a refreshed value cannot go back
+  (that case, or a database the recorder cannot write), the recorder keeps it
+  in `opencode.db.ari-recorder-refreshed-<pid>.json` beside the user's
+  database, mode 0600, and names that file in the error.
 - Without a database of the user's, the recorder copies nothing; provider keys
   in the environment still work.
 

@@ -26,6 +26,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { OpencodeLayout } from "./run.ts";
 import { openSqlite } from "./sqlite.ts";
+import type { SqliteDatabase } from "./sqlite.ts";
 
 /** The database file of OpenCode 2.1.2 release builds (`packages/cli/src/database-path.ts`). */
 export const OPENCODE_DATABASE_FILE = "opencode.db";
@@ -108,7 +109,10 @@ export async function copyCredentials(env: Env, layout: OpencodeLayout): Promise
  * Puts each credential OpenCode changed in the copy back into the user's
  * database. Throws, after writing back the others, when the user's row of a
  * changed credential also changed while the recorder ran: the recorder leaves
- * that row as it is.
+ * that row as it is. Whenever a changed value cannot go back (that conflict,
+ * or a database the recorder cannot write), it is kept in a file beside the
+ * user's database, mode 0600, which the error names: the workspace with the
+ * copy is removed next, and a refreshed token must not be lost with it.
  */
 export async function returnCredentials(credentials: CopiedCredentials): Promise<void> {
   if (!fs.existsSync(credentials.copy)) return;
@@ -121,9 +125,13 @@ export async function returnCredentials(credentials: CopiedCredentials): Promise
   }
   const changed = rows.filter((row) => credentials.original.has(row.id) && credentials.original.get(row.id) !== row.value);
   if (changed.length === 0) return;
-  const user = await openSqlite(credentials.real);
+  // Where a refreshed value goes when it cannot go back: beside the user's database, readable only by them.
+  const kept = `${credentials.real}.ari-recorder-refreshed-${process.pid}.json`;
+  const keep = (rows: ReadonlyArray<{ id: string; value: string }>): void => fs.writeFileSync(kept, `${JSON.stringify(rows, null, 2)}\n`, { mode: 0o600 });
+  let user: SqliteDatabase | undefined;
   const conflicts: string[] = [];
   try {
+    user = await openSqlite(credentials.real);
     const stamped = user.all("PRAGMA table_info(credential)").some((column) => column["name"] === "time_updated");
     user.exec("BEGIN IMMEDIATE");
     for (const row of changed) {
@@ -138,17 +146,22 @@ export async function returnCredentials(credentials: CopiedCredentials): Promise
     user.exec("COMMIT");
   } catch (error) {
     try {
-      user.exec("ROLLBACK");
+      user?.exec("ROLLBACK");
     } catch {
       // No transaction was open.
     }
-    throw error;
+    // The workspace, with the copy, goes next: keep the refreshed values where the user finds them, so none is lost.
+    keep(changed);
+    throw new Error(
+      `the recorder could not write the sign-in(s) OpenCode refreshed back to ${credentials.real} (${error instanceof Error ? error.message : String(error)}); it kept them in ${kept}, readable only by you. Put each value back into its row of the credential table, or sign in again.`,
+    );
   } finally {
-    user.close();
+    user?.close();
   }
   if (conflicts.length > 0) {
+    keep(changed.filter((row) => conflicts.includes(row.id)));
     throw new Error(
-      `the credential(s) ${conflicts.join(", ")} in ${credentials.real} changed while the recorder ran, and OpenCode also refreshed the recorder's copy; the recorder left them as they are. Sign in again if OpenCode reports the sign-in as expired.`,
+      `the credential(s) ${conflicts.join(", ")} in ${credentials.real} changed while the recorder ran, and OpenCode also refreshed the recorder's copy; the recorder left them as they are and kept its refreshed value(s) in ${kept}, readable only by you. Sign in again if OpenCode reports the sign-in as expired.`,
     );
   }
 }

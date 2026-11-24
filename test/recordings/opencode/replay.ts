@@ -17,7 +17,7 @@ import { opencodeNativeAnswers } from "./frames.ts";
 import { OPENCODE_PROTOCOL_WORDS } from "./protocol-words.ts";
 import { startOpencodeReplayServer } from "./replay-server.ts";
 import type { OpencodeReplay } from "./replay-server.ts";
-import { createOpencodeLayout, runOpencodeScenario } from "./run.ts";
+import { STREAM_CLOSE_WAIT_MS, createOpencodeLayout, runOpencodeScenario } from "./run.ts";
 
 /** The server password the replay's driver instance holds. The replay server asks for none; the recording holds no headers. */
 export const REPLAY_SERVER_PASSWORD = "ari-replay";
@@ -32,7 +32,7 @@ export interface OpencodeReplayResult {
 export interface OpencodeReplayOptions {
   /** How long the scenario waits for any one thing; 30 s by default. */
   readonly timeoutMs?: number;
-  /** After the scenario, how long replay waits with no frame taken (or a stream still open) before it calls a frame never taken; 500 ms by default. */
+  /** After the scenario, how long replay waits with no frame taken before it calls a frame never taken; 500 ms by default. It waits up to 5 s for the driver's event streams to close first. */
   readonly idleMs?: number;
   /** The replay's environment (HOME, PATH, USER, LOGNAME); process.env by default. */
   readonly env?: { readonly [name: string]: string | undefined };
@@ -59,10 +59,9 @@ export async function replayOpencode(source: Recording | string, options: Openco
       // Otherwise a drift explains a failed run better than whatever the driver made of it.
       throw replay.sequencer.failure ?? error;
     }
-    const idleMs = options.idleMs ?? 500;
-    // The driver closes its event stream as its session closes; then it may still be taking the last frames.
-    await replay.whenStreamsClosed(idleMs);
-    await replay.sequencer.whenTaken(idleMs);
+    // The driver closes its event stream as its session closes; the close may reach the server a moment later. Then the driver may still be taking the last frames.
+    await replay.whenStreamsClosed(STREAM_CLOSE_WAIT_MS);
+    await replay.sequencer.whenTaken(options.idleMs ?? 500);
     replay.sequencer.finish();
     checkScenario(result.run, opencodeNativeAnswers(replay.sequencer.matchedOutbound()));
     return { run: result.run, replay, diagnostics: result.diagnostics };

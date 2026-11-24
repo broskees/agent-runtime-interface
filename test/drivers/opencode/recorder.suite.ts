@@ -350,9 +350,40 @@ test("when the user's sign-in also changed during the run, the recorder leaves i
     copy = path.join(input.env["XDG_DATA_HOME"]!, "opencode", "opencode.db");
     return start(input);
   });
-  assert.match(outcomes[0]!.error?.message ?? "", /crd_0001 in .* changed while the recorder ran, and OpenCode also refreshed the recorder's copy; the recorder left them as they are/);
+  assert.match(outcomes[0]!.error?.message ?? "", /crd_0001 in .* changed while the recorder ran, and OpenCode also refreshed the recorder's copy; the recorder left them as they are and kept its refreshed value\(s\) in .*opencode\.db\.ari-recorder-refreshed-\d+\.json/);
   assert.equal(await credentialValue(database), "refreshed-by-another-opencode");
+  const kept = `${database}.ari-recorder-refreshed-${process.pid}.json`;
+  assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: "crd_0001", value: "refreshed-by-the-recorded-server" }], "the recorder's refreshed value is not lost");
+  assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
   assert.ok(!fs.existsSync(outcomes[0]!.workspace));
+});
+
+test("when the recorder cannot write a refreshed sign-in back, it keeps it in a file beside the user's database and says where", async () => {
+  const { database, env } = await seedHome();
+  const servers: FakeOpencodeServer[] = [];
+  let copy = "";
+  const start = fakeOpencodeServers(servers, {
+    onTurn: async () => {
+      const db = await openSqlite(copy);
+      try {
+        db.run("UPDATE credential SET value = ?", "refreshed-by-the-recorded-server");
+      } finally {
+        db.close();
+      }
+      // The user's database is no longer one the recorder can open.
+      for (const file of [database, `${database}-wal`, `${database}-shm`]) fs.rmSync(file, { force: true });
+      fs.writeFileSync(database, "not a database any more");
+    },
+  });
+  const { outcomes } = await recordInProcess({ ...env, ARI_RECORD_OPENCODE_MODEL: "fake/fake-small" }, ["simple"], async (input) => {
+    copy = path.join(input.env["XDG_DATA_HOME"]!, "opencode", "opencode.db");
+    return start(input);
+  });
+  const kept = `${database}.ari-recorder-refreshed-${process.pid}.json`;
+  assert.match(outcomes[0]!.error?.message ?? "", new RegExp(`could not write the sign-in\\(s\\) OpenCode refreshed back to .*; it kept them in ${kept.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: "crd_0001", value: "refreshed-by-the-recorded-server" }]);
+  assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
+  assert.ok(!fs.existsSync(outcomes[0]!.workspace), "the temp dir is removed");
 });
 
 test("without a database of the user's the recorder copies nothing and creates nothing in the user's data directory", async () => {

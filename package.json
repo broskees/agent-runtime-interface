@@ -88,7 +88,10 @@
     "test:python": "cd clients/python && uv run --locked pytest",
     "test:go": "cd clients/go && go test -count=1 ./...",
     "test:clients": "pnpm run test:rust && pnpm run test:python && pnpm run test:go",
-    "gate": "pnpm run codegen:check && pnpm run codegen:effect:check && pnpm run codegen:codex:check && pnpm run codegen:acp:check && pnpm run build && pnpm run check:rules && pnpm run typecheck && pnpm run test && pnpm run check:package && pnpm run codegen:clients:check && pnpm run build:binary && pnpm run test:binary && pnpm run test:clients"
+    "prepack": "node scripts/pack.ts --refuse-repository-pack",
+    "pack:tarball": "node scripts/pack.ts --out build/package",
+    "check:workflows": "go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/ci.yml .github/workflows/release.yml",
+    "gate": "pnpm run codegen:check && pnpm run codegen:effect:check && pnpm run codegen:codex:check && pnpm run codegen:acp:check && pnpm run build && pnpm run check:rules && pnpm run typecheck && pnpm run test && pnpm run check:package && pnpm run codegen:clients:check && pnpm run build:binary && pnpm run test:binary && pnpm run test:clients && pnpm run check:workflows"
   },
   "dependencies": {},
   "peerDependencies": {

@@ -25,14 +25,21 @@ const HOME = path.join(ROOT, "home");
 const WORKSPACE = path.join(ROOT, "project");
 fs.mkdirSync(HOME);
 fs.mkdirSync(WORKSPACE);
-// The SDK reads the home directory when it is used, so it sees this one, never the user's own.
-const savedHome = process.env["HOME"];
-process.env["HOME"] = HOME;
-after(() => {
-  if (savedHome === undefined) delete process.env["HOME"];
-  else process.env["HOME"] = savedHome;
-  fs.rmSync(ROOT, { recursive: true, force: true });
-});
+after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
+
+/** Runs a test with HOME at an empty directory: the SDK reads the home directory when it is used, so it sees this one, never the user's own. */
+function withHome(body: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    const saved = process.env["HOME"];
+    process.env["HOME"] = HOME;
+    try {
+      await body();
+    } finally {
+      if (saved === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = saved;
+    }
+  };
+}
 
 function policy(mode: "full_access" | "read_only" = "full_access") {
   return { mode, interaction: "default" as const, cwd: WORKSPACE };
@@ -52,7 +59,7 @@ function collect(session: { events(): AsyncIterable<AriEvent> }): AriEvent[] {
   return events;
 }
 
-test("status() finds the real SDK and its version", async () => {
+test("status() finds the real SDK and its version", withHome(async () => {
   const { instance } = await openInstance();
   const status = await instance.status();
   assert.equal(status.state, "ready");
@@ -60,9 +67,9 @@ test("status() finds the real SDK and its version", async () => {
   assert.equal(status.advisory, undefined);
   assert.deepEqual(status.auth, { status: "configured", evidence: "passive", scope: "managed_profile" });
   await instance.dispose();
-});
+}));
 
-test("threads are real Cursor agents in the instance's own store: created, resumed by another session, and replaced when Cursor does not hold them", async () => {
+test("threads are real Cursor agents in the instance's own store: created, resumed by another session, and replaced when Cursor does not hold them", withHome(async () => {
   const { host, instance } = await openInstance();
   const first = await instance.openSession({ launch: { mcpServers: [{ name: "launch-docs", transport: "http", url: "http://127.0.0.1:9/mcp" }] } });
   const created = await first.createThread({ cwd: WORKSPACE, policy: policy() });
@@ -97,9 +104,9 @@ test("threads are real Cursor agents in the instance's own store: created, resum
 
   assert.deepEqual(fs.readdirSync(HOME), [], "the SDK wrote nothing under the home directory");
   assert.deepEqual(networkAttempts(), []);
-});
+}));
 
-test("the tools a read_only thread offers are tool names the real SDK knows", async () => {
+test("the tools a read_only thread offers are tool names the real SDK knows", withHome(async () => {
   const sdk = await import("@cursor/sdk");
   const store = new sdk.JsonlLocalAgentStore(path.join(ROOT, "probe-store"));
   let valid: string[] = [];
@@ -112,4 +119,4 @@ test("the tools a read_only thread offers are tool names the real SDK knows", as
   for (const tool of READ_ONLY_TOOLS) assert.ok(valid.includes(tool), `${tool} is a Cursor tool name`);
   for (const writer of ["shell", "edit", "delete", "mcp", "task", "write"]) assert.ok(!READ_ONLY_TOOLS.includes(writer), `${writer} is not offered to a read_only thread`);
   assert.deepEqual(networkAttempts(), []);
-});
+}));

@@ -100,9 +100,9 @@ export function cursorHarness(): ConformanceHarness<CursorConfig> & { cleanup():
     name: "cursor (fake @cursor/sdk 1.4.2, in process)",
     notApplicable: {
       "session-replaced.locked": "Cursor's local agent store has no lock: Agent.resume reads the agent's row and opens it, whoever else holds it (@cursor/sdk index.js resumeAgent)",
-      "turn-failed.usage_limit": "Cursor's RunError carries only a message and a code, no reset time (@cursor/sdk run.d.ts); quirks.test.ts checks the usage_limit class",
+      "turn-failed.usage_limit": "Cursor's RunError carries only a message and a code, no reset time (@cursor/sdk run.d.ts); quirks.suite.ts checks the usage_limit class",
       "auth-states.inherited-credentials":
-        "The SDK runs Cursor's agent inside the host's process, whose shell tools inherit the host's process.env (977.js); the driver's part, an explicit apiKey on every SDK call, is tested in auth.test.ts",
+        "The SDK runs Cursor's agent inside the host's process, whose shell tools inherit the host's process.env (977.js); the driver's part, an explicit apiKey on every SDK call, is tested in auth.suite.ts",
     },
     cleanup,
     workspace: async () => workspace,

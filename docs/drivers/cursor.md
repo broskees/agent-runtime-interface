@@ -297,7 +297,7 @@ SDK can neither fork nor rewind an agent's conversation. `auth.complete`
 rejects with `unsupported{capability: "auth.complete"}`, because no Cursor
 sign-in returns through a callback URL. Every other optional member is left
 out.
-`test/drivers/cursor/capabilities.test.ts` holds the full list.
+`test/drivers/cursor/capabilities.suite.ts` holds the full list.
 
 ## Limits
 
@@ -315,19 +315,19 @@ out.
 
 ## Tests
 
-- `test/drivers/cursor/conformance.test.ts`: all 15 scenarios against the fake
-  SDK. Scenarios 8 and 15 do not apply (no approvals); the harness gives
-  reasons for three checks: a locked session (Cursor's store has no lock), a
-  usage limit's reset time (Cursor reports none) and inherited credentials in
-  the agent's environment (the host's own `process.env`).
-- `test/drivers/cursor/fake-sdk.ts`: the fake. It creates and resumes agents
-  with the real SDK, offline, in the real `JsonlLocalAgentStore`; it fakes
-  only the runs, and checks every update with the SDK's
-  `InteractionUpdateSchema`.
-- `test/drivers/cursor/real-sdk.test.ts`: the driver against the real SDK,
-  offline: threads created, resumed and replaced, with every outbound
-  connection refused.
-- `test/drivers/cursor/sdk-types.test.ts`: the driver's SDK types against
-  `@cursor/sdk` 1.4.2.
-- `capabilities.test.ts`, `availability.test.ts`, `launch-context.test.ts`,
-  `auth.test.ts`, `quirks.test.ts` and `meta.test.ts` cover the driver rules.
+All the driver's tests run in one Node process, `test/drivers/cursor/cursor.test.ts`,
+which imports each `*.suite.ts` file of `test/drivers/cursor/`:
+
+- `conformance.suite.ts`: all 15 scenarios against the fake SDK. Scenarios 8
+  and 15 do not apply (no approvals); the harness gives reasons for three
+  checks: a locked session (Cursor's store has no lock), a usage limit's reset
+  time (Cursor reports none) and inherited credentials in the agent's
+  environment (the host's own `process.env`).
+- `fake-sdk.ts`: the fake. It creates and resumes agents with the real SDK,
+  offline, in the real `JsonlLocalAgentStore`; it fakes only the runs, and
+  checks every update with the SDK's `InteractionUpdateSchema`.
+- `real-sdk.suite.ts`: the driver against the real SDK, offline: threads
+  created, resumed and replaced, with every outbound connection refused.
+- `sdk-types.suite.ts`: the driver's SDK types against `@cursor/sdk` 1.4.2.
+- `capabilities.suite.ts`, `availability.suite.ts`, `launch-context.suite.ts`,
+  `auth.suite.ts`, `quirks.suite.ts` and `meta.suite.ts` cover the driver rules.

@@ -16,10 +16,12 @@
 - Config options keep `dependsOn` from `configDependencies`.
 - Vendor `_meta` and unmapped updates pass through as `x:acp.meta` and
   `x:acp.update`; `ext("acp", "_method", params)` sends extension requests.
-- v2 tool patches keep omitted fields and clear `null` ones; a v2
-  `user_message` updates the turn's user item; resume applies the agent's
-  current-state snapshot, so running work becomes a `provider_initiated`
-  turn.
+- Tool updates follow each version's rules: v2 keeps omitted fields and
+  clears `null` ones; under v1, `null` changes nothing (v1 Tool Calls). A v2
+  `user_message` updates the turn's user item, which shows only the host's
+  own text, never the driver's first-prompt instructions. Resume applies the
+  agent's current-state snapshot, so running work becomes a
+  `provider_initiated` turn.
 - `resumeThread` passes launch instructions on: `systemPrompt` on
   `session/resume`, `session/load` or the replacing `session/new`, the rest
   in the first prompt.

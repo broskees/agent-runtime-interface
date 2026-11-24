@@ -108,7 +108,7 @@ interface MessageState {
   settled: boolean;
 }
 
-/** A tool call as the agent's patches left it. ACP v2 (`ToolCallUpdate`): an omitted field keeps its value, `null` clears it, a value replaces it. */
+/** A tool call as the agent's updates left it (`#tool` gives the rules for each protocol version). */
 interface ToolState {
   readonly itemId: string;
   readonly kind: ItemKind;
@@ -125,7 +125,24 @@ interface ToolState {
 
 interface UserMessageState {
   readonly itemId: string;
+  /** What the ARI item shows. */
   text: string;
+  /** The agent's text for the message: a `user_message` with `content` replaces it, a chunk appends to it. */
+  native: string;
+  /** A `user_message` set the whole content, so the native text is no longer a copy still arriving in chunks. */
+  replaced: boolean;
+  /** For the turn's prompt: what the driver sent and what the host wrote, so the agent's copy shows only the host's words. */
+  readonly prompt?: SentPrompt;
+}
+
+/** A prompt as the driver sent it: the instructions it put first (the `first_user_message` channel), then the host's content. */
+interface SentPrompt {
+  /** The text of every block sent, instructions included, as `contentText` joins them. */
+  readonly sent: string;
+  /** The instruction block's text; empty when the prompt carried none. */
+  readonly instructions: string;
+  /** The host's own text, which the user item shows. */
+  readonly hostText: string;
 }
 
 interface TurnState {
@@ -219,6 +236,32 @@ function stopOutcome(stopReason: string | null | undefined, error: { code?: unkn
       // ACP: an idle state may omit the reason; the turn ended, but nobody said why.
       return { status: "completed", notice: `The agent ended the turn without a known stop reason (${String(stopReason)}).` };
   }
+}
+
+/**
+ * ACP v1 tool updates carry only the fields that changed, and `null` changes nothing. ACP v1 Tool Calls
+ * (https://agentclientprotocol.com/protocol/v1/tool-calls.md) says: "Only the fields being changed need to be
+ * included"; for `rawInput` and `rawOutput`, "On a tool call update, both [omission and `null`] leave the previously
+ * reported value unchanged"; for `name`, "Omission and `null` both leave the existing name unchanged". v1 defines no
+ * way to clear a field: clearing with `null` arrived with v2, whose `tool_call_update` is "Now an explicit upsert with
+ * omit/`null`/value patch semantics" (v2 migration guide). So a v1 update drops its `null` fields before it is applied
+ * as a patch; `[]` still replaces a collection.
+ */
+function v1ToolUpdate(update: AcpToolCall): AcpToolCall {
+  return Object.fromEntries(Object.entries(update).filter(([, value]) => value !== null)) as unknown as AcpToolCall;
+}
+
+/**
+ * The text a user item shows. For the turn's prompt, the agent's copy of what the driver sent (whole, or the chunks
+ * so far) shows the host's own text: the instructions the driver put before it are not the user's words. A copy the
+ * agent changed, such as a redaction, shows the agent's text, still without the driver's instruction prefix.
+ */
+function userItemText(message: UserMessageState): string {
+  const prompt = message.prompt;
+  if (prompt === undefined) return message.native;
+  if (message.native === prompt.sent || (!message.replaced && prompt.sent.startsWith(message.native))) return prompt.hostText;
+  if (prompt.instructions !== "" && message.native.startsWith(prompt.instructions)) return message.native.slice(prompt.instructions.length).replace(/^\s+/, "");
+  return message.native;
 }
 
 export class AcpSession implements Session {
@@ -413,7 +456,8 @@ export class AcpSession implements Session {
     const blocks = await this.#promptBlocks(agent, input.content);
     const prompt = instructions.length === 0 ? blocks : [{ type: "text" as const, text: instructions.join("\n\n") }, ...blocks];
     thread.pendingInstructions = [];
-    const turn = this.#openTurn(thread, "user", { clientTurnKey: input.clientTurnKey, hostTag: input.hostTag, policy, text: promptText(input.content) });
+    const sent: SentPrompt = { sent: contentText(prompt), instructions: instructions.join("\n\n"), hostText: promptText(input.content) };
+    const turn = this.#openTurn(thread, "user", { clientTurnKey: input.clientTurnKey, hostTag: input.hostTag, policy, prompt: sent });
 
     if (agent.version === 1) {
       // v1: the response to session/prompt is the end of the turn.
@@ -769,7 +813,7 @@ export class AcpSession implements Session {
     }
   }
 
-  #openTurn(thread: ThreadState, origin: "user" | "provider_initiated", host: { clientTurnKey?: string; hostTag?: string | undefined; policy: RuntimePolicy; text?: string }): TurnState {
+  #openTurn(thread: ThreadState, origin: "user" | "provider_initiated", host: { clientTurnKey?: string; hostTag?: string | undefined; policy: RuntimePolicy; prompt?: SentPrompt }): TurnState {
     const ordinal = thread.nextTurnOrdinal;
     thread.nextTurnOrdinal += 1;
     // ACP has no turn ids: a turn is its position in this session's thread.
@@ -811,11 +855,11 @@ export class AcpSession implements Session {
       },
       envelope,
     );
-    if (host.text !== undefined) {
+    if (host.prompt !== undefined) {
       const promptNative: NativeRef = { id: null, strength: "none", ordinal: 0 };
       const promptId = deriveId({ kind: "item", native: promptNative, identityVersion: ACP_IDENTITY_VERSION, scope: id });
-      turn.unclaimedPrompt = { itemId: promptId, text: host.text };
-      this.#emit({ type: "item.upsert", item: { id: promptId, kind: "user_message", native: promptNative, status: "completed", turnId: id, text: host.text } }, envelope);
+      turn.unclaimedPrompt = { itemId: promptId, text: host.prompt.hostText, native: "", replaced: false, prompt: host.prompt };
+      this.#emit({ type: "item.upsert", item: { id: promptId, kind: "user_message", native: promptNative, status: "completed", turnId: id, text: host.prompt.hostText } }, envelope);
     }
     return turn;
   }
@@ -925,8 +969,9 @@ export class AcpSession implements Session {
   }
 
   /**
-   * A tool call update, applied as a patch (ACP v2 `ToolCallUpdate`; v1 updates carry only the fields that changed):
-   * an omitted field keeps its value, `null` clears it, a value replaces it, and `[]` clears a collection.
+   * A tool call update, applied as an ACP v2 patch (`ToolCallUpdate`): an omitted field keeps its value, `null` clears
+   * it, a value replaces it, and `[]` clears a collection. A v1 update arrives here without its `null` fields
+   * (`v1ToolUpdate`), so under v1 only a value or `[]` changes anything.
    */
   #tool(turn: TurnState, update: AcpToolCall, appendContent?: ToolCallContent): void {
     this.#endMessages(turn);
@@ -1022,37 +1067,39 @@ export class AcpSession implements Session {
 
   /**
    * v2 user message upserts (`UserMessage`): a `user_message` with `content` replaces the message, a chunk appends to
-   * it. The first one in a turn the host started is the agent's copy of the host's prompt, so it updates that user
-   * item rather than opening another; later ones open their own user items.
+   * it, and a new message id starts empty. The first one in a turn the host started is the agent's copy of the prompt
+   * the driver sent, so it updates that turn's user item (`userItemText` keeps the driver's instructions out of it);
+   * later ones open their own user items.
    */
   #userMessage(turn: TurnState, update: { sessionUpdate: string; messageId?: unknown; content?: unknown }): void {
     const messageId = typeof update.messageId === "string" ? update.messageId : undefined;
     if (messageId === undefined) return;
     const envelope = this.#turnEnvelope(turn);
-    const whole = update.sessionUpdate === "user_message";
-    const incoming = whole ? contentText((update.content ?? []) as V2.ContentBlock[]) : contentText([update.content as V2.ContentBlock]);
     let message = turn.userMessages.get(messageId);
     if (message === undefined && turn.unclaimedPrompt !== undefined) {
       message = turn.unclaimedPrompt;
       turn.unclaimedPrompt = undefined;
       turn.userMessages.set(messageId, message);
-      // A new message id starts empty: a chunk's text is the whole message so far.
-      const text = whole && update.content === undefined ? message.text : incoming;
-      if (text !== message.text) {
-        message.text = text;
-        this.#emit({ type: "item.upsert", item: { id: message.itemId, text } }, envelope);
-      }
-      return;
     }
+    const opened = message === undefined;
     if (message === undefined) {
       this.#endMessages(turn);
-      const native: NativeRef = { id: messageId, strength: "weak", fingerprint: "user_message" };
-      message = { itemId: this.#itemId(turn, native), text: incoming };
+      message = { itemId: this.#itemId(turn, { id: messageId, strength: "weak", fingerprint: "user_message" }), text: "", native: "", replaced: false };
       turn.userMessages.set(messageId, message);
-      this.#emit({ type: "item.upsert", item: { id: message.itemId, kind: "user_message", native, status: "completed", turnId: turn.id, text: incoming } }, envelope);
+    }
+    if (update.sessionUpdate === "user_message") {
+      if (update.content !== undefined) {
+        message.native = contentText((update.content ?? []) as V2.ContentBlock[]);
+        message.replaced = true;
+      }
+    } else message.native += contentText([update.content as V2.ContentBlock]);
+    const text = userItemText(message);
+    if (opened) {
+      message.text = text;
+      const native: NativeRef = { id: messageId, strength: "weak", fingerprint: "user_message" };
+      this.#emit({ type: "item.upsert", item: { id: message.itemId, kind: "user_message", native, status: "completed", turnId: turn.id, text } }, envelope);
       return;
     }
-    const text = whole ? (update.content === undefined ? message.text : incoming) : message.text + incoming;
     if (text === message.text) return;
     message.text = text;
     this.#emit({ type: "item.upsert", item: { id: message.itemId, text } }, envelope);
@@ -1206,7 +1253,8 @@ export class AcpSession implements Session {
       }
       case "tool_call":
       case "tool_call_update":
-        this.#tool(turn, params.update as AcpToolCall);
+        // v1: `null` leaves a field as it was; v2: `null` clears it.
+        this.#tool(turn, version === 1 ? v1ToolUpdate(params.update as AcpToolCall) : (params.update as AcpToolCall));
         return;
       case "tool_call_content_chunk": {
         const chunk = params.update as V2.ToolCallContentChunk;

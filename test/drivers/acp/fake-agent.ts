@@ -21,6 +21,7 @@
 //   --print-version <text>  the version --version prints
 //   --answer-protocol <n>   answer initialize with protocol version n (in the --protocol version's shape)
 //   --resume-state <state>  v2: the current state a resume reports (default idle), as if work were already running
+//   --echo-prompt-chunks    v2: report the inserted prompt as user_message_chunk updates, one per block, not one user_message
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -335,7 +336,9 @@ function buildV2(): acp2.AgentApp {
         });
       });
       // The prompt is inserted: report it, report the work running, then acknowledge it.
-      await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "user_message", messageId, content: params.prompt } });
+      if (flag("--echo-prompt-chunks")) {
+        for (const block of params.prompt) await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "user_message_chunk", messageId, content: block } });
+      } else await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "user_message", messageId, content: params.prompt } });
       await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "state_update", state: "running" } });
       send({ event: "turn", turnId: turn.turnId, prompt: text });
       return { messageId, ...meta("prompt") };

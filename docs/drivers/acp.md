@@ -70,18 +70,31 @@ const instance = await acpDriver.create(host, {
   turn ends; a v2 whole-message update (`agent_message`) carries the finished
   message, so it settles it and replaces what the chunks built. A tool call is
   one item: created by its first `tool_call` (v1) or `tool_call_update`
-  (v2), patched by later ones with ACP v2's patch rule (`ToolCallUpdate` in
-  the vendored schema): an omitted field keeps its value, `null` clears it
-  (a `null` title or `locations` clears the item's `title` or `paths`), a
-  value replaces it. The item's `output` is the agent's `rawOutput` when it
-  sent one, else the text of the tool's content; its `tool` field always
-  carries the stored input and `rawOutput` (as `result`), because an ARI
-  patch replaces `tool` whole. A v2 `user_message` replaces a user message's
-  content and a `user_message_chunk` appends to it (`UserMessage`): the
-  first one in a turn the host started is the agent's copy of the prompt, so
-  it updates the turn's user item (a redaction reaches the host); later ones
-  open their own user items. v1 user chunks only echo the prompt and are
-  ignored. Tool kinds map to item kinds (`read` to
+  (v2), patched by later ones under each version's own rule:
+  - v2 (`ToolCallUpdate` in the vendored schema): an omitted field keeps
+    its value, `null` clears it (a `null` title or `locations` clears the
+    item's `title` or `paths`), a value replaces it.
+  - v1 ([Tool Calls](https://agentclientprotocol.com/protocol/v1/tool-calls.md)):
+    "Only the fields being changed need to be included", and `null` clears
+    nothing. For `rawInput` and `rawOutput` the docs say omission and `null`
+    "both leave the previously reported value unchanged", and for `name`
+    "Omission and `null` both leave the existing name unchanged". Clearing
+    with `null` is new in v2 ([v2 migration](https://agentclientprotocol.com/protocol/v2/migration.md):
+    `tool_call_update` is "Now an explicit upsert with omit/`null`/value
+    patch semantics"). A concrete value, including `[]`, still replaces.
+
+  The item's `output` is the agent's `rawOutput` when it sent one, else the
+  text of the tool's content; its `tool` field always carries the stored
+  input and `rawOutput` (as `result`), because an ARI patch replaces `tool`
+  whole. A v2 `user_message` replaces a user message's content and a
+  `user_message_chunk` appends to it (`UserMessage`): the first one in a
+  turn the host started is the agent's copy of the prompt, so it updates the
+  turn's user item rather than opening another. That item shows only the
+  host's own words: while the agent's copy matches what the driver sent
+  (whole, or the chunks so far), it keeps the host's text, and a copy the
+  agent changed (a redaction, say) shows the agent's text without the
+  instructions the driver put first. Later user messages open their own user
+  items. v1 user chunks only echo the prompt and are ignored. Tool kinds map to item kinds (`read` to
   `file_read`, `edit`/`delete`/`move` to `file_change`, `search` to
   `file_search`, `execute` to `command_execution`, `fetch` to `web_search`,
   others to `tool_call`); diff content becomes `changes` (with diff text
@@ -104,6 +117,8 @@ const instance = await acpDriver.create(host, {
   `system`), else at the top of the thread's first prompt; `launch.developerPrompt`
   and `context.developer` always go at the top of the first prompt (channel
   `first_user_message`). Without them, the driver adds no text of its own.
+  Instructions sent in the first prompt never appear in the turn's
+  `user_message` item, which holds the host's content only.
   `resumeThread` does the same with its `launch`: `system` goes in the
   `systemPrompt` of `session/resume` or `session/load` (both versions take
   one) or of the `session/new` that replaces a session the agent could not
@@ -221,4 +236,4 @@ range. `test/drivers/acp/driver-rules.ts` checks both for all six drivers.
   resume, with `session.replaced` and `contextLost: true`.
 - A v2 tool call's `kind` and `status` reset by `null` are not applied: an
   ARI item keeps the kind it opened with, and ACP agents do not move a tool
-  call back to `pending`.
+  call back to `pending`. (Under v1, `null` changes nothing anyway.)

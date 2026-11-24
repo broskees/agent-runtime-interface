@@ -344,36 +344,69 @@ test("each ARI session runs its own agent process, and declares sessionModel pro
   }
 });
 
-test("v2: tool patches keep an omitted field and clear a null one (ToolCallUpdate)", async () => {
-  const rig = await openRig({ name: "v2 tool patches", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
-  try {
-    const { session, events, waitFor } = await rig.open();
-    const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
-    await session.startTurn({ threadId: thread.id, clientTurnKey: "k1", intent: "start", content: [{ type: "text", text: "Look around" }] });
-    const native = (await rig.nextTurn()) as FakeNativeTurn;
-    const location = `${rig.cwd}/README.md`;
-    await native.raw({ sessionUpdate: "tool_call_update", toolCallId: "t-1", title: "Inspect workspace", kind: "read", status: "in_progress", locations: [{ path: location }], rawOutput: "workspace details" });
-    const opened = await waitFor((event) => event.body.type === "item.upsert" && event.body.item.kind === "file_read", "the tool item");
-    const toolId = opened.body.type === "item.upsert" ? opened.body.item.id : "";
-    // A status-only completion changes the status and nothing else.
-    await native.raw({ sessionUpdate: "tool_call_update", toolCallId: "t-1", status: "completed" });
-    let item = await until(() => (folded(events, toolId)["status"] === "completed" ? folded(events, toolId) : undefined), "the tool to complete");
-    assert.equal(item["output"], "workspace details", "the omitted rawOutput keeps the output");
-    assert.deepEqual(item["tool"], { name: "Inspect workspace", result: "workspace details" });
-    assert.equal(item["title"], "Inspect workspace");
-    assert.deepEqual(item["paths"], [location]);
-    // null clears the title and the locations; the omitted rawOutput stays.
-    await native.raw({ sessionUpdate: "tool_call_update", toolCallId: "t-1", title: null, locations: null });
-    item = await until(() => ("title" in folded(events, toolId) ? undefined : folded(events, toolId)), "the title to be cleared");
-    assert.equal(item["paths"], undefined, "null locations clear the paths");
-    assert.equal(item["output"], "workspace details");
-    assert.deepEqual((item["tool"] as { result?: unknown }).result, "workspace details", "the omitted rawOutput keeps tool.result");
-    assert.equal(item["status"], "completed");
-    await native.complete();
-  } finally {
-    await rig.cleanup();
-  }
-});
+for (const protocol of [1, 2] as const) {
+  test(`v${protocol}: one tool update sequence follows the version's rules: a status-only update keeps every field, and null ${protocol === 1 ? "keeps" : "clears"} the title, locations, raw input and raw output`, async () => {
+    const rig = await openRig({ name: `v${protocol} tool updates`, driver: acpDriver, config: config(protocol), executable: "fake-acp-agent", protocol });
+    try {
+      const { session, events, waitFor } = await rig.open();
+      const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+      await session.startTurn({ threadId: thread.id, clientTurnKey: "k1", intent: "start", content: [{ type: "text", text: "Look around" }] });
+      const native = (await rig.nextTurn()) as FakeNativeTurn;
+      // v1 opens a tool call with `tool_call`; v2 with its first `tool_call_update`.
+      const open = protocol === 1 ? "tool_call" : "tool_call_update";
+      // An update that changes nothing emits nothing, so each step ends with a marker tool, applied after it.
+      let marks = 0;
+      const applied = async (update: { [key: string]: unknown }): Promise<{ [field: string]: unknown }> => {
+        await native.raw({ sessionUpdate: "tool_call_update", toolCallId: "t-1", ...update });
+        marks += 1;
+        const mark = `mark-${marks}`;
+        await native.raw({ sessionUpdate: open, toolCallId: mark, title: mark, status: "completed" });
+        await waitFor((event) => event.body.type === "item.upsert" && event.body.item.native?.id === mark, mark);
+        return folded(events, toolId);
+      };
+      const location = `${rig.cwd}/README.md`;
+      await native.raw({ sessionUpdate: open, toolCallId: "t-1", title: "Read README", kind: "read", status: "in_progress", locations: [{ path: location }], rawInput: { path: "README.md" }, rawOutput: "workspace details" });
+      const opened = await waitFor((event) => event.body.type === "item.upsert" && event.body.item.kind === "file_read", "the tool item");
+      const toolId = opened.body.type === "item.upsert" ? opened.body.item.id : "";
+      const everything = { name: "Read README", input: { path: "README.md" }, result: "workspace details" };
+
+      // Both versions: a status-only update changes the status and nothing else.
+      let item = await applied({ status: "completed" });
+      assert.equal(item["status"], "completed");
+      assert.equal(item["title"], "Read README");
+      assert.deepEqual(item["paths"], [location]);
+      assert.deepEqual(item["tool"], everything);
+      assert.equal(item["output"], "workspace details");
+
+      item = await applied({ status: "completed", title: null, locations: null });
+      if (protocol === 1) {
+        // v1 Tool Calls: "Only the fields being changed need to be included"; null clears nothing.
+        assert.equal(item["title"], "Read README", "v1: a null title keeps the title");
+        assert.deepEqual(item["paths"], [location], "v1: null locations keep the paths");
+      } else {
+        // v2 ToolCallUpdate: null clears.
+        assert.equal(item["title"], undefined, "v2: a null title clears the title");
+        assert.equal(item["paths"], undefined, "v2: null locations clear the paths");
+      }
+      assert.deepEqual(item["tool"], everything, "omitted raw input and output stay");
+      assert.equal(item["output"], "workspace details");
+
+      item = await applied({ rawInput: null, rawOutput: null });
+      if (protocol === 1) {
+        // v1 Tool Calls: for rawInput and rawOutput, omission and null "both leave the previously reported value unchanged".
+        assert.deepEqual(item["tool"], everything, "v1: null raw input and output keep them");
+        assert.equal(item["output"], "workspace details");
+      } else {
+        assert.deepEqual(item["tool"], { name: "Read README" }, "v2: null clears the raw input and output");
+        assert.equal(item["output"] ?? "", "", "v2: with no raw output and no content, the output is empty");
+      }
+      assert.equal(item["status"], "completed");
+      await native.complete();
+    } finally {
+      await rig.cleanup();
+    }
+  });
+}
 
 test("v2: a user_message upsert replaces the user item's content, and a later chunk appends to it (UserMessage)", async () => {
   const rig = await openRig({ name: "v2 user messages", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
@@ -417,3 +450,33 @@ test("v2: resume applies the agent's current-state snapshot: work already runnin
     await rig.cleanup();
   }
 });
+
+for (const chunks of [false, true] as const) {
+  test(`v2: the agent's copy of the first prompt${chunks ? ", in chunks," : ""} leaves the user item with the host's own text; the instructions the driver put before it stay out of the transcript`, async () => {
+    const rig = await openRig({ name: "v2 prompt copy", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2, agentArgs: chunks ? ["--echo-prompt-chunks"] : [] });
+    try {
+      // The agent takes no system prompt, so every instruction goes in the first prompt (channel first_user_message).
+      const { session, events, waitFor } = await rig.open({ launch: { appendSystemPrompt: ["ARI_TRANSCRIPT_SYSTEM"], developerPrompt: ["ARI_TRANSCRIPT_DEVELOPER"] } });
+      const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy(), context: { developer: "ARI_TRANSCRIPT_CONTEXT" } });
+      const started = await session.startTurn({ threadId: thread.id, clientTurnKey: "k1", intent: "start", content: [{ type: "text", text: "Begin." }] });
+      assert.ok(started.status === "accepted" && started.providerMessageId !== undefined);
+      const messageId = started.status === "accepted" ? started.providerMessageId! : "";
+      const native = (await rig.nextTurn()) as FakeNativeTurn;
+      for (const marker of [/ARI_TRANSCRIPT_SYSTEM/, /ARI_TRANSCRIPT_DEVELOPER/, /ARI_TRANSCRIPT_CONTEXT/]) assert.match(native.prompt, marker, "the agent got the instructions");
+      // The agent reported its copy before it answered session/prompt, so the driver has applied it.
+      const sentPrompt = frameMessages(rig.harness.frames, "client").find((message) => message["method"] === "session/prompt")!["params"] as { prompt: Array<{ text?: string }> };
+      const instructions = sentPrompt.prompt[0]!.text!;
+      assert.match(instructions, /ARI_TRANSCRIPT_SYSTEM/);
+      const userItem = await waitFor((event) => event.body.type === "item.upsert" && event.body.item.kind === "user_message", "the user item");
+      const userId = userItem.body.type === "item.upsert" ? userItem.body.item.id : "";
+      assert.deepEqual(itemUpserts(events, userId).map((patch) => patch.text), ["Begin."], "the user item only ever shows the host's text");
+      // A correction that still carries the driver's instruction block shows the agent's change without it.
+      await native.raw({ sessionUpdate: "user_message", messageId, content: [{ type: "text", text: instructions }, { type: "text", text: "Begin. (checked)" }] });
+      await until(() => (folded(events, userId)["text"] === "Begin. (checked)" ? true : undefined), "the corrected user item");
+      for (const patch of itemUpserts(events, userId)) assert.doesNotMatch(String(patch.text), /ARI_TRANSCRIPT_/, "no instruction reaches the user item");
+      await native.complete();
+    } finally {
+      await rig.cleanup();
+    }
+  });
+}

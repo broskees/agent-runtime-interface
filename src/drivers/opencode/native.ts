@@ -133,6 +133,7 @@ export interface NativeRuntime {
   getSession(sessionId: string, directory: string | undefined): Promise<NativeSessionInfo | undefined>;
   setRules(sessionId: string, directory: string, rules: readonly NativeRule[]): Promise<void>;
   getRules(sessionId: string, directory: string): Promise<readonly NativeRule[]>;
+  /** The session's whole history, oldest first, whatever order and pages the server answers in. */
   messages(sessionId: string, directory: string): Promise<NativeMessage[]>;
   /** Sends a prompt. The server names the message; 2.x says its id in the answer, 1.x only in its events. */
   prompt(input: PromptInput): Promise<{ readonly messageId?: string }>;

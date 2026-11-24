@@ -9,10 +9,15 @@
 //   session (`process_per_instance`), stopped only by `dispose()`.
 // - Any external server (`serverUrl`): shared, never started or stopped.
 //
-// MCP registrations are per directory on a server, so threads that share one
-// see each other's entries. The registry here knows every thread's entries per
-// server; when a thread adds its own, every other thread on that server first
-// gets a deny rule for it (see rules.ts).
+// MCP registrations are per directory on a server (1.x the directory's
+// instance, 2.x the location), so threads that share one see each other's
+// entries. The registry here knows every thread's entries per server: their
+// names, directory and config. When a thread adds its own, every other thread
+// on that server first gets deny rules for them (see rules.ts). Threads in one
+// directory that ask for the same server under one name share its entry, which
+// stays until the last of them leaves; asking for a different server under a
+// name another thread holds there is refused, because OpenCode keeps one entry
+// per name and the second would replace the first.
 
 import { callErrors } from "../../errors.ts";
 import type { HostServices } from "../../runtime.ts";
@@ -46,8 +51,24 @@ export interface Detected {
 }
 
 interface Owner {
-  readonly names: ReadonlySet<string>;
+  readonly directory: string;
+  /** Entry names, each with its config as `mcpConfigKey` writes it. */
+  readonly entries: ReadonlyMap<string, string>;
   readonly onOthers: (others: string[]) => Promise<void>;
+}
+
+/** An MCP config as one string, keys sorted, so two threads' requests for the same server compare equal. */
+export function mcpConfigKey(config: unknown): string {
+  const sorted = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(sorted);
+    if (typeof value !== "object" || value === null) return value;
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, sorted((value as { [key: string]: unknown })[key])]),
+    );
+  };
+  return JSON.stringify(sorted(config));
 }
 
 export class ServerPool {
@@ -153,43 +174,68 @@ export class ServerPool {
     return this.shared(detected, timeoutMs);
   }
 
-  /** The entry names every thread but `owner` holds on `endpoint`. */
+  /** The entry names every thread but `owner` holds on `endpoint`, less the names `owner` holds itself. */
   othersOn(endpoint: ServerEndpoint, owner: string): string[] {
     const owners = this.#owners.get(endpoint);
     if (owners === undefined) return [];
-    const own = owners.get(owner)?.names ?? new Set<string>();
-    return [...owners.entries()].filter(([id]) => id !== owner).flatMap(([, entry]) => [...entry.names].filter((name) => !own.has(name)));
+    const own = owners.get(owner)?.entries ?? new Map<string, string>();
+    return [...new Set([...owners.entries()].filter(([id]) => id !== owner).flatMap(([, entry]) => [...entry.entries.keys()].filter((name) => !own.has(name))))];
+  }
+
+  /** The entries `owner` holds on `endpoint`. */
+  entriesOf(endpoint: ServerEndpoint, owner: string): ReadonlyMap<string, string> {
+    return this.#owners.get(endpoint)?.get(owner)?.entries ?? new Map<string, string>();
+  }
+
+  /** Whether a thread other than `owner` holds the entry `name` in `directory` on `endpoint`: then it must stay. */
+  heldByOthers(endpoint: ServerEndpoint, owner: string, directory: string, name: string): boolean {
+    const owners = this.#owners.get(endpoint);
+    if (owners === undefined) return false;
+    return [...owners.entries()].some(([id, entry]) => id !== owner && entry.directory === directory && entry.entries.has(name));
   }
 
   /**
    * Records `owner`'s entries on `endpoint`, and first gives every other
-   * thread there a deny rule for them. Refuses names OpenCode's tool names
+   * thread there deny rules for them. Refuses a name another thread holds in
+   * the same directory for a different server, and names OpenCode's rules
    * cannot keep apart from another thread's.
    */
-  async register(endpoint: ServerEndpoint, owner: string, names: ReadonlySet<string>, onOthers: (others: string[]) => Promise<void>): Promise<string[]> {
+  async register(endpoint: ServerEndpoint, owner: string, directory: string, entries: ReadonlyMap<string, string>, onOthers: (others: string[]) => Promise<void>): Promise<string[]> {
     const owners = this.#owners.get(endpoint) ?? new Map<string, Owner>();
     this.#owners.set(endpoint, owners);
     for (const [id, entry] of owners) {
       if (id === owner) continue;
-      for (const name of names) {
-        if (entry.names.has(name)) continue;
-        const clash = collidingName(name, entry.names);
+      for (const [name, config] of entries) {
+        const theirs = entry.entries.get(name);
+        if (theirs !== undefined) {
+          if (entry.directory === directory && theirs !== config) {
+            throw callErrors.invalidState("mcp_name_conflict", `Another thread on this OpenCode server has a different MCP server named "${name}" in ${directory}; OpenCode keeps one entry per name there, so this one would replace it. Give the threads' servers different names.`);
+          }
+          // The same server under the same name (shared), or an entry of another directory, which this thread's sessions never see.
+          continue;
+        }
+        const clash = collidingName(name, entry.entries.keys());
         if (clash !== undefined) {
-          throw callErrors.invalidState("mcp_name_collision", `OpenCode names MCP tools <server>_<tool>, so the host tool servers "${name}" and "${clash}" cannot be kept apart on one server; give them names that are not one another's prefix`);
+          throw callErrors.invalidState("mcp_name_collision", `OpenCode's permission rules name MCP servers by prefix (tools <server>_<tool>, resources <server>:<uri>), so the host tool servers "${name}" and "${clash}" cannot be kept apart on one server; give them names that are not one another's prefix and hold no * or ?`);
         }
       }
     }
-    owners.set(owner, { names, onOthers });
+    owners.set(owner, { directory, entries, onOthers });
     for (const [id, entry] of owners) {
       if (id !== owner) await entry.onOthers(this.othersOn(endpoint, id));
     }
     return this.othersOn(endpoint, owner);
   }
 
+  /** Forgets `owner`'s entries; the other threads stop denying the ones nobody holds now. A thread whose rules could not be relaxed keeps denying, which is safe. */
   async unregister(endpoint: ServerEndpoint, owner: string): Promise<void> {
     const owners = this.#owners.get(endpoint);
     if (owners === undefined || !owners.delete(owner)) return;
-    for (const [id, entry] of owners) await entry.onOthers(this.othersOn(endpoint, id)).catch(() => undefined);
+    for (const [id, entry] of owners) {
+      await entry.onOthers(this.othersOn(endpoint, id)).catch((error: unknown) => {
+        this.#host.diagnostics.log({ level: "warn", msg: `Thread ${id} still denies MCP entries that are gone: ${error instanceof Error ? error.message : String(error)}` });
+      });
+    }
     if (owners.size === 0) this.#owners.delete(endpoint);
   }
 

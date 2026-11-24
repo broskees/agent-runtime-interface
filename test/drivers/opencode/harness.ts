@@ -72,7 +72,7 @@ export function opencodeHarness(options: OpencodeHarnessOptions): OpencodeHarnes
       "duplicate-always-options":
         "OpenCode answers a permission request with exactly once, always or reject (1.19.6 permission.reply, 2.1.2 Permission.Reply), so no native request offers two always options",
       "session-replaced.locked": "OpenCode keeps sessions in its database without a lock: any server reads any session by id (1.19.6 Session.get, 2.1.2 session.get), so there is no locked session to resume",
-      "idempotent-responses.full-access": "Under full_access the driver gives the session the rule * allow, so OpenCode asks no permission and there is no reply to check",
+      "idempotent-responses.full-access": "Under full_access the driver gives the thread's session the rule * allow, so OpenCode asks the kit's ordinary tool calls nothing and there is no reply to check (a 1.x subagent's request that still comes is answered once: quirks.suite.ts)",
     },
     workspace: async (): Promise<ConformanceWorkspace> => created.workspace,
     async setup(request): Promise<HarnessRig<OpencodeConfig>> {

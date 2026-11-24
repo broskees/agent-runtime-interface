@@ -76,6 +76,15 @@ them. Both generations accept only HTTP Basic auth with the user `opencode`.
   takes. A thread's directory is made canonical (symbolic links followed)
   before OpenCode sees it, so a thread started through a link reports the
   real directory and the same ids.
+- **Resume**: a resume that brings a `LaunchContext` gives the thread that
+  launch from its next turn, its MCP servers included (entries the old launch
+  gave come off); one that brings none keeps the thread's own, whether the
+  session holds the thread loaded, parked (1.x) or not at all. The thread's
+  creation `context` stays with it in the session that created it. A 2.x
+  thread resumed by an instance that did not write its instruction entry gets
+  the entry cleared before its first prompt, so host text an earlier instance
+  wrote does not stay (removing a missing entry changes nothing, 2.1.2
+  `core/src/session/instruction-entry.ts`).
 - **Ids**: every id derives from a native OpenCode id with
   `deriveId(kind, { id, strength: "strong" }, identityVersion: 1)`, scoped by
   the thread for turns, items and requests. A thread id is
@@ -105,13 +114,22 @@ them. Both generations accept only HTTP Basic auth with the user `opencode`.
   turn keeps it.
 - **Fork**: `session.fork` before a turn's prompt (from a turn) or of every
   message (at latest). OpenCode's fork takes no directory, so a fork stays in
-  the source's directory (`crossCwd: false`).
+  the source's directory (`crossCwd: false`). 2.x refuses to fork a session
+  without messages (`InvalidRequestError` `empty_session`, 2.1.2
+  `core/src/session.ts` `fork`); the driver reports that as `invalid_state`
+  (`empty_thread`). A 2.x fork takes the parent's rules and instruction
+  entries, and the driver knows the copied entry as the fork's own.
 - **Compaction**: 1.x `session.summarize` (with the thread's model), 2.x
   `session.compact`; both run as a run of their own, and `compactThread`
   returns when it ends.
 - **Snapshots** are rebuilt from the session's messages with the ids the live
   events used: each prompt starts a turn; steers (tagged in their metadata)
-  and assistant messages belong to the turn before.
+  and assistant messages belong to the turn before. Snapshots, forks from a
+  turn and rollbacks read the whole history, oldest first: 1.x answers it so
+  when the call has no `limit` (1.19.6 `session/session.ts` `messages`); 2.x
+  answers 50 messages a page, newest first, by default (2.1.2
+  `server/src/handlers/message.ts`), so the driver asks for `order: "asc"`
+  and pages of 200 and follows `cursor.next` until a page comes back short.
 - **Items**: text and reasoning parts by part id (2.x: the assistant message
   and the part's ordinal), tools by call id. `bash`/`shell` map to
   `command_execution`, `read` to `file_read`, `edit`/`write`/`apply_patch` to
@@ -122,7 +140,15 @@ them. Both generations accept only HTTP Basic auth with the user `opencode`.
 - **Subagents**: a child session of a thread (OpenCode's `task` tool) is a
   subagent with its own thread (`subagent.upsert` with `threadId`), running
   until the child's run ends. Its approvals and questions reach the host on
-  the parent thread with `origin.subagentId`.
+  the parent thread with `origin.subagentId`. OpenCode gives the child its
+  rules once, when it creates it: 2.x a copy of the parent's (2.1.2
+  `core/src/session.ts` `create`), 1.x only the parent's denies and
+  `external_directory` rules, evaluated after the subagent's own agent's
+  rules (1.19.6 `tool/task.ts`, `agent/subagent-permissions.ts`). So a 1.x
+  subagent does not ask where the thread's mode asks, and asks where its
+  agent does (for example before reading a `.env` file): that is OpenCode's
+  native behaviour, kept. The driver adds to each child's rules every deny of
+  another thread's MCP entry the thread gets later.
 - **Todo lists** (1.x): `todo.updated` becomes the turn's `todo_list` item.
 
 ## Runtime modes are OpenCode permission rules
@@ -138,8 +164,8 @@ matches wins. A thread's rules are, in this order:
    - `auto_accept_edits`: shell and `external_directory` ask, `edit` allowed;
    - `read_only`: shell and `edit` denied, `external_directory` asks;
 2. the host's own rules, set through `opencode.permissionRules`;
-3. one `deny` for every other thread's host MCP entry on the same server
-   (see below).
+3. the `deny` rules for every other thread's host MCP entries on the same
+   server (see below).
 
 `auto` is not supported: OpenCode has no automatic approval classifier.
 2.x replaces a session's rules on a live session (`session.update`), so the
@@ -154,19 +180,45 @@ a config file), while the host's tool servers are per thread. So:
 - Each thread gets the host's tool server for it (`hostTools.mcpServerFor`)
   plus the launch's MCP servers, under exactly the names the host chose,
   before its first turn: on create, resume, fork and replacement alike.
-- On a shared server (2.x, or any external server) every other thread gets a
-  `deny` rule for each new entry before the entry is added. MCP tools ask for
-  the permission `<server>_<tool>`, both names sanitized to `[a-zA-Z0-9_-]`
-  (1.19.6 `mcp/catalog.ts` `toolName`, 2.1.2 `core/src/tool/mcp.ts` `name`),
-  so `<other server>_* deny` closes every tool of that entry. The deny rules
-  come last, so neither a mode nor the host's rules can reopen them, and a
-  saved "always" grant cannot either (2.x checks a session's denies before
-  saved grants).
-- Host names that OpenCode's tool names cannot keep apart (one is the other's
-  prefix followed by `_`) are refused with `invalid_state`
-  (`mcp_name_collision`).
-- A closed session takes its entries off a shared server, and the other
-  threads stop denying them.
+- On a shared server (2.x, or any external server) every other thread, and
+  each of its subagents, gets `deny` rules for each new entry before the
+  entry is added, one for each way OpenCode reaches an entry:
+  - its tools: MCP tools ask for the permission `<server>_<tool>`, both names
+    sanitized to `[a-zA-Z0-9_-]` (1.19.6 `mcp/catalog.ts` `toolName`, 2.1.2
+    `core/src/tool/mcp.ts` `name`), so `<other server>_* deny` closes every
+    tool of that entry (1.x also leaves such a tool out of the model's tools,
+    1.19.6 `permission/index.ts` `disabled`);
+  - its resources: 1.x lists and reads them under `read` for
+    `mcp:<server>:*` and `mcp:<server>:<uri>` (1.19.6 `session/tools.ts`), so
+    the driver denies `read` on `mcp:<other server>:*`; 2.x under
+    `opencode_list_mcp_resources` for the server's name and
+    `opencode_read_mcp_resource` for `<server>:<uri>` (2.1.2
+    `core/src/tool/plugin/mcp-resource.ts`), so the driver denies both. A
+    listing of every server names them all, so a thread lists resources by
+    its own server's name while another thread's entry is there.
+  The deny rules come last, so neither a mode nor the host's rules can reopen
+  them, and on 2.x a saved "always" grant cannot either (2.x checks a
+  session's denies before saved grants, 2.1.2 `core/src/permission.ts`
+  `evaluateInput`).
+- 1.x checks its in-memory "always" grants after a session's rules (1.19.6
+  `permission/index.ts` `ask`), and a shared external 1.x server keeps them
+  for every session of the directory. Tools stay closed, because 1.x leaves a
+  denied tool out of the model's tools whatever the grants say; a resource
+  read would not, so on a shared 1.x server the driver offers no `always` for
+  a `read` of `mcp:` patterns. A grant another client of that server makes is
+  outside the driver's reach.
+- Threads in one directory that ask for the same MCP server under one name
+  (the same config, such as a session's launch servers) share its entry. A
+  thread that asks for a different server under a name another thread holds
+  in that directory is refused with `invalid_state` (`mcp_name_conflict`):
+  OpenCode keeps one entry per name there, and the second would replace the
+  first. Host names that OpenCode's rules cannot keep apart (one is the
+  other's prefix followed by `_` or `:`, or a name holds `*` or `?`) are
+  refused with `invalid_state` (`mcp_name_collision`).
+- A closed session takes its entries off a shared server first (an entry
+  another thread still holds stays), and only then do the other threads stop
+  denying them. A removal OpenCode does not confirm keeps the other threads'
+  denies, and `session.close()` rejects with it.
 
 ## Requests
 
@@ -181,9 +233,16 @@ a config file), while the host's tool servers are per thread. So:
   - `reject`: decision `decline`.
   A host's `full_access` auto-reply (`fullAccessAutoReply` in `ari/host`)
   therefore picks `once`, the narrowest. The driver itself never answers.
-  Under `full_access` the session's `* allow` rule means OpenCode asks
-  nothing; a request that still arrives (a host rule that asks) carries
-  `fullAccessOverride: "ask_rule"`, so no auto-reply answers it.
+  Under `full_access` the thread's `* allow` rule means OpenCode asks the
+  thread's own session nothing. A request that still arrives says why:
+  - a rule the host set asks for it: `fullAccessOverride: "ask_rule"`;
+  - it comes from a 1.x subagent, whose agent's rules asked (see Subagents):
+    no override, so the host's auto-reply answers it, and OpenCode gets
+    `once`;
+  - anything else is OpenCode's own check, such as a plugin's
+    `permission.evaluate` hook (2.1.2 `core/src/permission.ts`
+    `evaluateInput`): `fullAccessOverride: "provider_check"`.
+  A request with an override reaches the user; no auto-reply answers it.
 - A question (1.x `question.asked`, 2.x a form) becomes a `user_input` request
   answered in OpenCode's shape (1.x `answers: string[][]` of option labels,
   2.x the form's `answer` by field key). Answering without `answers` rejects

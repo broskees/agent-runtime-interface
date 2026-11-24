@@ -137,7 +137,7 @@ export interface V2Client {
     };
   };
   /** [session.message.list] */
-  readonly message: { list(input: { readonly sessionID: string }): Promise<unknown> };
+  readonly message: { list(input: { readonly sessionID: string; readonly limit?: number; readonly order?: "asc" | "desc"; readonly cursor?: string }): Promise<unknown> };
   /** [session.permission.reply] */
   readonly permission: { reply(input: { readonly sessionID: string; readonly requestID: string; readonly decision: "once" | "always" | "reject" }): Promise<void> };
   /** [experimental.mcp.add], [experimental.mcp.remove] */

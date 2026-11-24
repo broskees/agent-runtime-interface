@@ -387,6 +387,7 @@ export class V1Runtime implements NativeRuntime {
     return str(revert?.["messageID"]);
   }
 
+  /** The whole history, oldest first: without `limit`, 1.19.6 pages through every message itself and answers them in that order (`session/session.ts` `messages`). */
   async messages(sessionId: string, directory: string): Promise<NativeMessage[]> {
     const reverted = await this.#revertedFrom(sessionId, directory);
     const listed = data(await this.#client.session.messages({ sessionID: sessionId, directory }), `session ${sessionId}`);

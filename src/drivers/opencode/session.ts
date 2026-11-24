@@ -8,13 +8,17 @@
 //   on the server process exiting; never on a timer.
 // - Runtime modes are the session's own permission rules, which OpenCode
 //   enforces natively; host MCP entries of other threads on the same server
-//   are denied by the same rules (rules.ts).
+//   are denied by the same rules (rules.ts), in the thread's session and in
+//   each of its subagents' sessions, which OpenCode gave a copy of the rules
+//   once, when it created them.
 // - "Always" replies reach the whole project, so the option says so
-//   (`scope: "project"`); under `full_access` the session's rules allow
-//   everything and OpenCode asks nothing, so no reply can widen anything.
+//   (`scope: "project"`). Under `full_access` the thread's rules allow
+//   everything; a request that still comes says why (`#fullAccessOverride`).
 // - Host instructions travel in OpenCode's system channel: 1.x
 //   `session.prompt_async` `system` on every prompt, 2.x the session's
 //   instruction entry `ari`. Nothing is written to OpenCode's config files.
+//   A resume that brings a LaunchContext replaces the thread's; one that
+//   brings none keeps it.
 // - 2.x steering joins the running execution and never starts one; a steer
 //   that missed its execution is taken back and the host gets
 //   `prompt_required`. 1.x has no such call, so 1.x steering is off.
@@ -53,7 +57,8 @@ import type { OpencodeConfig } from "./config.ts";
 import { failureOf, itemIdFor, permissionOptions, providerTurnIdFor, requestIdFor, requestKindOf, subagentIdFor, threadIdFor, toolItemFields, turnIdFor } from "./mapping.ts";
 import type { McpEntry, NativeError, NativeEvent, NativeMessage, NativeQuestion, NativeRule, NativeToolState } from "./native.ts";
 import type { Detected, Link, ServerPool } from "./pool.ts";
-import { sessionRules } from "./rules.ts";
+import { mcpConfigKey } from "./pool.ts";
+import { childRules, lastMatchingEffect, sessionRules } from "./rules.ts";
 
 /** What the instance gives each session. */
 export interface OpencodeSessionContext {
@@ -76,7 +81,10 @@ interface Envelope {
 }
 
 interface Launch {
-  readonly systemPrompts: readonly string[];
+  /** Host instructions of the session's and the thread's LaunchContext; a resume that brings a LaunchContext replaces them. */
+  readonly launchPrompts: readonly string[];
+  /** Host instructions the thread was created with (`createThread` `context`); they stay with the thread. */
+  readonly contextPrompts: readonly string[];
   readonly mcpServers: NonNullable<LaunchContext["mcpServers"]>;
   model: string | undefined;
   agent: string | undefined;
@@ -105,7 +113,7 @@ interface OcThread {
   readonly sessionId: string;
   readonly directory: string;
   policy: RuntimePolicy;
-  readonly launch: Launch;
+  launch: Launch;
   hostRules: NativeRule[];
   /** Host MCP entries this thread put on its server. */
   mcpNames: Set<string>;
@@ -120,6 +128,8 @@ interface OcThread {
   pendingSteers: number;
   /** Set for a subagent's own session. */
   readonly parent: { readonly threadId: string; readonly subagentId: string } | undefined;
+  /** A subagent's: the rules OpenCode gave its session when it created it, which the driver extends with the current isolation denies. */
+  createdRules: readonly NativeRule[] | undefined;
   providerTurns: number;
 }
 
@@ -152,9 +162,13 @@ async function canonicalDirectory(directory: string): Promise<string> {
   }
 }
 
-function systemPrompts(launch: LaunchContext | undefined, context: CreateThreadInput["context"] | undefined): string[] {
-  // OpenCode has one host instruction channel, the system prompt, so developer text goes there too.
-  return [...(launch?.appendSystemPrompt ?? []), ...(launch?.developerPrompt ?? []), ...(context?.system === undefined ? [] : [context.system]), ...(context?.developer === undefined ? [] : [context.developer])];
+// OpenCode has one host instruction channel, the system prompt, so developer text goes there too.
+function launchPrompts(launch: LaunchContext | undefined): string[] {
+  return [...(launch?.appendSystemPrompt ?? []), ...(launch?.developerPrompt ?? [])];
+}
+
+function contextPrompts(context: CreateThreadInput["context"] | undefined): string[] {
+  return [...(context?.system === undefined ? [] : [context.system]), ...(context?.developer === undefined ? [] : [context.developer])];
 }
 
 /** An ARI MCP server as OpenCode's MCP config (1.x `McpLocalConfig`/`McpRemoteConfig`, 2.x `Mcp.LocalConfig`/`Mcp.RemoteConfig`). */
@@ -210,6 +224,7 @@ export class OpencodeSession implements Session {
     const launch = this.#launchFor(input.config, input.launch, input.context);
     const cwd = await canonicalDirectory(input.cwd);
     const link = await this.#newLink(cwd);
+    let registered: OcThread | undefined;
     try {
       await this.#watch(link, cwd);
       // Other threads' entries are denied from the start; this thread's own come right after.
@@ -222,9 +237,11 @@ export class OpencodeSession implements Session {
         ...(launch.agent === undefined ? {} : { agent: launch.agent }),
       });
       const thread = this.#register(created.id, created.directory || cwd, input.policy, launch, link, { ...(input.title === undefined ? {} : { title: input.title }) }, undefined);
+      registered = thread;
       await this.#giveMcpServers(thread);
       return { ...thread.thread, appliedConfig: this.#applied(thread) };
     } catch (error) {
+      if (registered !== undefined) await this.#forget(registered, link);
       if (this.#dedicated()) await this.#stopLink(link);
       throw error;
     }
@@ -235,14 +252,18 @@ export class OpencodeSession implements Session {
     const target = "handle" in input.native ? input.native.handle : input.native.id;
     if (target === null || target === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const known = this.#threads.get(threadIdFor(target));
-    if (known !== undefined && !known.unloaded && known.link !== undefined) return { ...known.thread, appliedConfig: this.#applied(known) };
+    if (known !== undefined && !known.unloaded && known.link !== undefined) {
+      // A subagent's thread lives as long as its parent's run; OpenCode drives it.
+      if (known.parent !== undefined) return { ...known.thread, appliedConfig: this.#applied(known) };
+      return this.#resumeHeld(known, input);
+    }
     const policy = input.policy ?? known?.policy;
     if (policy !== undefined) this.#checkMode(policy);
     const directory = policy?.cwd !== undefined && policy.cwd !== "" ? await canonicalDirectory(policy.cwd) : known?.directory;
     if (directory === undefined && this.#context.shape.generation === 1) {
       throw callErrors.validation([{ message: "resuming an OpenCode 1.x session this session does not know needs policy.cwd", path: ["policy", "cwd"] }]);
     }
-    const launch = this.#launchFor(input.config, input.launch, undefined, known?.launch);
+    const launch = this.#resumedLaunch(input, known);
     const link = await this.#newLink(directory);
     try {
       const found = await link.runtime.getSession(target, directory);
@@ -273,6 +294,29 @@ export class OpencodeSession implements Session {
       if (this.#dedicated() && ![...this.#threads.values()].some((thread) => thread.link === link)) await this.#stopLink(link);
       throw error;
     }
+  }
+
+  /**
+   * A resume of a thread this session holds on a live server: the thread takes
+   * what the resume brings (a LaunchContext, config, a policy) from its next
+   * turn, as a fresh resume would; its MCP entries follow the new launch.
+   */
+  async #resumeHeld(known: OcThread, input: ResumeThreadInput): Promise<AppliedThread> {
+    const policy = input.policy === undefined ? undefined : { ...input.policy, cwd: known.directory };
+    if (policy !== undefined) {
+      this.#checkMode(policy);
+      if (policy.mode !== known.policy.mode && !this.#capabilities.runtimePolicy.switchInSession) throw callErrors.unsupported("runtimePolicy.switchInSession");
+    }
+    if (input.config !== undefined) this.#applyConfig(known, input.config);
+    // Set first: a server that has to start again gives the thread the new launch's entries.
+    known.launch = this.#resumedLaunch(input, known);
+    const link = await this.#linkOf(known);
+    if (policy !== undefined && policy.mode !== known.policy.mode) {
+      known.policy = policy;
+      await this.#applyRules(known, this.#context.pool.othersOn(link.endpoint, known.thread.id));
+    }
+    if (input.launch !== undefined) await this.#giveMcpServers(known);
+    return { ...known.thread, appliedConfig: this.#applied(known) };
   }
 
   async readSnapshot(threadId: string): Promise<ThreadSnapshot> {
@@ -306,7 +350,7 @@ export class OpencodeSession implements Session {
     const forked = await link.runtime.fork(source.sessionId, source.directory, before);
     const policy = input.policy ?? source.policy;
     this.#checkMode(policy);
-    const launch: Launch = { systemPrompts: [...source.launch.systemPrompts], mcpServers: [...source.launch.mcpServers], model: source.launch.model, agent: source.launch.agent };
+    const launch: Launch = { launchPrompts: [...source.launch.launchPrompts], contextPrompts: [...source.launch.contextPrompts], mcpServers: [...source.launch.mcpServers], model: source.launch.model, agent: source.launch.agent };
     if (typeof input.config?.["model"] === "string") launch.model = input.config["model"];
     // A 1.x fork gets a server of its own, like every 1.x thread.
     const forkLink = this.#dedicated() ? await this.#newLink(source.directory) : link;
@@ -597,14 +641,23 @@ export class OpencodeSession implements Session {
     this.#closed = true;
     for (const watch of this.#watches.values()) void watch.then((handle) => handle.close()).catch(() => undefined);
     this.#watches.clear();
+    const failures: unknown[] = [];
     for (const thread of this.#threads.values()) {
       if (thread.parent !== undefined) continue;
       const link = thread.link;
       if (link === undefined) continue;
-      await this.#context.pool.unregister(link.endpoint, thread.thread.id);
-      if (this.#dedicated()) await this.#stopLink(link);
+      if (this.#dedicated()) {
+        await this.#context.pool.unregister(link.endpoint, thread.thread.id);
+        await this.#stopLink(link);
+        continue;
+      }
       // A shared server outlives the session: take this thread's entries off it.
-      else for (const name of thread.mcpNames) await link.runtime.removeMcp(name, thread.directory).catch(() => undefined);
+      try {
+        await this.#takeOff(thread, link);
+      } catch (error) {
+        failures.push(error);
+        this.#context.host.diagnostics.log({ level: "error", msg: `OpenCode did not confirm removing the MCP entries of thread ${thread.thread.id}; the other threads keep denying them: ${error instanceof Error ? error.message : String(error)}` });
+      }
     }
     for (const pending of this.#requests.values()) {
       if (pending.resolved) continue;
@@ -616,6 +669,7 @@ export class OpencodeSession implements Session {
     }
     this.#emit({ type: "session.state", state: "stopped" });
     this.#sequencer.close();
+    if (failures.length > 0) throw failures[0];
   }
 
   // -------------------------------------------------------------------------
@@ -773,24 +827,75 @@ export class OpencodeSession implements Session {
       pendingPrompt: undefined,
       pendingSteers: 0,
       parent,
+      createdRules: undefined,
       providerTurns: 0,
     };
     thread.thread = snapshot;
     thread.policy = policy;
     thread.link = link;
     thread.unloaded = false;
-    if (existing !== undefined) Object.assign(existing.launch, launch);
+    thread.launch = launch;
     this.#threads.set(id, thread);
     this.#bySession.set(sessionId, thread);
     this.#emit({ type: "thread.upsert", thread: snapshot }, { threadId: id });
     return thread;
   }
 
-  /** Writes the thread's permission rules: its mode, the host's rules, and a deny for every other thread's MCP entry. */
+  /**
+   * Writes the thread's permission rules: its mode, the host's rules, and the
+   * denies of every other thread's MCP entries. OpenCode copied the thread's
+   * rules into each subagent session when it created it (2.1.2
+   * `core/src/session.ts` `create`; 1.19.6 `tool/task.ts` keeps the denies),
+   * and never again, so the subagents get the current denies too.
+   */
   async #applyRules(thread: OcThread, others: string[]): Promise<void> {
     const link = thread.link;
     if (link === undefined) return;
     await link.runtime.setRules(thread.sessionId, thread.directory, sessionRules(thread.policy.mode, link.runtime.generation, thread.hostRules, others));
+    for (const child of this.#threads.values()) {
+      if (child.parent?.threadId !== thread.thread.id || child.createdRules === undefined) continue;
+      await link.runtime.setRules(child.sessionId, child.directory, childRules(child.createdRules, link.runtime.generation, others));
+    }
+  }
+
+  /** A subagent's session from now on gets every deny its thread gets, on top of the rules OpenCode gave it. */
+  async #isolateChild(root: OcThread, child: OcThread, link: Link): Promise<void> {
+    child.createdRules = await link.runtime.getRules(child.sessionId, child.directory);
+    await link.runtime.setRules(child.sessionId, child.directory, childRules(child.createdRules, link.runtime.generation, this.#context.pool.othersOn(link.endpoint, root.thread.id)));
+  }
+
+  /** Takes an entry off the server; one OpenCode no longer has is gone already. */
+  async #removeEntry(link: Link, name: string, directory: string): Promise<void> {
+    try {
+      await link.runtime.removeMcp(name, directory);
+    } catch (error) {
+      if (toCallError(error)?.code === "not_found") return;
+      throw error;
+    }
+  }
+
+  /**
+   * Takes the thread's MCP entries off a shared server, then lets the other
+   * threads stop denying them. An entry another thread in the directory holds
+   * stays. A removal OpenCode does not confirm throws before any deny is
+   * dropped, so the other threads keep denying an entry that may remain.
+   */
+  async #takeOff(thread: OcThread, link: Link): Promise<void> {
+    const pool = this.#context.pool;
+    for (const name of pool.entriesOf(link.endpoint, thread.thread.id).keys()) {
+      if (pool.heldByOthers(link.endpoint, thread.thread.id, thread.directory, name)) continue;
+      await this.#removeEntry(link, name, thread.directory);
+    }
+    await pool.unregister(link.endpoint, thread.thread.id);
+  }
+
+  /** Drops a thread whose creation failed after OpenCode made its session: its entries come off the server, and it is closed. */
+  async #forget(thread: OcThread, link: Link): Promise<void> {
+    if (!this.#dedicated()) await this.#takeOff(thread, link).catch((error: unknown) => this.#context.host.diagnostics.log({ level: "error", msg: `OpenCode did not confirm removing the MCP entries of thread ${thread.thread.id}: ${error instanceof Error ? error.message : String(error)}` }));
+    else await this.#context.pool.unregister(link.endpoint, thread.thread.id);
+    this.#threads.delete(thread.thread.id);
+    this.#bySession.delete(thread.sessionId);
+    this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, status: "closed" } }, { threadId: thread.thread.id });
   }
 
   /**
@@ -808,33 +913,58 @@ export class OpencodeSession implements Session {
     } catch (error) {
       this.#context.host.diagnostics.log({ level: "warn", msg: `The host gave no tool server for thread ${thread.thread.id}: ${error instanceof Error ? error.message : String(error)}` });
     }
-    const names = new Set(entries.map((entry) => entry.name));
-    const others = await this.#context.pool.register(link.endpoint, thread.thread.id, names, async (updated) => {
-      if (thread.link === link) await this.#applyRules(thread, updated);
-    });
+    const pool = this.#context.pool;
+    const wanted = new Map(entries.map((entry) => [entry.name, mcpConfigKey(entry.config)]));
+    const onOthers = async (updated: string[]): Promise<void> => {
+      if (!this.#closed && thread.link === link) await this.#applyRules(thread, updated);
+    };
+    // Every other thread denies an entry before it is added, and keeps denying one this thread drops until OpenCode confirms it is gone.
+    const held = pool.entriesOf(link.endpoint, thread.thread.id);
+    const dropped = [...held.keys()].filter((name) => !wanted.has(name));
+    const others = await pool.register(link.endpoint, thread.thread.id, thread.directory, new Map([...[...held].filter(([name]) => !wanted.has(name)), ...wanted]), onOthers);
     await this.#applyRules(thread, others);
     for (const entry of entries) await link.runtime.addMcp(entry);
-    thread.mcpNames = names;
+    for (const name of dropped) {
+      if (!pool.heldByOthers(link.endpoint, thread.thread.id, thread.directory, name)) await this.#removeEntry(link, name, thread.directory);
+    }
+    if (dropped.length > 0) await pool.register(link.endpoint, thread.thread.id, thread.directory, wanted, onOthers);
+    thread.mcpNames = new Set(wanted.keys());
   }
 
+  /**
+   * A thread's launch: the session's LaunchContext and the thread's own, its
+   * creation `context`, and its model and agent. For a thread the session
+   * already holds (`base`), its creation context, model and agent carry over
+   * unless `config` changes them.
+   */
   #launchFor(config: ConfigValues | undefined, launch: LaunchContext | undefined, context: CreateThreadInput["context"], base?: Launch): Launch {
     const merged = { ...this.#input.launch, ...launch };
     if ((merged.dynamicTools ?? []).length > 0) throw callErrors.unsupported("tools.dynamicTools");
-    const pick = (key: string, fallback: string | undefined): string | undefined => {
+    const pick = (key: "model" | "agent"): string | undefined => {
       const given = config?.[key];
       if (typeof given === "string") return given;
+      if (base?.[key] !== undefined) return base[key];
       const session = this.#input.config?.[key];
-      return typeof session === "string" ? session : fallback;
+      return typeof session === "string" ? session : this.#context.config[key];
     };
     const mcpServers = [...(this.#input.launch?.mcpServers ?? []), ...(launch?.mcpServers ?? [])];
     // Refused before any session exists: a transport OpenCode cannot take.
     for (const server of mcpServers) mcpConfig(server);
     return {
-      systemPrompts: [...systemPrompts(this.#input.launch, undefined), ...systemPrompts(launch, context)],
+      launchPrompts: [...launchPrompts(this.#input.launch), ...launchPrompts(launch)],
+      contextPrompts: context === undefined ? [...(base?.contextPrompts ?? [])] : contextPrompts(context),
       mcpServers,
-      model: pick("model", base?.model ?? this.#context.config.model),
-      agent: pick("agent", base?.agent ?? this.#context.config.agent),
+      model: pick("model"),
+      agent: pick("agent"),
     };
+  }
+
+  /** The launch a resume gives a thread: a thread the session holds keeps its own unless the resume brings a LaunchContext, which replaces the LaunchContext part. */
+  #resumedLaunch(input: ResumeThreadInput, known: OcThread | undefined): Launch {
+    if (known === undefined || input.launch !== undefined) return this.#launchFor(input.config, input.launch, undefined, known?.launch);
+    const model = input.config?.["model"];
+    const agent = input.config?.["agent"];
+    return { ...known.launch, model: typeof model === "string" ? model : known.launch.model, agent: typeof agent === "string" ? agent : known.launch.agent };
   }
 
   #checkMode(policy: RuntimePolicy): void {
@@ -856,7 +986,7 @@ export class OpencodeSession implements Session {
 
   /** The thread's host instructions plus this turn's, as one system text. */
   #system(thread: OcThread, context: StartTurnInput["context"]): string | undefined {
-    const parts = [...thread.launch.systemPrompts, ...(context?.system === undefined ? [] : [context.system]), ...(context?.developer === undefined ? [] : [context.developer])].filter((part) => part !== "");
+    const parts = [...thread.launch.launchPrompts, ...thread.launch.contextPrompts, ...contextPrompts(context)].filter((part) => part !== "");
     return parts.length === 0 ? undefined : parts.join("\n\n");
   }
 
@@ -1038,8 +1168,13 @@ export class OpencodeSession implements Session {
     const turn = root.active;
     const link = parent.link ?? root.link;
     if (link === undefined) return;
-    const child = this.#register(info.id, info.directory || parent.directory, parent.policy, { systemPrompts: [], mcpServers: [], model: parent.launch.model, agent: undefined }, link, {}, { threadId: root.thread.id, subagentId });
+    const child = this.#register(info.id, info.directory || parent.directory, parent.policy, { launchPrompts: [], contextPrompts: [], mcpServers: [], model: parent.launch.model, agent: undefined }, link, {}, { threadId: root.thread.id, subagentId });
     child.thread = { ...child.thread, status: "running" };
+    void this.#isolateChild(root, child, link).catch((error: unknown) => {
+      const text = `The subagent ${subagentId} keeps the rules OpenCode gave it; the driver could not add the current MCP isolation denies: ${error instanceof Error ? error.message : String(error)}`;
+      this.#context.host.diagnostics.log({ level: "error", msg: text });
+      this.#emit({ type: "notice", level: "error", code: "opencode_subagent_rules", text }, { threadId: root.thread.id });
+    });
     this.#emit(
       {
         type: "subagent.upsert",
@@ -1200,17 +1335,48 @@ export class OpencodeSession implements Session {
         ...(path !== undefined ? { paths: [path] } : kind === "file_change" || kind === "file_read" ? { paths: [...event.resources] } : {}),
         tool: { name: event.action, input: { resources: [...event.resources], ...metadata } },
       },
-      options: permissionOptions(event.action, event.always),
+      options: this.#permissionOptions(event),
       allowCustomAnswer: false,
       allowFeedback: false,
       response: { mode: "live" },
       survivesRestart: false,
       status: "pending",
-      // OpenCode asks under full access only when a rule says ask.
-      ...(root.policy.mode === "full_access" ? { fullAccessOverride: "ask_rule" as const } : {}),
     };
+    const override = root.policy.mode === "full_access" ? this.#fullAccessOverride(root, asker, event) : undefined;
+    if (override !== undefined) request.fullAccessOverride = override;
     this.#requests.set(id, { request, threadId: root.thread.id, turnId: turn?.id, sessionId: asker.sessionId, nativeId: event.requestId, kind: "permission", questions: [], inFlight: undefined, resolved: false });
     this.#emit({ type: "request.upsert", request }, turn === undefined ? { threadId: root.thread.id } : this.#turnEnvelope(turn));
+  }
+
+  /**
+   * OpenCode's replies as options. A shared 1.x server keeps an "always"
+   * grant in memory for every session of the directory and checks it after
+   * their own rules (1.19.6 `permission/index.ts` `ask`), so an "always" for
+   * an MCP resource read (`mcp:<server>:...`) would reopen that entry for the
+   * other threads that deny it: there the driver offers no "always".
+   */
+  #permissionOptions(event: Extract<NativeEvent, { type: "permission" }>) {
+    const options = permissionOptions(event.action, event.always);
+    const shared1x = this.#context.shape.generation === 1 && !this.#dedicated();
+    if (!shared1x || event.action !== "read" || !event.always.some((pattern) => pattern.startsWith("mcp:"))) return options;
+    return options.filter((option) => option.optionId !== "always");
+  }
+
+  /**
+   * Why OpenCode asked a full_access thread, whose own rules allow everything
+   * (`* allow` after the agent's): a rule the host set asks (`ask_rule`); or
+   * the asker is a 1.x subagent, whose session OpenCode gives its own agent's
+   * rules plus only the thread's denies (1.19.6 `agent/subagent-permissions.ts`),
+   * so that agent's defaults asked and the thread's full_access answers it
+   * (undefined: the host's auto-reply picks once); or else OpenCode checked on
+   * its own, as a plugin's `permission.evaluate` hook can (2.1.2
+   * `core/src/permission.ts` `evaluateInput`), which must reach the user
+   * (`provider_check`).
+   */
+  #fullAccessOverride(root: OcThread, asker: OcThread, event: Extract<NativeEvent, { type: "permission" }>): "ask_rule" | "provider_check" | undefined {
+    if (event.resources.some((resource) => lastMatchingEffect(event.action, resource, root.hostRules) === "ask")) return "ask_rule";
+    if (asker.parent !== undefined && this.#context.shape.generation === 1) return undefined;
+    return "provider_check";
   }
 
   #onQuestion(root: OcThread, asker: OcThread, event: Extract<NativeEvent, { type: "question" }>): void {

@@ -9,15 +9,27 @@
 // A session's rules are, in this order:
 // 1. the runtime mode's rules;
 // 2. rules the host set through the `opencode.permissionRules` extension;
-// 3. one `deny` per host MCP entry of every other thread on the same server.
-//    MCP tool calls ask for the permission `<server>_<tool>`, with the server
-//    and tool names sanitized to `[a-zA-Z0-9_-]` (1.x
-//    `mcp/catalog.ts` `toolName`, 2.x `core/src/tool/mcp.ts` `name`), so the
-//    rule `<other server>_*` denies every tool of that entry. A session's deny
-//    is checked before any saved "always" grant (2.x `evaluateInput`), so
-//    another thread's grant cannot reopen it.
+// 3. `deny` rules for each host MCP entry of every other thread on the same
+//    server, one for each way OpenCode lets a session reach an entry:
+//    - its tools: MCP tool calls ask for the permission `<server>_<tool>`,
+//      with the server and tool names sanitized to `[a-zA-Z0-9_-]` (1.x
+//      `mcp/catalog.ts` `toolName`, 2.x `core/src/tool/mcp.ts` `name`), so
+//      `<other server>_*` denies every tool of that entry; 1.x also leaves a
+//      tool denied for every resource out of the model's tools
+//      (`permission/index.ts` `disabled`);
+//    - its resources: 1.x lists and reads them under the permission `read`,
+//      for `mcp:<server>:*` and `mcp:<server>:<uri>` (`session/tools.ts`);
+//      2.x under `opencode_list_mcp_resources` for the server's name and
+//      `opencode_read_mcp_resource` for `<server>:<uri>`
+//      (`core/src/tool/plugin/mcp-resource.ts`). A listing of every server
+//      names them all, so it is denied while another thread's entry is there.
+//    A 2.x session's deny is checked before any saved "always" grant (2.x
+//    `evaluateInput`), so another thread's grant cannot reopen it. 1.x checks
+//    its in-memory grants after the session's rules (1.x `ask`); only a shared
+//    external 1.x server has that, and session.ts offers no "always" there for
+//    an MCP resource read.
 // The deny rules come last so neither the mode nor the host can unlock
-// another thread's tools.
+// another thread's entry.
 
 import type { RuntimeMode } from "../../generated/config.ts";
 import type { NativeRule } from "./native.ts";
@@ -52,27 +64,57 @@ export function sanitizeMcpName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-/** Denies every tool of each of `others`, the MCP entries this thread does not own. */
-export function isolationRules(others: Iterable<string>): NativeRule[] {
-  return [...new Set([...others].map(sanitizeMcpName))].sort().map((name) => ({ action: `${name}_*`, resource: "*", effect: "deny" as const }));
+/** Denies each of `others`, the MCP entries this thread does not hold, every way OpenCode reaches an entry: its tools and its resources. */
+export function isolationRules(others: Iterable<string>, generation: Generation): NativeRule[] {
+  const deny = (action: string, resource: string): NativeRule => ({ action, resource, effect: "deny" });
+  const names = [...new Set(others)].sort();
+  const tools = [...new Set(names.map(sanitizeMcpName))].map((name) => deny(`${name}_*`, "*"));
+  const resources = names.flatMap((name) => (generation === 1 ? [deny("read", `mcp:${name}:*`)] : [deny("opencode_list_mcp_resources", name), deny("opencode_read_mcp_resource", `${name}:*`)]));
+  return [...tools, ...resources];
 }
 
 /**
- * The entry names whose tool names OpenCode cannot keep apart: `a` and `a_b`
- * give tool names that `a_*` matches for both. A thread's deny of the other's
- * entry would then deny its own tools too, or the reverse.
+ * The entry name of `others` that OpenCode's rules cannot keep apart from
+ * `name`, if any. `a` and `a_b` give tool names that `a_*` matches for both;
+ * `a` and `a:b` give resources that `a:*` (2.x) or `mcp:a:*` (1.x) matches for
+ * both; a `*` or `?` in a name is a wildcard in the resource rules. A thread's
+ * deny of the other's entry would then deny its own too, or the reverse. The
+ * same name twice is the registry's matter (pool.ts), not a collision.
  */
 export function collidingName(name: string, others: Iterable<string>): string | undefined {
   const own = sanitizeMcpName(name);
   for (const other of others) {
+    if (other === name) continue;
     const sanitized = sanitizeMcpName(other);
     if (sanitized === own || own.startsWith(`${sanitized}_`) || sanitized.startsWith(`${own}_`)) return other;
+    if (name.startsWith(`${other}:`) || other.startsWith(`${name}:`) || /[*?]/.test(name) || /[*?]/.test(other)) return other;
   }
   return undefined;
 }
 
 export function sessionRules(mode: RuntimeMode, generation: Generation, hostRules: readonly NativeRule[], others: Iterable<string>): NativeRule[] {
-  return [...modeRules(mode, generation), ...hostRules, ...isolationRules(others)];
+  return [...modeRules(mode, generation), ...hostRules, ...isolationRules(others, generation)];
+}
+
+/** A subagent's rules: the ones OpenCode gave it when it created it, then the current denies of every other thread's entries. */
+export function childRules(created: readonly NativeRule[], generation: Generation, others: Iterable<string>): NativeRule[] {
+  return [...created, ...isolationRules(others, generation)];
+}
+
+/** OpenCode's wildcard match (1.x and 2.x `util/wildcard.ts` `match`): `*` is any text, `?` one character, and a trailing ` *` also matches nothing after the word. */
+export function wildcardMatch(input: string, pattern: string): boolean {
+  let escaped = pattern
+    .replaceAll("\\", "/")
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  if (escaped.endsWith(" .*")) escaped = `${escaped.slice(0, -3)}( .*)?`;
+  return new RegExp(`^${escaped}$`, "s").test(input.replaceAll("\\", "/"));
+}
+
+/** The effect of the last of `rules` that matches `action` and `resource`, as OpenCode evaluates them; undefined when none matches. */
+export function lastMatchingEffect(action: string, resource: string, rules: readonly NativeRule[]): NativeRule["effect"] | undefined {
+  return rules.findLast((rule) => wildcardMatch(action, rule.action) && wildcardMatch(resource, rule.resource))?.effect;
 }
 
 /** Rules as 1.x's `PermissionRuleset` (`permission`, `pattern`, `action`). */

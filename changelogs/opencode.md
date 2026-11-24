@@ -13,10 +13,23 @@
   `externallyOwned: true` for a configured `serverUrl`, which the driver never
   stops.
 - Runtime modes as native OpenCode session permission rules; each thread's
-  host MCP entry under the host's name, and a deny rule for every other
-  thread's entry on a shared server.
+  host MCP entry under the host's name, and deny rules for every other
+  thread's entry on a shared server, its tools and its resources alike, kept
+  current in the thread's subagent sessions too. Threads share an identical
+  entry of one name; a different server under a name another thread holds is
+  refused (`mcp_name_conflict`). A closing session takes its entries off
+  before the other threads stop denying them, and reports a removal OpenCode
+  did not confirm.
 - "Always" approvals report `scope: "project"`; a full_access auto-reply
-  picks "once"; under full_access OpenCode asks nothing.
+  picks "once". Under full_access a request says why it still came
+  (`ask_rule`, `provider_check`), except a 1.x subagent's, which the
+  auto-reply answers.
+- History is read whole and oldest first (2.x pages of 200 with cursors), so
+  snapshots, forks from a turn and rollbacks are right past OpenCode's first
+  page. A 2.x fork of a thread with no messages is `invalid_state`
+  (`empty_thread`).
+- A resume reads the LaunchContext it brings, also for a thread the session
+  holds; without one, the thread keeps its own.
 - 2.x steering through OpenCode's inbox (`delivery: "steer"`,
   `resume: false`), with `prompt_required` for a steer that missed its turn.
 - Subagents (child sessions) with their own threads, questions and forms as

@@ -294,6 +294,9 @@ function modelRef(model: string | undefined): { id: string; providerID: string }
 /** The instruction entry key the driver keeps a thread's host instructions under. */
 export const INSTRUCTIONS_KEY = "ari";
 
+/** The largest page of messages 2.x serves (2.1.2 `@opencode/protocol` `SessionMessagesQuery`: `limit` 1 to 200). */
+const MESSAGE_PAGE_LIMIT = 200;
+
 /** An OpenCode 2.x server as a `NativeRuntime`. One runtime is shared by every session of an instance. */
 export class V2Runtime implements NativeRuntime {
   readonly generation = 2 as const;
@@ -301,7 +304,11 @@ export class V2Runtime implements NativeRuntime {
   readonly #client: V2Client;
   /** The model and agent each session last used, so a prompt switches only on a change. */
   readonly #selected = new Map<string, { model?: string; agent?: string }>();
-  /** The instructions each session holds, so the entry is written only on a change. */
+  /**
+   * The instructions each session holds under the driver's entry, so the entry
+   * is written only on a change. A session missing here (one this runtime did
+   * not create, such as a resumed one) may hold an entry from before.
+   */
   readonly #instructions = new Map<string, string>();
 
   constructor(sdk: V2Sdk, endpoint: ServerEndpoint) {
@@ -358,6 +365,7 @@ export class V2Runtime implements NativeRuntime {
       ),
     );
     this.#selected.set(created.id, { ...(input.model === undefined ? {} : { model: input.model }), ...(input.agent === undefined ? {} : { agent: input.agent }) });
+    this.#instructions.set(created.id, "");
     return created;
   }
 
@@ -379,13 +387,26 @@ export class V2Runtime implements NativeRuntime {
     return fromV2Rules(isObject(session) ? session["permissions"] : undefined);
   }
 
+  /**
+   * The whole history, oldest first. 2.x answers one page at a time, newest
+   * first unless asked otherwise (2.1.2 `server/src/handlers/message.ts`), so
+   * the first request asks for oldest first and the rest follow `cursor.next`,
+   * which keeps that order, until a page comes back short.
+   */
   async messages(sessionId: string): Promise<NativeMessage[]> {
-    const page = await call(`session ${sessionId}`, () => this.#client.message.list({ sessionID: sessionId }));
-    const data = isObject(page) && Array.isArray(page["data"]) ? page["data"] : [];
-    return data.flatMap((entry) => {
-      const message = historyMessage(entry);
-      return message === undefined ? [] : [message];
-    });
+    const messages: NativeMessage[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const after = cursor;
+      const page = await call(`session ${sessionId}`, () => this.#client.message.list(after === undefined ? { sessionID: sessionId, order: "asc", limit: MESSAGE_PAGE_LIMIT } : { sessionID: sessionId, cursor: after, limit: MESSAGE_PAGE_LIMIT }));
+      const data = isObject(page) && Array.isArray(page["data"]) ? page["data"] : [];
+      for (const entry of data) {
+        const message = historyMessage(entry);
+        if (message !== undefined) messages.push(message);
+      }
+      cursor = isObject(page) && isObject(page["cursor"]) ? str(page["cursor"]["next"]) : undefined;
+      if (data.length < MESSAGE_PAGE_LIMIT || cursor === undefined) return messages;
+    }
   }
 
   /** Keeps a session's model, agent and host instructions as the prompt asks, changing each only when it differs. */
@@ -403,7 +424,8 @@ export class V2Runtime implements NativeRuntime {
     }
     this.#selected.set(input.sessionId, selected);
     const instructions = input.system ?? "";
-    if (instructions !== (this.#instructions.get(input.sessionId) ?? "")) {
+    // An entry this runtime does not know may hold host text from an earlier session: clear it (removing a missing entry changes nothing, 2.1.2 `core/src/session/instruction-entry.ts` `remove`).
+    if (instructions !== this.#instructions.get(input.sessionId)) {
       if (instructions === "") await call(`session ${input.sessionId}`, () => this.#client.session.instructions.entry.remove({ sessionID: input.sessionId, key: INSTRUCTIONS_KEY }));
       else await call(`session ${input.sessionId}`, () => this.#client.session.instructions.entry.put({ sessionID: input.sessionId, key: INSTRUCTIONS_KEY, value: instructions }));
       this.#instructions.set(input.sessionId, instructions);
@@ -470,10 +492,20 @@ export class V2Runtime implements NativeRuntime {
     await call(`form ${requestId}`, () => this.#client.session.form.reply({ sessionID: sessionId, formID: requestId, answer }));
   }
 
+  /** A fork takes the parent's rules and instruction entries (2.1.2 `core/src/session.ts` `fork`); a session without messages cannot be forked. */
   async fork(sessionId: string, _directory: string, beforeMessageId: string | undefined): Promise<NativeSessionInfo> {
-    const forked = sessionInfo(await call(`session ${sessionId}`, () => this.#client.session.fork({ sessionID: sessionId, ...(beforeMessageId === undefined ? {} : { before: beforeMessageId }) })));
+    let answer: unknown;
+    try {
+      answer = await this.#client.session.fork({ sessionID: sessionId, ...(beforeMessageId === undefined ? {} : { before: beforeMessageId }) });
+    } catch (error) {
+      if (isObject(error) && error["_tag"] === "InvalidRequestError" && error["kind"] === "empty_session") throw callErrors.invalidState("empty_thread", "OpenCode forks only a session that has messages; this thread has none");
+      throw v2CallError(error, `session ${sessionId}`);
+    }
+    const forked = sessionInfo(answer);
     const selected = this.#selected.get(sessionId);
     if (selected !== undefined) this.#selected.set(forked.id, { ...selected });
+    const instructions = this.#instructions.get(sessionId);
+    if (instructions !== undefined) this.#instructions.set(forked.id, instructions);
     return forked;
   }
 

@@ -17,6 +17,7 @@ import { recordClaude } from "../../recordings/claude/record.ts";
 import type { ClaudeRecordOutcome } from "../../recordings/claude/record.ts";
 import { replayClaude } from "../../recordings/claude/replay.ts";
 import { createClaudeReplaySdk } from "../../recordings/claude/replay-sdk.ts";
+import { startTurnAfterItsText } from "../../recordings/late-start-turn.ts";
 import { createSanitiser } from "../../recordings/sanitiser.ts";
 import { encodeRecording, parseRecording, readRecording } from "../../recordings/format.ts";
 import type { Frame, Recording, RecordingMetadata } from "../../recordings/format.ts";
@@ -146,6 +147,51 @@ function reachedFrom(entry: string): string[] {
   walk(path.join(REPO_ROOT, entry));
   return [...seen].map((file) => path.relative(REPO_ROOT, file).split(path.sep).join("/"));
 }
+
+test("interrupt: when the turn's text reaches the host before startTurn resolves, the host still interrupts at the turn's first text and the Claude replay passes", async () => {
+  const recording = await recordingOf("interrupt");
+  const { run, replay } = await replayClaude(recording, { timeoutMs: 5_000, wrapSession: startTurnAfterItsText });
+  assert.ok(replay.sequencer.done());
+  const [turnId] = run.turnIds;
+  const messages = new Set(run.events.flatMap((event) => (event.body.type === "item.upsert" && event.body.item.kind === "assistant_message" ? [event.body.item.id] : [])));
+  const firstText = run.events.find(
+    (event) =>
+      event.turnId === turnId &&
+      ((event.body.type === "item.delta" && messages.has(event.body.itemId) && event.body.field === "text" && event.body.chunk !== "") ||
+        (event.body.type === "item.upsert" && messages.has(event.body.item.id) && typeof event.body.item.text === "string" && event.body.item.text !== "")),
+  );
+  assert.ok(firstText !== undefined, "the turn's text is kept, attributed to the turn");
+  assert.deepEqual(run.interrupted, { turnId, afterSeq: firstText.seq }, "the host interrupted at the first text, which came before startTurn resolved");
+});
+
+test("approval_allowed: replay fails when the message with the command's result is removed: the command's output never reaches the host", async () => {
+  const recording = await recordingOf("approval_allowed");
+  const index = recording.frames.findIndex((entry) => entry.frame.kind === "message" && (entry.frame["message"] as { type: string }).type === "user");
+  assert.ok(index !== -1, "the recording holds the command's result");
+  const { file } = editedCopy(recording, "removed-tool-result", (frames) => frames.splice(index, 1));
+  await assert.rejects(replayClaude(file, { timeoutMs: 10_000 }), /scenario approval_allowed: a command or tool item completed with the marker in its output/);
+});
+
+test("approval_denied: replay fails when the message with the declined command's result is removed: the command would show as completed", async () => {
+  const recording = await recordingOf("approval_denied");
+  const index = recording.frames.findIndex((entry) => entry.frame.kind === "message" && (entry.frame["message"] as { type: string }).type === "user");
+  assert.ok(index !== -1, "the recording holds the declined command's result");
+  const { file } = editedCopy(recording, "removed-denial-result", (frames) => frames.splice(index, 1));
+  await assert.rejects(replayClaude(file, { timeoutMs: 10_000 }), /scenario approval_denied: no command item completed/);
+});
+
+test("interrupt: replay fails, naming the file and the line, when the result of the driver's interrupt call is removed, instead of waiting for ever", async () => {
+  const recording = await recordingOf("interrupt");
+  const call = recording.frames.find((entry) => entry.frame.kind === "call" && entry.frame["method"] === "interrupt")!;
+  const index = recording.frames.findIndex((entry) => entry.frame.kind === "result" && entry.frame["id"] === call.frame["id"]);
+  assert.ok(index !== -1, "the recording holds the interrupt call's result");
+  const { file } = editedCopy(recording, "removed-interrupt-result", (frames) => frames.splice(index, 1));
+  await assert.rejects(replayClaude(file, { timeoutMs: 3_000 }), (error: unknown) => {
+    assert.ok(error instanceof Error, String(error));
+    assert.match(error.message, new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\d+: replay stalled: the interrupt scenario waited 3000 ms for the host's answers and interrupt to settle`), error.message.slice(0, 600));
+    return true;
+  });
+});
 
 test("the replay SDK imports neither driver code nor the fake SDK, directly or through other modules, type-only imports included", () => {
   // The walk finds driver code where it is: the rig imports the driver and the fake.

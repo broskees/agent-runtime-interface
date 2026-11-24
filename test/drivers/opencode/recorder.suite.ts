@@ -16,8 +16,8 @@ import { LIVE_RECORD_VARIABLE, parseRecordArguments } from "../../../scripts/rec
 import { DEFAULT_OPENCODE_RECORDINGS } from "../../../scripts/record-opencode.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
-import { opencodeDataDirectory, userDatabaseFile } from "../../recordings/opencode/credentials.ts";
-import { OpencodeModelChoiceError, recordOpencode } from "../../recordings/opencode/record.ts";
+import { opencodeDataDirectory, recoveryFileFor, userDatabaseFile } from "../../recordings/opencode/credentials.ts";
+import { OpencodeModelChoiceError, describeOpencodeRun, failuresOf, recordOpencode } from "../../recordings/opencode/record.ts";
 import type { OpencodeRecordOutcome, RecordOpencodeOptions } from "../../recordings/opencode/record.ts";
 import { replayOpencode } from "../../recordings/opencode/replay.ts";
 import { OPENCODE_SERVE_ARGS, opencodeServeEnvironment, startOpencodeServe } from "../../recordings/opencode/serve.ts";
@@ -350,9 +350,10 @@ test("when the user's sign-in also changed during the run, the recorder leaves i
     copy = path.join(input.env["XDG_DATA_HOME"]!, "opencode", "opencode.db");
     return start(input);
   });
-  assert.match(outcomes[0]!.error?.message ?? "", /crd_0001 in .* changed while the recorder ran, and OpenCode also refreshed the recorder's copy; the recorder left them as they are and kept its refreshed value\(s\) in .*opencode\.db\.ari-recorder-refreshed-\d+\.json/);
+  assert.match(outcomes[0]!.error?.message ?? "", /crd_0001 in .* changed while the recorder ran, and OpenCode also refreshed the recorder's copy; the recorder left them as they are; it kept the refreshed value\(s\) in .*opencode\.db\.ari-recorder-refreshed-\d+\.json/);
   assert.equal(await credentialValue(database), "refreshed-by-another-opencode");
   const kept = `${database}.ari-recorder-refreshed-${process.pid}.json`;
+  assert.equal(outcomes[0]!.recoveryFile, kept);
   assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: "crd_0001", value: "refreshed-by-the-recorded-server" }], "the recorder's refreshed value is not lost");
   assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
   assert.ok(!fs.existsSync(outcomes[0]!.workspace));
@@ -380,11 +381,147 @@ test("when the recorder cannot write a refreshed sign-in back, it keeps it in a 
     return start(input);
   });
   const kept = `${database}.ari-recorder-refreshed-${process.pid}.json`;
-  assert.match(outcomes[0]!.error?.message ?? "", new RegExp(`could not write the sign-in\\(s\\) OpenCode refreshed back to .*; it kept them in ${kept.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.match(outcomes[0]!.error?.message ?? "", new RegExp(`could not write the sign-in\\(s\\) OpenCode refreshed back to .*; it kept the refreshed value\\(s\\) in ${kept.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: "crd_0001", value: "refreshed-by-the-recorded-server" }]);
   assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
   assert.ok(!fs.existsSync(outcomes[0]!.workspace), "the temp dir is removed");
 });
+
+/** Sets the value of credential row `id` in the database `file`. */
+async function setCredential(file: string, id: string, value: string): Promise<void> {
+  const db = await openSqlite(file);
+  try {
+    db.run("UPDATE credential SET value = ? WHERE id = ?", value, id);
+  } finally {
+    db.close();
+  }
+}
+
+/** The recording function against fresh fakes in this process; `onScenario` runs at the first turn of each scenario, given its number (from 0) and the database copy its server opens. */
+async function recordWithSignInChanges(env: { [name: string]: string }, scenarios: readonly ScenarioName[], onScenario: (number: number, copy: string) => Promise<void>, crash = false): Promise<{ outDir: string; outcomes: OpencodeRecordOutcome[] }> {
+  const servers: FakeOpencodeServer[] = [];
+  let started = -1;
+  const { outDir, outcomes } = await recordInProcess({ ...env, ARI_RECORD_OPENCODE_MODEL: "fake/fake-small" }, scenarios, async (input) => {
+    started += 1;
+    const number = started;
+    const copy = path.join(input.env["XDG_DATA_HOME"]!, "opencode", "opencode.db");
+    return fakeOpencodeServers(servers, { crash, onTurn: async (_run, index) => (index === 0 ? onScenario(number, copy) : undefined) })(input);
+  });
+  return { outDir, outcomes };
+}
+
+test("refreshed sign-ins that cannot go back in two scenarios all survive in the run's recovery file, one record per credential row", async () => {
+  const { database, env } = await seedHome();
+  const seed = await openSqlite(database);
+  try {
+    seed.run("INSERT INTO credential VALUES (?, ?, ?, ?, NULL, NULL, 1, 1, 1)", "crd_0002", "other", "default", JSON.stringify({ type: "key", key: "fake-provider-key-0102" }));
+  } finally {
+    seed.close();
+  }
+  // Each scenario: OpenCode refreshes one row of the copy, and another OpenCode changes the same row of the user's database.
+  const rows = ["crd_0001", "crd_0002", "crd_0001"];
+  const { outDir, outcomes } = await recordWithSignInChanges(env, ["simple", "approval_denied", "multi_turn"], async (number, copy) => {
+    await setCredential(copy, rows[number]!, `refreshed-${number + 1}-by-the-recorded-server`);
+    await setCredential(database, rows[number]!, `changed-${number + 1}-by-another-opencode`);
+  });
+  const kept = recoveryFileFor(database);
+  assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [
+    { id: "crd_0001", value: "refreshed-3-by-the-recorded-server", olderValues: ["refreshed-1-by-the-recorded-server"] },
+    { id: "crd_0002", value: "refreshed-2-by-the-recorded-server" },
+  ]);
+  assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
+  assert.deepEqual(
+    outcomes.map((outcome) => [outcome.scenario, outcome.recoveryFile, outcome.workspaceKept, fs.existsSync(outcome.workspace)]),
+    [
+      ["simple", kept, false, false],
+      ["approval_denied", kept, false, false],
+      ["multi_turn", kept, false, false],
+    ],
+  );
+  for (const outcome of outcomes) assert.match(outcome.error?.message ?? "", new RegExp(`it kept the refreshed value\\(s\\) in ${kept.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.equal(describeOpencodeRun(outcomes, outDir).filter((line) => line.includes(kept)).length, 1, "the run's last lines name the recovery file");
+});
+
+test("when the recovery file cannot take a refreshed sign-in either, the recorder keeps the workspace with its database copy, stops the run and names both", async () => {
+  const { database, env } = await seedHome();
+  const kept = recoveryFileFor(database);
+  // Nothing can be written where the recovery file goes.
+  fs.mkdirSync(kept);
+  fs.writeFileSync(path.join(kept, "occupied"), "");
+  const { outDir, outcomes } = await recordWithSignInChanges(env, ["simple", "multi_turn"], async (_number, copy) => {
+    await setCredential(copy, "crd_0001", "refreshed-by-the-recorded-server");
+    // The user's database is no longer one the recorder can open.
+    for (const file of [database, `${database}-wal`, `${database}-shm`]) fs.rmSync(file, { force: true });
+    fs.writeFileSync(database, "not a database any more");
+  });
+  assert.equal(outcomes.length, 1, "the run stopped: no other scenario ran");
+  const [outcome] = outcomes;
+  const copy = path.join(outcome!.workspace, "xdg-data", "opencode", "opencode.db");
+  try {
+    assert.equal(outcome!.workspaceKept, true);
+    assert.equal(outcome!.recoveryFile, undefined);
+    assert.ok(fs.existsSync(copy), "the workspace with its database copy is kept");
+    const db = await openSqlite(copy, { readOnly: true });
+    try {
+      assert.equal(String(db.all("SELECT value FROM credential WHERE id = ?", "crd_0001")[0]!["value"]), "refreshed-by-the-recorded-server", "the copy holds the refreshed sign-in");
+    } finally {
+      db.close();
+    }
+    const message = outcome!.error?.message ?? "";
+    const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(message, new RegExp(`could not keep them in ${escaped(kept)} either`));
+    assert.match(message, new RegExp(`only in the recorder's copy, ${escaped(copy)}`));
+    assert.match(message, new RegExp(`the recorder kept the workspace ${escaped(outcome!.workspace)}`));
+    assert.ok(describeOpencodeRun(outcomes, outDir).some((line) => line.includes(outcome!.workspace)), "the run's last lines name the kept workspace");
+  } finally {
+    fs.rmSync(outcome!.workspace, { recursive: true, force: true });
+  }
+});
+
+for (const [label, blockRecovery] of [
+  ["kept in the recovery file", false],
+  ["kept only in the workspace", true],
+] as const) {
+  test(`a scenario that fails and a refreshed sign-in ${label} are both reported`, async () => {
+    const { database, env } = await seedHome();
+    const kept = recoveryFileFor(database);
+    if (blockRecovery) {
+      fs.mkdirSync(kept);
+      fs.writeFileSync(path.join(kept, "occupied"), "");
+    }
+    // The server dies in the scenario's first run, after OpenCode refreshed the copy and another OpenCode changed the user's row.
+    const { outDir, outcomes } = await recordWithSignInChanges(
+      env,
+      ["simple"],
+      async (_number, copy) => {
+        await setCredential(copy, "crd_0001", "refreshed-by-the-recorded-server");
+        await setCredential(database, "crd_0001", "changed-by-another-opencode");
+      },
+      true,
+    );
+    const [outcome] = outcomes;
+    try {
+      const failures = failuresOf(outcome!);
+      assert.ok(failures.length >= 2, `more than one failure: ${outcome!.error?.message}`);
+      assert.doesNotMatch(failures[0]!.message, /credential|sign-in/, "the scenario's own failure comes first");
+      assert.ok(outcome!.error!.message.includes(failures[0]!.message), "the error names the scenario's failure");
+      const ending = describeOpencodeRun(outcomes, outDir).join("\n");
+      if (blockRecovery) {
+        assert.equal(outcome!.workspaceKept, true);
+        assert.match(outcome!.error!.message, /could not keep them in .* either/);
+        assert.ok(outcome!.error!.message.includes(`the recorder kept the workspace ${outcome!.workspace}`), outcome!.error!.message);
+        assert.ok(ending.includes(outcome!.workspace), ending);
+      } else {
+        assert.equal(outcome!.recoveryFile, kept);
+        assert.ok(outcome!.error!.message.includes(`it kept the refreshed value(s) in ${kept}`), outcome!.error!.message);
+        assert.ok(ending.includes(kept), ending);
+        assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: "crd_0001", value: "refreshed-by-the-recorded-server" }]);
+      }
+    } finally {
+      if (outcome?.workspaceKept === true) fs.rmSync(outcome.workspace, { recursive: true, force: true });
+    }
+  });
+}
 
 test("without a database of the user's the recorder copies nothing and creates nothing in the user's data directory", async () => {
   const home = fs.mkdtempSync(path.join(DIRECTORY, "no-database-"));

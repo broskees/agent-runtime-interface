@@ -12,6 +12,10 @@
 //   - $HOME (and its real path) with <HOME>;
 //   - the values of ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and
 //     CLAUDE_CODE_OAUTH_TOKEN with <ANTHROPIC_API_KEY> and so on;
+//   - the value of every other variable of the environment whose name ends
+//     in _KEY, _TOKEN, _SECRET or _PASSWORD, when it is 8 characters or
+//     more, with <NAME> (the recorded server and Claude Code can see the
+//     user's environment, and a tool can print it);
 //   - email addresses with <EMAIL>;
 //   - the OS user name (os.userInfo().username, and the values of USER and
 //     LOGNAME where they differ) with <USER>. How depends on what the string
@@ -43,6 +47,20 @@ import * as os from "node:os";
 /** The credential variables whose values never reach a recording. */
 export const SECRET_VARIABLES = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
 
+/** Any other variable whose name ends in one of these holds a secret: its value never reaches a recording either. */
+export const SECRET_NAME_SUFFIXES = ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD"] as const;
+
+/** Shorter values of those variables stay: a short value (`1`, `true`, `none`) would match ordinary text. */
+export const SECRET_VALUE_MIN_LENGTH = 8;
+
+/** The variables of `env`, besides SECRET_VARIABLES, whose values the sanitiser replaces. */
+export function secretVariablesOf(env: { readonly [name: string]: string | undefined }): string[] {
+  return Object.entries(env)
+    .filter(([name, value]) => value !== undefined && value.length >= SECRET_VALUE_MIN_LENGTH && !(SECRET_VARIABLES as readonly string[]).includes(name) && SECRET_NAME_SUFFIXES.some((suffix) => name.endsWith(suffix)))
+    .map(([name]) => name)
+    .sort();
+}
+
 export const PLACEHOLDERS = {
   workspace: "<WORKSPACE>",
   path: "<PATH>",
@@ -56,7 +74,7 @@ export const PLACEHOLDERS = {
 export interface SanitiserInput {
   /** The recording's temp workspace. */
   readonly workspace: string;
-  /** The environment the recorder (or the replay) runs in: HOME, PATH, USER, LOGNAME and the credential variables come from it. */
+  /** The environment the recorder (or the replay) runs in: HOME, PATH, USER, LOGNAME, the credential variables and every other secret variable come from it. */
   readonly env: { readonly [name: string]: string | undefined };
   /** The OS user name; os.userInfo().username when left out. USER and LOGNAME are replaced too when they differ from it. */
   readonly user?: string;
@@ -156,6 +174,11 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
   add(input.workspace, PLACEHOLDERS.workspace);
   add(input.env["HOME"], PLACEHOLDERS.home);
   for (const name of SECRET_VARIABLES) add(input.env[name], `<${name}>`);
+  // A secret is not a path: its value is replaced as it is, never resolved on disk.
+  for (const name of secretVariablesOf(input.env)) {
+    const value = input.env[name]!;
+    if (!exact.some((entry) => entry.value === value)) exact.push({ value, placeholder: `<${name}>` });
+  }
   exact.sort((a, b) => b.value.length - a.value.length);
   const users = new Set(userNames(input));
   const names = [...users].sort((a, b) => b.length - a.length);

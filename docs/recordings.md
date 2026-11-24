@@ -185,7 +185,8 @@ Replay fails, naming the recording file, the line and both frames, when:
   driver (see below);
 - the scenario waits too long for something (a recorded inbound frame is
   missing, for example). The message names the next recorded frame and the
-  last frame replayed.
+  last frame replayed. Every wait counts: an event, a call into the driver,
+  and the host's answers and interrupt settling.
 
 An inbound frame counts as replayed only once the driver has taken it, not
 when the sequencer hands it to the replay SDK. For Claude: a message, the end
@@ -207,6 +208,42 @@ until the driver's event streams have closed, or 5 seconds.
 Before it compares, replay runs the driver's frame through the sanitiser with
 its own workspace, `$HOME` and `PATH`. Before it delivers, it puts its own
 workspace where the recording says `<WORKSPACE>`.
+
+### What replay detects, and what it does not
+
+Replay checks the driver against the recording. It is not a tamper detector.
+The header's `sha256` guards a recording against edits: the loader refuses a
+file whose frames do not match it, so an edit fails unless the checksum is
+computed again.
+
+Replay detects:
+
+- an outbound frame that is changed, skipped, extra or out of order: the
+  sequencer compares each one with the next recorded frame;
+- an extra recorded inbound frame the driver cannot take: an event or an end
+  after the driver closed its stream, or a response to a request the driver
+  gave up;
+- a removed inbound frame the scenario's outcome depends on. The run then
+  waits for something that never comes and stalls, or the driver sends a
+  frame the recording does not expect, or a scenario assertion fails. For
+  example, without the event that ends the turn the turn never ends; without
+  the result of the approved command, `approval_allowed` finds no marker in
+  the command's output; without Claude Code's result of the declined command,
+  `approval_denied` sees that command complete.
+
+Replay does not detect:
+
+- a removed, duplicated or reordered inbound frame the driver reads and
+  ignores, or that changes nothing the scenario checks. In the fake
+  recordings, OpenCode's `session.inbox.enqueued`, `session.step.started` or
+  one `session.text.delta` can go (`session.text.ended` carries the whole
+  text), and so can one of Claude Code's `content_block_delta` stream events;
+- a change to inbound content the scenario's assertions do not look at, such
+  as the text of a `session.text.delta`;
+- whether the driver read an HTTP frame. A response, an event or an end counts
+  as taken once the replay server has written and flushed it to a connection
+  the driver still holds open, the same standard as a Claude stream item that
+  the driver's `next()` returned.
 
 ## Fields replay ignores
 
@@ -237,6 +274,7 @@ and is sanitised like any other value):
 | a string that is exactly the value of `PATH` | `<PATH>` |
 | `$HOME`, and its real path | `<HOME>` |
 | the values of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` | `<ANTHROPIC_API_KEY>`, `<ANTHROPIC_AUTH_TOKEN>`, `<CLAUDE_CODE_OAUTH_TOKEN>` |
+| the value of every other variable of the recorder's environment whose name ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, when it is 8 characters or more | `<NAME>`, for example `<GEMINI_API_KEY>` |
 | the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ): in an inbound frame wherever it is a whole word, except in a protocol word; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
 | email addresses | `<EMAIL>` |
 | another home directory: `/home/<name>`, `/Users/<name>`, `/root` | `<OTHER_HOME>` |
@@ -244,6 +282,14 @@ and is sanitised like any other value):
 
 Exact values go first, longest first, so a path inside the workspace is
 replaced whole.
+
+The recorded OpenCode server inherits the recorder's environment, and a tool
+it runs can print it; Claude Code gets only `PATH`, but a tool can still print
+a value it finds elsewhere. So the sanitiser replaces the value of every
+variable whose name ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, in
+inbound and outbound frames alike. A shorter value stays, because it would
+match ordinary text. The scan cannot see these values: it runs without the
+recorder's environment.
 
 How the user name goes depends on what the string is:
 
@@ -382,13 +428,23 @@ The sources for these choices (Claude Code and Agent SDK docs, read
   regardless ("What settingSources does not control").
 - `CLAUDE_CONFIG_DIR`: "All settings, session history, and plugins are stored
   under this path" (Environment variables reference).
-- Managed policy settings (for example `/etc/claude-code/managed-settings.json`)
-  load from the machine in all cases. The recorder cannot turn them off; a
-  machine with such a file records under it.
-- Server-managed settings that Anthropic serves to an eligible organization
-  credential, and endpoint-managed policy on the machine, can still reach a
-  recorded session: the SDK cannot turn either off ("What settingSources does
-  not control").
+- Managed settings load in all cases, and neither the temp HOME nor
+  `CLAUDE_CONFIG_DIR` keeps them out. The recorder does not isolate them; a
+  machine with any of them records under them. The sources, from
+  "Deploy managed settings" (read 2026-11-24), "Where each mechanism stores
+  the policy":
+  - server-managed settings, which Claude Code fetches for an organization
+    account from the claude.ai admin console or a Claude apps gateway;
+  - the macOS configuration profile in the `com.anthropic.claudecode`
+    managed preferences domain;
+  - the Windows registry value `Settings` under
+    `HKLM\SOFTWARE\Policies\ClaudeCode`, and under
+    `HKCU\SOFTWARE\Policies\ClaudeCode`;
+  - `managed-settings.json`, a `managed-settings.d/` directory and
+    `managed-mcp.json` in the system directory:
+    `/Library/Application Support/ClaudeCode/` on macOS,
+    `/etc/claude-code/` on Linux and WSL, `C:\Program Files\ClaudeCode\` on
+    Windows.
 
 ### How Claude Code finds the sign-in
 
@@ -467,10 +523,21 @@ session has no MCP server at all.
 
 The sources are OpenCode's own code at tag `v2.1.2` (commit
 `a517687fde98a7329ada3ae644a01a9fc6c4e99e` of
-https://github.com/anomalyco/opencode), read 2026-11-24. The system config
-directory (`/etc/opencode` on Linux, `packages/core/src/config/discovery.ts:28-32`)
-and macOS managed preferences load in all cases; a machine with them records
-under them.
+https://github.com/anomalyco/opencode), read 2026-11-24.
+
+Two system sources load in all cases, and neither the temp HOME nor the XDG
+directories keep them out. The recorder does not isolate them; a machine with
+either records under them:
+
+- the system config directory, with its `opencode.json` or `opencode.jsonc`
+  and the rest of a config directory: `/etc/opencode` on Linux,
+  `/Library/Application Support/opencode` on macOS,
+  `%ProgramData%\opencode` on Windows (`packages/core/src/config/discovery.ts:27-32`).
+  The server sets no option that skips it (`packages/cli/src/server-process.ts:121-133`);
+- on macOS, the managed preferences that MDM deploys:
+  `/Library/Managed Preferences/<user>/ai.opencode.managed.plist`, else
+  `/Library/Managed Preferences/ai.opencode.managed.plist`
+  (`packages/core/src/config/discovery.ts:34-40,110-117`).
 
 ### How OpenCode finds the sign-in
 
@@ -504,15 +571,24 @@ in.
   one that fails, the recorder writes each credential whose value changed in
   the copy back to the user's database, so a rotated token is never lost.
   When the user's row also changed meanwhile, the recorder leaves it as it is
-  and reports the scenario failed. Whenever a refreshed value cannot go back
-  (that case, or a database the recorder cannot write), the recorder keeps it
-  in `opencode.db.ari-recorder-refreshed-<pid>.json` beside the user's
-  database, mode 0600, and names that file in the error.
+  and reports the scenario failed.
+- Whenever a refreshed value cannot go back (that case, or a database the
+  recorder cannot write), the recorder adds it to the run's recovery file
+  beside the user's database, `opencode.db.ari-recorder-refreshed-<pid>.json`,
+  mode 0600. The file holds one record per credential row, `{ "id", "value" }`,
+  with `olderValues` when a later scenario kept a newer value for the same row.
+  The recorder reads the file and adds to it, never truncates it, and replaces
+  it only by renaming a complete new file over it. Each scenario's error names
+  the file, and so do the run's last lines.
+- When the recovery file cannot take the value either, the workspace's copy of
+  the database holds the only copy. The recorder then keeps that workspace,
+  stops the run, and names the workspace and the copy in the error and in the
+  run's last lines.
 - Without a database of the user's, the recorder copies nothing; provider keys
   in the environment still work.
 
 The workspace, with the copied database, is removed after each scenario, also
-after one that fails.
+after one that fails, unless it holds the only copy of a refreshed sign-in.
 
 ### The model
 
@@ -562,7 +638,8 @@ eight short turns.
 
 The recorder writes `test/drivers/opencode/recordings/<scenario>.ndjson`, one
 file per scenario, also for a scenario whose checks failed (it says which,
-and exits 1). Without `ARI_LIVE_RECORD=1` it exits 2 before it loads anything
+and exits 1). Its last lines name every recovery file and every kept
+workspace; see "How OpenCode finds the sign-in". Without `ARI_LIVE_RECORD=1` it exits 2 before it loads anything
 or starts any process; without a model the server offers it exits 2 before
 the first prompt.
 

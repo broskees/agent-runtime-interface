@@ -37,7 +37,7 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   // Only now: these load the driver and start processes.
   const { SCENARIO_NAMES } = await import("../test/recordings/scenarios.ts");
-  const { OpencodeModelChoiceError, recordOpencode } = await import("../test/recordings/opencode/record.ts");
+  const { OpencodeModelChoiceError, describeOpencodeRun, failuresOf, recordOpencode } = await import("../test/recordings/opencode/record.ts");
   const { startOpencodeServe } = await import("../test/recordings/opencode/serve.ts");
   let parsed: RecordArguments;
   try {
@@ -54,13 +54,13 @@ async function main(argv: readonly string[]): Promise<number> {
     startServer: (input) => startOpencodeServe({ layout: input.layout, env: input.env, password: input.password }),
     log: (line) => process.stdout.write(`record-opencode: ${line}\n`),
   });
-  const choice = outcomes.find((outcome) => outcome.error instanceof OpencodeModelChoiceError);
-  if (choice !== undefined) {
-    process.stderr.write(`record-opencode: stopped before the first prompt. ${choice.error!.message}\n`);
-    return 2;
-  }
+  const choice = outcomes.flatMap(failuresOf).find((failure) => failure instanceof OpencodeModelChoiceError);
+  if (choice !== undefined) process.stderr.write(`record-opencode: stopped before the first prompt. ${choice.message}\n`);
+  // Every recovery file and every kept workspace, whatever else failed.
   const failed = outcomes.filter((outcome) => outcome.error !== undefined);
-  process.stdout.write(`record-opencode: ${outcomes.length - failed.length} of ${outcomes.length} scenario(s) passed; recordings in ${parsed.outDir}\n`);
+  const stream = failed.length === 0 ? process.stdout : process.stderr;
+  for (const line of describeOpencodeRun(outcomes, parsed.outDir)) stream.write(`record-opencode: ${line}\n`);
+  if (choice !== undefined) return 2;
   return failed.length === 0 ? 0 : 1;
 }
 

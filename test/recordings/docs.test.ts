@@ -81,3 +81,30 @@ test("the docs name the file OpenCode 2.1.2 keeps its sign-ins in, and the sourc
     assert.ok(tableRows(setup).some((row) => row[0] === `\`${variable}\``), `the table names ${variable}`);
   }
 });
+
+test("the docs say what replay detects and what it does not, and that the checksum guards edits", () => {
+  const replay = section("What replay detects, and what it does not");
+  assert.match(replay, /It is not a tamper detector\.\nThe header's `sha256` guards a recording against edits/);
+  assert.match(replay, /^Replay detects:$/m);
+  assert.match(replay, /^Replay does not detect:$/m);
+  assert.match(replay, /written and flushed it to a connection\s+the driver still holds open/);
+});
+
+test("the docs name the system and managed configuration sources that the temp HOME and config directories do not keep out", () => {
+  const opencode = section("How the OpenCode recorder keeps the user's setup out");
+  for (const source of ["`/etc/opencode`", "`/Library/Application Support/opencode`", "`%ProgramData%\\opencode`", "`/Library/Managed Preferences/<user>/ai.opencode.managed.plist`", "`/Library/Managed Preferences/ai.opencode.managed.plist`"]) {
+    assert.ok(opencode.includes(source), `the OpenCode section names ${source}`);
+  }
+  const claude = section("How the Claude recorder keeps the user's setup out");
+  for (const source of ["server-managed settings", "`com.anthropic.claudecode`", "`HKLM\\SOFTWARE\\Policies\\ClaudeCode`", "`HKCU\\SOFTWARE\\Policies\\ClaudeCode`", "`/Library/Application Support/ClaudeCode/`", "`/etc/claude-code/`", "`C:\\Program Files\\ClaudeCode\\`", "`managed-settings.d/`", "`managed-mcp.json`"]) {
+    assert.ok(claude.includes(source), `the Claude section names ${source}`);
+  }
+});
+
+test("the docs give the sanitiser's rule for secret environment variables", () => {
+  const rows = tableRows(section("Sanitising and the scan"));
+  assert.ok(
+    rows.some((row) => /ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, when it is 8 characters or more/.test(row[0]!) && row[1] === "`<NAME>`, for example `<GEMINI_API_KEY>`"),
+    JSON.stringify(rows),
+  );
+});

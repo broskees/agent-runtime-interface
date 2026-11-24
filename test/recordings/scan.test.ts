@@ -14,7 +14,7 @@ import { REPO_ROOT } from "../helpers/spec.ts";
 import { encodeRecording, parseRecording } from "./format.ts";
 import type { Frame, RecordingMetadata } from "./format.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "./claude/protocol-words.ts";
-import { PLACEHOLDERS, createSanitiser, userNames } from "./sanitiser.ts";
+import { PLACEHOLDERS, createSanitiser, secretVariablesOf, userNames } from "./sanitiser.ts";
 
 const METADATA: RecordingMetadata = {
   driver: "claude",
@@ -171,6 +171,28 @@ test("the sanitiser replaces the workspace, $HOME, the user name in paths and th
     });
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("the sanitiser replaces the value of every variable whose name ends in _KEY, _TOKEN, _SECRET or _PASSWORD, 8 characters or more, in both directions", () => {
+  const env = {
+    HOME: "/tmp/ari-unused-home",
+    GEMINI_API_KEY: "AIzaSyAriSyntheticGeminiKeyForTests000",
+    GITHUB_TOKEN: "github-token-value-0123",
+    SESSION_SECRET: "session-secret-value",
+    DB_PASSWORD: "correct-horse-battery",
+    SHORT_TOKEN: "1234567",
+    MONKEY: "monkey-value-0123",
+    KEY: "bare-key-value-0123",
+  };
+  assert.deepEqual(secretVariablesOf(env), ["DB_PASSWORD", "GEMINI_API_KEY", "GITHUB_TOKEN", "SESSION_SECRET"]);
+  const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env, user: "ari-nobody" });
+  const printed = Object.entries(env)
+    .map(([name, value]) => `${name}=${value}`)
+    .join(" ");
+  const expected = "HOME=<HOME> GEMINI_API_KEY=<GEMINI_API_KEY> GITHUB_TOKEN=<GITHUB_TOKEN> SESSION_SECRET=<SESSION_SECRET> DB_PASSWORD=<DB_PASSWORD> SHORT_TOKEN=1234567 MONKEY=monkey-value-0123 KEY=bare-key-value-0123";
+  for (const dir of ["in", "out"] as const) {
+    assert.deepEqual(sanitise({ dir, kind: "message", text: printed, [env.GEMINI_API_KEY]: "as a key" }), { dir, kind: "message", text: expected, "<GEMINI_API_KEY>": "as a key" }, `a frame going ${dir}`);
   }
 });
 

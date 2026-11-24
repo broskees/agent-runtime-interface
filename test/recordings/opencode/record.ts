@@ -12,8 +12,10 @@
 // HOME and XDG base directories inside the workspace and none of the user's
 // OPENCODE_* variables (./serve.ts), and its database holds only the user's
 // sign-ins. A sign-in OpenCode refreshed during the run goes back to the
-// user's database. The workspace is removed after every scenario, also after
-// one that fails.
+// user's database, or, when it cannot, into this run's recovery file beside
+// it (./credentials.ts). The workspace is removed after every scenario, also
+// after one that fails, unless it holds the only copy of a refreshed sign-in:
+// then the recorder keeps it and stops.
 
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
@@ -24,7 +26,7 @@ import { writeRecording } from "../format.ts";
 import { createSanitiser } from "../sanitiser.ts";
 import { SCENARIOS, checkScenario } from "../scenarios.ts";
 import type { Scenario, ScenarioName } from "../scenarios.ts";
-import { copyCredentials, returnCredentials } from "./credentials.ts";
+import { CredentialsKeptError, copyCredentials, returnCredentials } from "./credentials.ts";
 import type { CopiedCredentials } from "./credentials.ts";
 import { opencodeNativeAnswers } from "./frames.ts";
 import { OPENCODE_PROTOCOL_WORDS } from "./protocol-words.ts";
@@ -75,10 +77,37 @@ export interface OpencodeRecordOutcome {
   /** The recording written, when the run reached the server at all. */
   readonly file?: string;
   readonly frames: number;
-  /** Why the scenario failed: its run, its assertions, the model check, or the sign-in copy-back. */
+  /**
+   * Why the scenario failed: its run, its assertions, the model check, the
+   * sign-in copy-back. With more than one failure, an AggregateError whose
+   * message names each, in the order they happened.
+   */
   readonly error?: Error;
-  /** The temp workspace the scenario ran in; it no longer exists. */
+  /** The temp workspace the scenario ran in; removed unless `workspaceKept`. */
   readonly workspace: string;
+  /** The workspace still exists: its database copy holds the only copy of a refreshed sign-in. The run stopped after this scenario. */
+  readonly workspaceKept: boolean;
+  /** The recovery file this scenario added refreshed sign-ins to, when one could not go back to the user's database. */
+  readonly recoveryFile?: string;
+}
+
+/** Each failure of a scenario, in order. */
+export function failuresOf(outcome: OpencodeRecordOutcome): readonly Error[] {
+  if (outcome.error === undefined) return [];
+  return outcome.error instanceof AggregateError ? (outcome.error.errors as Error[]) : [outcome.error];
+}
+
+/** The lines that end a run: how many scenarios passed, then every recovery file and every kept workspace, so none goes unseen. */
+export function describeOpencodeRun(outcomes: readonly OpencodeRecordOutcome[], outDir: string): string[] {
+  const failed = outcomes.filter((outcome) => outcome.error !== undefined);
+  const lines = [`${outcomes.length - failed.length} of ${outcomes.length} scenario(s) passed; recordings in ${outDir}`];
+  for (const file of new Set(outcomes.flatMap((outcome) => (outcome.recoveryFile === undefined ? [] : [outcome.recoveryFile])))) {
+    lines.push(`refreshed sign-in(s) that could not go back to your OpenCode database are in ${file}, readable only by you: put each value back into its row of the credential table, or sign in again`);
+  }
+  for (const outcome of outcomes.filter((each) => each.workspaceKept)) {
+    lines.push(`the run stopped after ${outcome.scenario} and kept its workspace ${outcome.workspace}: its database copy holds the only copy of a refreshed sign-in`);
+  }
+  return lines;
 }
 
 /** The model is missing or not one the server offers: the recorder stops before the first prompt. */
@@ -155,10 +184,12 @@ async function recordOne(scenario: Scenario, options: RecordOpencodeOptions): Pr
   let proxy: RecordingProxy | undefined;
   let model: string | undefined;
   let vendorVersion = "unknown";
-  let error: Error | undefined;
+  const errors: Error[] = [];
   const failed = (reason: unknown): void => {
-    error ??= reason instanceof Error ? reason : new Error(String(reason));
+    errors.push(reason instanceof Error ? reason : new Error(String(reason)));
   };
+  let recoveryFile: string | undefined;
+  let workspaceKept = false;
   try {
     credentials = await copyCredentials(options.env, layout);
     server = await options.startServer({ scenario, layout, env: opencodeServeEnvironment(layout, options.env, password), password });
@@ -175,13 +206,22 @@ async function recordOne(scenario: Scenario, options: RecordOpencodeOptions): Pr
   } finally {
     await proxy?.close().catch(failed);
     await server?.stop().catch(failed);
-    try {
-      if (credentials !== undefined) await returnCredentials(credentials);
-    } catch (reason) {
-      failed(reason);
+    if (credentials !== undefined) {
+      try {
+        await returnCredentials(credentials);
+      } catch (reason) {
+        failed(reason);
+        // Kept in the recovery file: the copy can go. Anything else: the copy may hold the only refreshed value.
+        if (reason instanceof CredentialsKeptError) recoveryFile = reason.recoveryFile;
+        else {
+          workspaceKept = true;
+          failed(new Error(`the recorder kept the workspace ${layout.root}, with its copy of your OpenCode database, ${credentials.copy}, and stopped. Put each refreshed value from that copy's credential table back into yours, then delete the workspace.`));
+        }
+      }
     }
-    fs.rmSync(layout.root, { recursive: true, force: true });
+    if (!workspaceKept) fs.rmSync(layout.root, { recursive: true, force: true });
   }
+  const error = errors.length <= 1 ? errors[0] : new AggregateError(errors, `${errors.length} failures:\n${errors.map((each, index) => `  ${index + 1}. ${each.message}`).join("\n")}`);
   let file: string | undefined;
   if (frames.length > 0 && model !== undefined) {
     const sanitise = createSanitiser({ workspace: layout.root, env: options.env, protocolWords: OPENCODE_PROTOCOL_WORDS, ...(options.user === undefined ? {} : { user: options.user }) });
@@ -203,10 +243,22 @@ async function recordOne(scenario: Scenario, options: RecordOpencodeOptions): Pr
     );
   }
   log(`${scenario.name}: ${error === undefined ? "passed" : `FAILED: ${error.message}`}${file === undefined ? ", nothing recorded" : `, ${frames.length} frames in ${file}`}`);
-  return { scenario: scenario.name, frames: frames.length, workspace: layout.root, ...(file === undefined ? {} : { file }), ...(error === undefined ? {} : { error }) };
+  return {
+    scenario: scenario.name,
+    frames: frames.length,
+    workspace: layout.root,
+    workspaceKept,
+    ...(file === undefined ? {} : { file }),
+    ...(error === undefined ? {} : { error }),
+    ...(recoveryFile === undefined ? {} : { recoveryFile }),
+  };
 }
 
-/** Records each scenario in turn. A failed scenario does not stop the others, but a model the server does not offer stops them all. */
+/**
+ * Records each scenario in turn. A failed scenario does not stop the others,
+ * but two failures stop them all: a model the server does not offer, and a
+ * refreshed sign-in the recorder could keep nowhere but in the workspace.
+ */
 export async function recordOpencode(options: RecordOpencodeOptions): Promise<OpencodeRecordOutcome[]> {
   const names = options.scenarios ?? SCENARIOS.map((scenario) => scenario.name);
   const outcomes: OpencodeRecordOutcome[] = [];
@@ -215,7 +267,7 @@ export async function recordOpencode(options: RecordOpencodeOptions): Promise<Op
     if (scenario === undefined) throw new Error(`no scenario is named ${JSON.stringify(name)}`);
     const outcome = await recordOne(scenario, options);
     outcomes.push(outcome);
-    if (outcome.error instanceof OpencodeModelChoiceError) break;
+    if (outcome.workspaceKept || failuresOf(outcome).some((failure) => failure instanceof OpencodeModelChoiceError)) break;
   }
   return outcomes;
 }

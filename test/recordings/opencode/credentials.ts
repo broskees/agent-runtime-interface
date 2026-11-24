@@ -21,6 +21,8 @@
 // OpenCode changed in the copy (it refreshed an OAuth token, as
 // `packages/core/src/integration.ts` does through `credentials.update`) goes
 // back to the user's database, unless the user's row also changed meanwhile.
+// A value that cannot go back is added to the run's recovery file beside the
+// user's database; when that fails too, the caller keeps the copy.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -106,13 +108,95 @@ export async function copyCredentials(env: Env, layout: OpencodeLayout): Promise
 }
 
 /**
+ * Where this recorder run keeps refreshed sign-ins that could not go back to
+ * `database`: a file beside it, readable only by the user. One file per run
+ * (by process id), so two runs at once never write the same file; every
+ * scenario of the run adds to it.
+ */
+export function recoveryFileFor(database: string): string {
+  return `${database}.ari-recorder-refreshed-${process.pid}.json`;
+}
+
+/** One credential row in the recovery file: the newest refreshed value the recorder could not put back, and any older ones. */
+export interface RecoveredCredential {
+  readonly id: string;
+  readonly value: string;
+  /** Values an earlier scenario or run kept for the same row, oldest first. */
+  readonly olderValues?: readonly string[];
+}
+
+/** Some refreshed sign-ins could not go back to the user's database; each is safe in `recoveryFile`. */
+export class CredentialsKeptError extends Error {
+  readonly recoveryFile: string;
+  constructor(message: string, recoveryFile: string) {
+    super(message);
+    this.name = "CredentialsKeptError";
+    this.recoveryFile = recoveryFile;
+  }
+}
+
+/** Some refreshed sign-ins could not go back, and the recovery file could not take them either: the workspace copy is the only one left. */
+export class CredentialsNotSavedError extends Error {
+  readonly copy: string;
+  readonly recoveryFile: string;
+  constructor(message: string, copy: string, recoveryFile: string) {
+    super(message);
+    this.name = "CredentialsNotSavedError";
+    this.copy = copy;
+    this.recoveryFile = recoveryFile;
+  }
+}
+
+/**
+ * Adds `rows` to the recovery file, one record per credential row: a row
+ * already there keeps its earlier values in `olderValues`. It reads the file
+ * first and writes the merged list to a new file it then renames over the
+ * old one, so a failed write leaves the old file whole. A file it cannot
+ * read as a recovery file is never overwritten: it throws instead.
+ */
+export function keepRefreshedCredentials(recoveryFile: string, rows: ReadonlyArray<{ id: string; value: string }>): void {
+  let kept: RecoveredCredential[] = [];
+  if (fs.existsSync(recoveryFile)) {
+    const parsed: unknown = JSON.parse(fs.readFileSync(recoveryFile, "utf8"));
+    const valid = Array.isArray(parsed) && parsed.every((entry: unknown) => {
+      const record = entry as { id?: unknown; value?: unknown; olderValues?: unknown };
+      return typeof record === "object" && record !== null && typeof record.id === "string" && typeof record.value === "string" && (record.olderValues === undefined || (Array.isArray(record.olderValues) && record.olderValues.every((value) => typeof value === "string")));
+    });
+    if (!valid) throw new Error(`${recoveryFile} is not a list of credential records the recorder wrote`);
+    kept = parsed as RecoveredCredential[];
+  }
+  for (const row of rows) {
+    const index = kept.findIndex((record) => record.id === row.id);
+    const earlier = kept[index];
+    if (earlier === undefined) {
+      kept.push({ id: row.id, value: row.value });
+      continue;
+    }
+    if (earlier.value === row.value) continue;
+    const olderValues = [...(earlier.olderValues ?? []), earlier.value].filter((value) => value !== row.value);
+    kept[index] = { id: row.id, value: row.value, olderValues };
+  }
+  const staged = `${recoveryFile}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(staged, `${JSON.stringify(kept, null, 2)}\n`, { mode: 0o600, flag: "w" });
+    fs.chmodSync(staged, 0o600);
+    fs.renameSync(staged, recoveryFile);
+  } catch (error) {
+    fs.rmSync(staged, { force: true });
+    throw error;
+  }
+}
+
+/**
  * Puts each credential OpenCode changed in the copy back into the user's
- * database. Throws, after writing back the others, when the user's row of a
- * changed credential also changed while the recorder ran: the recorder leaves
- * that row as it is. Whenever a changed value cannot go back (that conflict,
- * or a database the recorder cannot write), it is kept in a file beside the
- * user's database, mode 0600, which the error names: the workspace with the
- * copy is removed next, and a refreshed token must not be lost with it.
+ * database. A changed value that cannot go back (the user's row also changed
+ * while the recorder ran, or the recorder cannot write the database) is added
+ * to the recovery file beside the user's database (`recoveryFileFor`), and
+ * this throws a CredentialsKeptError naming it. When even that file cannot
+ * take the value, this throws a CredentialsNotSavedError: the copy is then
+ * the only place the value is, and the caller must keep it. Any other error
+ * leaves the caller unsure whether a value changed, so it must keep the copy
+ * too.
  */
 export async function returnCredentials(credentials: CopiedCredentials): Promise<void> {
   if (!fs.existsSync(credentials.copy)) return;
@@ -125,9 +209,20 @@ export async function returnCredentials(credentials: CopiedCredentials): Promise
   }
   const changed = rows.filter((row) => credentials.original.has(row.id) && credentials.original.get(row.id) !== row.value);
   if (changed.length === 0) return;
-  // Where a refreshed value goes when it cannot go back: beside the user's database, readable only by them.
-  const kept = `${credentials.real}.ari-recorder-refreshed-${process.pid}.json`;
-  const keep = (rows: ReadonlyArray<{ id: string; value: string }>): void => fs.writeFileSync(kept, `${JSON.stringify(rows, null, 2)}\n`, { mode: 0o600 });
+  const recoveryFile = recoveryFileFor(credentials.real);
+  /** Keeps `rows` in the recovery file, or throws CredentialsNotSavedError saying why it could not. */
+  const keep = (rows: ReadonlyArray<{ id: string; value: string }>, why: string): never => {
+    try {
+      keepRefreshedCredentials(recoveryFile, rows);
+    } catch (error) {
+      throw new CredentialsNotSavedError(
+        `${why}, and the recorder could not keep them in ${recoveryFile} either (${error instanceof Error ? error.message : String(error)}). The refreshed value(s) of ${rows.map((row) => row.id).join(", ")} are only in the recorder's copy, ${credentials.copy}.`,
+        credentials.copy,
+        recoveryFile,
+      );
+    }
+    throw new CredentialsKeptError(`${why}; it kept the refreshed value(s) in ${recoveryFile}, readable only by you. Put each value back into its row of the credential table, or sign in again.`, recoveryFile);
+  };
   let user: SqliteDatabase | undefined;
   const conflicts: string[] = [];
   try {
@@ -150,18 +245,14 @@ export async function returnCredentials(credentials: CopiedCredentials): Promise
     } catch {
       // No transaction was open.
     }
-    // The workspace, with the copy, goes next: keep the refreshed values where the user finds them, so none is lost.
-    keep(changed);
-    throw new Error(
-      `the recorder could not write the sign-in(s) OpenCode refreshed back to ${credentials.real} (${error instanceof Error ? error.message : String(error)}); it kept them in ${kept}, readable only by you. Put each value back into its row of the credential table, or sign in again.`,
-    );
+    keep(changed, `the recorder could not write the sign-in(s) OpenCode refreshed back to ${credentials.real} (${error instanceof Error ? error.message : String(error)})`);
   } finally {
     user?.close();
   }
   if (conflicts.length > 0) {
-    keep(changed.filter((row) => conflicts.includes(row.id)));
-    throw new Error(
-      `the credential(s) ${conflicts.join(", ")} in ${credentials.real} changed while the recorder ran, and OpenCode also refreshed the recorder's copy; the recorder left them as they are and kept its refreshed value(s) in ${kept}, readable only by you. Sign in again if OpenCode reports the sign-in as expired.`,
+    keep(
+      changed.filter((row) => conflicts.includes(row.id)),
+      `the credential(s) ${conflicts.join(", ")} in ${credentials.real} changed while the recorder ran, and OpenCode also refreshed the recorder's copy; the recorder left them as they are`,
     );
   }
 }

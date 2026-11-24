@@ -29,7 +29,7 @@ import { createFakeHost } from "../../../src/conformance/fake-host.ts";
 import type { DiagnosticEntry } from "../../../src/generated/host.ts";
 import { SERVER_PASSWORD_SECRET, createOpencodeDriver } from "../../../src/drivers/opencode/index.ts";
 import type { OpencodeConfig } from "../../../src/drivers/opencode/index.ts";
-import type { HostServices } from "../../../src/runtime.ts";
+import type { HostServices, Session } from "../../../src/runtime.ts";
 import { runScenario } from "../scenarios.ts";
 import type { NativeProgress, Scenario, ScenarioRun } from "../scenarios.ts";
 
@@ -84,6 +84,8 @@ export interface OpencodeScenarioInput {
   readonly model: string;
   readonly timeoutMs: number;
   readonly native?: NativeProgress;
+  /** Wraps each session the host opens; tests use it to play a host that behaves differently. */
+  readonly wrapSession?: (session: Session) => Session;
 }
 
 export interface OpencodeScenarioResult {
@@ -118,7 +120,8 @@ export async function runOpencodeScenario(input: OpencodeScenarioInput): Promise
     const run = await runScenario(input.scenario, {
       openSession: async () => {
         await input.transport.whenStreamsClosed(STREAM_CLOSE_WAIT_MS);
-        return instance.openSession({});
+        const session = await instance.openSession({});
+        return input.wrapSession === undefined ? session : input.wrapSession(session);
       },
       cwd: input.layout.cwd,
       timeoutMs: input.timeoutMs,

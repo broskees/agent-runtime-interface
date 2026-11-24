@@ -8,11 +8,13 @@
 
 import * as fs from "node:fs";
 import type { DiagnosticEntry } from "../../../src/generated/host.ts";
+import type { Session } from "../../../src/runtime.ts";
 import type { Recording } from "../format.ts";
 import { readRecording } from "../format.ts";
 import { createSanitiser } from "../sanitiser.ts";
 import { ScenarioStallError, checkScenario, scenarioNamed } from "../scenarios.ts";
 import type { ScenarioRun } from "../scenarios.ts";
+import type { ReplaySequencer } from "../sequencer.ts";
 import { opencodeNativeAnswers } from "./frames.ts";
 import { OPENCODE_PROTOCOL_WORDS } from "./protocol-words.ts";
 import { startOpencodeReplayServer } from "./replay-server.ts";
@@ -38,6 +40,8 @@ export interface OpencodeReplayOptions {
   readonly env?: { readonly [name: string]: string | undefined };
   /** The OS user name; os.userInfo().username by default. */
   readonly user?: string;
+  /** Wraps each session the replay's host opens, given the replay's sequencer; tests use it to play a host that behaves differently. */
+  readonly wrapSession?: (session: Session, sequencer: ReplaySequencer) => Session;
 }
 
 export async function replayOpencode(source: Recording | string, options: OpencodeReplayOptions = {}): Promise<OpencodeReplayResult> {
@@ -50,9 +54,11 @@ export async function replayOpencode(source: Recording | string, options: Openco
   try {
     const env = options.env ?? process.env;
     replay = await startOpencodeReplayServer(recording, { workspace: layout.root, sanitise: createSanitiser({ workspace: layout.root, env, protocolWords: OPENCODE_PROTOCOL_WORDS, ...(options.user === undefined ? {} : { user: options.user }) }) });
+    const wrapSession = options.wrapSession;
+    const sequencer = replay.sequencer;
     let result: { run: ScenarioRun; diagnostics: readonly DiagnosticEntry[] };
     try {
-      result = await runOpencodeScenario({ scenario, layout, transport: replay, password: REPLAY_SERVER_PASSWORD, model: header.model, timeoutMs: options.timeoutMs ?? 30_000, native: replay.progress });
+      result = await runOpencodeScenario({ scenario, layout, transport: replay, password: REPLAY_SERVER_PASSWORD, model: header.model, timeoutMs: options.timeoutMs ?? 30_000, native: replay.progress, ...(wrapSession === undefined ? {} : { wrapSession: (session: Session) => wrapSession(session, sequencer) }) });
     } catch (error) {
       // A stall happened while nothing had drifted: what the cleanup after it sent is not the cause.
       if (error instanceof ScenarioStallError) throw error;

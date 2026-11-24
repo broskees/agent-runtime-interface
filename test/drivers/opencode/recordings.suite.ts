@@ -22,6 +22,7 @@ import { OPENCODE_PROTOCOL_WORDS } from "../../recordings/opencode/protocol-word
 import { recordOpencode } from "../../recordings/opencode/record.ts";
 import type { OpencodeRecordOutcome } from "../../recordings/opencode/record.ts";
 import { replayOpencode } from "../../recordings/opencode/replay.ts";
+import { startTurnAfterItsText } from "../../recordings/late-start-turn.ts";
 import { FRAME_FORMAT_FIELDS } from "../../recordings/sanitiser.ts";
 import { SCENARIOS, SCENARIO_NAMES, checkScenario } from "../../recordings/scenarios.ts";
 import type { ScenarioName } from "../../recordings/scenarios.ts";
@@ -195,6 +196,22 @@ for (const name of SCENARIO_NAMES) {
   });
 }
 
+test("interrupt: when the turn's text reaches the host before startTurn resolves, the host still interrupts at the turn's first text and the OpenCode replay passes", async () => {
+  const recording = await recordingOf("interrupt");
+  const { run, replay } = await replayOpencode(recording, { timeoutMs: 5_000, wrapSession: startTurnAfterItsText });
+  assert.ok(replay.sequencer.done());
+  const [turnId] = run.turnIds;
+  const messages = new Set(run.events.flatMap((event) => (event.body.type === "item.upsert" && event.body.item.kind === "assistant_message" ? [event.body.item.id] : [])));
+  const firstText = run.events.find(
+    (event) =>
+      event.turnId === turnId &&
+      ((event.body.type === "item.delta" && messages.has(event.body.itemId) && event.body.field === "text" && event.body.chunk !== "") ||
+        (event.body.type === "item.upsert" && messages.has(event.body.item.id) && typeof event.body.item.text === "string" && event.body.item.text !== "")),
+  );
+  assert.ok(firstText !== undefined, "the turn's text is kept, attributed to the turn");
+  assert.deepEqual(run.interrupted, { turnId, afterSeq: firstText.seq }, "the host interrupted at the first text, which came before startTurn resolved");
+});
+
 /** Every repository file `entry` reaches through relative imports and exports, type-only ones included. */
 function reachedFrom(entry: string): string[] {
   const seen = new Set<string>();
@@ -308,6 +325,30 @@ for (const name of SCENARIO_NAMES) {
   }
 }
 
+test("OpenCode replay fails, naming the file, the line and both frames around the gap, when a recording holds the response to a request it lacks", async () => {
+  const recording = await recordingOf("simple");
+  const index = recording.frames.findIndex((entry) => entry.frame.kind === "request" && entry.frame["path"] === "/api/session");
+  const removed = recording.frames[index]!;
+  const before = recording.frames[index - 1]!;
+  const { file } = editedCopy(recording, "skipped-request", (frames) => frames.splice(index, 1));
+  // The copy lost one line: the request's response now sits on the request's line, and the frame before it is unchanged.
+  await assert.rejects(replayOpencode(file, { timeoutMs: 10_000 }), (error: unknown) =>
+    assertDrift(error, file, removed.line, [
+      new RegExp(`replay could not deliver the recorded frame: the frame answers exchange ${String(removed.frame["id"])}, which the driver has not started`),
+      new RegExp(`recorded \\(line ${removed.line}\\): \\{"dir":"in","kind":"response","id":${String(removed.frame["id"])}`),
+      new RegExp(`last replayed \\(line ${before.line}\\): ${escape(JSON.stringify(before.frame))}`),
+    ]),
+  );
+});
+
+test("approval_allowed: OpenCode replay fails when the event with the command's result is removed: the command's output never reaches the host", async () => {
+  const recording = await recordingOf("approval_allowed");
+  const index = recording.frames.findIndex((entry) => entry.frame.kind === "event" && (entry.frame["event"] as { type: string }).type === "session.tool.success");
+  assert.ok(index !== -1, "the recording holds the command's result");
+  const { file } = editedCopy(recording, "removed-tool-success", (frames) => frames.splice(index, 1));
+  await assert.rejects(replayOpencode(file, { timeoutMs: 10_000 }), /scenario approval_allowed: a command or tool item completed with the marker in its output/);
+});
+
 test("OpenCode replay ignores no field: a change to a request's query or body fails, and the code's list is empty", async () => {
   assert.deepEqual(OPENCODE_IGNORED_FIELDS, []);
   const recording = await recordingOf("simple");
@@ -402,4 +443,17 @@ test("the OpenCode recorder sanitises what it writes: no workspace path, no HOME
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("a GEMINI_API_KEY of the recorder's environment that a tool prints is replaced in the OpenCode recording, and the recording replays", async () => {
+  // A synthetic key in the shape of a Google API key; the scan's token patterns do not know it.
+  const key = "AIzaSyAriSyntheticGeminiKeyForTests000";
+  const marker = SCENARIOS.find((scenario) => scenario.name === "approval_allowed")!.marker!;
+  const { outcomes } = await recordFake("gemini-key", { HOME: fs.mkdtempSync(path.join(DIRECTORY, "home-")), USER: "ari-test-user", GEMINI_API_KEY: key }, ["approval_allowed"], { commandOutput: `GEMINI_API_KEY=${key}\n${marker}\n` });
+  const outcome = outcomes[0]!;
+  assert.equal(outcome.error, undefined, outcome.error?.message);
+  const text = fs.readFileSync(outcome.file!, "utf8");
+  assert.ok(!text.includes(key), "the key's value is nowhere in the recording");
+  assert.ok(text.includes("GEMINI_API_KEY=<GEMINI_API_KEY>"), "the command's output holds the placeholder");
+  await replayOpencode(outcome.file!);
 });

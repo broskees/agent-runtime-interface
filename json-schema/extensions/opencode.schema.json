@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/extensions/opencode.schema.json",
+  "title": "OpenCode extension opencode.permissionRules",
+  "description": "A thread's own OpenCode permission rules. OpenCode evaluates a session's rules after its agent's, and the last rule that matches a permission and resource wins. The OpenCode driver lists `{ ns: \"opencode.permissionRules\", version: \"1\" }` in `capabilities.extensions` and answers `session.ext(\"opencode.permissionRules\", \"get\" | \"set\", params)`. `get` returns the rules as the server holds them for the thread's session; `set` replaces the host's own rules, which the driver keeps after the rules of the thread's runtime mode and before the rules that deny other threads' MCP servers, and returns the server's rules after the change.",
+  "$defs": {
+    "OpencodePermissionEffect": {
+      "anyOf": [
+        {
+          "enum": [
+            "allow",
+            "deny",
+            "ask"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "OpencodePermissionRule": {
+      "description": "One rule: `action` is the permission or tool name (1.x `permission`, for example `bash`, `edit`, `read` or `<server>_<tool>` for an MCP tool), `resource` the pattern it applies to (1.x `pattern`); both take `*` and `?` wildcards.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "effect": {
+          "$ref": "#/$defs/OpencodePermissionEffect"
+        }
+      },
+      "required": [
+        "action",
+        "resource",
+        "effect"
+      ]
+    },
+    "OpencodePermissionRulesGetParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ]
+    },
+    "OpencodePermissionRulesSetParams": {
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpencodePermissionRule"
+          }
+        }
+      },
+      "required": [
+        "threadId",
+        "rules"
+      ]
+    },
+    "OpencodePermissionRulesResult": {
+      "description": "Result of `get` and `set`: the thread's session rules as the server holds them.",
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpencodePermissionRule"
+          }
+        }
+      },
+      "required": [
+        "rules"
+      ]
+    }
+  }
+}

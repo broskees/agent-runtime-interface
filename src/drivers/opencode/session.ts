@@ -29,6 +29,7 @@ import type { AriEvent, AriEventBody } from "../../generated/events.ts";
 import type { McpServerConfig } from "../../generated/session.ts";
 import type { OpenSessionInput } from "../../generated/instance.ts";
 import type { Failure } from "../../generated/errors.ts";
+import { OpencodePermissionRulesGetParamsSchema, OpencodePermissionRulesSetParamsSchema } from "../../generated/extensions/opencode.ts";
 import type { Item, ItemPatch } from "../../generated/item.ts";
 import type { Question, Request } from "../../generated/request.ts";
 import type {
@@ -565,24 +566,25 @@ export class OpencodeSession implements Session {
     return this.#context.contextWindows.get(model);
   }
 
-  /** `opencode.permissionRules`: `get` reads a thread's own rules from the server; `set` replaces the host's rules in them. */
+  /** `opencode.permissionRules` (spec/v1/extensions/opencode.schema.json): `get` reads a thread's own rules from the server; `set` replaces the host's rules in them. */
   async ext(ns: string, method: string, params: unknown): Promise<unknown> {
     this.#open();
     if (ns !== PERMISSION_RULES_EXTENSION) throw callErrors.unsupported(`extensions.${ns}`);
-    const input = (typeof params === "object" && params !== null ? params : {}) as { threadId?: unknown; rules?: unknown };
-    if (typeof input.threadId !== "string") throw callErrors.validation([{ message: "params.threadId is required", path: ["params", "threadId"] }]);
-    const thread = this.#thread(input.threadId);
-    const link = await this.#linkOf(thread);
-    if (method === "get") return { rules: await link.runtime.getRules(thread.sessionId, thread.directory) };
+    if (method === "get") {
+      const input = OpencodePermissionRulesGetParamsSchema.parse(params);
+      const thread = this.#thread(input.threadId);
+      const link = await this.#linkOf(thread);
+      return { rules: await link.runtime.getRules(thread.sessionId, thread.directory) };
+    }
     if (method === "set") {
-      if (!Array.isArray(input.rules)) throw callErrors.validation([{ message: "params.rules must be an array of { action, resource, effect }", path: ["params", "rules"] }]);
-      const rules: NativeRule[] = input.rules.map((rule: unknown, index) => {
-        const entry = rule as { action?: unknown; resource?: unknown; effect?: unknown };
-        if (typeof entry?.action !== "string" || typeof entry.resource !== "string" || (entry.effect !== "allow" && entry.effect !== "deny" && entry.effect !== "ask")) {
-          throw callErrors.validation([{ message: "a rule is { action, resource, effect: allow | deny | ask }", path: ["params", "rules", index] }]);
-        }
-        return { action: entry.action, resource: entry.resource, effect: entry.effect };
+      const input = OpencodePermissionRulesSetParamsSchema.parse(params);
+      const thread = this.#thread(input.threadId);
+      const rules: NativeRule[] = input.rules.map((rule, index) => {
+        const effect = (["allow", "deny", "ask"] as const).find((known) => known === rule.effect);
+        if (effect === undefined) throw callErrors.validation([{ message: "OpenCode rules allow, deny or ask", path: ["params", "rules", index, "effect"] }]);
+        return { action: rule.action, resource: rule.resource, effect };
       });
+      const link = await this.#linkOf(thread);
       thread.hostRules = rules;
       await this.#applyRules(thread, this.#context.pool.othersOn(link.endpoint, thread.thread.id));
       return { rules: await link.runtime.getRules(thread.sessionId, thread.directory) };

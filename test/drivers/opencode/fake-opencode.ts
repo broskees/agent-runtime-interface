@@ -349,6 +349,16 @@ export class FakeRun implements NativeTurn {
     return this.server.subagent(this, name);
   }
 
+  /** 1.x: the agent's todo list changed (`todo.updated`, written by the `todowrite` tool). */
+  async todos(entries: ReadonlyArray<{ readonly content: string; readonly status: string }>): Promise<void> {
+    this.#publish("todo.updated", { sessionID: this.session.id, todos: entries.map((entry) => ({ content: entry.content, status: entry.status, priority: "medium" })) });
+  }
+
+  /** A permission request from a subagent's own session, while this run waits for the subagent. */
+  async requestApprovalFrom(childSessionId: string, approval: NativeApproval): Promise<NativeApprovalHandle> {
+    return this.server.askFrom(childSessionId, this, approval);
+  }
+
   nextSteer(): Promise<string> {
     return this.#steers.next().then((next) => {
       if (next.done === true) throw new Error("the run ended");

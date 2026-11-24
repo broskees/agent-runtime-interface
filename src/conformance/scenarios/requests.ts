@@ -144,6 +144,8 @@ export const idempotentResponsesScenario: Scenario = {
       context.note("the full_access auto-reply was not checked: the driver declares runtimePolicy.modes.full_access off");
       return;
     }
+    // A native agent that asks nothing under full_access has no reply to check.
+    if (context.skipCheck("idempotent-responses.full-access", "the narrowest reply under full_access")) return;
     const fullAccess = await context.openSession(created);
     const fullThread = await context.createThread(fullAccess, { mode: "full_access" });
     const second = await context.beginTurn(fullAccess, rig, fullThread.id, "Deploy the site.");

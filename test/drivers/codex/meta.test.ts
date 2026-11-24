@@ -66,8 +66,9 @@ describe("ari/meta/codex", () => {
       "ari.goal",
       "x:codex.searchTerm",
       "codex.chatgpt_auth_tokens",
-      // How a new or forked thread gets the host's tool server, which launch-context.test.ts exercises.
-      "`thread/archive`,\n`thread/unarchive` and a cold `thread/resume`",
+      // The documented limit on the host's per-thread tool server for a new or forked thread, which launch-context.test.ts exercises.
+      "tests/suite/v2/thread_resume.rs:521–566",
+      "core/src/session/session.rs:2169–2180",
       'applyNetworkPolicyAmendment:["allow","registry.npmjs.org"]',
     ]) {
       assert.ok(docs.includes(fact), `docs/drivers/codex.md does not mention ${fact}`);

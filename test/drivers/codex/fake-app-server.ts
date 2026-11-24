@@ -51,7 +51,8 @@
 //   (protocol/src/approvals.rs:379–411, core/src/session/mod.rs:3433–3439,
 //   core/src/tools/approvals.rs:800–985, app-server-protocol/src/protocol/v2/
 //   item.rs:91–113). Under approval policy `never` Codex asks nothing and
-//   runs the command (core/src/exec_policy.rs:907–911).
+//   runs the command (core/src/exec_policy.rs:907–911), so the puppet
+//   refuses to ask for an approval then: no reply exists to report.
 // - Setting an active goal on an idle thread starts a turn at once, and Codex
 //   starts the next one when a turn of an active goal completes
 //   (ext/goal/src/runtime.rs:223–239,
@@ -1413,12 +1414,9 @@ export class FakeCodexWorld {
           replies: async () => [...replies],
           nativeDecisions: Object.fromEntries(mapped.byKit),
         };
-        // Under approval policy `never` Codex asks nothing: the command runs, as an allow-once would let it.
+        // Under approval policy `never` Codex sends no ordinary approval at all (core/src/exec_policy.rs:907–911): there is nothing to ask, and no reply to report.
         if (approval.kind === "command" && thread.settings.approvalPolicy === "never") {
-          const once = approval.options.find((option) => option.decision === "accept");
-          if (once === undefined) throw new Error("under approval policy never Codex runs the command without asking; the kit offered no allow-once option to report");
-          record(once.optionId);
-          return handle;
+          throw new Error("Codex sends no approval under approval policy never: the command runs unasked, so there is no approval to answer");
         }
         const itemId = store.newItemId("call");
         let pending: Promise<unknown>;

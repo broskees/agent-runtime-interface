@@ -283,8 +283,8 @@ describe("the fake app-server follows pinned Codex", () => {
     const threadId = await client.startThread({ approvalPolicy: "never", sandbox: "danger-full-access" });
     await client.result("turn/start", { threadId, input: [{ type: "text", text: "Deploy.", text_elements: [] }] });
     const turn = await nextTurn(client.world);
-    const handle = await turn.requestApproval({ kind: "command", options: [{ optionId: "once", label: "", decision: "accept" }, { optionId: "no", label: "", decision: "decline" }] });
-    assert.equal(await handle.nextReply(), "once");
+    // Codex sends nothing, so the puppet has no approval to give and reports no reply.
+    await assert.rejects(turn.requestApproval({ kind: "command", options: [{ optionId: "once", label: "", decision: "accept" }, { optionId: "no", label: "", decision: "decline" }] }), /Codex sends no approval under approval policy never/);
     assert.equal(client.frames.some((frame) => frame["method"] === "item/commandExecution/requestApproval"), false);
     client.world.dispose();
   });

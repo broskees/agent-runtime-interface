@@ -27,6 +27,10 @@ test("every applicable scenario passed, and the only one not exercised has the h
   );
   const honesty = report.results.find((result) => result.key === "capability-honesty")!;
   assert.match(honesty.notes.join("\n"), /left out: none; not exercised: ext codex\.review/);
+  // Under full_access Codex sends no approval, so scenario 15 reports that branch not checked, with the harness's reason, rather than a reply nobody sent.
+  const idempotent = report.results.find((result) => result.key === "idempotent-responses")!;
+  assert.match(idempotent.notes.join("\n"), /not checked \(idempotent-responses\.full-access\): under full_access the driver runs Codex with approval policy never/);
+  assert.doesNotMatch(idempotent.notes.join("\n"), /answered the full_access approval/);
 });
 
 test("every frame the fake app-server and the driver exchanged validates against the vendored Codex schema", () => {

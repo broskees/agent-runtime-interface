@@ -458,7 +458,7 @@ the poison's whole lifetime.
 | 12 | `side-effect-free-probe` | `probe()` and `probe({ deep: true })` return valid results that report the agent `installed`, call no `secrets.set`, `secrets.delete`, `callbacks.register`, `coordination.acquire` or `hostTools.*`, spawn only the probe executables, and create, change or remove no file under the instance's paths at any moment while they run. | `watchInstanceFiles`, `probeExecutables` | check `side-effect-free-probe.files` |
 | 13 | `replay-from-seq` | `events({ fromSeq: 1 })` and `events({ fromSeq: middle })` replay exactly the live events (same `seq`, same ids, same bodies), and the replayed stream goes on live identically. | `say`, `runTool`, `complete` | never |
 | 14 | `capability-honesty` | Every capability-gated member the driver declares off is left out or rejects with `unsupported{capability}`; every one it declares on returns a valid result, has its effect, and returns what the native side produced. See below. | the optional puppet members, `inspectSession`, `activity` and `exercise` its declarations need | checks `capability-honesty.<member>`, `capability-honesty.native-effects` and `capability-honesty.native-activity` |
-| 15 | `idempotent-responses` | Three responses with one `(requestId, responseKey)`, two of them concurrent, have one outcome and reach the agent once. A second request in the same session answered with the same `responseKey` is another pair and reaches the agent too. Under `full_access`, the reply the agent gets is the narrowest accepting option, whether the driver answers itself or hands the request to the host's `fullAccessAutoReply`. | `requestApproval` | as scenario 8; the `full_access` part is skipped with a note when `runtimePolicy.modes.full_access` is off |
+| 15 | `idempotent-responses` | Three responses with one `(requestId, responseKey)`, two of them concurrent, have one outcome and reach the agent once. A second request in the same session answered with the same `responseKey` is another pair and reaches the agent too. Under `full_access`, the reply the agent gets is the narrowest accepting option, whether the driver answers itself or hands the request to the host's `fullAccessAutoReply`. | `requestApproval` | as scenario 8; the `full_access` part is skipped with a note when `runtimePolicy.modes.full_access` is off, or when the harness gives a reason under `idempotent-responses.full-access` |
 
 Scenario 14 checks the members below, with the capability paths that gate
 them (`GATED_MEMBERS` holds the table, and a test keeps it in step with
@@ -584,6 +584,8 @@ unless `notApplicable` has a reason under the check's key. The check keys are
 `session-replaced.native-history`, `auth-states.configured`,
 `auth-states.unavailable`, `auth-states.unknown`, `auth-states.poison`,
 `auth-states.inherited-credentials`, `side-effect-free-probe.files`,
+`idempotent-responses.full-access` (for a native agent that sends no
+approval under `full_access`, so no reply exists to check),
 `capability-honesty.native-effects`, `capability-honesty.native-activity`,
 `capability-honesty.background`, `capability-honesty.stopSubagent`,
 `capability-honesty.turns.steer`, `capability-honesty.mcpApps`,

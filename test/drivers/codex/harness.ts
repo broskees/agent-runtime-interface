@@ -98,6 +98,8 @@ export function codexHarness(options: { readonly wrapAppServer?: (process: Spawn
     cleanup: created.cleanup,
     notApplicable: {
       "capability-honesty.ext.codex.review": "codex.review start runs a review turn of its own on the thread scenario 14 goes on to roll back; quirks.test.ts covers it",
+      "idempotent-responses.full-access":
+        "under full_access the driver runs Codex with approval policy never, and Codex then sends no ordinary approval (core/src/exec_policy.rs:907–911), so no reply exists to check",
     },
     workspace: async (): Promise<ConformanceWorkspace> => created.workspace,
     async setup(request): Promise<HarnessRig<CodexDriverConfig>> {

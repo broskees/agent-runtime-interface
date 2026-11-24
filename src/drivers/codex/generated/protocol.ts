@@ -24,7 +24,6 @@ export interface CodexClientRequestMap {
   "thread/turns/list": { params: ThreadTurnsListParams; result: ThreadTurnsListResponse };
   "thread/list": { params: ThreadListParams; result: ThreadListResponse };
   "thread/archive": { params: ThreadArchiveParams; result: ThreadArchiveResponse };
-  "thread/unarchive": { params: ThreadUnarchiveParams; result: ThreadUnarchiveResponse };
   "thread/delete": { params: ThreadDeleteParams; result: ThreadDeleteResponse };
   "thread/unsubscribe": { params: ThreadUnsubscribeParams; result: ThreadUnsubscribeResponse };
   "thread/revert": { params: ThreadRevertParams; result: ThreadRevertResponse };
@@ -80,7 +79,6 @@ export interface CodexServerNotificationMap {
   "thread/status/changed": ThreadStatusChangedNotification;
   "thread/closed": ThreadClosedNotification;
   "thread/archived": ThreadArchivedNotification;
-  "thread/unarchived": ThreadUnarchivedNotification;
   "thread/compacted": ContextCompactedNotification;
   "thread/goal/updated": ThreadGoalUpdatedNotification;
   "thread/goal/cleared": ThreadGoalClearedNotification;
@@ -119,7 +117,6 @@ export const CODEX_CLIENT_REQUEST_METHODS: readonly CodexClientRequestMethod[] =
   "thread/turns/list",
   "thread/list",
   "thread/archive",
-  "thread/unarchive",
   "thread/delete",
   "thread/unsubscribe",
   "thread/revert",
@@ -169,7 +166,6 @@ export const CODEX_SERVER_NOTIFICATION_METHODS: readonly CodexServerNotification
   "thread/status/changed",
   "thread/closed",
   "thread/archived",
-  "thread/unarchived",
   "thread/compacted",
   "thread/goal/updated",
   "thread/goal/cleared",
@@ -256,11 +252,6 @@ export class CodexAppServerClient {
   /** `thread/archive` */
   threadArchive(params: CodexClientRequestMap["thread/archive"]["params"]): Promise<CodexClientRequestMap["thread/archive"]["result"]> {
     return this.#transport.request("thread/archive", params) as Promise<CodexClientRequestMap["thread/archive"]["result"]>;
-  }
-
-  /** `thread/unarchive` */
-  threadUnarchive(params: CodexClientRequestMap["thread/unarchive"]["params"]): Promise<CodexClientRequestMap["thread/unarchive"]["result"]> {
-    return this.#transport.request("thread/unarchive", params) as Promise<CodexClientRequestMap["thread/unarchive"]["result"]>;
   }
 
   /** `thread/delete` */
@@ -2914,18 +2905,6 @@ export type ThreadTurnsListResponse = {
   data: Turn[];
   /** Opaque cursor to pass to the next call to continue after the last turn. if None, there are no more turns to return. */
   nextCursor?: string | null;
-};
-
-export type ThreadUnarchivedNotification = {
-  threadId: string;
-};
-
-export type ThreadUnarchiveParams = {
-  threadId: string;
-};
-
-export type ThreadUnarchiveResponse = {
-  thread: Thread;
 };
 
 export type ThreadUnreadPosition = {

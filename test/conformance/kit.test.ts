@@ -97,6 +97,15 @@ describe("not applicable only for a declared capability or a stated reason", () 
     assert.equal(result.reason, "the agent cannot run tools");
   });
 
+  test("a reason under idempotent-responses.full-access skips scenario 15's full_access part with a note, and the rest still runs", async () => {
+    const reason = "the native agent sends no approval under full_access";
+    const result = await runScenario(adjustedHarness({ notApplicable: { "idempotent-responses.full-access": reason } }), "idempotent-responses");
+    assert.equal(result.status, "passed", result.reason);
+    assert.ok(result.notes.includes(`the narrowest reply under full_access not checked (idempotent-responses.full-access): ${reason}`), result.notes.join("\n"));
+    const unchanged = await runScenario(adjustedHarness(), "idempotent-responses");
+    assert.ok(unchanged.notes.some((note) => /the driver (answered the full_access approval itself|handed the full_access approval to the host)/.test(note)), unchanged.notes.join("\n"));
+  });
+
   test("a reason that is empty or spans two lines is a failure, not a pass", async () => {
     for (const reason of ["", "   ", "first line\nsecond line"]) {
       const result = await runScenario(adjustedHarness({ notApplicable: { settlement: reason } }), "settlement");

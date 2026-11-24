@@ -170,6 +170,11 @@ supported member against the fake app-server.
 
 ## Turns, items and requests
 
+- **Working directory.** A thread runs in `createThread`'s `cwd`, which is
+  `thread/start`'s `cwd`, also when `policy.cwd` names another directory.
+  Codex has one working directory per thread, and its sandbox roots are that
+  directory and `policy.additionalRoots`. A fork runs in `forkThread`'s
+  `cwd` when given, else in its source's directory.
 - **Settlement.** A turn settles only on Codex's `turn/completed` (or when the
   process exits: `failed`, class `transport_error`, thread reusable after a
   resume). No timer settles a turn.
@@ -182,9 +187,11 @@ supported member against the fake app-server.
   active and has no open run opens one. Each turn Codex starts joins the open
   run: it carries the run's `hostTag` and `parentTurnId` (the run's first
   turn), and `x:ari.goal.updated` lists every turn of the run in `turnIds`.
-  The run ends when the goal stops being active. `ari.goal` `set` returns the
-  goal as set, with `turnIds: []`; the events report the turns. Each native
-  turn has its own `turn.terminal`.
+  The run closes when the goal stops being active: Codex starts no more turns
+  for it, and the run keeps its turns, so `ari.goal` `get` on a completed goal
+  still lists them. A new active goal opens a new run. `ari.goal` `set`
+  returns the goal as set, with `turnIds: []`; the events report the turns.
+  Each native turn has its own `turn.terminal`.
 - **A host turn that meets a goal turn.** `turn/start` on a thread with a
   running turn adds the input to that turn (`turn_processor.rs:722–763`).
   Only the `turn/start` answer names the host's turn: a `turn/started` that
@@ -277,25 +284,41 @@ the host gave: `launch.mcpServers` in `thread/start`, `thread/fork` and every
 `thread/resume`, and the host's tool server from
 `hostTools.mcpServerFor(threadId)` in every `thread/resume`.
 
-Every thread has the host's tool server before its first turn runs. Codex
-assigns thread ids itself, so the server for a new or forked thread is known
-only after `thread/start` or `thread/fork` answered. Codex takes MCP servers
-only in the `config` of `thread/start`, `thread/fork` and a cold
-`thread/resume`: it ignores a resume's overrides while the thread is loaded
-(app-server `thread_processor.rs:4900–4955`), and it refuses to resume a
-thread before its first turn wrote a rollout (`no rollout found`,
-`tests/suite/v2/thread_resume.rs:521–566`). `thread/archive` writes the empty
-rollout without a turn and shuts the thread down
-(`thread_processor.rs:1895–1904`, `tests/suite/v2/thread_archive.rs:313–355`).
-So after `thread/start` or `thread/fork` the driver sends `thread/archive`,
-`thread/unarchive` and a cold `thread/resume` with the launch servers and the
-host's server. Codex reports these as `thread/archived` and
-`thread/unarchived` to its clients, and the thread is listed from its
-creation on. An ephemeral thread (`persistSession: false`) has no rollout to
-resume: it gets only `launch.mcpServers`. When a resume fails because the
-thread is missing or held by another process, the replacement thread gets
-that resume's `LaunchContext` and the host's server the same way. The driver
-writes no file.
+**Known limit: a new or forked thread gets the host's tools only through
+`launch.mcpServers`.** The host's per-thread server from
+`hostTools.mcpServerFor(threadId)` reaches a thread from its first resume on,
+not before its first turn. The pinned Codex source rules out a clean way to
+add it earlier:
+
+- Codex assigns the thread id: `ThreadStartParams` and `ThreadForkParams` in
+  the schema have no thread-id field, so the ARI thread id, and with it the
+  per-thread server, is known only after `thread/start` or `thread/fork`
+  answered.
+- Codex takes MCP servers only in the `config` of `thread/start`,
+  `thread/fork` and a cold `thread/resume`. `thread/settings/update` has no
+  `config` (schema: `ThreadSettingsUpdateParams`), and
+  `config/mcpServer/reload` takes no parameters (schema) and reloads the
+  servers Codex's config layers define, which the driver could change only by
+  writing a config file.
+- A resume before the thread's first turn fails with `no rollout found`
+  (app-server `tests/suite/v2/thread_resume.rs:521–566`), and a resume of a
+  thread the connection has loaded ignores its `config`
+  (`thread_processor.rs:4900–4955`).
+- Archiving the new thread would give it a rollout and unload it
+  (`thread_processor.rs:1895–1904`), so an unarchive and a cold resume could
+  apply the server. But Codex then runs the first turn's `SessionStart` hooks
+  with source `resume` instead of `startup` or `fork`
+  (`core/src/session/session.rs:2169–2180`, `core/src/session/turn.rs:412`),
+  and those hooks can add model-visible context or stop the turn
+  (`core/src/hook_runtime.rs:133–185`). Codex would also broadcast
+  `thread/archived` and `thread/unarchived` to its other clients. The driver
+  does not do this.
+
+So the host passes its tools for a new or forked thread in
+`launch.mcpServers`, under names it chooses. A fork gets its source's launch
+servers in `thread/fork`. When a resume fails because the thread is missing
+or held by another process, the replacement thread gets that resume's
+`LaunchContext`. The driver writes no file.
 
 ## Regenerating the protocol client
 
@@ -321,6 +344,10 @@ pinned source lines. In the conformance run the model meets a goal in the
 first turn Codex starts for it, so scenario 14's `ari.goal` call leaves no
 turn running. The harness maps each kit approval option to the native option
 id the driver shows, from the documented format above, not by calling the
-driver. All 15 pass; the `codex.review` extension call is checked in
-`quirks.test.ts` instead of scenario 14, because it runs a turn on the thread
-scenario 14 goes on to roll back.
+driver. All 15 pass. Two checks are not exercised, each with the harness's
+reason: the `codex.review` extension call in scenario 14 (it runs a turn on
+the thread scenario 14 goes on to roll back; `quirks.test.ts` covers it), and
+scenario 15's `full_access` reply (`idempotent-responses.full-access`): under
+`full_access` the driver runs Codex with approval policy `never`, and Codex
+then sends no ordinary approval, so there is no reply to check. The fake
+refuses to ask for one rather than invent a reply.

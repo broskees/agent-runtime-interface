@@ -157,6 +157,53 @@ describe("codex quirks", () => {
     strictGrammar(opened.events);
   });
 
+  test("ari.goal get after a goal run completed lists the run's turns, as the completion event did", async () => {
+    rig = await codexRig();
+    const opened = await rig.open();
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    await opened.session.ext!("ari.goal", "set", { threadId: thread.id, objective: "Tidy the repository." });
+    const ids: string[] = [];
+    for (const last of [false, true]) {
+      const turn = await rig.nextAutonomousTurn();
+      if (last) await turn.reachGoal();
+      await turn.complete();
+      const id = await opened.until(() => opened.bodies("turn.upsert").find((body) => body.turn.native?.id === turn.nativeTurnId)?.turn.id, "a goal turn");
+      await terminal(opened, id);
+      ids.push(id);
+    }
+    const completed = await opened.until(() => {
+      const last = opened.bodies("x:ari.goal.updated").at(-1) as { data: { status: string; turnIds: string[] } | null } | undefined;
+      return last?.data?.status === "completed" ? last.data : undefined;
+    }, "the goal to complete");
+    assert.deepEqual(completed.turnIds, ids);
+    const got = (await opened.session.ext!("ari.goal", "get", { threadId: thread.id })) as { status: string; turnIds: string[] };
+    assert.equal(got.status, "completed");
+    assert.deepEqual(got.turnIds, ids, "the run's turns outlive the end of the run");
+    // A new goal opens a new run, which starts empty.
+    const set = (await opened.session.ext!("ari.goal", "set", { threadId: thread.id, objective: "Write the release notes." })) as { turnIds: string[] };
+    assert.deepEqual(set.turnIds, []);
+    const next = await rig.nextAutonomousTurn();
+    await next.reachGoal();
+    await next.complete();
+    const nextId = await opened.until(() => opened.bodies("turn.upsert").find((body) => body.turn.native?.id === next.nativeTurnId)?.turn.id, "the new goal's turn");
+    await terminal(opened, nextId);
+    assert.deepEqual(((await opened.session.ext!("ari.goal", "get", { threadId: thread.id })) as { turnIds: string[] }).turnIds, [nextId]);
+  });
+
+  test("createThread runs the thread in its own cwd, also when policy.cwd names another directory", async () => {
+    rig = await codexRig();
+    const opened = await rig.open();
+    // Codex has one working directory per thread: createThread's cwd. Its sandbox roots are that directory and policy.additionalRoots.
+    const thread = await opened.session.createThread({ cwd: rig.otherCwd, policy: policy(rig.cwd) });
+    assert.equal(rig.requests("thread/start").at(-1)!["cwd"], rig.otherCwd);
+    assert.equal(thread.cwd, rig.otherCwd);
+    assert.equal(rig.world.inspect(thread.native.id!)!.cwd, rig.otherCwd);
+    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "c-1", intent: "start", content: [{ type: "text", text: "Where am I?" }] });
+    await (await rig.nextTurn()).complete();
+    await terminal(opened, (started as { turnId: string }).turnId);
+    assert.equal(rig.world.inspect(thread.native.id!)!.cwd, rig.otherCwd);
+  });
+
   test("a goal set during a host turn: that turn leads the run, and the turns Codex starts after it carry its hostTag and parentTurnId", async () => {
     rig = await codexRig();
     const opened = await rig.open();

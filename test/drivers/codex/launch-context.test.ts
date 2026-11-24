@@ -65,30 +65,37 @@ describe("no host prompts and host-chosen names", () => {
     assert.deepEqual(Object.keys(resume["config"] as object), [`mcp_servers.host-tools-${thread.id}`]);
   });
 
-  test("a new thread has the host's per-thread tool server before its first turn runs, and keeps the launch servers", async () => {
+  test("a new thread gets the host's tools from launch.mcpServers at creation, and the host's per-thread server from its first resume, with no archive round trip", async () => {
     rig = await codexRig({ host: { mcpServerName: (threadId) => `orchestrator-${threadId.slice(-6)}` } });
-    const opened = await rig.open();
+    const first = await rig.open();
     const launch = { mcpServers: [{ name: "host-preview", transport: "http", url: "http://127.0.0.1:4555/mcp" }] };
-    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch });
+    const thread = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch });
     const hostName = `orchestrator-${thread.id.slice(-6)}`;
+    // Codex names the thread only in thread/start's answer, so no per-thread server can be asked for before it.
+    assert.deepEqual(rig.host.calls.filter((call) => call.operation === "hostTools.mcpServerFor"), []);
+    assert.deepEqual(rig.requests("thread/start").at(-1)!["config"], { "mcp_servers.host-preview": { url: "http://127.0.0.1:4555/mcp" } });
+    const started = await first.session.startTurn({ threadId: thread.id, clientTurnKey: "first", intent: "start", content: [{ type: "text", text: "Use the tools." }] });
+    const turn = await rig.nextTurn();
+    assert.deepEqual(turn.settings.mcpServers, ["host-preview"], "the first turn has the launch servers");
+    await turn.complete();
+    await first.until(() => first.bodies("turn.terminal").find((body) => body.turnId === (started as { turnId: string }).turnId), "the first turn to end");
+    // No archive, unarchive or resume ran before the first turn: they would make Codex run its SessionStart hooks as "resume", not "startup".
+    const methods = rig.world.requests.filter((request) => (request.params as { threadId?: string }).threadId === thread.native.id).map((request) => request.method);
+    assert.equal(methods[0], "turn/start", `the first request naming the new thread is its first turn, not ${methods[0]}`);
+    assert.deepEqual(methods.filter((method) => ["thread/archive", "thread/unarchive", "thread/resume"].includes(method)), []);
+    await first.session.close();
+
+    const second = await rig.open();
+    await second.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(rig.cwd), launch });
     assert.deepEqual(rig.host.calls.filter((call) => call.operation === "hostTools.mcpServerFor").map((call) => call.args), [[thread.id, { transport: "http" }]]);
-    // Codex has the servers loaded before any turn: they are the thread's live config.
-    assert.deepEqual(rig.world.storedThread(thread.native.id!)!.settings.mcpServers.sort(), [hostName, "host-preview"].sort());
-    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "first", intent: "start", content: [{ type: "text", text: "Use the tools." }] });
-    const first = await rig.nextTurn();
-    assert.deepEqual([...first.settings.mcpServers].sort(), [hostName, "host-preview"].sort(), "the first turn runs with the host's tool server");
-    await first.complete();
-    await opened.until(() => opened.bodies("turn.terminal").find((body) => body.turnId === (started as { turnId: string }).turnId), "the first turn to end");
-    // Codex refuses a resume before the first turn, and ignores a resume's config while the thread is loaded, so the driver archives and unarchives the new thread first.
-    assert.deepEqual(
-      rig.world.requests.filter((request) => request.params !== null && (request.params as { threadId?: string }).threadId === thread.native.id).map((request) => request.method).slice(0, 4),
-      ["thread/archive", "thread/unarchive", "thread/resume", "turn/start"],
-    );
-    const nativeSessions = await rig.instance.nativeSessions!.list({ cwd: rig.cwd });
-    assert.ok(nativeSessions.items.some((item) => item.id === thread.native.id), "the thread is not left archived");
+    const resumedTurn = await second.session.startTurn({ threadId: thread.id, clientTurnKey: "second", intent: "start", content: [{ type: "text", text: "Again." }] });
+    const again = await rig.nextTurn();
+    assert.deepEqual([...again.settings.mcpServers].sort(), [hostName, "host-preview"].sort(), "after a resume the thread has the host's per-thread server too");
+    await again.complete();
+    await second.until(() => second.bodies("turn.terminal").find((body) => body.turnId === (resumedTurn as { turnId: string }).turnId), "the resumed turn to end");
   });
 
-  test("the replacement thread after a failed resume keeps that resume's launch context, and gets the host's tool server before its first turn", async () => {
+  test("the replacement thread after a failed resume keeps that resume's launch context", async () => {
     rig = await codexRig();
     const first = await rig.open();
     const thread = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
@@ -102,16 +109,16 @@ describe("no host prompts and host-chosen names", () => {
     const start = rig.requests("thread/start").at(-1)!;
     assert.match(String(start["developerInstructions"]), new RegExp(MARKERS.appendSystem));
     assert.deepEqual(Object.keys(start["config"] as object), ["mcp_servers.host-preview"]);
-    assert.deepEqual(rig.world.storedThread(replacement.native.id!)!.settings.mcpServers.sort(), [`host-tools-${replacement.id}`, "host-preview"].sort());
     const started = await second.session.startTurn({ threadId: replacement.id, clientTurnKey: "after", intent: "start", content: [{ type: "text", text: "Go on." }] });
     const turn = await rig.nextTurn();
-    assert.deepEqual([...turn.settings.mcpServers].sort(), [`host-tools-${replacement.id}`, "host-preview"].sort());
-    assert.match(String(rig.requests("thread/resume").at(-1)!["developerInstructions"]), new RegExp(MARKERS.appendSystem));
+    assert.equal(turn.nativeThreadId, replacement.native.id);
+    assert.deepEqual(turn.settings.mcpServers, ["host-preview"]);
+    assert.equal(rig.requests("thread/archive").length, 0);
     await turn.complete();
     await second.until(() => second.bodies("turn.terminal").find((body) => body.turnId === (started as { turnId: string }).turnId), "the turn to end");
   });
 
-  test("a fork gets the source's launch MCP servers in thread/fork, and the host's tool server for the fork before its first turn", async () => {
+  test("a fork gets the source's launch MCP servers in thread/fork, with no archive round trip", async () => {
     rig = await codexRig();
     const opened = await rig.open();
     const launch = { mcpServers: [{ name: "host-preview", transport: "http", url: "http://127.0.0.1:4555/mcp" }] };
@@ -121,10 +128,12 @@ describe("no host prompts and host-chosen names", () => {
     await opened.until(() => opened.bodies("turn.terminal").find((body) => body.turnId === (started as { turnId: string }).turnId), "the turn to end");
     const fork = await opened.session.forkThread!({ threadId: thread.id, at: { type: "latest" } });
     assert.deepEqual(rig.requests("thread/fork").at(-1)!["config"], { "mcp_servers.host-preview": { url: "http://127.0.0.1:4555/mcp" } });
+    assert.deepEqual(rig.host.calls.filter((call) => call.operation === "hostTools.mcpServerFor"), [], "the fork's id comes from Codex's answer, too late for a per-thread server");
     const forkStarted = await opened.session.startTurn({ threadId: fork.id, clientTurnKey: "fork", intent: "start", content: [{ type: "text", text: "On the fork." }] });
     const turn = await rig.nextTurn();
     assert.equal(turn.nativeThreadId, fork.native.id);
-    assert.deepEqual([...turn.settings.mcpServers].sort(), [`host-tools-${fork.id}`, "host-preview"].sort());
+    assert.deepEqual(turn.settings.mcpServers, ["host-preview"]);
+    assert.deepEqual(rig.requests("thread/archive"), []);
     await turn.complete();
     await opened.until(() => opened.bodies("turn.terminal").find((body) => body.turnId === (forkStarted as { turnId: string }).turnId), "the fork's turn to end");
   });

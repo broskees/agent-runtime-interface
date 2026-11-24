@@ -593,6 +593,9 @@ export class ClaudeInstance implements Instance {
   // Sessions.
 
   async openSession(input: OpenSessionInput): Promise<Session> {
+    if ((input.launch?.dynamicTools ?? []).length > 0) {
+      throw callErrors.unsupported("tools.dynamicTools", "The Claude driver does not serve dynamic tools; give the host's tools as an MCP server");
+    }
     const { runtime, executable } = await this.#available();
     const ordinal = this.#sessionCount;
     this.#sessionCount += 1;

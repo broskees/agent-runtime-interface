@@ -1,0 +1,282 @@
+# The `claude` driver
+
+`ari/drivers/claude` runs Claude Code through the Claude Agent SDK
+(`@anthropic-ai/claude-agent-sdk`). `ari/meta/claude` holds what a host shows
+before loading it: the label, the icon, the config schema with form hints and
+the tested versions.
+
+## Install
+
+The SDK is an optional peer of `ari`:
+
+```sh
+npm install ari @anthropic-ai/claude-agent-sdk
+```
+
+The driver is tested against SDK **0.3.330**, which bundles Claude Code
+**2.1.330** (`CLAUDE_TESTED_VERSIONS` is `>=0.3.330 <0.3.331`). The peer
+range is `^0.3.330`. Another SDK version works, and `status().advisory` says
+it is untested.
+
+The SDK carries the native Claude Code binary in a platform package
+(`@anthropic-ai/claude-agent-sdk-<platform>-<arch>`, an optional dependency).
+A package manager that skips optional dependencies leaves it out.
+
+## How the driver runs Claude Code
+
+- **Loading.** Importing the driver or its metadata loads no vendor code and
+  spawns nothing; `create()` only reads whether the instance keeps an API key.
+  The first `status()`, `probe()`, `catalog.list()` or `openSession()` loads
+  the SDK with a dynamic `import()` and finds the native binary the way the
+  SDK does (its platform packages, glibc before musl on Linux).
+- **Missing runtime.** Without the SDK, `status()` and `probe()` report
+  `installed: false` with a `driver_unavailable` error naming
+  `@anthropic-ai/claude-agent-sdk`, and `openSession` rejects with it. Without
+  the native binary, the error names the platform package and the binary and
+  says to reinstall without `--omit=optional` or to set `executablePath`.
+- **One query per thread.** Each thread is one Claude session run by one
+  `query()` in streaming input mode, so one Claude Code process per thread
+  (`sessionModel: "process_per_thread"`). A session holds any number of
+  threads.
+- **Ids.** The driver picks each new thread's Claude session id (a UUID, the
+  `sessionId` option) and each prompt's uuid, through `crypto.randomUUID()`
+  by default (`createClaudeDriver({ newUuid })` replaces it). Claude keeps
+  both in its transcript. Thread ids derive from the session id, turn ids
+  from the prompt's uuid, item ids from the API message id and block index or
+  the `tool_use` id, request ids from the `canUseTool` request id, and task
+  and subagent ids from Claude's task id. A turn Claude starts on its own
+  (after a background task finishes) has no prompt of ours and uses an
+  ordinal and the first frame's uuid (`turnIds: "weak"`).
+- **Environment.** `Options.env` replaces Claude Code's whole environment. It
+  is the instance's `environment`, minus `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` and minus the host's
+  `envPolicy.stripAmbient`, plus the instance's own API key when it has one,
+  plus `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` (a refused resume then comes
+  back as a result naming the reason).
+
+## Turns
+
+- A turn starts with a prompt and settles only on Claude's `result` message,
+  on Stop, or when the process dies. There is no quiet timer.
+- **Steer** is a prompt with `priority: "now"`. Claude ends the running native
+  turn (`terminal_reason` `aborted_streaming` or `aborted_tools`) and reads the
+  steer next. The host's turn spans both native turns and settles on the
+  result whose `user_message_uuids` holds the steer
+  (`turns.steeringInterruptsTools` and `turns.multiNativeTurnsPerRequest`).
+  A steer for a turn the driver knows has ended returns `prompt_required`.
+- **Queue** is a prompt with `priority: "later"`: Claude holds it until the
+  running turn ends and then starts it. The queued turn is reported `pending`
+  until then.
+- **Stop** calls `Query.interrupt()`; `restartRuntime: true` closes the query
+  instead. Either way the turn ends `interrupted`, and the next turn resumes
+  the session.
+- **Process exit** ends the turn `failed` with `transport_error` and
+  `threadDisposition: "reusable"`: the next turn resumes the session in a new
+  process. Background tasks end with the process.
+- **Failures.** A rejected rate limit, an assistant `rate_limit` error or an
+  API 429 is `usage_limit`, with `resetAt` from the rate limit event's
+  `resetsAt`. `authentication_failed` and its relatives, or a 401/403, are
+  `permission_error`, and also poison the instance's auth scope for 30
+  seconds. `invalid_request` and `model_not_found` are `validation_error`;
+  the rest are `provider_error`.
+
+## Requests
+
+Permission prompts come through `canUseTool` and wait as `live` requests
+(`survivesRestart: false`) until `respond`. Claude's answers carry no option
+ids, so the driver names each option after the answer it sends:
+
+| Option id | Decision | Scope | Claude gets |
+|---|---|---|---|
+| `allow` | `accept` | `once` | `{ behavior: "allow" }` |
+| `allow:session` (or `allow:cliArg`) | `accept_for_session` | `session` | `allow` with the suggestions that persist for the session |
+| `allow:localSettings`, `allow:projectSettings` | `accept_always` | `project` | `allow` with the suggestions for that settings file |
+| `allow:userSettings` | `accept_always` | `global` | `allow` with the suggestions for the user's settings |
+| `deny` | `decline` | | `{ behavior: "deny", message }` (the host's `feedback`, if any) |
+| `deny:interrupt` | `cancel` | | `deny` with `interrupt: true` |
+
+Claude's `suggestions` are grouped by where they persist; each group is one
+option whose scope is that destination's real reach. When Claude sets
+`suppressAlwaysAllowRule`, only session-scoped suggestions are offered. An
+`AskUserQuestion` call is a `user_input` request: questions `q0`, `q1`, ...,
+option ids are Claude's labels, and the answers go back as
+`updatedInput.answers`. A prompt raised inside a subagent names it in
+`origin.subagentId`. A prompt forced by an ask rule carries
+`fullAccessOverride: "ask_rule"`. Under `full_access` the session runs in
+`bypassPermissions`, so Claude asks only for ask rules.
+
+## Host instructions and MCP servers
+
+- `launch.appendSystemPrompt`, `launch.developerPrompt` and the thread's
+  `context.system` and `context.developer` go into the `claude_code` system
+  prompt's `append` (channel `system`), with `snapshot: false`, so Claude Code
+  never records them in its transcript and a resume can carry new ones.
+- A turn's `context.system`, `context.developer` and `context.synthetic` lead
+  the turn's prompt as text blocks (channel `first_user_message`). They are
+  part of the prompt, so the transcript keeps them.
+- Without either, the driver passes Claude Code's own `claude_code` preset
+  with nothing appended, and the prompt holds only the host's content.
+- MCP servers: the session's and thread's `launch.mcpServers`, plus the
+  server `hostTools.mcpServerFor(threadId, { transport: "http" })` returns,
+  under exactly the names the host gave, through `Query.setMcpServers` right
+  after the process starts and before the first prompt. `alwaysLoad` is kept,
+  so tool search does not defer those tools. A resume of a live thread with a
+  new `launch` replaces them the same way. Claude Code's stdio config has no
+  working directory, so a stdio server with `cwd` is refused.
+- Nothing from `LaunchContext` is written to a file: MCP servers travel over
+  the control channel, and the append is not recorded.
+
+## Threads
+
+- `createThread` starts the thread's query at once (`threads.createEmpty`).
+- `resumeThread` checks the session with `getSessionInfo`. A missing session,
+  or one Claude Code refuses to resume (`startup_failure_reason`
+  `session_held_by_background`), is replaced by a fresh session in the
+  policy's directory, with `session.replaced` (`contextLost: true`). Claude
+  Code writes a transcript only once a session holds a message, so a thread
+  that never ran a turn cannot be resumed and is replaced too. A resume
+  replays the stored turns as events unless `quiet`.
+- `forkThread` starts a query with `resume` (the source), `forkSession: true`,
+  `sessionId` (the fork) and, for a fork from a turn, `resumeSessionAt` set to
+  the last transcript entry of that turn (the fork keeps the turn). Claude
+  keeps transcripts per project directory, so a fork stays in its source's
+  directory (`crossCwd: false`).
+- `readSnapshot` reads the transcript with `getSessionMessages`. Steers this
+  session sent belong to the turn they steered; a steer sent by an earlier
+  session reads as a turn of its own.
+- `unloadThread` and `release()` close queries; the next turn resumes the
+  session. `canRelease()` is false while a turn, a queued turn, a pending
+  request or a background task runs.
+- Directories are resolved to their real path, so a path through a symbolic
+  link names the same thread.
+
+## Capabilities against the proposal's §1.2 Claude column
+
+| Capability | §1.2 | Driver | Source for a difference |
+|---|---|---|---|
+| Switch model mid-session | Y | Y (`sessions.switchModel`) | |
+| Switch runtime mode mid-session | – | Y (`sessions.switchRuntimeMode`, `runtimePolicy.switchInSession`) | `Query.setPermissionMode` (Agent SDK TypeScript reference, Query object) |
+| Read thread snapshot | – | Y | `getSessionMessages()` (Agent SDK TypeScript reference, Functions) |
+| Roll back thread | Y | – | `resumeSessionAt` keeps messages "up to and including" one uuid (SDK `Options.resumeSessionAt`), so rolling back to the start, which `rollbackThread` must serve, has no native form |
+| Fork thread / fork from a turn | Y/Y | Y/Y | |
+| Fork from an item | (not in §1.2) | – | |
+| Fork from a subagent thread | – | – | |
+| Fork into another directory | (not in §1.2) | – | `listSessions({ dir })`: sessions are stored per project directory |
+| Steer an active turn (stops pending tools) | Y | Y, `steeringInterruptsTools: true` | |
+| Queued messages / interrupt | Y | Y/Y | |
+| Streams tool output | – | – | |
+| Streams plan text | – | – | |
+| MCP tools | Y | Y | |
+| Dynamic tool callbacks | Y | – | In-process tools need `createSdkMcpServer` with zod-typed `tool()` definitions or an `McpServer` from `@modelcontextprotocol/sdk` (Agent SDK reference, `createSdkMcpServer`); the driver does not build one, and refuses `launch.dynamicTools` |
+| MCP apps | (not in §1.2) | – | `Query.readMcpResource` reads only `ui://` resources and the SDK has no tool-call method (SDK `Query`) |
+| Command / file-change approval | Y | Y | |
+| File-read approval | Y | Y | |
+| Approvals from subagents | – | Y | `CanUseTool` options carry `agentID` "if running within the context of a sub-agent" (SDK `CanUseTool`) |
+| Structured questions | Y | Y | |
+| Todo list / proposed plan | Y/Y | Y/Y | |
+| Subagents / exposes child thread ids | Y/– | Y/– | |
+| Wait for / close subagents | –/– | –/Y | `Query.stopTask(taskId)` stops a running task, and a subagent is a task (`task_started` with `task_type: "local_agent"`) |
+| Accepts system / developer context | Y/Y | Y/Y, through `system` and `first_user_message` | |
+| Can generate summaries | Y | – (`context.summaries`) | No SDK call summarizes a conversation; `textGeneration` covers text from host input |
+| Native turn / item / request id strength | weak/strong/strong | weak/strong/strong | |
+| Policy enforcement | native | native | |
+| Read-only runtime mode | (not in §1.2) | – | `PermissionMode` has no read-only mode (`default`, `acceptEdits`, `bypassPermissions`, `plan`, `dontAsk`, `auto`) |
+| Background tasks list / stop / await | (not in §1.2) | Y/Y/Y | `task_started` and `task_notification` messages, `Query.stopTask` |
+
+Runtime modes map to permission modes: `approval_required` to `default`,
+`auto_accept_edits` to `acceptEdits`, `auto` to `auto`, `full_access` to
+`bypassPermissions` (the driver sets `allowDangerouslySkipPermissions` so a
+live thread can switch to it), and the `plan` interaction mode to `plan`.
+
+## The 44 optional members
+
+`test/drivers/claude/capabilities.test.ts` lists each with its outcome and
+exercises every supported one against the fake SDK.
+
+| Member | Outcome | Why, when left out |
+|---|---|---|
+| `Session.readSnapshot`, `forkThread`, `unloadThread`, `backgroundTasks.list`, `.stop`, `.await`, `stopSubagent`, `ext` | supported | |
+| `Session.rollbackThread` | absent | No native rollback to the start (above) |
+| `Session.compactThread` | absent | The SDK has no compaction call; `/compact` is a prompt the host can send |
+| `Session.injectHistory` | absent | The SDK has no history injection |
+| `Session.mcpApps.*` | absent | See MCP apps above |
+| `Session.contextWindow`, `canReuseContextUsage` | absent | `ModelInfo` reports no context window |
+| `Session.uploadFeedback` | absent | The SDK has no feedback upload |
+| `Instance.invalidateCaches`, `maintenance.advisory`, `auth.methods`, `.state`, `.reportRuntimeFailure`, `.start`, `.respond`, `.cancel`, `.logout`, `catalog.refresh`, `limits.current`, `.accountKey`, `textGeneration.generate`, `nativeSessions.list`, `.delete`, `.archive` | supported | |
+| `Instance.auth.complete` | rejects `unsupported{auth.complete}` | Sign-in runs in `claude auth login`; no callback comes back |
+| `Instance.maintenance.install`, `.update` | absent | The SDK is the host's npm dependency |
+| `Instance.auth.transferProfile`, `.transferSession` | absent | Claude has no credential handover |
+| `Instance.workspace.snapshot` | absent | Commands and skills come only from a running query |
+| `Instance.limits.consumeResetCredit` | absent | The SDK has no reset credits |
+| `Instance.usageHistory.scan` | absent | The SDK keeps no usage history |
+| `Instance.subProviders.*` | absent | Claude has no sub-providers |
+
+## Account, catalog and limits
+
+- **Auth.** A managed profile is an Anthropic API key the instance stores in
+  the host's secrets (`claude/api-key`, through `auth.start` and
+  `auth.respond` with method `api-key`); it is `configured`. Otherwise the
+  ambient sign-in is what `claude auth status --json` says: `loggedIn: true`
+  is `authenticated`, `false` is `unauthenticated`, a cloud `apiProvider`
+  (Bedrock, Vertex, ...) is `unknown`, and a failed check is `unavailable`.
+  Method `claude-login` tells the user to run `claude auth login`.
+  `auth.logout` removes the instance's key; the ambient sign-in belongs to the
+  user. A runtime auth failure poisons the failing scope for 30 seconds.
+- **Probe.** `probe()` loads the SDK and finds the binary; `probe({ deep:
+  true })` also runs `claude auth status --json`. Nothing else.
+- **Catalog.** `Query.supportedModels()` from a query that loads no settings,
+  MCP servers or tools, persists nothing and is closed at once; cached until
+  `catalog.refresh()` or `invalidateCaches()`.
+- **Limits.** Rate limit events (`rate_limit_event`) update the instance's
+  windows (`five_hour` is `5h`, `seven_day` is `weekly`, `overage` is
+  `credits`, others are `x:claude.<type>`) and each session emits
+  `limits.updated`.
+- **Text generation.** A one-turn query with `tools: []`, no MCP servers, no
+  settings files and nothing persisted (`toolsDisabled: "native"`); with a
+  schema, `outputFormat` returns `structured_output`.
+- **Native sessions.** `listSessions({ dir })` (50 per page; the cursor is the
+  offset), `archiveSession` and `deleteSession`. These SDK functions run in
+  the host's process and read the Claude config directory that process's
+  environment names (`CLAUDE_CONFIG_DIR`, by default `~/.claude`).
+
+## Extensions
+
+Each is listed in `capabilities.extensions` with version `1`. Payloads are in
+`spec/v1/extensions/claude.schema.json` and `ari.goal.schema.json`.
+
+- **`claude.hooks`.** `ext("claude.hooks", "set", { threadId, hooks })` sets
+  command hooks for the thread's live query with `Query.applyFlagSettings`
+  (`null` removes them). The driver runs every query with
+  `includeHookEvents`, and each hook message becomes an `x:claude.hook`
+  event (`phase` `started`, `progress` or `response`).
+- **`claude.fileCheckpoints`.** Every query runs with
+  `enableFileCheckpointing`. `ext("claude.fileCheckpoints", "rewind", {
+  threadId, turnId, dryRun? })` calls `Query.rewindFiles` with the turn's
+  prompt uuid and returns Claude's answer.
+- **`ari.goal`** (derived). Claude's SDK mode reports no goal events. The
+  driver reads the goal from what Claude does: a `SetGoal` tool call or a
+  `/goal <condition>` prompt sets it, `/goal clear` clears it. It emits
+  `x:ari.goal.updated` with `derived: true`, and `ext("ari.goal", "get", {
+  threadId })` reads the goal from the transcript, `derived: true`. `set` and
+  `clear` are `unsupported`: the host sends `/goal ...` as a turn.
+
+## Known limits
+
+- **A steer that races the end of its turn.** Claude Code has no refusal for
+  a late steer: a prompt that reaches an idle session starts a new turn. When
+  the turn ends after the driver last heard from it but before the steer
+  arrives, the steer runs as a further native turn inside the host's turn
+  instead of returning `prompt_required`. The conformance harness gives this
+  reason for the kit's `steer-after-end.race` check.
+- **`ari.goal` through `ext`** is computed by the driver, so the conformance
+  kit's check that an extension call reaches the agent does not apply to it
+  (`capability-honesty.ext.ari.goal`).
+- **Pending requests** die with the query: `canUseTool` is a live callback.
+
+## Tests
+
+`test/drivers/claude/` holds the fake SDK (`fake-sdk.ts`, typed by the
+pinned SDK), the type-level proof that the driver's own SDK types match the
+SDK (`sdk-types.ts`), the conformance harness and suite, and the tests for
+the driver's quirks, launch context, availability, capability honesty and
+metadata. `SOURCES.md` lists the vendor sources and pinned versions.

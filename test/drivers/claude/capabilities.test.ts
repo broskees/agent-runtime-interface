@@ -83,6 +83,13 @@ describe("claude driver: capability honesty for the 44 optional members", () => 
         }
       }
       await assert.rejects(rig.instance.auth!.complete({ flowId: "x", callbackUrl: "http://localhost/" }), (error: { callError?: { code: string; capability?: string } }) => error.callError?.code === "unsupported" && error.callError.capability === "auth.complete");
+      // Dynamic tools are declared off and refused, at open and per thread, before anything starts.
+      const tool = { name: "host_tool", inputSchema: { type: "object" } };
+      await assert.rejects(rig.instance.openSession({ launch: { dynamicTools: [tool] } }), (error: { callError?: { capability?: string } }) => error.callError?.capability === "tools.dynamicTools");
+      const queries = rig.world.queries.length;
+      await assert.rejects(rig.thread({ launch: { dynamicTools: [tool] } }), (error: { callError?: { capability?: string } }) => error.callError?.capability === "tools.dynamicTools");
+      assert.equal(rig.world.queries.length, queries);
+      assert.equal(hasCapability(CLAUDE_CAPABILITIES, "tools.dynamicTools"), false);
       // Capabilities behind members that are left out are off too.
       for (const path of ["threads.rollback", "checkpointing.conversationRollback", "threads.compact", "threads.injectHistory", "tools.mcpApps", "contextWindowReporting", "sessions.contextUsageReuse", "sessions.feedbackUpload"]) {
         assert.equal(hasCapability(CLAUDE_CAPABILITIES, path), false, path);

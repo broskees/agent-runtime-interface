@@ -35,7 +35,10 @@ import type { ContentBlock } from "../../generated/common.ts";
 import type { ConfigChangePlan, RuntimePolicy } from "../../generated/config.ts";
 import type { Failure } from "../../generated/errors.ts";
 import type { AriEvent, AriEventBody } from "../../generated/events.ts";
+import { AriGoalGetParamsSchema } from "../../generated/extensions/ari.goal.ts";
 import type { AriGoal } from "../../generated/extensions/ari.goal.ts";
+import { ClaudeHooksSetParamsSchema, ClaudeRewindParamsSchema } from "../../generated/extensions/claude.ts";
+import type { ClaudeHookEventData, ClaudeHookMatcher, ClaudeRewindResult } from "../../generated/extensions/claude.ts";
 import type { OpenSessionInput } from "../../generated/instance.ts";
 import type { Item, ItemPatch } from "../../generated/item.ts";
 import type { Request } from "../../generated/request.ts";
@@ -320,6 +323,26 @@ function errorText(error: unknown): string {
 
 const IMAGE_TYPES = new Set<string>(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
+/** The `claude.hooks` params as Claude Code's settings `hooks`: the same shape, copied field by field. */
+function hookSettings(hooks: { [event: string]: ClaudeHookMatcher[] }): ClaudeHookSettings {
+  const settings: ClaudeHookSettings = {};
+  for (const [event, matchers] of Object.entries(hooks)) {
+    settings[event] = matchers.map((matcher) => ({
+      ...(matcher.matcher === undefined ? {} : { matcher: matcher.matcher }),
+      hooks: matcher.hooks.map((hook) => ({
+        type: "command" as const,
+        command: hook.command,
+        ...(hook.args === undefined ? {} : { args: [...hook.args] }),
+        ...(hook.timeout === undefined ? {} : { timeout: hook.timeout }),
+        ...(hook.statusMessage === undefined ? {} : { statusMessage: hook.statusMessage }),
+        ...(hook.once === undefined ? {} : { once: hook.once }),
+        ...(hook.async === undefined ? {} : { async: hook.async }),
+      })),
+    }));
+  }
+  return settings;
+}
+
 /** The prompt text of a user transcript entry, or undefined when it is not a prompt (tool results, other content). */
 function promptTextOf(entry: ClaudeSessionMessage): string | undefined {
   if (entry.type !== "user" || entry.parent_tool_use_id !== null) return undefined;
@@ -539,6 +562,9 @@ export class ClaudeSession implements Session {
   }
 
   #mergeLaunch(launch: LaunchContext | undefined): LaunchContext {
+    if ((launch?.dynamicTools ?? []).length > 0) {
+      throw callErrors.unsupported("tools.dynamicTools", "The Claude driver does not serve dynamic tools; give the host's tools as an MCP server");
+    }
     const session = this.#open.launch;
     return {
       appendSystemPrompt: [...(session?.appendSystemPrompt ?? []), ...(launch?.appendSystemPrompt ?? [])],
@@ -838,7 +864,7 @@ export class ClaudeSession implements Session {
               ...(hook.output === undefined || hook.output === "" ? {} : { output: hook.output }),
               ...(hook.outcome === undefined ? {} : { outcome: hook.outcome }),
               ...(hook.exit_code === undefined ? {} : { exitCode: hook.exit_code }),
-            },
+            } satisfies ClaudeHookEventData,
             fallback: { title: `Hook ${hook.hook_name} (${hook.hook_event})`, ...(hook.output === undefined || hook.output === "" ? {} : { text: hook.output }) },
           },
           { threadId: thread.thread.id, turnId: turn?.id, hostTag: turn?.hostTag },
@@ -1683,39 +1709,35 @@ export class ClaudeSession implements Session {
 
   async ext(ns: string, method: string, params: unknown): Promise<unknown> {
     this.#live();
-    const args = asRecord(params);
-    const threadId = asString(args["threadId"]);
     if (ns === EXT_FILE_CHECKPOINTS) {
       if (method !== "rewind") throw callErrors.unsupported(`extensions.${ns}.${method}`);
-      const turnId = asString(args["turnId"]);
-      if (threadId === undefined || turnId === undefined) throw callErrors.validation([{ message: "rewind needs threadId and turnId", path: [] }]);
-      const thread = this.#thread(threadId);
-      const uuid = await this.#promptUuid(thread, turnId);
+      const input = ClaudeRewindParamsSchema.parse(params);
+      const thread = this.#thread(input.threadId);
+      const uuid = await this.#promptUuid(thread, input.turnId);
       const live = await this.#ensureQuery(thread);
-      const result = await live.query.rewindFiles(uuid, { dryRun: args["dryRun"] === true });
-      return {
+      const result = await live.query.rewindFiles(uuid, { dryRun: input.dryRun === true });
+      const answer: ClaudeRewindResult = {
         canRewind: result.canRewind,
         ...(result.error === undefined ? {} : { error: result.error }),
         ...(result.filesChanged === undefined ? {} : { filesChanged: result.filesChanged }),
         ...(result.insertions === undefined ? {} : { insertions: result.insertions }),
         ...(result.deletions === undefined ? {} : { deletions: result.deletions }),
       };
+      return answer;
     }
     if (ns === EXT_HOOKS) {
       if (method !== "set") throw callErrors.unsupported(`extensions.${ns}.${method}`);
-      if (threadId === undefined) throw callErrors.validation([{ message: "set needs threadId", path: ["threadId"] }]);
-      const hooks = args["hooks"];
-      if (hooks !== null && (typeof hooks !== "object" || Array.isArray(hooks))) throw callErrors.validation([{ message: "hooks must be an object of hook events, or null", path: ["hooks"] }]);
-      const live = await this.#ensureQuery(this.#thread(threadId));
-      await live.query.applyFlagSettings({ hooks: hooks as ClaudeHookSettings | null });
+      const input = ClaudeHooksSetParamsSchema.parse(params);
+      const live = await this.#ensureQuery(this.#thread(input.threadId));
+      await live.query.applyFlagSettings({ hooks: input.hooks === null ? null : hookSettings(input.hooks) });
       return null;
     }
     if (ns === EXT_GOAL) {
       if (method !== "get") {
         throw callErrors.unsupported(`extensions.${ns}.${method}`, "Claude sets goals with its /goal command in a turn the host sends; the driver reads them from the transcript");
       }
-      if (threadId === undefined) throw callErrors.validation([{ message: "get needs threadId", path: ["threadId"] }]);
-      return this.#goalFromTranscript(this.#thread(threadId));
+      const input = AriGoalGetParamsSchema.parse(params);
+      return this.#goalFromTranscript(this.#thread(input.threadId));
     }
     throw callErrors.unsupported(`extensions.${ns}`);
   }

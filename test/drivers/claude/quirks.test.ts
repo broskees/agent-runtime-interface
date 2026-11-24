@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { describe, test } from "node:test";
 import type { Request } from "../../../src/generated/request.ts";
 import { CLAUDE_CAPABILITIES, CLAUDE_EXTENSIONS, subagentIdFor } from "../../../src/drivers/claude/index.ts";
+import { ClaudeHookEventSchema, ClaudeRewindResultSchema } from "../../../src/generated/extensions/claude.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { openClaudeRig, until } from "./rig.ts";
 import type { ClaudeRig } from "./rig.ts";
@@ -325,6 +326,8 @@ describe("claude driver quirks", () => {
         return found.length === 2 ? found : undefined;
       }, "two x:claude.hook events");
       assert.deepEqual(hookEvents.map((event) => ((event.body as { data: { phase: string } }).data.phase)), ["started", "response"]);
+      for (const event of hookEvents) assert.equal(ClaudeHookEventSchema.is(event.body), true, JSON.stringify(event.body));
+      assert.deepEqual((hookEvents[1]!.body as { data: unknown }).data, { phase: "response", hookId: (hookEvents[0]!.body as { data: { hookId: string } }).data.hookId, hookName: "lint", hookEvent: "PostToolUse", output: "lint passed", outcome: "success", exitCode: 0 });
       assert.equal(hookEvents[1]!.turnId, turnId);
       await native.complete();
       await rig.terminal(turnId);
@@ -334,7 +337,31 @@ describe("claude driver quirks", () => {
       assert.equal(call.dryRun, true);
       assert.equal(call.userMessageId, rig.world.prompts().find((prompt) => prompt.message.content !== undefined && JSON.stringify(prompt.message.content).includes("Edit the file."))!.uuid);
       assert.deepEqual(rewound, call.result);
+      assert.equal(ClaudeRewindResultSchema.is(rewound), true);
+      // Params are checked against spec/v1/extensions/claude.schema.json before anything reaches Claude.
+      await assert.rejects(rig.session.ext!("claude.fileCheckpoints", "rewind", { threadId: thread.id }), (error: { callError?: { code: string } }) => error.callError?.code === "validation");
+      await assert.rejects(rig.session.ext!("claude.hooks", "set", { threadId: thread.id, hooks: { Stop: [{ hooks: [{ type: "prompt", prompt: "x" }] }] } }), (error: { callError?: { code: string } }) => error.callError?.code === "validation");
       await assert.rejects(rig.session.ext!("claude.other", "x", {}), (error: { callError?: { capability?: string } }) => error.callError?.capability === "extensions.claude.other");
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a resume in a fresh session replays the stored turns as events, and a quiet one does not", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.thread();
+      const first = await rig.simpleTurn(thread.id, "Hello there.", "Hi.");
+      const { session, log } = await rig.openAnother();
+      await session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy() });
+      await until(() => log.find((event) => event.body.type === "turn.terminal"), "the replayed turn");
+      assert.deepEqual(log.events.map((event) => event.body.type).slice(2), ["thread.upsert", "turn.upsert", "item.upsert", "item.upsert", "turn.terminal"]);
+      const replayedTurn = log.find((event) => event.body.type === "turn.upsert")!;
+      assert.equal((replayedTurn.body as { turn: { id: string } }).turn.id, first);
+      const { session: quietSession, log: quietLog } = await rig.openAnother();
+      await quietSession.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy(), quiet: true });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(quietLog.find((event) => event.body.type === "turn.upsert"), undefined);
     } finally {
       await rig.cleanup();
     }

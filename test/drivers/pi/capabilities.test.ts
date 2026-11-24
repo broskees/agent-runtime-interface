@@ -153,6 +153,52 @@ test("each session member the driver supports works against Pi", async () => {
   assert.equal((await rig.inspect(thread))?.loaded, true);
 });
 
+test("an untouched thread survives unloadThread: it resumes as itself in the same session and in a fresh one", async () => {
+  const rig = await openPiTestRig();
+  rigs.push(rig);
+  const first = await rig.open();
+  const runTurn = async (opened: Awaited<ReturnType<PiTestRig["open"]>>, threadId: string, text: string) => {
+    const started = await opened.session.startTurn({ threadId, clientTurnKey: text, intent: "start", content: [{ type: "text", text }] });
+    assert.equal(started.status, "accepted");
+    if (started.status !== "accepted") throw new Error("not accepted");
+    const native = await rig.nextTurn();
+    await native.complete();
+    assert.equal((await rig.terminal(opened.events, started.turnId)).status, "completed");
+    assert.equal(opened.events.find((event) => event.body.type === "turn.terminal" && event.body.turnId === started.turnId)?.threadId, threadId);
+  };
+
+  // Threads with no messages: Pi has written no file for them yet (createEmpty).
+  const thread = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+  const other = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+  assert.equal(fs.existsSync(thread.handle!), false);
+
+  await first.session.unloadThread!(thread.id);
+  assert.equal((await rig.inspect(thread))?.loaded, false);
+  const again = await first.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(rig.cwd) });
+  assert.equal(again.id, thread.id);
+  assert.equal(again.native.id, thread.native.id);
+  assert.equal(again.handle, thread.handle);
+  await runTurn(first, thread.id, "Back in the same session.");
+
+  await first.session.unloadThread!(other.id);
+  await first.session.close();
+  const second = await rig.open();
+  const resumed = await second.session.resumeThread({ native: { handle: other.handle! }, policy: policy(rig.cwd) });
+  assert.equal(resumed.id, other.id);
+  assert.equal(resumed.native.id, other.native.id);
+  await runTurn(second, resumed.id, "Back in a fresh session.");
+
+  for (const opened of [first, second]) {
+    assert.equal(
+      opened.events.some((event) => event.body.type === "session.replaced"),
+      false,
+      "no untouched thread was replaced by a new session",
+    );
+  }
+  assert.deepEqual((await rig.inspect(thread))?.prompts, ["Back in the same session."]);
+  assert.deepEqual((await rig.inspect(other))?.prompts, ["Back in a fresh session."]);
+});
+
 test("each auth member the driver supports works", async () => {
   const rig = await openPiTestRig();
   rigs.push(rig);

@@ -3,7 +3,8 @@
 // `status()` names the binary to install and `openSession` rejects with
 // `driver_unavailable`; with `pi`, `status()` reports its version and an
 // advisory when it is outside the tested range. The last test runs the driver
-// on real Node host services against a `pi` found on PATH.
+// on real Node host services against a `pi` found on PATH, and type-checks
+// every frame that fake exchanged, read from its trace file.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -17,7 +18,8 @@ import { PI_TESTED_VERSIONS, piDriver } from "../../../src/drivers/pi/index.ts";
 import { isAriError, toCallError } from "../../../src/index.ts";
 import type { AriEvent, Request } from "../../../src/index.ts";
 import { createCoordination, createNodeHostServices } from "../../../src/node/index.ts";
-import { FAKE_PI } from "./harness.ts";
+import { FAKE_PI, framesUnder } from "./harness.ts";
+import { checkRunsAgainstPiTypes } from "./pi-types.ts";
 import { openPiTestRig, policy } from "./rig.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -117,7 +119,8 @@ test("on real Node host services, the driver finds pi on PATH and completes a tu
     callbacks: { register: async (flowId) => ({ url: `http://127.0.0.1:9/${flowId}` }) },
     coordination: createCoordination(),
     writeDiagnostic: () => undefined,
-    baseEnv: { PATH: bin, HOME: home },
+    // FAKE_PI_TRACE_DIRECTORY tells the fake where to trace its frames; real pi ignores it.
+    baseEnv: { PATH: bin, HOME: home, FAKE_PI_TRACE_DIRECTORY: path.join(root, "traces") },
     envPolicy: { stripAmbient: [...(piDriver.cliManifest?.envScrubPrefixes ?? [])] },
   });
   try {
@@ -153,6 +156,16 @@ test("on real Node host services, the driver finds pi on PATH and completes a tu
     await instance.dispose();
     // Nothing under the provider's own config directory.
     assert.equal(fs.existsSync(path.join(home, ".pi")), false);
+
+    // This fake had no puppet channel; its trace file still holds every frame, and they match Pi's types.
+    const frames = framesUnder(root);
+    for (const type of ["get_available_models", "get_state", "get_entries", "prompt", "extension_ui_response"]) {
+      assert.ok(frames.some((frame) => frame.direction === "in" && frame.record["type"] === type), `no ${type} frame was traced`);
+    }
+    for (const type of ["response", "agent_start", "message_end", "extension_ui_request", "agent_settled"]) {
+      assert.ok(frames.some((frame) => frame.direction === "out" && frame.record["type"] === type), `no ${type} frame was traced`);
+    }
+    assert.deepEqual(checkRunsAgainstPiTypes([{ frames, root }]).diagnostics, []);
   } finally {
     await host.dispose();
   }

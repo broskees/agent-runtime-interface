@@ -5,9 +5,10 @@
 // files under each instance's state directory, and the workspace is a real
 // directory with a real symbolic link.
 //
-// The harness also keeps every RPC frame each fake sent or received, and the
-// command line and directory of every fake it started, so tests can check the
-// frames against Pi's published types and see how the driver ran Pi.
+// The harness also reads every RPC frame each fake sent or received from the
+// fakes' trace files, and keeps the command line and directory of every fake
+// it started, so tests can check the frames against Pi's published types and
+// see how the driver ran Pi.
 
 import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
@@ -38,7 +39,38 @@ export interface Frame {
   readonly record: { readonly [key: string]: unknown };
 }
 
-/** One fake `pi` the harness started: its arguments and working directory. */
+/**
+ * Every frame of every fake `pi` that ran under `root`, read from the trace
+ * files the fake writes in its session directory (one file per process, in
+ * the order the process read or wrote them). Works for fakes with and
+ * without a puppet channel.
+ */
+export function framesUnder(root: string): Frame[] {
+  const files: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".fake-pi-trace.ndjson")) files.push(full);
+    }
+  };
+  if (fs.existsSync(root)) walk(root);
+  return files.sort().flatMap((file) =>
+    fs
+      .readFileSync(file, "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Frame),
+  );
+}
+
+/** The text blocks of a Pi message's content, joined. */
+function textOf(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((block: { type?: unknown; text?: unknown }) => (block?.type === "text" && typeof block.text === "string" ? [block.text] : [])).join("");
+}
+
+/** One fake `pi` the harness started: its arguments and the directory it was started in. */
 export interface Invocation {
   readonly argv: readonly string[];
   readonly cwd: string;
@@ -163,7 +195,7 @@ export function storedSessionState(file: string): NativeSessionState | undefined
   return {
     loaded: false,
     cwd: header?.cwd ?? "",
-    prompts: active.filter((entry) => entry.type === "message" && prompts.has(entry.id ?? "")).map((entry) => String(entry.message?.content)),
+    prompts: active.filter((entry) => entry.type === "message" && prompts.has(entry.id ?? "")).map((entry) => textOf(entry.message?.content)),
     compactions: active.filter((entry) => entry.type === "compaction").length,
     injectedMessages: [],
     backgroundTasks: [],
@@ -172,7 +204,8 @@ export function storedSessionState(file: string): NativeSessionState | undefined
 }
 
 export interface PiHarness extends ConformanceHarness<PiConfig> {
-  readonly frames: Frame[];
+  /** Every frame the fakes of this harness exchanged so far, from their trace files. */
+  readonly frames: readonly Frame[];
   readonly invocations: Invocation[];
   readonly root: string;
   cleanup(): void;
@@ -187,11 +220,12 @@ export interface PiHarnessOptions {
 /** The Pi driver against fake `pi` processes. */
 export function piHarness(options: PiHarnessOptions = {}): PiHarness {
   const created = createConformanceWorkspace("ari-pi-conformance-");
-  const frames: Frame[] = [];
   const invocations: Invocation[] = [];
   return {
     name: options.name ?? "pi driver (fake pi --mode rpc in a child process)",
-    frames,
+    get frames() {
+      return framesUnder(created.root);
+    },
     invocations,
     root: created.root,
     cleanup: created.cleanup,
@@ -209,8 +243,8 @@ export function piHarness(options: PiHarnessOptions = {}): PiHarness {
         if (path.basename(spawnRequest.command) !== path.basename(FAKE_PI)) throw callErrors.notFound({ resource: "executable", id: spawnRequest.command });
         const extra = [`--fake-ambient-auth=${request.ambientAuth}`, ...(options.fakeVersion === undefined ? [] : [`--fake-version=${options.fakeVersion}`])];
         const child = childProcess.spawn(process.execPath, [FAKE_PI, ...(spawnRequest.args ?? []), ...extra], {
-          // Exactly the environment the host computed, so dropped credentials stay dropped.
-          env: { ...spawnRequest.environment },
+          // Exactly the environment the host computed, so dropped credentials stay dropped, plus where the fake traces its frames.
+          env: { ...spawnRequest.environment, FAKE_PI_TRACE_DIRECTORY: path.join(rigRoot, "fake-pi-trace") },
           stdio: [spawnRequest.stdin === "ignore" ? "ignore" : "pipe", "pipe", "pipe", "ipc"],
           ...(spawnRequest.cwd === undefined ? {} : { cwd: spawnRequest.cwd }),
         });
@@ -218,7 +252,6 @@ export function piHarness(options: PiHarnessOptions = {}): PiHarness {
         child.once("exit", () => children.delete(child));
         const channel: PuppetChannel = new PuppetChannel(child, (event) => {
           if (event["event"] === "turn") turns.push(nativeTurn(channel, Number(event["runId"]), String(event["prompt"])));
-          else if (event["event"] === "frame") frames.push({ direction: event["direction"] as Frame["direction"], record: event["record"] as Frame["record"] });
           else if (event["event"] === "started") invocations.push({ argv: event["argv"] as string[], cwd: String(event["cwd"]), bridge: event["bridge"] as Invocation["bridge"] });
         });
         channels.push(channel);

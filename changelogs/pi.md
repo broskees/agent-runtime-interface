@@ -11,11 +11,17 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
 - Loads the ARI bridge extension into every Pi process: tool calls gated by
   the ARI runtime mode (`read_only`, `approval_required`,
   `auto_accept_edits`, `full_access`), Pi's working directory reported back,
-  and the `/ari-mcp`, `/ari-rewind` and `/ari-context` commands.
-- Threads: create, resume (`--session`, with `session.replaced` when Pi
-  cannot resume), read snapshot, fork at latest or from a turn (`pi --fork`,
-  also into another directory), roll back (persisted in the session file),
-  compact, unload, release.
+  and the `/ari-mcp`, `/ari-rewind`, `/ari-context` and `/ari-persist`
+  commands.
+- Threads: create, resume (`--session`, in the directory the session file
+  records, with `session.replaced` when Pi cannot resume), read snapshot,
+  fork at latest or from a turn (`pi --fork`, also into another directory),
+  roll back (persisted in the session file), compact, unload, release. A
+  thread without messages comes back as itself after unload or release: the
+  bridge writes Pi's header before the process stops, and every restart
+  checks Pi's session id.
+- Resumes only session files under the instance's state directory, so host
+  instructions are never written into a session the user's own pi keeps.
 - Turns: start, steer (with `prompt_required` when Pi queued the steer after
   the run ended), interrupt; settlement only on `agent_settled` or process
   exit.

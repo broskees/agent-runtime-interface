@@ -44,8 +44,27 @@ loading the driver.
   keeps the system prompt (including host text) in its session files
   ([session-format.md](https://pi.dev/docs/latest/session-format)), so they
   must stay out of the provider's own config directory.
-- A thread whose process was parked (`release`, `unloadThread`) or exited
-  starts again with `--session <file>` the next time it is used.
+- **The driver opens only session files under `<stateDir>/sessions`.**
+  `--session-dir` does not move a file named with `--session`, and Pi records
+  the `--append-system-prompt` text in the file it opens (Pi's
+  `SessionManager.open`, `dist/core/session-manager.js:1347–1368`; the
+  `addendum` section, `dist/core/system-prompt.js:96–97`, goes into a system
+  message, `dist/core/agent-session.js:1394–1399`, which Pi persists,
+  `:825–830`). Resuming a
+  file the user's own pi keeps under `~/.pi` would write host instructions
+  into it, so `resumeThread` rejects a handle (or an id Pi would read as a
+  path) outside that directory with a `validation` error, and starts no
+  process. A bare session id is safe: Pi looks ids up only in `--session-dir`.
+- A thread whose process was parked (`release`, `unloadThread`, closing the
+  session) or exited starts again with `--session <file>` the next time it is
+  used. Pi writes a session file only once it holds a message, and
+  `--session` of a missing file starts a *different* session at that path
+  (Pi's `SessionManager._setSessionFile`). So before the driver stops an idle
+  process it sends the bridge's `/ari-persist`, which writes Pi's own header
+  when Pi has not written the file; Pi then reopens the same session id from
+  it. Every restart checks the session id Pi reports: a different id is a
+  `not_found` error for that call, and the driver stops the process Pi
+  started instead. It never moves the thread's events to another session.
 - Frames are split on LF only (the driver kit's NDJSON decoder), never on
   U+2028 or U+2029, as Pi's docs require.
 
@@ -71,7 +90,7 @@ loads it into every Pi process with `--extension`. Its source is
 2. **Reports Pi's working directory** at `session_start` as a `setStatus`
    record under the key `ari`, so a thread started through a symbolic link
    reports the real directory.
-3. **Adds three commands** the driver sends as prompts. Pi runs an extension
+3. **Adds four commands** the driver sends as prompts. Pi runs an extension
    command at once and never adds it to the conversation.
    - `/ari-mcp <json>` registers the host's MCP servers with
      `pi.registerMcpServer`, under the names the host chose. Nothing is
@@ -80,6 +99,11 @@ loads it into every Pi process with `--extension`. Its source is
      `ctx.navigateTree`, labelled `ari-rewind`. The label entry persists the
      move, so a rollback survives a restart.
    - `/ari-context <json>` holds host instructions for the next run only.
+   - `/ari-persist` writes the session header, as Pi's session manager holds
+     it (`ctx.sessionManager.getHeader()`), to the session file when Pi has
+     not written that file yet. It creates the file exclusively, so a file Pi
+     wrote is never touched. This is the bridge's only file write, and it
+     imports only `node:fs` for it.
 4. **Appends held instructions** to that one run's system prompt in
    `before_agent_start`.
 
@@ -90,11 +114,16 @@ It never adds instruction text of its own. Its runtime mode arrives in the
 
 - **Thread**: one Pi session. `native` is Pi's session id (strong); `handle`
   is the session file, which `resumeThread({ native: { handle } })` takes.
-- **Resume**: `pi --session <file>`. Pi starts a *new* session when the file
-  is missing; the driver sees that its session id does not match the file name,
-  stops that process, starts a fresh session and emits `session.replaced` with
-  `contextLost: true`. A session id Pi cannot find makes Pi exit, with the same
-  fallback.
+- **Resume**: `pi --session <file>`, for a file under `<stateDir>/sessions`.
+  Pi works in the directory the file's header records, wherever pi starts, so
+  the thread's `cwd` is that directory, not `policy.cwd` (Pi's
+  `SessionManager.open` and `dist/main.js:772–776`). A thread without
+  messages resumes as itself, because `/ari-persist` wrote its header when
+  its process stopped. Pi starts a *new* session when the file is missing;
+  the driver sees that its session id does not match the file name, stops
+  that process, starts a fresh session and emits `session.replaced` with
+  `contextLost: true`. A session id Pi cannot find makes Pi exit, with the
+  same fallback.
 - **Turn**: one `prompt` and the run it starts. Pi has no turn id, so a turn
   is named by the position of its prompt among every user message of the
   session file in append order (weak, ordinal). Entries are append-only, so a
@@ -109,8 +138,9 @@ It never adds instruction text of its own. Its runtime mode arrives in the
 - **Interrupt**: Pi's `abort`, which answers once the session is idle.
 - **Rollback**: `/ari-rewind` to the prompt of the first turn to drop. The
   session keeps its file and id.
-- **Fork**: `pi --fork <file>`, run in the destination directory. A fork made
-  over RPC keeps the source's working directory, so the driver always uses the
+- **Fork**: `pi --fork <file>`, run in the destination directory, or in the
+  source thread's own directory when the host names none. A fork made over
+  RPC keeps the source's working directory, so the driver always uses the
   CLI, as the proposal's §1.3 notes. A fork from a turn then rewinds the copy
   to before that turn's prompt.
 - **Compaction**: Pi's `compact` command, between turns.
@@ -126,7 +156,8 @@ It never adds instruction text of its own. Its runtime mode arrives in the
 ## Prompt content
 
 Text blocks become the prompt's text, and inline images go in Pi's `images`
-field. Host files (`attachmentRef`) reach Pi as the path
+field. Pi records the prompt as one text block followed by those images
+(`dist/core/agent-session.js:1573–1582`). Host files (`attachmentRef`) reach Pi as the path
 `host.attachments.resolve` returns. When the host cannot give the bytes, the
 prompt names the attachment as unreadable, as the proposal's §10 requires;
 that is the only text the driver adds to a prompt. A `resource_link` or an
@@ -183,12 +214,12 @@ it has no row. Every difference names its source.
 | `sessions.release` | `true` | not in §1.2 | Stops the processes; threads restart with `--session`. |
 | `sessions.feedbackUpload` | `false` | not in §1.2 | Pi's RPC has no feedback command (Pi docs rpc-commands.md). |
 | `sessions.contextUsageReuse` | `false` | not in §1.2 | |
-| `threads.createEmpty` | `true` | not in §1.2 | |
+| `threads.createEmpty` | `true` | not in §1.2 | Pi writes no file until a message, so the bridge's `/ari-persist` writes the header before the process stops. |
 | `threads.readSnapshot` | `true` | Y | Rebuilt from `get_entries`. |
 | `threads.rollback` | `true` | Y | `/ari-rewind`, persisted as a label entry. |
 | `threads.compact` | `true` | not in §1.2 | Pi's `compact` command. |
 | `threads.injectHistory` | `false` | not in §1.2 | |
-| `threads.unload` | `true` | not in §1.2 | |
+| `threads.unload` | `true` | not in §1.2 | Stops the thread's process; `resumeThread` reopens the same session id, in the same session or a fresh one. |
 | `threads.exposesNativeIds` | `true` | not in §1.2 | |
 | `threads.fork.supported` | `true` | Y | `pi --fork <file>`. |
 | `threads.fork.fromTurn` | `true` | Y | Holds the history before the turn. |
@@ -282,3 +313,10 @@ through a callback URL. Every other optional member is left out.
   takes precedence over the bridge's registration (Pi docs mcp.md).
 - Pi does not lock session files, so two processes can open one session; the
   driver never does that itself.
+- A session file outside `<stateDir>/sessions`, such as one the user's own pi
+  keeps under `~/.pi`, cannot be resumed (see "How it runs Pi").
+- A thread without messages whose process exited on its own, before the
+  driver could send `/ari-persist`, cannot start again: Pi never wrote its
+  session. Its next use fails with `not_found`.
+- The path check on a resume handle is lexical (`.` and `..` resolved, no
+  symbolic links followed), as the driver reads no files itself.

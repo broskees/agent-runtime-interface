@@ -16,6 +16,16 @@
 //   `/ari-rewind` (the bridge's `navigateTree`, persisted as a label entry),
 //   and `--fork <file>` run in the destination directory, because a fork
 //   made over RPC keeps the source's working directory.
+// - Pi writes a session file only once it holds a message, and
+//   `--session <file>` of a missing file starts a new session at that path.
+//   So before the driver stops an idle process, the bridge's `/ari-persist`
+//   writes Pi's header for a session Pi has not written, and every restart
+//   checks that Pi reopened the thread's own session id; a different one is
+//   an error, never a silent new thread.
+// - The driver opens only session files under its state directory's
+//   `sessions`. Pi records `--append-system-prompt` text in the session file
+//   it opens, so resuming a file the user's own pi keeps (under ~/.pi) would
+//   write host instructions there; such a resume is refused.
 // - Extension UI dialogs (`select`, `confirm`, `input`, `editor`) become
 //   `Request`s; the bridge's approval dialogs become approvals with their
 //   native option ids.
@@ -46,7 +56,7 @@ import type {
 } from "../../generated/session.ts";
 import type { Thread, ThreadSnapshot, Turn } from "../../generated/thread.ts";
 import type { HostServices, Session } from "../../runtime.ts";
-import { BRIDGE_SETTINGS_VARIABLE, BRIDGE_STATUS_KEY, CONTEXT_COMMAND, MCP_COMMAND, REWIND_COMMAND, parseApprovalTitle } from "./bridge.ts";
+import { BRIDGE_SETTINGS_VARIABLE, BRIDGE_STATUS_KEY, CONTEXT_COMMAND, MCP_COMMAND, PERSIST_COMMAND, REWIND_COMMAND, parseApprovalTitle } from "./bridge.ts";
 import type { BridgeMode, BridgeSettings } from "./bridge.ts";
 import { piCapabilities } from "./capabilities.ts";
 import type { PiConfig } from "./config.ts";
@@ -181,6 +191,35 @@ function splitModel(slug: string): { provider: string; modelId: string } {
   return { provider: slug.slice(0, slash), modelId: slug.slice(slash + 1) };
 }
 
+/** How long a stopping process may take to answer `/ari-persist` before it is stopped anyway. */
+const PERSIST_TIMEOUT_MS = 10_000;
+
+/** The segments of an absolute path with `.` and `..` resolved, or undefined for a relative path. */
+function absoluteSegments(file: string): string[] | undefined {
+  const slashed = file.replace(/\\/g, "/");
+  if (!slashed.startsWith("/") && !/^[A-Za-z]:\//.test(slashed)) return undefined;
+  const segments: string[] = [];
+  for (const segment of slashed.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") segments.pop();
+    else segments.push(segment);
+  }
+  return segments;
+}
+
+/** True when `file` is an absolute path inside `directory`. Pi resolves a relative path against its own directory, so that counts as outside. */
+function isInsideDirectory(file: string, directory: string): boolean {
+  const inner = absoluteSegments(file);
+  const outer = absoluteSegments(directory);
+  if (inner === undefined || outer === undefined || inner.length <= outer.length) return false;
+  return outer.every((segment, index) => inner[index] === segment);
+}
+
+/** Pi reads a `--session` argument as a path when it has a slash or ends in `.jsonl`, and as a session id otherwise (Pi's main.js resolveSessionPath). */
+function isSessionPath(argument: string): boolean {
+  return argument.includes("/") || argument.includes("\\") || argument.endsWith(".jsonl");
+}
+
 /** The session id Pi put in a session file's name (`<timestamp>_<id>.jsonl`, Pi docs session-format.md). */
 function sessionIdInFileName(file: string): string | undefined {
   return /_([A-Za-z0-9][A-Za-z0-9._-]*)\.jsonl$/.exec(file)?.[1];
@@ -250,6 +289,14 @@ export class PiSession implements Session {
     this.#open();
     const target = "handle" in input.native ? input.native.handle : input.native.id;
     if (target === null || target === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
+    // A bare id resolves inside --session-dir only; a path could name a file the user's own pi keeps.
+    const sessionsDirectory = `${this.#context.host.paths.stateDir}/sessions`;
+    if (isSessionPath(target) && !isInsideDirectory(target, sessionsDirectory)) {
+      throw callErrors.validation(
+        [{ message: `The Pi driver resumes only session files under ${sessionsDirectory}. Pi writes a thread's launch instructions into the session file it opens, so it will not open ${target}.`, path: ["native", "handle" in input.native ? "handle" : "id"] }],
+        "The Pi session file is outside the driver's state directory",
+      );
+    }
     const known = [...this.#threads.values()].find((candidate) => candidate.thread.handle === target || candidate.thread.native.id === target);
     if (known !== undefined && !known.unloaded && known.process !== undefined) return known.thread;
 
@@ -316,7 +363,8 @@ export class PiSession implements Session {
     // A fork from a turn holds the history before that turn; at latest, everything.
     const target = input.at.type === "turn" ? this.#userEntryOf(source, transcript, input.at.turnId) : transcript.leafId;
     const policy = input.policy ?? (input.cwd === undefined ? source.policy : { ...source.policy, cwd: input.cwd });
-    const launch = this.#launchFor(input.cwd ?? source.launch.cwd, policy, input.config, { appendSystemPrompt: [...source.launch.systemPrompts], mcpServers: [...source.launch.launchMcpServers] }, undefined);
+    // Without a destination, the fork stays where the source works: Pi's own directory, which a resumed session takes from its file.
+    const launch = this.#launchFor(input.cwd ?? source.thread.cwd, policy, input.config, { appendSystemPrompt: [...source.launch.systemPrompts], mcpServers: [...source.launch.launchMcpServers] }, undefined);
     // Pi's CLI copies the session into the directory it runs in; RPC's fork would keep the source's directory.
     const started = transcript.userEntries.length === 0 || source.thread.handle === undefined ? await this.#start(launch, []) : await this.#start(launch, ["--fork", source.thread.handle]);
     const forkTranscript = readTranscript(await started.process.request<{ entries: unknown; leafId: unknown }>({ type: "get_entries" }));
@@ -674,8 +722,14 @@ export class PiSession implements Session {
     if (thread.starting !== undefined) return thread.starting;
     const handle = thread.thread.handle;
     if (handle === undefined) throw callErrors.invalidState("no_session_file");
+    const nativeId = thread.thread.native.id;
     thread.starting = (async () => {
       const started = await this.#start(thread.launch, ["--session", handle]);
+      if (started.sessionId !== nativeId) {
+        // Pi started a new session at a path with no file. Registering it would send this thread's events to another thread.
+        await started.process.close();
+        throw callErrors.notFound({ resource: "Pi session", id: nativeId ?? handle, message: `Pi no longer has session ${String(nativeId)} at ${handle}; it would have started session ${started.sessionId} there instead` });
+      }
       await this.#register(started, thread.policy, thread.launch, {});
       return started.process;
     })();
@@ -686,14 +740,31 @@ export class PiSession implements Session {
     }
   }
 
+  /** Stops a thread's process. An idle one first has the bridge write the header of a session Pi has not written, so the thread reopens as itself. */
   async #park(thread: PiThread): Promise<void> {
     const process = thread.process;
     thread.process = undefined;
-    if (process !== undefined) await process.close();
+    if (process === undefined) return;
+    if (thread.active === undefined && !process.exited) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.#command(process, PERSIST_COMMAND, ""),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(callErrors.transport(`pi did not answer /${PERSIST_COMMAND} within ${PERSIST_TIMEOUT_MS} ms`)), PERSIST_TIMEOUT_MS);
+          }),
+        ]);
+      } catch (error) {
+        this.#context.host.diagnostics.log({ level: "warn", msg: `Pi could not write the header of thread ${thread.thread.id} before stopping: ${error instanceof Error ? error.message : String(error)}` });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await process.close();
   }
 
   async #command(process: PiProcess, name: string, argument: string): Promise<void> {
-    const response = await process.request<{ disposition?: unknown }>({ type: "prompt", message: `/${name} ${argument}` }).catch((error: unknown) => {
+    const response = await process.request<{ disposition?: unknown }>({ type: "prompt", message: argument === "" ? `/${name}` : `/${name} ${argument}` }).catch((error: unknown) => {
       throw commandError(error, "native session");
     });
     if (response.disposition !== "handled") throw callErrors.protocol("bridge_command", `pi did not run the bridge command /${name}`);

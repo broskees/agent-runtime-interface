@@ -18,16 +18,33 @@
 //   `parentId`). A new session's file is written only once it holds a user or
 //   assistant message; `--session <path>` of a missing file starts a new
 //   session at that path, as Pi does.
+// - The working directory Pi runs in: a new session and a `--fork` take the
+//   directory pi was started in, and `--session` of a stored file takes the
+//   `cwd` of the file's header, wherever pi was started (Pi's
+//   SessionManager.open, dist/core/session-manager.js:1365, and
+//   dist/main.js:772). Tool paths, the bridge's status and the system prompt
+//   use that directory.
+// - User messages as Pi records them for `prompt`, `steer` and `follow_up`: a
+//   text block followed by the images the command carried
+//   (dist/core/agent-session.js:1573–1582 and 1891–1910).
 // - RPC commands the driver uses (`prompt`, `steer`, `abort`, `get_state`,
 //   `get_entries`, `get_messages`, `get_available_models`, `set_model`,
 //   `set_thinking_level`, `compact`, `clear_queue`, `get_commands`) and the
 //   events of a run (`agent_start` ... `agent_settled`).
 // - The ARI bridge extension (src/drivers/pi/bridge.ts) when `--extension`
 //   names it: its `setStatus` with the working directory, its approval
-//   dialogs, its `/ari-rewind` and `/ari-context` commands and its MCP
-//   registrations. Real Pi runs the bridge itself; this fake does what the
-//   bridge would do, and test/drivers/pi/bridge.test.ts checks the bridge
-//   against the same expectations.
+//   dialogs, its `/ari-rewind`, `/ari-context` and `/ari-persist` commands
+//   and its MCP registrations. Real Pi runs the bridge itself; this fake does
+//   what the bridge would do, and test/drivers/pi/bridge.test.ts checks the
+//   bridge against the same expectations.
+//
+// Every RPC frame the fake reads or writes is also appended to a trace file,
+// `<trace dir>/<pid>-<time>.fake-pi-trace.ndjson`, as
+// `{ "direction": "in" | "out", "record": ... }`, so tests can type-check
+// every frame of every run, with or without a puppet channel. The trace
+// directory is `FAKE_PI_TRACE_DIRECTORY` when a test sets it, and otherwise
+// `<session dir>/fake-pi-trace`; a `--no-session` pi without the variable
+// has no session directory and writes no trace.
 //
 // The fake does nothing on its own. A test drives it over a Node IPC channel
 // (the conformance kit's puppet: `say`, `runTool`, `requestApproval`,
@@ -364,14 +381,24 @@ function resolveSessionArgument(argument: string, dir: string): string | undefin
 // ---------------------------------------------------------------------------
 // Startup
 
-const cwd = process.cwd();
+/** The directory pi was started in. A stored session's own directory replaces it below. */
+const spawnCwd = process.cwd();
 // Pi's default is ~/.pi/agent/sessions. The fake never guesses a home: without HOME or --session-dir it refuses.
 const homeDirectory = process.env["HOME"];
 if (flag("--session-dir") === undefined && (homeDirectory === undefined || homeDirectory === "") && !args.switches.has("--no-session")) {
   process.stderr.write("fake pi: give --session-dir or HOME\n");
   process.exit(2);
 }
-const sessionDir = path.resolve(flag("--session-dir") ?? path.join(homeDirectory ?? cwd, ".pi", "agent", "sessions"));
+const sessionDir = path.resolve(flag("--session-dir") ?? path.join(homeDirectory ?? spawnCwd, ".pi", "agent", "sessions"));
+const traceDirectory = process.env["FAKE_PI_TRACE_DIRECTORY"] ?? (args.switches.has("--no-session") ? undefined : path.join(sessionDir, "fake-pi-trace"));
+const traceFile = traceDirectory === undefined ? undefined : path.join(traceDirectory, `${process.pid}-${Date.now()}.fake-pi-trace.ndjson`);
+
+/** Appends one frame to this process's trace file. */
+function trace(direction: "in" | "out", record: unknown): void {
+  if (traceFile === undefined) return;
+  fs.mkdirSync(path.dirname(traceFile), { recursive: true });
+  fs.appendFileSync(traceFile, `${JSON.stringify({ direction, record })}\n`);
+}
 let model = findModel(flag("--model") ?? "fake/fake-small");
 if (model === undefined) {
   process.stderr.write(`Error: Model not found: ${flag("--model")}\n`);
@@ -383,28 +410,31 @@ const appendedSystemPrompts = args.flags.get("--append-system-prompt") ?? [];
 let session: SessionFile;
 try {
   if (args.switches.has("--no-session")) {
-    session = SessionFile.inMemory(cwd);
+    session = SessionFile.inMemory(spawnCwd);
   } else if (flag("--fork") !== undefined) {
     const source = resolveSessionArgument(flag("--fork")!, sessionDir);
     if (source === undefined) {
       process.stderr.write(`No session found matching '${flag("--fork")}'\n`);
       process.exit(1);
     }
-    session = SessionFile.fork(source, sessionDir, cwd);
+    session = SessionFile.fork(source, sessionDir, spawnCwd);
   } else if (flag("--session") !== undefined) {
     const file = resolveSessionArgument(flag("--session")!, sessionDir);
     if (file === undefined) {
       process.stderr.write(`No session found matching '${flag("--session")}'\n`);
       process.exit(1);
     }
-    session = SessionFile.open(file, sessionDir, cwd);
+    session = SessionFile.open(file, sessionDir, spawnCwd);
   } else {
-    session = SessionFile.create(sessionDir, cwd);
+    session = SessionFile.create(sessionDir, spawnCwd);
   }
 } catch (error) {
   process.stderr.write(`Error: ${(error as Error).message}\n`);
   process.exit(1);
 }
+
+/** Pi's working directory: the header's, so a resumed session works where it was made and a fork where pi ran. */
+const cwd = session.header.cwd;
 
 /** The ARI bridge, when `--extension` names its file: the fake then does what the bridge does. */
 interface BridgeState {
@@ -425,7 +455,7 @@ const bridge: BridgeState | undefined = (() => {
   }
 })();
 
-tell({ event: "started", pid: process.pid, cwd, argv: process.argv.slice(2), bridge: bridge ?? null, sessionFile: session.file });
+tell({ event: "started", pid: process.pid, cwd: spawnCwd, argv: process.argv.slice(2), bridge: bridge ?? null, sessionFile: session.file });
 
 // ---------------------------------------------------------------------------
 // Output
@@ -433,7 +463,7 @@ tell({ event: "started", pid: process.pid, cwd, argv: process.argv.slice(2), bri
 let heldFrames: Record[] | undefined;
 
 function writeFrame(record: Record): void {
-  tell({ event: "frame", direction: "out", record });
+  trace("out", record);
   process.stdout.write(`${JSON.stringify(record)}\n`);
 }
 
@@ -489,10 +519,26 @@ interface Run {
   ended: boolean;
 }
 
+/** An image a command carried, as Pi's `ImageContent`. */
+type Image = { readonly type: "image"; readonly data: string; readonly mimeType: string };
+
+/** What the user sent with `prompt`, `steer` or `follow_up`: the text and its images. */
+interface UserInput {
+  readonly text: string;
+  readonly images: Image[];
+}
+
+function imagesOf(value: unknown): Image[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((image: { type?: unknown; data?: unknown; mimeType?: unknown }) =>
+    image?.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string" ? [{ type: "image" as const, data: image.data, mimeType: image.mimeType }] : [],
+  );
+}
+
 let run: Run | undefined;
 let runCounter = 0;
-const steeringQueue: string[] = [];
-const followUpQueue: string[] = [];
+const steeringQueue: UserInput[] = [];
+const followUpQueue: UserInput[] = [];
 let pendingContext: string[] = [];
 const dialogs = new Map<string, PendingDialog>();
 let toolCounter = 0;
@@ -514,19 +560,26 @@ function stateRecord(): Record {
 }
 
 function emitQueue(): void {
-  emit({ type: "queue_update", steering: [...steeringQueue], followUp: [...followUpQueue] });
+  emit({ type: "queue_update", steering: steeringQueue.map((input) => input.text), followUp: followUpQueue.map((input) => input.text) });
 }
 
 function appendMessage(message: Json): void {
   if ((message as Record)["role"] === "user" && !session.entries.some((entry) => entry.type === "message")) {
-    // Pi persists the system prompt's sections with the first request of a session.
-    session.append({ type: "message", message: { role: "system", content: "", sections: { preamble: "You are the fake Pi agent.", cwd, ...(appendedSystemPrompts.length === 0 ? {} : { append: appendedSystemPrompts.join("\n\n") }) }, timestamp: Date.now() } });
+    // Pi persists the system prompt's sections with the first request of a session; --append-system-prompt is its addendum.
+    session.append({ type: "message", message: { role: "system", content: "", sections: { preamble: "You are the fake Pi agent.", cwd, ...(appendedSystemPrompts.length === 0 ? {} : { addendum: appendedSystemPrompts.join("\n\n") }) }, timestamp: Date.now() } });
   }
   session.append({ type: "message", message });
 }
 
-function userMessage(text: string): Record {
-  return { role: "user", content: text, timestamp: Date.now() };
+/** A user message as Pi builds it: one text block, then the images. */
+function userMessage(input: UserInput): Record {
+  return { role: "user", content: [{ type: "text", text: input.text }, ...input.images], timestamp: Date.now() };
+}
+
+/** The text blocks of a message's content, joined. */
+function textOf(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((block: { type?: unknown; text?: unknown }) => (block?.type === "text" && typeof block.text === "string" ? [block.text] : [])).join("");
 }
 
 function assistantMessage(content: Json[], stopReason: string, extra: Record = {}): Record {
@@ -548,21 +601,22 @@ function closeLlmTurn(current: Run, message: Json, toolResults: Json[]): void {
 
 function deliverSteering(current: Run): void {
   while (steeringQueue.length > 0) {
-    const text = steeringQueue.shift()!;
+    const input = steeringQueue.shift()!;
     emitQueue();
-    const message = userMessage(text);
+    const message = userMessage(input);
     emit({ type: "message_start", message });
     emit({ type: "message_end", message });
     appendMessage(message);
     current.messages.push(message);
     current.endsWithAnswer = false;
-    current.steers.push(text);
-    current.steerWaiters.shift()?.(text);
+    current.steers.push(input.text);
+    current.steerWaiters.shift()?.(input.text);
   }
 }
 
-function startRun(text: string, commandId: string | undefined): void {
+function startRun(input: UserInput, commandId: string | undefined): void {
   runCounter += 1;
+  const text = input.text;
   const current: Run = {
     id: runCounter,
     prompt: text,
@@ -581,7 +635,7 @@ function startRun(text: string, commandId: string | undefined): void {
   emit({ type: "agent_start" });
   current.llmTurnOpen = true;
   emit({ type: "turn_start" });
-  const message = userMessage(text);
+  const message = userMessage(input);
   emit({ type: "message_start", message });
   emit({ type: "message_end", message });
   appendMessage(message);
@@ -783,10 +837,22 @@ function handleCommand(command: { [key: string]: unknown }): void {
         respond(id, "prompt", { disposition: "handled" });
         return;
       }
+      if (bridge !== undefined && (message === "/ari-persist" || message.startsWith("/ari-persist "))) {
+        // The bridge writes Pi's own header when Pi has not written the file yet. Pi's session
+        // manager is not told, so the fake's session stays unwritten too: the driver stops the
+        // process next, and a later pi opens the file by its header.
+        if (session.file !== "" && !fs.existsSync(session.file)) {
+          fs.mkdirSync(path.dirname(session.file), { recursive: true });
+          fs.writeFileSync(session.file, `${JSON.stringify(session.header)}\n`, { flag: "wx" });
+        }
+        respond(id, "prompt", { disposition: "handled" });
+        return;
+      }
+      const input: UserInput = { text: message, images: imagesOf(command["images"]) };
       if (run !== undefined && !run.ended) {
         const behavior = command["streamingBehavior"];
-        if (behavior === "steer") steeringQueue.push(message);
-        else if (behavior === "followUp") followUpQueue.push(message);
+        if (behavior === "steer") steeringQueue.push(input);
+        else if (behavior === "followUp") followUpQueue.push(input);
         else {
           fail(id, "prompt", "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
           return;
@@ -796,14 +862,14 @@ function handleCommand(command: { [key: string]: unknown }): void {
         if (behavior === "steer") deliverSteering(run);
         return;
       }
-      startRun(message, id);
+      startRun(input, id);
       return;
     }
     case "steer":
     case "follow_up": {
-      const message = String(command["message"] ?? "");
-      if (type === "steer") steeringQueue.push(message);
-      else followUpQueue.push(message);
+      const input: UserInput = { text: String(command["message"] ?? ""), images: imagesOf(command["images"]) };
+      if (type === "steer") steeringQueue.push(input);
+      else followUpQueue.push(input);
       emitQueue();
       respond(id, type, { disposition: "queued" });
       // While a run streams, Pi hands the steer to the model before its next response.
@@ -823,7 +889,7 @@ function handleCommand(command: { [key: string]: unknown }): void {
       return;
     }
     case "clear_queue": {
-      const data = { steering: steeringQueue.splice(0), followUp: followUpQueue.splice(0) };
+      const data = { steering: steeringQueue.splice(0).map((input) => input.text), followUp: followUpQueue.splice(0).map((input) => input.text) };
       emitQueue();
       respond(id, "clear_queue", data);
       return;
@@ -896,7 +962,7 @@ function handleCommand(command: { [key: string]: unknown }): void {
       const commands =
         bridge === undefined
           ? []
-          : ["ari-mcp", "ari-rewind", "ari-context"].map((name) => ({ name, description: `ARI bridge command ${name}`, source: "extension", sourceInfo: { path: bridgePath!, source: "cli", scope: "temporary", origin: "top-level" } }));
+          : ["ari-mcp", "ari-rewind", "ari-context", "ari-persist"].map((name) => ({ name, description: `ARI bridge command ${name}`, source: "extension", sourceInfo: { path: bridgePath!, source: "cli", scope: "temporary", origin: "top-level" } }));
       respond(id, "get_commands", { commands });
       return;
     }
@@ -934,7 +1000,7 @@ process.stdin.on("data", (chunk: string) => {
         newline = buffered.indexOf("\n");
         continue;
       }
-      tell({ event: "frame", direction: "in", record: command });
+      trace("in", command);
       try {
         handleCommand(command);
       } catch (error) {
@@ -1031,7 +1097,7 @@ function promptsOf(file: SessionFile): string[] {
   return file
     .activePath()
     .filter((entry) => entry.type === "message" && file.prompts.has(entry.id))
-    .map((entry) => String((entry["message"] as { content?: unknown }).content));
+    .map((entry) => textOf((entry["message"] as { content?: unknown }).content));
 }
 
 if (puppetSend !== undefined) {

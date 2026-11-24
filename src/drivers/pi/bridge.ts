@@ -1,7 +1,7 @@
 // The ARI bridge: a small Pi extension the driver loads into every Pi process
 // with `pi --extension <file>`. Pi leaves permission policy, host MCP servers
 // and session-tree navigation to extensions (Pi docs: extensions.md, mcp.md),
-// so the bridge does exactly four things and nothing else:
+// so the bridge does exactly five things and nothing else:
 //
 // 1. It gates tool calls by the thread's ARI runtime mode. When a call needs
 //    the user, it asks through Pi's extension UI (`ctx.ui.select`), which RPC
@@ -21,6 +21,12 @@
 //    instructions for the next run only.
 // 4. Its `before_agent_start` handler appends those held instructions to that
 //    one run's system prompt.
+// 5. `/ari-persist` writes the session's header, as Pi's session manager holds
+//    it, to the session file when Pi has not written that file yet. Pi writes
+//    a session file only once it holds a message, and `--session <file>` of a
+//    missing file starts a different session there (Pi's
+//    SessionManager._setSessionFile), so the driver sends this just before it
+//    stops an idle process: a thread without messages then reopens as itself.
 //
 // The bridge never writes instructions of its own into the model's prompt.
 // Its one setting, the runtime mode, arrives in the environment variable
@@ -38,6 +44,7 @@ export const BRIDGE_STATUS_KEY = "ari";
 export const MCP_COMMAND = "ari-mcp";
 export const REWIND_COMMAND = "ari-rewind";
 export const CONTEXT_COMMAND = "ari-context";
+export const PERSIST_COMMAND = "ari-persist";
 
 /** The ARI runtime modes the bridge enforces. */
 export type BridgeMode = "read_only" | "approval_required" | "auto_accept_edits" | "full_access";
@@ -93,12 +100,15 @@ export function parseApprovalTitle(title: string): ApprovalDescriptor | undefine
 }
 
 /**
- * The extension's source. It imports nothing: Pi hands it the `ExtensionAPI`
- * object, and it reads only `process.env`. `pi /*: ExtensionAPI *\/` marks the
- * parameter the committed type check annotates with Pi's own type.
+ * The extension's source. Pi hands it the `ExtensionAPI` object; it reads
+ * `process.env`, and imports only `node:fs` for `/ari-persist`.
+ * `pi /*: ExtensionAPI *\/` marks the parameter the committed type check
+ * annotates with Pi's own type.
  */
 export const PI_BRIDGE_SOURCE = String.raw`// ARI bridge for Pi. Written by the ARI Pi driver; loaded with pi --extension.
 // It adds nothing to the model's prompt except text the host gave for one run.
+import { existsSync, writeFileSync } from "node:fs";
+
 const SETTINGS_VARIABLE = "ARI_PI_BRIDGE";
 const STATUS_KEY = "ari";
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
@@ -183,6 +193,17 @@ export default function ariBridge(pi /*: ExtensionAPI */) {
       const parsed = JSON.parse(args);
       if (typeof parsed.text !== "string" || parsed.text === "") return;
       pendingContext = pendingContext === "" ? parsed.text : pendingContext + "\n\n" + parsed.text;
+    },
+  });
+
+  pi.registerCommand("ari-persist", {
+    description: "Write the session header if pi has not written the session file yet (used by ARI before it stops pi)",
+    handler: async (_args, ctx) => {
+      const file = ctx.sessionManager.getSessionFile();
+      const header = ctx.sessionManager.getHeader();
+      if (file === undefined || header === null || existsSync(file)) return;
+      // Exclusive create: a file pi wrote meanwhile is never overwritten.
+      writeFileSync(file, JSON.stringify(header) + "\n", { flag: "wx" });
     },
   });
 

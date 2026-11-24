@@ -1,7 +1,7 @@
 // The bridge extension, run for real against a stand-in for Pi's ExtensionAPI.
 // The fake pi does what the bridge does; these tests pin what that is: the
 // `ari` status with Pi's working directory, the approval dialog's JSON title
-// and option ids, the runtime-mode gate, the three commands, and that the
+// and option ids, the runtime-mode gate, the four commands, and that the
 // bridge adds nothing to the prompt unless the host gave text for one run.
 // pi-types.test.ts type-checks the same source against Pi's ExtensionAPI.
 
@@ -159,6 +159,24 @@ test("/ari-mcp registers the host's servers under their names, /ari-rewind moves
   await bridge.command("ari-context", JSON.stringify({ text: "Be brief." }));
   assert.deepEqual(await bridge.emit("before_agent_start", { type: "before_agent_start", systemPrompt: "BASE" }), { systemPrompt: "BASE\n\nUse tabs.\n\nBe brief." });
   assert.equal(await bridge.emit("before_agent_start", { type: "before_agent_start", systemPrompt: "BASE" }), undefined, "the text lasts one run");
+});
+
+test("/ari-persist writes Pi's own session header when Pi has not written the session file, and never touches a written one", async () => {
+  const bridge = await load("approval_required");
+  const sessionFile = path.join(directory, "sessions", "2026-11-23T00-00-00-000Z_00000000-0000-4000-8000-000000000abc.jsonl");
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  const header = { type: "session", version: 3, id: "00000000-0000-4000-8000-000000000abc", timestamp: "2026-11-23T00:00:00.000Z", cwd: "/work/real" };
+  const ctx = { sessionManager: { getSessionFile: () => sessionFile, getHeader: () => header } };
+
+  await bridge.command("ari-persist", "", ctx);
+  assert.equal(fs.readFileSync(sessionFile, "utf8"), `${JSON.stringify(header)}\n`);
+
+  fs.writeFileSync(sessionFile, "lines pi wrote\n");
+  await bridge.command("ari-persist", "", ctx);
+  assert.equal(fs.readFileSync(sessionFile, "utf8"), "lines pi wrote\n", "a file pi wrote is left alone");
+
+  // A session without a file (pi --no-session) has nothing to write.
+  await bridge.command("ari-persist", "", { sessionManager: { getSessionFile: () => undefined, getHeader: () => header } });
 });
 
 test("the bridge source holds no instruction text of its own", () => {

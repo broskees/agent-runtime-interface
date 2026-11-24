@@ -1,13 +1,18 @@
 // The Pi quirks the driver keeps (proposal §1.3 Pi row): the user's own `pi` in
 // RPC mode with strict JSONL framing; resume, rollback and forks through Pi's
-// session files, with a fork into another directory run by Pi's CLI there;
-// host tools only through a namespaced MCP bridge named by the host; and Pi's
-// extension UI dialogs as requests.
+// session files, with a fork into another directory run by Pi's CLI there and
+// a resumed session in the directory its file records; a thread Pi has not
+// written yet that comes back as itself after its process stops, and a
+// missing session file that is never swapped silently for a new session;
+// prompts as Pi records them (a text block, then images); host tools only
+// through a namespaced MCP bridge named by the host; and Pi's extension UI
+// dialogs as requests.
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { after, test } from "node:test";
+import { isAriError } from "../../../src/index.ts";
 import type { AriEvent, Request } from "../../../src/index.ts";
 import { FAKE_PI } from "./harness.ts";
 import { checkRunsAgainstPiTypes } from "./pi-types.ts";
@@ -253,6 +258,161 @@ test("Pi extension UI dialogs arrive as requests, and answers go back in Pi's ow
   await opened.terminal(session.events, started.turnId);
   assert.equal(await left.nextReply(), "cancelled");
   assert.ok(session.events.some((event) => event.body.type === "request.upsert" && event.body.request.id === leftRequest.id && event.body.request.status === "cancelled"));
+});
+
+/** The JSON lines of a session file. */
+function storedLines(file: string): Array<{ type?: string; id?: string; cwd?: string; message?: { role?: string; content?: unknown } }> {
+  return fs
+    .readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as { type?: string });
+}
+
+/** The ids of every thread the session has announced. */
+function announcedThreads(events: readonly AriEvent[]): string[] {
+  return [...new Set(events.flatMap((event) => (event.body.type === "thread.upsert" ? [event.body.thread.id] : [])))];
+}
+
+test("a resumed session works in the directory its file records, wherever pi starts; a fork without a destination stays there", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, first, thread.id, "Here.");
+  await first.session.close();
+
+  // Pi's --session takes the cwd from the file's header; the policy's directory only decides where pi is started.
+  const second = await opened.open();
+  const resumed = await second.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(opened.otherCwd) });
+  assert.equal(resumed.id, thread.id);
+  assert.equal(opened.harness.invocations.at(-1)?.cwd, opened.otherCwd, "pi was started in the policy's directory");
+  assert.equal(resumed.cwd, opened.cwd, "the resumed thread works in the directory its session file records");
+  assert.equal((await opened.inspect(resumed))?.cwd, opened.cwd);
+
+  const started = await second.session.startTurn({ threadId: resumed.id, clientTurnKey: "read-notes", intent: "start", content: [{ type: "text", text: "Read the notes." }] });
+  assert.equal(started.status, "accepted");
+  if (started.status !== "accepted") return;
+  const native = await opened.nextTurn();
+  await native.runTool({ name: "read", input: {}, output: "notes", path: "notes.txt" });
+  await native.complete();
+  await opened.terminal(second.events, started.turnId);
+  const paths = second.events.flatMap((event) => (event.body.type === "item.upsert" && event.turnId === started.turnId ? (event.body.item.paths ?? []) : []));
+  assert.deepEqual(paths, [path.join(opened.cwd, "notes.txt")], "Pi's tool paths are under the stored directory");
+
+  const fork = await second.session.forkThread!({ threadId: resumed.id, at: { type: "latest" } });
+  assert.equal(fork.cwd, opened.cwd, "a fork without a destination works where its source works");
+  assert.equal(opened.harness.invocations.at(-1)?.cwd, opened.cwd, "pi --fork ran in the source's own directory");
+});
+
+test("a prompt reaches Pi as its text and images, and Pi records a text block followed by the images", async () => {
+  const opened = await rig();
+  const session = await opened.open();
+  const thread = await session.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  const image = { type: "image" as const, data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", mimeType: "image/png" };
+  const started = await session.session.startTurn({ threadId: thread.id, clientTurnKey: "picture", intent: "start", content: [{ type: "text", text: "What is this?" }, image] });
+  assert.equal(started.status, "accepted");
+  if (started.status !== "accepted") return;
+  const native = await opened.nextTurn();
+  await native.say("A single pixel.");
+  await native.complete();
+  await opened.terminal(session.events, started.turnId);
+
+  const expected = [{ type: "text", text: "What is this?" }, image];
+  const command = opened.harness.frames.find((frame) => frame.direction === "in" && frame.record["type"] === "prompt" && frame.record["message"] === "What is this?");
+  assert.deepEqual(command?.record["images"], [image], "the driver sent the image with Pi's prompt command");
+  const userEvents = opened.harness.frames.filter((frame) => frame.direction === "out" && (frame.record["type"] === "message_start" || frame.record["type"] === "message_end") && (frame.record["message"] as { role?: unknown }).role === "user");
+  assert.equal(userEvents.length, 2);
+  for (const event of userEvents) assert.deepEqual((event.record["message"] as { content?: unknown }).content, expected);
+  const stored = storedLines(thread.handle!).filter((line) => line.type === "message" && line.message?.role === "user");
+  assert.deepEqual(
+    stored.map((line) => line.message?.content),
+    [expected],
+  );
+  const userItem = session.events.find((event) => event.body.type === "item.upsert" && event.turnId === started.turnId && event.body.item.kind === "user_message");
+  assert.equal((userItem?.body as { item?: { text?: string } } | undefined)?.item?.text, "What is this?");
+});
+
+test("after release, the first turn of a thread Pi has not written yet runs on that thread and reaches its terminal", async () => {
+  const opened = await rig();
+  const session = await opened.open();
+  const thread = await session.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  assert.equal(fs.existsSync(thread.handle!), false, "Pi writes no file for a session without messages");
+
+  await session.session.release();
+  // The bridge wrote Pi's own header before the process stopped, so --session reopens this session.
+  assert.deepEqual(
+    storedLines(thread.handle!).map((line) => [line.type, line.id]),
+    [["session", thread.native.id]],
+  );
+
+  const started = await session.session.startTurn({ threadId: thread.id, clientTurnKey: "after-release", intent: "start", content: [{ type: "text", text: "After release." }] });
+  assert.equal(started.status, "accepted");
+  if (started.status !== "accepted") return;
+  assert.deepEqual(announcedThreads(session.events), [thread.id], "no other thread took over the thread's events");
+  const native = await opened.nextTurn();
+  await native.say("Still here.");
+  await native.complete();
+  const terminal = await opened.terminal(session.events, started.turnId);
+  assert.equal(terminal.status, "completed");
+  const terminalEvent = session.events.find((event) => event.body.type === "turn.terminal" && event.body.turnId === started.turnId);
+  assert.equal(terminalEvent?.threadId, thread.id);
+  assert.equal(storedLines(thread.handle!)[0]?.id, thread.native.id, "the file still holds the thread's own session");
+  assert.deepEqual((await opened.inspect(thread))?.prompts, ["After release."]);
+});
+
+test("when a thread's session file is gone, pi starting a new session there is an error, not a new thread", async () => {
+  const opened = await rig();
+  const session = await opened.open();
+  const thread = await session.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, session, thread.id, "Kept.");
+  await session.session.release();
+  fs.rmSync(thread.handle!);
+  const eventsBefore = session.events.length;
+
+  await assert.rejects(session.session.startTurn({ threadId: thread.id, clientTurnKey: "gone", intent: "start", content: [{ type: "text", text: "Anyone there?" }] }), (error: unknown) => {
+    assert.ok(isAriError(error, "not_found"), `rejected with ${String(error)}`);
+    assert.match(String((error as Error).message), new RegExp(thread.native.id!));
+    return true;
+  });
+  const later = session.events.slice(eventsBefore);
+  assert.deepEqual(
+    later.filter((event) => event.body.type === "thread.upsert" || event.body.type === "turn.upsert"),
+    [],
+    "no thread or turn was announced for the session pi started instead",
+  );
+  assert.equal(fs.existsSync(thread.handle!), false, "pi wrote nothing at the thread's path");
+});
+
+test("resuming a session file that does not exist never returns another session as the one asked for", async () => {
+  const opened = await rig();
+  const session = await opened.open();
+  const missingId = "00000000-0000-4000-8000-00000000ffff";
+  const handle = path.join(opened.host.paths.stateDir, "sessions", `2026-11-23T00-00-00-000Z_${missingId}.jsonl`);
+
+  // Without a policy the driver has no directory to start a fresh session in, so it starts nothing.
+  const spawnsBefore = opened.host.spawns.length;
+  await assert.rejects(session.session.resumeThread({ native: { handle } }), (error: unknown) => isAriError(error, "validation"));
+  assert.equal(opened.host.spawns.length, spawnsBefore);
+  // With one, the driver starts a fresh session and says the old context is gone.
+  const fresh = await session.session.resumeThread({ native: { handle }, policy: policy(opened.cwd) });
+  assert.notEqual(fresh.native.id, missingId);
+  const replaced = session.events.find((event) => event.body.type === "session.replaced");
+  assert.equal((replaced?.body as { previousNativeId?: string } | undefined)?.previousNativeId, handle);
+  assert.equal((replaced?.body as { contextLost?: boolean } | undefined)?.contextLost, true);
+  assert.equal(replaced?.threadId, fresh.id);
+  assert.notEqual(fresh.handle, handle);
+
+  // The first turn of the returned thread settles on it.
+  const started = await session.session.startTurn({ threadId: fresh.id, clientTurnKey: "fresh", intent: "start", content: [{ type: "text", text: "Fresh start." }] });
+  assert.equal(started.status, "accepted");
+  if (started.status !== "accepted") return;
+  const native = await opened.nextTurn();
+  await native.complete();
+  const terminal = await opened.terminal(session.events, started.turnId);
+  assert.equal(terminal.status, "completed");
+  assert.equal(session.events.find((event) => event.body.type === "turn.terminal" && event.body.turnId === started.turnId)?.threadId, fresh.id);
+  assert.equal(storedLines(fresh.handle!)[0]?.id, fresh.native.id);
+  assert.equal(fs.existsSync(handle), false, "nothing was written at the missing path");
 });
 
 test("every frame and session file line of these tests matches Pi's published types", () => {

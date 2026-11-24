@@ -27,7 +27,7 @@ version.
 | https://pi.dev/docs/latest/sessions (`docs/sessions.md`) | A session keeps the working directory it was created in; `--fork` copies a session into the current directory |
 | https://pi.dev/docs/latest/cli (`docs/cli.md`) | `--version`, `--session`, `--fork`, `--session-dir`, `--no-session`, `--model`, `--thinking`, `--api-key` (only with `--model`), `--append-system-prompt`, `--extension`, `pi auth check --json --no-refresh` |
 | https://pi.dev/docs/latest/mcp (`docs/mcp.md`) | MCP server config (stdio and streamable HTTP, no SSE), `exposure: "direct"`, `pi.registerMcpServer` from extensions, `mcp.json` taking precedence |
-| https://pi.dev/docs/latest/extensions (`docs/extensions.md`) | Extension events (`session_start`, `tool_call`, `before_agent_start`), `registerCommand`, `ctx.ui.select`, `ctx.navigateTree`, the `permission-gate.ts` and `subagent/` examples |
+| https://pi.dev/docs/latest/extensions (`docs/extensions.md`) | Extension events (`session_start`, `tool_call`, `before_agent_start`), `registerCommand`, `ctx.ui.select`, `ctx.navigateTree`, `ctx.sessionManager` (`getSessionFile`, `getHeader`), the `permission-gate.ts` and `subagent/` examples |
 | https://pi.dev/docs/latest/providers (`docs/providers.md`) | Provider credential variables (`PI_CREDENTIAL_VARIABLES`) |
 | https://pi.dev/docs/latest/security (`docs/security.md`) | Pi asks no approval before tool calls |
 
@@ -40,9 +40,10 @@ All in `@earendil-works/pi-coding-agent@1.6.0` (`dist/`), or its dependency
 |---|---|
 | `dist/modes/rpc/rpc-types.d.ts` | `RpcCommand`, `RpcResponse`, `RpcExtensionUIRequest`, `RpcExtensionUIResponse`: the types frames are checked against |
 | `dist/modes/rpc/rpc-mode.js` | The `prompt` response is written once preflight succeeds; extension commands answer `handled` after they ran; the bridge's `session_start` status is written before any command is read |
-| `dist/core/agent-session.js` | `steer` queues even when no run is active (`_queueUserInput`); `navigateTree` moves the leaf, and with a label persists it as a label entry |
-| `dist/core/session-manager.js` | A session file is written once it holds a user or assistant message; a missing `--session` path starts a new session there; `--fork` copies every entry; no session lock |
-| `dist/main.js` | `--session <id>` that matches no session exits with an error; `pi auth check` prints JSON and exits 0, 1 or 2 |
+| `dist/core/agent-session.js` | `steer` queues even when no run is active (`_queueUserInput`); `navigateTree` moves the leaf, and with a label persists it as a label entry; a prompt's user message is a text block followed by its images (1573–1582), and so is a steer's or follow-up's (1891–1910); the prompt's sections, the `--append-system-prompt` addendum among them, are persisted as a system message (825–830, 1394–1399); a `before_agent_start` system prompt is sent but not recorded |
+| `dist/core/system-prompt.js` | `--append-system-prompt` becomes the `addendum` section (96–97) |
+| `dist/core/session-manager.js` | A session file is written once it holds a user or assistant message (`_persist`, with an exclusive create); a missing `--session` path starts a new session there, and a file holding only a header reopens that session (`_setSessionFile`); `SessionManager.open` takes the cwd from the file's header (1347–1368) and keeps the file where it is, whatever `--session-dir` says; `--fork` copies every entry into the directory pi runs in; no session lock |
+| `dist/main.js` | `--session <id>` that matches no session exits with an error; ids are looked up only in `--session-dir` when it is given; the runtime works in the session manager's cwd (772–776); `pi auth check` prints JSON and exits 0, 1 or 2 |
 | `dist/cli/auth-check.js` | `ready`, `not_ready` and `invalid` (`invalid_state`) results |
 | `pi-agent-core/dist/agent-loop.js` | Steers are handed to the model before its next response, also after a final answer; follow-ups run in the same agent run |
 | `@earendil-works/pi-ai/dist/utils/retry.js` | The wording of quota and plan-limit errors |
@@ -54,7 +55,15 @@ every frame the driver sent (`RpcCommand | RpcExtensionUIResponse`), every
 frame the fake sent (`RpcResponse | JsonAgentSessionEvent |
 RpcExtensionUIRequest`, plus the RPC-only `extension_error` event that json.md
 documents), every line of every session file the fakes wrote (`SessionHeader |
-SessionEntry`), and the bridge extension's source (`ExtensionAPI`), all from
-`@earendil-works/pi-coding-agent@1.6.0`. `conformance.test.ts` and
-`quirks.test.ts` run it over their whole runs.
+SessionEntry`), every user message among them as Pi builds it (Pi's user
+message with block content, never a string, which Pi's own type would also
+allow), and the bridge extension's source (`ExtensionAPI`), all from
+`@earendil-works/pi-coding-agent@1.6.0`.
+
+The fake appends every frame it reads or writes to a trace file
+(`*.fake-pi-trace.ndjson`, in `FAKE_PI_TRACE_DIRECTORY` or its session
+directory), so the frames of a fake without a puppet channel are checked too.
+`conformance.test.ts`, `quirks.test.ts`, `capabilities.test.ts`,
+`instructions.test.ts` and `availability.test.ts` run the check over every
+frame of their runs.
 

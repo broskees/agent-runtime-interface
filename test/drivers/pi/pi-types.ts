@@ -17,11 +17,38 @@ import ts from "typescript";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const VIRTUAL_DIRECTORY = path.join(ROOT, "test", "drivers", "pi");
 
-/** Frames whose shape Pi documents but does not export as a type. */
+/** Frames whose shape Pi documents but does not export as a type, and the narrower shapes Pi's code builds. */
 const DOCUMENTED_EXTRAS = `
 /** RPC-only event, Pi docs json.md "RPC-only events". */
 type RpcExtensionErrorEvent = { type: "extension_error"; extensionPath: string; event: string; error: string };
+/**
+ * A user message as Pi builds it for an RPC prompt, steer or follow-up: a text
+ * block, then the images, never a bare string (dist/core/agent-session.js
+ * 1573–1582 and 1891–1910). Pi's message type also allows a string, so the
+ * broad type alone would not catch a fake that sends one.
+ */
+type PiUserMessage = Extract<SessionMessageEntry["message"], { role: "user" }>;
+type RpcUserMessage = PiUserMessage & { content: Exclude<PiUserMessage["content"], string> };
 `;
+
+/** Every user message inside Pi's events, responses and session lines. */
+function userMessagesIn(received: readonly unknown[], sessionLines: readonly unknown[]): unknown[] {
+  const found: unknown[] = [];
+  const add = (message: unknown): void => {
+    if (typeof message === "object" && message !== null && (message as { role?: unknown }).role === "user") found.push(message);
+  };
+  for (const value of received) {
+    const record = value as { type?: unknown; message?: unknown; messages?: unknown; data?: { messages?: unknown } };
+    if (record.type === "message_start" || record.type === "message_end") add(record.message);
+    if (record.type === "agent_end" && Array.isArray(record.messages)) record.messages.forEach(add);
+    if (record.type === "response" && Array.isArray(record.data?.messages)) record.data.messages.forEach(add);
+  }
+  for (const value of sessionLines) {
+    const line = value as { type?: unknown; message?: unknown };
+    if (line.type === "message") add(line.message);
+  }
+  return found;
+}
 
 function check(files: ReadonlyMap<string, string>, options: ts.CompilerOptions): string[] {
   const host = ts.createCompilerHost(options);
@@ -85,13 +112,14 @@ function constants(values: readonly unknown[], type: string, prefix: string): st
 /**
  * Type-checks what the driver sent Pi (`RpcCommand` or `RpcExtensionUIResponse`),
  * what Pi sent the driver (`RpcResponse`, `JsonAgentSessionEvent` or
- * `RpcExtensionUIRequest`), and the lines of Pi session files (`SessionHeader`
- * or `SessionEntry`). Returns the compiler's diagnostics; none means every
- * value matches Pi's types.
+ * `RpcExtensionUIRequest`), the lines of Pi session files (`SessionHeader`
+ * or `SessionEntry`), and every user message among them as Pi builds it
+ * (`RpcUserMessage` above). Returns the compiler's diagnostics; none means
+ * every value matches Pi's types.
  */
 export function checkAgainstPiTypes(input: { readonly sent: readonly unknown[]; readonly received: readonly unknown[]; readonly sessionLines: readonly unknown[] }): string[] {
   const source = [
-    `import type { JsonAgentSessionEvent, RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse, SessionEntry, SessionHeader } from "@earendil-works/pi-coding-agent";`,
+    `import type { JsonAgentSessionEvent, RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse, SessionEntry, SessionHeader, SessionMessageEntry } from "@earendil-works/pi-coding-agent";`,
     DOCUMENTED_EXTRAS,
     `type DriverToPi = RpcCommand | RpcExtensionUIResponse;`,
     `type PiToDriver = RpcResponse | JsonAgentSessionEvent | RpcExtensionUIRequest | RpcExtensionErrorEvent;`,
@@ -99,6 +127,7 @@ export function checkAgainstPiTypes(input: { readonly sent: readonly unknown[]; 
     constants(input.sent, "DriverToPi", "sent"),
     constants(input.received, "PiToDriver", "received"),
     constants(input.sessionLines, "SessionLine", "line"),
+    constants(userMessagesIn(input.received, input.sessionLines), "RpcUserMessage", "user"),
   ].join("\n");
   return check(new Map([[path.join(VIRTUAL_DIRECTORY, "__pi_frames__.ts"), source]]), BASE_OPTIONS);
 }

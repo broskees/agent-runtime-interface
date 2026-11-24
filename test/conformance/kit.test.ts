@@ -97,6 +97,15 @@ describe("not applicable only for a declared capability or a stated reason", () 
     assert.equal(result.reason, "the agent cannot run tools");
   });
 
+  test("a reason under idempotent-responses.full-access skips scenario 15's full_access part with a note, and the rest still runs", async () => {
+    const reason = "the native agent sends no approval under full_access";
+    const result = await runScenario(adjustedHarness({ notApplicable: { "idempotent-responses.full-access": reason } }), "idempotent-responses");
+    assert.equal(result.status, "passed", result.reason);
+    assert.ok(result.notes.includes(`the narrowest reply under full_access not checked (idempotent-responses.full-access): ${reason}`), result.notes.join("\n"));
+    const unchanged = await runScenario(adjustedHarness(), "idempotent-responses");
+    assert.ok(unchanged.notes.some((note) => /the driver (answered the full_access approval itself|handed the full_access approval to the host)/.test(note)), unchanged.notes.join("\n"));
+  });
+
   test("a reason that is empty or spans two lines is a failure, not a pass", async () => {
     for (const reason of ["", "   ", "first line\nsecond line"]) {
       const result = await runScenario(adjustedHarness({ notApplicable: { settlement: reason } }), "settlement");
@@ -162,6 +171,41 @@ describe("not applicable only for a declared capability or a stated reason", () 
     const result = await runScenario(noLink, "symlinked-workspace");
     assert.equal(result.status, "failed");
     assert.match(result.reason ?? "", /no symlinkedCwd; give one, or a reason under symlinked-workspace/);
+  });
+});
+
+describe("a harness's nativeOptionIds mapping", () => {
+  /** The reference harness, whose approvals report `mapping` as the native option ids. */
+  const mappedHarness = (mapping: (kitIds: readonly string[]) => { [kitId: string]: string }): ConformanceHarness<ReferenceDriverConfig> => {
+    const base = referenceHarness();
+    return {
+      ...base,
+      async setup(request) {
+        const rig = await base.setup(request);
+        const nextTurn = async () => {
+          const turn = await rig.native.nextTurn();
+          return override(turn, {
+            requestApproval: async (approval) => ({ ...(await turn.requestApproval(approval)), nativeOptionIds: mapping(approval.options.map((option) => option.optionId)) }),
+          });
+        };
+        return { ...rig, native: { ...rig.native, nextTurn } };
+      },
+    };
+  };
+
+  test("a one-to-one mapping passes scenario 8", async () => {
+    const result = await runScenario(mappedHarness((kitIds) => Object.fromEntries(kitIds.map((id) => [id, id]))), "duplicate-always-options");
+    assert.equal(result.status, "passed", result.reason);
+  });
+
+  test("a mapping that sends two kit options to one native option fails the scenario, naming both", async () => {
+    // The reference driver would pass if the kit trusted this mapping: both accept_always options would find the same native option.
+    const result = await runScenario(
+      mappedHarness((kitIds) => Object.fromEntries(kitIds.map((id) => [id, id === "allow-session" ? "allow-prefix" : id]))),
+      "duplicate-always-options",
+    );
+    assert.equal(result.status, "failed");
+    assert.match(result.reason ?? "", /sends kit options "allow-session" and "allow-prefix" to one native option "allow-prefix"/);
   });
 });
 

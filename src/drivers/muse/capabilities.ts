@@ -1,6 +1,6 @@
 // What the Muse driver declares. docs/drivers/muse.md compares each value
 // with the proposal's §1.2 Muse column and cites the vendor source for every
-// difference; test/drivers/muse/capabilities.test.ts checks that each declared
+// difference; test/drivers/muse/capabilities.suite.ts checks that each declared
 // member works and each one declared off is absent or refused.
 
 import type { Capabilities } from "../../generated/capabilities.ts";

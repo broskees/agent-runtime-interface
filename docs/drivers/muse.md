@@ -234,7 +234,7 @@ where it has no row. Every difference names its source.
 | `limits.consumeResetCredit`, `usageHistory.scan`, `textGeneration.generate` | absent |
 | `nativeSessions.*`, `subProviders.*` | absent |
 
-`test/drivers/muse/capabilities.test.ts` lists all 44 and exercises each
+`test/drivers/muse/capabilities.suite.ts` lists all 44 and exercises each
 supported member against the fake `muse serve`.
 
 ## Host instructions and tools
@@ -282,11 +282,13 @@ injection, because Muse's public documentation names no such CLI flags.
 
 ## Conformance
 
-`test/drivers/muse/conformance.test.ts` runs all 15 scenarios with the real
+`test/drivers/muse/conformance.suite.ts` runs all 15 scenarios with the real
 SDK `Connection` against the fake `muse serve` of
 `test/drivers/muse/fake-muse.ts`; all 15 pass. One check is not exercised, with
 the harness's reason: `auth-states.unavailable` (the driver runs no sign-in
 check, so none can fail). Every frame the fake and the driver exchange in every
 Muse test file is type-checked against the SDK's own wire types when the file
-ends (`test/drivers/muse/frames.ts`); `frames.test.ts` shows planted mistakes
+ends (`test/drivers/muse/frames.ts`); `frames.suite.ts` shows planted mistakes
 are caught. `sdk-types.ts` proves the driver's own SDK types match the SDK's.
+All Muse suites run in one test process, `test/drivers/muse-driver.test.ts`,
+so their TypeScript compiles do not run beside each other during the gate.

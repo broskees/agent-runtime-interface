@@ -6,7 +6,7 @@
 // server opens that file at `packages/cli/src/server-process.ts:114`
 // (`database: { path: databasePath(global.data) }`), and
 // `packages/cli/src/database-path.ts` names it (`OPENCODE_DB`, else
-// `opencode.db`); `packages/core/src/credential.ts` reads the rows. The data
+// `opencode.db`); `packages/core/src/credential.ts:89-104` reads the rows. The data
 // directory is `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode`
 // (`packages/util/src/global-roots.ts`). The legacy `auth.json` there is read
 // only by a migration of an existing database, never by a new one

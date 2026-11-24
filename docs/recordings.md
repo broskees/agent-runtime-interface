@@ -482,7 +482,8 @@ database, the file `opencode.db` in its data directory
 is the credential file the recorder copies into the temp data directory. The
 server opens it at `packages/cli/src/server-process.ts:114`,
 `path: databasePath(global.data),`; `packages/cli/src/database-path.ts:4-13`
-names the file, and `packages/core/src/credential.ts` reads its rows. The
+names the file, and `packages/core/src/credential.ts:89-104` reads its rows
+(`db.select().from(CredentialTable)`). The
 legacy `auth.json` in the same directory is read only by a migration of an
 existing database (`packages/core/src/database/migration/20260805200742_import_legacy_credentials.ts:39`),
 never by a new one: `packages/core/src/database/migration.ts:29-46` creates a

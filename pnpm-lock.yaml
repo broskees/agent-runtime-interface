@@ -11,6 +11,15 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 1.6.0
         version: 1.6.0
+      '@opencode-ai/sdk':
+        specifier: 1.19.6
+        version: 1.19.6
+      '@opencode/client':
+        specifier: 2.1.2
+        version: 2.1.2(effect@4.1.5)
+      '@opencode/protocol':
+        specifier: 2.1.2
+        version: 2.1.2
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5
@@ -324,6 +333,26 @@ packages:
   '@isaacs/nonrecursive-glob-match@1.1.0':
     resolution: {integrity: sha512-GPm/Dbvk5RLmhRnxXIa7nTpK0xtl4E0wj0MslsuNiJ1FIROU+2+9lgUC/dgF7Ey4QCWhfEsgxilMRMCdHPfDfw==}
 
+  '@opencode-ai/sdk@1.19.6':
+    resolution: {integrity: sha512-jYV7s+Tlc5jDILOyWFIgISkPlfk7z3ByqeC8/T9aESZBgSZosQR784U2UoM3ZrJ8S0LJ2cB+IA9xZN7Jj8tnhQ==}
+
+  '@opencode/client@2.1.2':
+    resolution: {integrity: sha512-c7FqI/zMy6HrdVGHynzouiz3y1smokGuimh2+Is2iVWz8I8VzJEty9eTrvQkQzXG1Hj5K2FL1K5fytQ7yJEd9w==}
+    peerDependencies:
+      effect: 4.0.1
+      solid-js: '>=1.9.0'
+    peerDependenciesMeta:
+      effect:
+        optional: true
+      solid-js:
+        optional: true
+
+  '@opencode/protocol@2.1.2':
+    resolution: {integrity: sha512-dNJuZrJlcUnc3mP7GFoawXECpUoUA+1TEbXvXkFKteq9tpZbO5Qsi1AWqocRJH2cIfG8v5rddyBTyX4+0ax9Yw==}
+
+  '@opencode/schema@2.1.2':
+    resolution: {integrity: sha512-gYbneOINd0Tt41krlC79OWjcXMPlW9EjIR+tmG3EYD8SEA4xCdZh0WhZLrFDlLMKDcb6d9xeHTFwhqGACt0IRg==}
+
   '@protobufjs/aspromise@1.1.2':
     resolution: {integrity: sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==}
 
@@ -384,6 +413,9 @@ packages:
 
   '@stablelib/base64@1.0.1':
     resolution: {integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==}
+
+  '@standard-schema/spec@1.1.0':
+    resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
   '@types/node@22.20.5':
     resolution: {integrity: sha512-U2+DNr+wSjpsTS/wZGYHq7GcwfuSmKiKvoPvK22zwTlRhU91yOniN4qRR5KhIjvif7ysw/dz/hKmfDH0Ris4aA==}
@@ -449,6 +481,9 @@ packages:
 
   ecdsa-sig-formatter@1.0.11:
     resolution: {integrity: sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==}
+
+  effect@4.0.1:
+    resolution: {integrity: sha512-b1VlQG9g8fwxE5QnIZuPoOP/0MsqHJSRKxUijjoM80E5q95FXrX5yWtY5XI8G+GJsBQAVSDbLS458z9a++uVvw==}
 
   effect@4.1.5:
     resolution: {integrity: sha512-xyR20KhQI0vg2gD8ILUSQRTTESEYJ0JKdP+QD8J37xbwPTqXRxFM/l0+vUVD9fuSvoYruoTqyt33C4FZv1s4TQ==}
@@ -1104,6 +1139,27 @@ snapshots:
 
   '@isaacs/nonrecursive-glob-match@1.1.0': {}
 
+  '@opencode-ai/sdk@1.19.6':
+    dependencies:
+      cross-spawn: 7.0.6
+
+  '@opencode/client@2.1.2(effect@4.1.5)':
+    dependencies:
+      '@opencode/protocol': 2.1.2
+      '@opencode/schema': 2.1.2
+    optionalDependencies:
+      effect: 4.1.5
+
+  '@opencode/protocol@2.1.2':
+    dependencies:
+      '@opencode/schema': 2.1.2
+      effect: 4.0.1
+
+  '@opencode/schema@2.1.2':
+    dependencies:
+      '@standard-schema/spec': 1.1.0
+      effect: 4.0.1
+
   '@protobufjs/aspromise@1.1.2': {}
 
   '@protobufjs/base64@1.1.2': {}
@@ -1167,6 +1223,8 @@ snapshots:
 
   '@stablelib/base64@1.0.1': {}
 
+  '@standard-schema/spec@1.1.0': {}
+
   '@types/node@22.20.5':
     dependencies:
       undici-types: 6.21.0
@@ -1217,6 +1275,8 @@ snapshots:
   ecdsa-sig-formatter@1.0.11:
     dependencies:
       safe-buffer: 5.2.1
+
+  effect@4.0.1: {}
 
   effect@4.1.5: {}
 

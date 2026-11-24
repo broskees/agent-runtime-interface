@@ -1,0 +1,203 @@
+// The servers of one instance, and which host MCP entries each thread put on them.
+//
+// - 1.x, started by the driver: one server per thread (`process_per_thread`).
+//   A 1.x server keeps "always" grants in memory for the whole directory
+//   (1.x `permission/index.ts` `approved`), and those grants win over a
+//   session's own rules there, so threads never share a 1.x server the driver
+//   starts.
+// - 2.x, started by the driver: one server per instance, shared by every
+//   session (`process_per_instance`), stopped only by `dispose()`.
+// - Any external server (`serverUrl`): shared, never started or stopped.
+//
+// MCP registrations are per directory on a server, so threads that share one
+// see each other's entries. The registry here knows every thread's entries per
+// server; when a thread adds its own, every other thread on that server first
+// gets a deny rule for it (see rules.ts).
+
+import { callErrors } from "../../errors.ts";
+import type { HostServices } from "../../runtime.ts";
+import type { ServerShape } from "./capabilities.ts";
+import { OPENCODE_PASSWORD_VARIABLES, SERVER_PASSWORD_SECRET } from "./config.ts";
+import type { OpencodeConfig } from "./config.ts";
+import type { NativeRuntime } from "./native.ts";
+import { collidingName } from "./rules.ts";
+import { loadSdk } from "./sdk.ts";
+import type { OpencodeSdkLoaders } from "./sdk.ts";
+import { basicAuthorization, cliVersion, externalEndpoint, generationOf, serverVersion, startServer } from "./server.ts";
+import type { Generation, ServerEndpoint } from "./server.ts";
+import { V1Runtime } from "./v1.ts";
+import { V2Runtime } from "./v2.ts";
+
+export interface Link {
+  readonly endpoint: ServerEndpoint;
+  readonly runtime: NativeRuntime;
+}
+
+/** What the instance found: the server generation and version, and how to reach or start it. */
+export interface Detected {
+  readonly generation: Generation;
+  readonly version: string;
+  readonly external: boolean;
+  /** The `opencode` executable, for a server the driver starts. */
+  readonly executable?: string;
+  /** The external server's URL and authorization. */
+  readonly url?: string;
+  readonly authorization?: string;
+}
+
+interface Owner {
+  readonly names: ReadonlySet<string>;
+  readonly onOthers: (others: string[]) => Promise<void>;
+}
+
+export class ServerPool {
+  readonly #host: HostServices<OpencodeConfig>;
+  readonly #config: OpencodeConfig;
+  readonly #environment: { readonly [name: string]: string };
+  readonly #loaders: OpencodeSdkLoaders;
+  #shared: Promise<Link> | undefined;
+  /** Host MCP entries by server, then by owning thread. */
+  readonly #owners = new Map<ServerEndpoint, Map<string, Owner>>();
+  #disposed = false;
+
+  constructor(host: HostServices<OpencodeConfig>, config: OpencodeConfig, environment: { readonly [name: string]: string }, loaders: OpencodeSdkLoaders) {
+    this.#host = host;
+    this.#config = config;
+    // Every server the driver starts gets its own password; an inherited one never reaches it.
+    const passwords = new Set<string>(OPENCODE_PASSWORD_VARIABLES);
+    this.#environment = Object.fromEntries(Object.entries(environment).filter(([name]) => !passwords.has(name)));
+    this.#loaders = loaders;
+  }
+
+  get environment(): { readonly [name: string]: string } {
+    return this.#environment;
+  }
+
+  get external(): boolean {
+    return this.#config.serverUrl !== undefined && this.#config.serverUrl !== "";
+  }
+
+  async #externalAuthorization(): Promise<string | undefined> {
+    const stored = await this.#host.secrets.get(SERVER_PASSWORD_SECRET.namespace, SERVER_PASSWORD_SECRET.key);
+    return stored === null ? undefined : basicAuthorization(new TextDecoder().decode(stored));
+  }
+
+  unavailableBinary() {
+    return callErrors.driverUnavailable({ binary: this.#config.binary, installHint: "Install OpenCode (https://opencode.ai) and make sure `opencode` is on PATH, or set the driver's binary config." }, `OpenCode is not installed: ${this.#config.binary} was not found`);
+  }
+
+  /** Finds the server generation and version. Starts nothing and writes nothing: `opencode --version`, or a read of the external server's info. */
+  async detect(): Promise<Detected> {
+    if (this.external) {
+      const url = this.#config.serverUrl!;
+      const authorization = await this.#externalAuthorization();
+      const found = await serverVersion(url, authorization);
+      return { generation: found.generation, version: found.version, external: true, url, ...(authorization === undefined ? {} : { authorization }) };
+    }
+    const executable = await this.#host.process.resolveExecutable(this.#config.binary);
+    if (executable === null) throw this.unavailableBinary();
+    const found = await cliVersion(this.#host, executable);
+    const generation = found.version === undefined ? undefined : generationOf(found.version);
+    if (!found.ok || found.version === undefined || generation === undefined) throw callErrors.protocol("unknown_version", `Could not tell the OpenCode version from \`${this.#config.binary} --version\`: ${JSON.stringify(found.output)}`);
+    return { generation, version: found.version, external: false, executable };
+  }
+
+  async #runtime(endpoint: ServerEndpoint): Promise<NativeRuntime> {
+    if (endpoint.generation === 1) return new V1Runtime(await loadSdk(1, this.#loaders), endpoint);
+    return new V2Runtime(await loadSdk(2, this.#loaders), endpoint);
+  }
+
+  /** The instance's shared server: an external one, or the one 2.x server the driver starts. */
+  async shared(detected: Detected, timeoutMs: number): Promise<Link> {
+    if (this.#disposed) throw callErrors.invalidState("instance_disposed");
+    const current = this.#shared;
+    if (current !== undefined) {
+      const link = await current.catch(() => undefined);
+      if (link !== undefined && link.endpoint.alive && link.endpoint.version === detected.version) return link;
+      if (link !== undefined && !link.endpoint.external) await link.endpoint.stop();
+      this.#shared = undefined;
+    }
+    const started = (async (): Promise<Link> => {
+      const endpoint = detected.external
+        ? externalEndpoint(detected.url!, detected.authorization, detected.version, detected.generation)
+        : await startServer(this.#host, { executable: detected.executable!, version: detected.version, generation: detected.generation, cwd: undefined, environment: this.#environment, timeoutMs });
+      try {
+        return { endpoint, runtime: await this.#runtime(endpoint) };
+      } catch (error) {
+        await endpoint.stop();
+        throw error;
+      }
+    })();
+    this.#shared = started;
+    started.catch(() => {
+      if (this.#shared === started) this.#shared = undefined;
+    });
+    return started;
+  }
+
+  /** A server of its own for one 1.x thread, started in the thread's directory. */
+  async dedicated(detected: Detected, cwd: string | undefined, timeoutMs: number): Promise<Link> {
+    if (this.#disposed) throw callErrors.invalidState("instance_disposed");
+    const endpoint = await startServer(this.#host, { executable: detected.executable!, version: detected.version, generation: detected.generation, cwd, environment: this.#environment, timeoutMs });
+    try {
+      return { endpoint, runtime: await this.#runtime(endpoint) };
+    } catch (error) {
+      await endpoint.stop();
+      throw error;
+    }
+  }
+
+  /** The server a thread runs on, by the instance's shape. */
+  async linkFor(detected: Detected, shape: ServerShape, cwd: string | undefined, timeoutMs: number): Promise<Link> {
+    if (shape.generation === 1 && !shape.external) return this.dedicated(detected, cwd, timeoutMs);
+    return this.shared(detected, timeoutMs);
+  }
+
+  /** The entry names every thread but `owner` holds on `endpoint`. */
+  othersOn(endpoint: ServerEndpoint, owner: string): string[] {
+    const owners = this.#owners.get(endpoint);
+    if (owners === undefined) return [];
+    const own = owners.get(owner)?.names ?? new Set<string>();
+    return [...owners.entries()].filter(([id]) => id !== owner).flatMap(([, entry]) => [...entry.names].filter((name) => !own.has(name)));
+  }
+
+  /**
+   * Records `owner`'s entries on `endpoint`, and first gives every other
+   * thread there a deny rule for them. Refuses names OpenCode's tool names
+   * cannot keep apart from another thread's.
+   */
+  async register(endpoint: ServerEndpoint, owner: string, names: ReadonlySet<string>, onOthers: (others: string[]) => Promise<void>): Promise<string[]> {
+    const owners = this.#owners.get(endpoint) ?? new Map<string, Owner>();
+    this.#owners.set(endpoint, owners);
+    for (const [id, entry] of owners) {
+      if (id === owner) continue;
+      for (const name of names) {
+        if (entry.names.has(name)) continue;
+        const clash = collidingName(name, entry.names);
+        if (clash !== undefined) {
+          throw callErrors.invalidState("mcp_name_collision", `OpenCode names MCP tools <server>_<tool>, so the host tool servers "${name}" and "${clash}" cannot be kept apart on one server; give them names that are not one another's prefix`);
+        }
+      }
+    }
+    owners.set(owner, { names, onOthers });
+    for (const [id, entry] of owners) {
+      if (id !== owner) await entry.onOthers(this.othersOn(endpoint, id));
+    }
+    return this.othersOn(endpoint, owner);
+  }
+
+  async unregister(endpoint: ServerEndpoint, owner: string): Promise<void> {
+    const owners = this.#owners.get(endpoint);
+    if (owners === undefined || !owners.delete(owner)) return;
+    for (const [id, entry] of owners) await entry.onOthers(this.othersOn(endpoint, id)).catch(() => undefined);
+    if (owners.size === 0) this.#owners.delete(endpoint);
+  }
+
+  async dispose(): Promise<void> {
+    this.#disposed = true;
+    const shared = this.#shared;
+    this.#shared = undefined;
+    const link = await shared?.catch(() => undefined);
+    if (link !== undefined) await link.endpoint.stop();
+  }
+}

@@ -9,7 +9,8 @@ import type { RuntimeMode } from "../../generated/config.ts";
 import type { Item } from "../../generated/item.ts";
 import type { Request } from "../../generated/request.ts";
 import type { OpenedSession, ScenarioContext } from "../context.ts";
-import type { NativeApproval, NativeApprovalOption } from "../harness.ts";
+import type { NativeApproval, NativeApprovalHandle, NativeApprovalOption } from "../harness.ts";
+import { ConformanceFailure } from "../util.ts";
 
 export interface Scenario {
   /** 1 to 15, the order of the acceptance criteria's inventory and of docs/conformance.md. */
@@ -51,6 +52,29 @@ export function approval(kind: NativeApproval["kind"], options: readonly NativeA
 export function supervisedMode(capabilities: Capabilities): RuntimeMode | undefined {
   const modes: RuntimeMode[] = ["approval_required", "auto_accept_edits", "read_only", "auto"];
   return modes.find((mode) => hasCapability(capabilities, `runtimePolicy.modes.${mode}`));
+}
+
+/**
+ * The native option id the driver sees for the kit's `optionId`: the
+ * harness's mapping when it gave one, else the id itself. The mapping must be
+ * one-to-one: when two kit options reach the driver as one native option, a
+ * reply cannot say which the host chose, so the kit refuses the mapping.
+ */
+export function nativeOptionId(handle: Pick<NativeApprovalHandle, "nativeOptionIds">, optionId: string): string {
+  const mapping = handle.nativeOptionIds;
+  if (mapping === undefined) return optionId;
+  const kitIdFor = new Map<string, string>();
+  for (const [kitId, nativeId] of Object.entries(mapping)) {
+    const other = kitIdFor.get(nativeId);
+    if (other !== undefined) {
+      throw new ConformanceFailure(`the harness's nativeOptionIds sends kit options "${other}" and "${kitId}" to one native option "${nativeId}"; each kit option needs a native option of its own`);
+    }
+    kitIdFor.set(nativeId, kitId);
+  }
+  if (Object.hasOwn(mapping, optionId)) return mapping[optionId]!;
+  const other = kitIdFor.get(optionId);
+  if (other !== undefined) throw new ConformanceFailure(`the harness's nativeOptionIds sends kit option "${other}" to "${optionId}", which is also the unmapped kit option "${optionId}"`);
+  return optionId;
 }
 
 /** Waits for a pending request that offers the native option `optionId`. */

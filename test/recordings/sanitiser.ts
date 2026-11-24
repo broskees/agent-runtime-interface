@@ -3,8 +3,9 @@
 // both sides are compared in the same placeholder form.
 //
 // It replaces, in every string and every object key (a frame's own format
-// fields, `dir`, `kind`, `query`, `id`, `method` and `toolName`, stay as the
-// tap wrote them):
+// fields, `dir`, `kind`, `query`, `id`, `method`, `toolName` and
+// `contentType`, stay as the tap wrote them when they hold a string, a
+// number, a boolean or null):
 //   - the recording's temp workspace (and its real path) with <WORKSPACE>;
 //   - a string that is exactly the value of PATH with <PATH> (PATH differs
 //     between the recording machine and the replay machine);
@@ -72,8 +73,17 @@ export type FrameSide = "in" | "out";
  */
 export type Sanitiser = <T>(value: T, side?: FrameSide) => T;
 
-/** The fields the recording format itself defines: a frame keeps them as the tap wrote them. */
-const FRAME_FORMAT_FIELDS: ReadonlySet<string> = new Set(["dir", "kind", "query", "id", "method", "toolName"]);
+/**
+ * The fields the recording format itself defines: a frame keeps them as the
+ * tap wrote them when they hold a string, a number, a boolean or null. An
+ * object or array under one of these names (an OpenCode request's `query`,
+ * which holds the request's query parameters) is sanitised like any value.
+ */
+export const FRAME_FORMAT_FIELDS: ReadonlySet<string> = new Set(["dir", "kind", "query", "id", "method", "toolName", "contentType"]);
+
+function isScalar(value: unknown): boolean {
+  return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
 
 function isFrame(value: unknown): value is { readonly dir: FrameSide; readonly kind: string; readonly [field: string]: unknown } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -187,7 +197,10 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
   return <T>(value: T, side?: FrameSide): T => {
     if (side === undefined && isFrame(value)) {
       const out: { [key: string]: unknown } = {};
-      for (const [field, entry] of Object.entries(value)) out[FRAME_FORMAT_FIELDS.has(field) ? field : text(field, "path")] = FRAME_FORMAT_FIELDS.has(field) ? entry : walk(entry, value.dir, field);
+      for (const [field, entry] of Object.entries(value)) {
+        const kept = FRAME_FORMAT_FIELDS.has(field) && isScalar(entry);
+        out[FRAME_FORMAT_FIELDS.has(field) ? field : text(field, "path")] = kept ? entry : walk(entry, value.dir, field);
+      }
       return out as T;
     }
     return walk(value, side ?? "in", undefined) as T;

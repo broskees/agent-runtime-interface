@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { checkRepository } from "../../scripts/check-rules.ts";
+import { installConsumer, packAsPublished } from "../helpers/consumer.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
 
 const tempDirs: string[] = [];
@@ -61,13 +62,9 @@ describe("a project without effect", () => {
   let consumer = "";
 
   before(() => {
-    assert.ok(fs.existsSync(path.join(REPO_ROOT, "dist", "index.js")), "dist/ is missing: run `pnpm run build` first (the gate does)");
-    const packDir = tempDir("ari-effect-pack-");
-    const output = execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", packDir], { cwd: REPO_ROOT, encoding: "utf8" });
-    const tarball = path.join(packDir, (JSON.parse(output) as Array<{ filename: string }>)[0]!.filename);
+    const { tarball } = packAsPublished(tempDir("ari-effect-pack-"));
     consumer = tempDir("ari-no-effect-");
-    fs.writeFileSync(path.join(consumer, "package.json"), JSON.stringify({ name: "consumer", private: true, type: "module" }));
-    execFileSync("npm", ["install", "--offline", "--no-audit", "--no-fund", "--ignore-scripts", tarball], { cwd: consumer, encoding: "utf8" });
+    installConsumer(consumer, [tarball]);
   });
 
   test("has no effect package to load", () => {

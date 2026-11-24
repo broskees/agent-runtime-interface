@@ -1,7 +1,10 @@
 // The package as a consumer gets it: strict, erasable TypeScript compiled to
-// ESM; a tarball that installs into a fresh project and imports; and a
-// package-contents check that fails on stray files, missing build output and
-// an oversized root export.
+// ESM; a tarball, packed as it is published (scripts/pack.ts), that installs
+// into a fresh project and imports; a package-contents check that fails on
+// stray files, missing build output, a published export condition or bin that
+// names an unshipped file, and an oversized root export; and the two release
+// guards: packing the repository directly is refused, and a non-empty
+// `dependencies` fails scripts/check-dependencies.ts.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -10,9 +13,11 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { checkManifest, checkPackage, checkTarball } from "../scripts/check-package.ts";
+import { checkManifest, checkPackage, checkPublishedManifest, checkTarball, publishedContents, tarballContents } from "../scripts/check-package.ts";
 import type { PackageJson } from "../scripts/check-package.ts";
 import { packedFiles } from "../scripts/check-rules.ts";
+import { REFUSE_REPOSITORY_PACK_MESSAGE, packPackage, publishedManifest } from "../scripts/pack.ts";
+import { installConsumer } from "./helpers/consumer.ts";
 import { REPO_ROOT } from "./helpers/spec.ts";
 
 const tempDirs: string[] = [];
@@ -46,15 +51,9 @@ describe("the packed tarball", () => {
 
   before(() => {
     requireBuild();
-    const packDir = tempDir("ari-pack-");
-    const output = execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", packDir], {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-    });
-    const tarball = path.join(packDir, (JSON.parse(output) as Array<{ filename: string }>)[0]!.filename);
+    const { tarball } = packPackage(REPO_ROOT, tempDir("ari-pack-"));
     consumer = tempDir("ari-consumer-");
-    fs.writeFileSync(path.join(consumer, "package.json"), JSON.stringify({ name: "consumer", private: true, type: "module" }));
-    execFileSync("npm", ["install", "--offline", "--no-audit", "--no-fund", "--ignore-scripts", tarball], { cwd: consumer, encoding: "utf8" });
+    installConsumer(consumer, [tarball]);
   });
 
   test("installs into a fresh project with no vendor SDKs, and `ari` imports from it", () => {
@@ -144,7 +143,81 @@ describe("the package-contents check", () => {
     }
     fs.mkdirSync(path.join(root, "scripts"));
     fs.writeFileSync(path.join(root, "scripts", "size-budget.json"), JSON.stringify({ rootExportMinifiedBytes: 1000 }));
-    const { problems } = await checkPackage(root, packedFiles(REPO_ROOT));
+    const { problems } = await checkPackage(root, publishedContents(REPO_ROOT));
     assert.ok(problems.some((problem) => /over the budget of 1000 bytes/.test(problem)), problems.join("\n"));
+  });
+
+  test("fails when the published package.json sends a condition or the bin to a file the tarball does not ship, or has dependencies", () => {
+    requireBuild();
+    const { manifest, files } = publishedContents(REPO_ROOT);
+    assert.deepEqual(checkPublishedManifest(manifest, files), []);
+    const broken = structuredClone(manifest);
+    (broken.exports!["./host"] as Record<string, string>)["development"] = "./src/host/index.ts";
+    (broken.exports!["./meta/*"] as Record<string, string>)["browser"] = "./dist/meta/*.browser.js";
+    broken.bin = { "ari-driver": "./dist/wire/missing-cli.js" };
+    broken.dependencies = { "left-pad": "1.3.0" };
+    const problems = checkPublishedManifest(broken, files);
+    assert.ok(problems.some((problem) => problem.includes('exports["./host"] condition development sends ./src/host/index.ts')), problems.join("\n"));
+    assert.ok(problems.some((problem) => problem.includes('exports["./meta/*"] condition browser sends 12 of 12 subpaths')), problems.join("\n"));
+    assert.ok(problems.some((problem) => problem.includes("bin ari-driver is ./dist/wire/missing-cli.js")), problems.join("\n"));
+    assert.ok(problems.some((problem) => problem.includes('"dependencies" must be empty')), problems.join("\n"));
+  });
+});
+
+describe("packing as published", () => {
+  test("the published package.json drops the development condition and the scripts, and keeps every other field", () => {
+    const published = publishedManifest(pkg as never) as Record<string, unknown> & { exports: Record<string, unknown> };
+    const expected = structuredClone(pkg) as Record<string, unknown> & { exports: Record<string, unknown> };
+    delete expected["scripts"];
+    for (const entry of Object.values(expected.exports)) if (typeof entry === "object" && entry !== null) delete (entry as Record<string, unknown>)["development"];
+    assert.deepEqual(published, expected);
+    assert.ok(!JSON.stringify(published).includes('"development"'));
+    assert.deepEqual(publishedManifest(pkg as never, { repository: "git+https://github.com/example/ari.git" })["repository"], { type: "git", url: "git+https://github.com/example/ari.git" });
+  });
+
+  test("the tarball holds the published package.json and the same files a repository pack lists, and the repository's package.json is unchanged", () => {
+    requireBuild();
+    const before = fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8");
+    const packed = packPackage(REPO_ROOT, tempDir("ari-pack-check-"));
+    assert.equal(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"), before);
+    const contents = tarballContents(packed.tarball);
+    assert.deepEqual(contents.manifest, packed.manifest);
+    assert.deepEqual(contents.manifest, publishedManifest(pkg as never));
+    assert.deepEqual(contents.files, packedFiles(REPO_ROOT));
+    assert.deepEqual([...packed.files], contents.files);
+  });
+
+  test("npm pack in the repository itself is refused by the prepack script", () => {
+    const destination = tempDir("ari-refused-pack-");
+    const result = spawnSync("npm", ["pack", "--pack-destination", destination], { cwd: REPO_ROOT, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(REFUSE_REPOSITORY_PACK_MESSAGE), result.stderr);
+    assert.deepEqual(fs.readdirSync(destination), []);
+  });
+});
+
+describe("scripts/check-dependencies.ts, which the release workflow runs before it builds and before it publishes", () => {
+  const script = path.join(REPO_ROOT, "scripts", "check-dependencies.ts");
+
+  test("passes the repository's package.json and the packed tarball", () => {
+    requireBuild();
+    const { tarball } = packPackage(REPO_ROOT, tempDir("ari-deps-pack-"));
+    for (const file of [path.join(REPO_ROOT, "package.json"), tarball]) {
+      const result = spawnSync(process.execPath, [script, file], { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /no runtime dependencies/);
+    }
+  });
+
+  test("fails a package.json, or a tarball, whose dependencies are not empty", () => {
+    const directory = tempDir("ari-deps-");
+    const manifest = path.join(directory, "package.json");
+    fs.writeFileSync(manifest, JSON.stringify({ ...pkg, dependencies: { "left-pad": "1.3.0", zod: "4.0.0" } }));
+    const packed = JSON.parse(execFileSync("npm", ["pack", directory, "--json", "--ignore-scripts", "--pack-destination", directory], { cwd: directory, encoding: "utf8" })) as Array<{ filename: string }>;
+    for (const file of [manifest, path.join(directory, packed[0]!.filename)]) {
+      const result = spawnSync(process.execPath, [script, file], { encoding: "utf8" });
+      assert.equal(result.status, 1, `${file}: ${result.stdout}${result.stderr}`);
+      assert.match(result.stderr, /"dependencies" must be empty, but it lists left-pad, zod/);
+    }
   });
 });

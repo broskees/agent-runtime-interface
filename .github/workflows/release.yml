@@ -1,0 +1,209 @@
+# Release: publish a version to npm and attach the standalone binaries to its
+# GitHub release. It runs when a `v<version>` tag is pushed, and only then.
+#
+#   build           checks the tag and the dependencies, runs the gate, packs
+#                   the package once with scripts/pack.ts (the published
+#                   package.json leaves out the repository-only `development`
+#                   export condition), checks that tarball, and builds
+#                   ari-driver for the five release platforms
+#   npm             publishes that tarball with npm trusted publishing and
+#                   provenance; the only job that can mint an OIDC token
+#   github-release  creates the GitHub release with the binaries, their
+#                   SHA256SUMS and the tarball; the only job that can write
+#
+# Before the first release, configure a trusted publisher for the package on
+# npmjs.com: this repository and the workflow file `release.yml`. Then set
+# the package's publishing access to "Require two-factor authentication and
+# disallow tokens". SECURITY.md lists the rules this workflow keeps.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: gate, pack and binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
+
+      # No caches anywhere in a release build.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          package-manager-cache: false
+
+      - name: Refuse runtime dependencies
+        run: node scripts/check-dependencies.ts package.json
+
+      - name: Check the tag is a signed tag for this version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::The tag $TAG does not match the package version $version."
+            exit 1
+          fi
+          tag_type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type')"
+          if [ "$tag_type" != "tag" ]; then
+            echo "::error::$TAG is a lightweight tag. Release from a signed annotated tag (git tag -s)."
+            exit 1
+          fi
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha')"
+          verified="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha" --jq '.verification.verified')"
+          if [ "$verified" != "true" ]; then
+            echo "::error::GitHub does not verify the signature of $TAG."
+            exit 1
+          fi
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+          no-cache: true
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.26.5"
+          cache: false
+
+      - name: Install Rust 1.97.1
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.13.6"
+          enable-cache: false
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Gate
+        run: pnpm run gate
+
+      - name: Pack the package as it is published
+        id: pack
+        run: |
+          tarball="$(node scripts/pack.ts --out build/release --repository "git+$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git")"
+          echo "tarball=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tarball and its own package.json
+        env:
+          TARBALL: build/release/${{ steps.pack.outputs.tarball }}
+        run: |
+          node scripts/check-package.ts --tarball "$TARBALL"
+          node scripts/check-dependencies.ts "$TARBALL"
+
+      - name: Build ari-driver for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64
+        run: |
+          node scripts/build-binary.ts --target all --out build/standalone
+          for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            cp "build/standalone/$target/ari-driver" "build/release/ari-driver-$target"
+          done
+          cp build/standalone/windows-x64/ari-driver.exe build/release/ari-driver-windows-x64.exe
+          cd build/release
+          sha256sum ari-driver-* ./*.tgz > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: build/release/
+          if-no-files-found: error
+          retention-days: 7
+
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+
+  npm:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: build/release
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Check npm supports trusted publishing
+        run: |
+          npm_version="$(npm --version)"
+          echo "npm $npm_version"
+          node -e 'const [major, minor] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5)) { console.error("::error::Trusted publishing needs npm 11.5.1 or later."); process.exit(1); }' "$npm_version"
+
+      - name: Refuse runtime dependencies in the tarball
+        env:
+          TARBALL: build/release/${{ needs.build.outputs.tarball }}
+        run: node scripts/check-dependencies.ts "$TARBALL"
+
+      - name: Publish with provenance
+        env:
+          TARBALL: build/release/${{ needs.build.outputs.tarball }}
+        run: npm publish "$TARBALL" --provenance --access public
+
+  github-release:
+    name: create the GitHub release
+    needs: [build, npm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # The tag's own annotation becomes the release notes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: build/release
+
+      - name: Create the release and attach the binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          TARBALL: build/release/${{ needs.build.outputs.tarball }}
+        run: |
+          gh release create "$TAG" --verify-tag --notes-from-tag --title "$TAG" \
+            build/release/ari-driver-linux-x64 \
+            build/release/ari-driver-linux-arm64 \
+            build/release/ari-driver-darwin-x64 \
+            build/release/ari-driver-darwin-arm64 \
+            build/release/ari-driver-windows-x64.exe \
+            build/release/SHA256SUMS \
+            "$TARBALL"

@@ -277,6 +277,7 @@ Each is listed in `capabilities.extensions` with version `1`. Payloads are in
 
 `test/drivers/claude/` holds the fake SDK (`fake-sdk.ts`, typed by the
 pinned SDK), the type-level proof that the driver's own SDK types match the
-SDK (`sdk-types.ts`), the conformance harness and suite, and the tests for
+SDK (`sdk-types.ts`, which `sdk-types.test.ts` also compiles with planted
+mistakes to show each is caught), the conformance harness and suite, and the tests for
 the driver's quirks, launch context, availability, capability honesty and
 metadata. `SOURCES.md` lists the vendor sources and pinned versions.

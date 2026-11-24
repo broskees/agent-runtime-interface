@@ -1,0 +1,20 @@
+[package]
+name = "ari-client"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+description = "A thin client for ARI drivers over ari/wire (newline-delimited JSON-RPC 2.0 on stdio)."
+
+[lib]
+name = "ari_client"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "rt", "macros", "time"] }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["process", "io-util", "sync", "rt-multi-thread", "macros", "time"] }

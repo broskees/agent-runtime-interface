@@ -56,12 +56,16 @@ function idsOf(event: Omit<AriEvent, "at">): string[] {
 
 /**
  * A result without its duration. The notes of the settlement and auth
- * scenarios say whether the pause ran on "virtual" or "real" time, which is
- * the harness's clock setting (the in-process run uses the kit's default
- * virtual clock), so that one word is left out of the comparison.
+ * scenarios measure a pause ("36.5 s of virtual time passed ...", "lasted
+ * 30 s of real time"). Which clock ran is the harness's setting (the
+ * in-process run uses the kit's default virtual clock), and on real time the
+ * measured seconds vary with machine load (36.5 against 36.6), so the
+ * clock's name and the seconds before it are left out of the comparison.
+ * Every other word of every note must match. The scenarios themselves check
+ * the pause length: each must pass in both runs.
  */
 function resultSummary(result: ScenarioResult): object {
-  const notes = result.notes.map((note) => note.replace(/ of (?:virtual|real) time\b/, " of <clock> time"));
+  const notes = result.notes.map((note) => note.replace(/\b\d+(?:\.\d+)? s of (?:virtual|real) time\b/, "<elapsed> s of <clock> time"));
   return { id: result.id, key: result.key, status: result.status, notApplicableBy: result.notApplicableBy, reason: result.reason, notes };
 }
 

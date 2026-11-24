@@ -1,0 +1,21 @@
+[project]
+name = "ari-client"
+version = "0.1.0"
+description = "A thin client for ARI drivers over ari/wire (newline-delimited JSON-RPC 2.0 on stdio)."
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ari_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"

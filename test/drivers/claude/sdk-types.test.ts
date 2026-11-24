@@ -13,7 +13,7 @@ import ts from "typescript";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 
 const HERE = path.join(REPO_ROOT, "test", "drivers", "claude");
-const ROOTS = [path.join(HERE, "sdk-types.ts"), path.join(HERE, "headers-init.d.ts")];
+const ROOTS = [path.join(HERE, "sdk-types.ts"), path.join(REPO_ROOT, "test", "types", "headers-init.d.ts")];
 const DRIVER_SDK = path.join(REPO_ROOT, "src", "drivers", "claude", "sdk.ts");
 const FAKE = path.join(HERE, "fake-sdk.ts");
 

@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { REPO_ROOT } from "../helpers/spec.ts";
 import { CLAUDE_FRAME_KINDS } from "./claude/frames.ts";
+import { OPENCODE_FRAME_KINDS } from "./opencode/frames.ts";
 import { RECORDING_HEADER_FIELDS } from "./format.ts";
 import { REPLAY_IGNORED_FIELDS } from "./ignored-fields.ts";
 
@@ -45,6 +46,11 @@ test("the docs list every Claude frame kind with its direction, and no other", (
   assert.deepEqual(kinds, CLAUDE_FRAME_KINDS.map((entry) => ({ dir: entry.dir, kind: entry.kind })));
 });
 
+test("the docs list every OpenCode frame kind with its direction, and no other", () => {
+  const kinds = tableRows(section("OpenCode frames")).map((row) => ({ dir: row[0]!, kind: row[1]!.replace(/`/g, "") }));
+  assert.deepEqual(kinds, OPENCODE_FRAME_KINDS.map((entry) => ({ dir: entry.dir, kind: entry.kind })));
+});
+
 test('the docs list under "Fields replay ignores" equals the code\'s list, each field with its reason', () => {
   const documented = tableRows(section("Fields replay ignores")).map(([driver, kind, field, reason]) => ({
     driver: driver!,
@@ -61,5 +67,17 @@ test('the docs list under "Fields replay ignores" equals the code\'s list, each 
 
 test('the docs have the "How to record" and "How to refresh" sections a person follows', () => {
   assert.match(section("How to record"), /ARI_LIVE_RECORD=1 pnpm run record:claude/);
+  assert.match(section("Recording OpenCode"), /ARI_LIVE_RECORD=1 ARI_RECORD_OPENCODE_MODEL=<provider\/model> pnpm run record:opencode/);
   assert.match(section("How to refresh"), /Record again when the vendor's version changes/);
+});
+
+test("the docs name the file OpenCode 2.1.2 keeps its sign-ins in, and the source line that opens it", () => {
+  const signIn = section("How OpenCode finds the sign-in");
+  assert.match(signIn, /`opencode\.db` in its data directory/);
+  assert.match(signIn, /`packages\/cli\/src\/server-process\.ts:114`,\n`path: databasePath\(global\.data\),`/);
+  assert.match(signIn, /^OpenCode 2\.1\.2 has no credential file of its own/m);
+  const setup = section("How the OpenCode recorder keeps the user's setup out");
+  for (const variable of ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENCODE_PASSWORD", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_CLAUDE_CODE"]) {
+    assert.ok(tableRows(setup).some((row) => row[0] === `\`${variable}\``), `the table names ${variable}`);
+  }
 });

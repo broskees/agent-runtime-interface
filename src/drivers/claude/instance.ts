@@ -216,11 +216,16 @@ export class ClaudeInstance implements Instance {
     return this.#runtime;
   }
 
-  /** The Claude Code executable queries run: the configured one (looked up on PATH), else the SDK's bundled binary. */
+  /**
+   * The Claude Code executable queries run: the configured one, else the
+   * SDK's bundled binary. The host resolves the configured one: a bare name
+   * on PATH, a path with a directory part as it stands. Either way it must
+   * name an executable file, or the driver is unavailable.
+   */
   async #executable(runtime: ClaudeSdkRuntime): Promise<{ path: string; configured: boolean }> {
     const configured = this.#config.executablePath;
     if (configured !== undefined) {
-      const path = configured.includes("/") ? configured : await this.#host.process.resolveExecutable(configured);
+      const path = await this.#host.process.resolveExecutable(configured);
       if (path === null) {
         throw callErrors.driverUnavailable({ binary: configured, installHint: CLAUDE_BINARY_HINT }, `The configured Claude Code executable (${configured}) was not found.`);
       }

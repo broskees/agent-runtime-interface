@@ -33,7 +33,11 @@ A package manager that skips optional dependencies leaves it out.
   `installed: false` with a `driver_unavailable` error naming
   `@anthropic-ai/claude-agent-sdk`, and `openSession` rejects with it. Without
   the native binary, the error names the platform package and the binary and
-  says to reinstall without `--omit=optional` or to set `executablePath`.
+  says to reinstall without `--omit=optional` or to set `executablePath`. A
+  configured `executablePath` goes through the host's
+  `process.resolveExecutable` (a bare name on `PATH`, a path with a directory
+  part as it stands); when it names no executable file, `status()` reports
+  the driver unavailable with an error naming it, and `openSession` rejects.
 - **One query per thread.** Each thread is one Claude session run by one
   `query()` in streaming input mode, so one Claude Code process per thread
   (`sessionModel: "process_per_thread"`). A session holds any number of
@@ -103,7 +107,10 @@ option ids are Claude's labels, and the answers go back as
 `updatedInput.answers`. A prompt raised inside a subagent names it in
 `origin.subagentId`. A prompt forced by an ask rule carries
 `fullAccessOverride: "ask_rule"`. Under `full_access` the session runs in
-`bypassPermissions`, so Claude asks only for ask rules.
+`bypassPermissions`, so Claude asks only for ask rules. Every other call runs
+without `canUseTool` (SDK reference, `Options.canUseTool`: "Not invoked for
+calls auto-approved by ... `permissionMode`"), so no request and no reply
+exist for it.
 
 ## Host instructions and MCP servers
 
@@ -123,6 +130,13 @@ option ids are Claude's labels, and the answers go back as
   so tool search does not defer those tools. A resume of a live thread with a
   new `launch` replaces them the same way. Claude Code's stdio config has no
   working directory, so a stdio server with `cwd` is refused.
+- A running query cannot change its system prompt. A resume of a live thread
+  whose new `launch` changes the append therefore ends the running query and
+  starts one with `resume` (or, for a session that has no message yet,
+  `sessionId` again), which carries the new append. While the thread has a
+  turn, a queued turn, a pending request or a background task, that would end
+  them, so the resume rejects with `invalid_state` and changes nothing. A
+  `launch` that keeps the append keeps the query.
 - Nothing from `LaunchContext` is written to a file: MCP servers travel over
   the control channel, and the append is not recorded.
 
@@ -136,6 +150,11 @@ option ids are Claude's labels, and the answers go back as
   Code writes a transcript only once a session holds a message, so a thread
   that never ran a turn cannot be resumed and is replaced too. A resume
   replays the stored turns as events unless `quiet`.
+- A resume of a live thread applies a new `model` and `effort` to the running
+  query with `setModel` and `applyFlagSettings`, and a new policy's
+  permission mode with `setPermissionMode`; `appliedConfig` reports only
+  what the query took. A resume with `purpose: "history"` changes nothing and
+  reports what the thread runs with.
 - `forkThread` starts a query with `resume` (the source), `forkSession: true`,
   `sessionId` (the fork) and, for a fork from a turn, `resumeSessionAt` set to
   the last transcript entry of that turn (the fork keeps the turn). Claude
@@ -143,7 +162,9 @@ option ids are Claude's labels, and the answers go back as
   directory (`crossCwd: false`).
 - `readSnapshot` reads the transcript with `getSessionMessages`. Steers this
   session sent belong to the turn they steered; a steer sent by an earlier
-  session reads as a turn of its own.
+  session reads as a turn of its own. A local command such as `/goal` reads
+  as the command the user typed; the rows Claude Code writes around it (its
+  caveat and its output) are not turns.
 - `unloadThread` and `release()` close queries; the next turn resumes the
   session. `canRelease()` is false while a turn, a queued turn, a pending
   request or a background task runs.
@@ -253,12 +274,21 @@ Each is listed in `capabilities.extensions` with version `1`. Payloads are in
   `enableFileCheckpointing`. `ext("claude.fileCheckpoints", "rewind", {
   threadId, turnId, dryRun? })` calls `Query.rewindFiles` with the turn's
   prompt uuid and returns Claude's answer.
-- **`ari.goal`** (derived). Claude's SDK mode reports no goal events. The
-  driver reads the goal from what Claude does: a `SetGoal` tool call or a
-  `/goal <condition>` prompt sets it, `/goal clear` clears it. It emits
-  `x:ari.goal.updated` with `derived: true`, and `ext("ari.goal", "get", {
-  threadId })` reads the goal from the transcript, `derived: true`. `set` and
-  `clear` are `unsupported`: the host sends `/goal ...` as a turn.
+- **`ari.goal`** (derived). Claude's SDK mode has no goal call. The driver
+  reads the goal only from what Claude Code confirms in the transcript
+  (`getSessionMessages`). Claude Code records a `/goal` prompt as a tagged
+  command row and its answer as a tagged `<local-command-stdout>` row:
+  `Goal set: <condition>` sets the goal and `Goal cleared: <condition>`
+  clears it; a refusal (a condition over 4000 characters, for example) or a
+  status answer changes nothing. A `SetGoal` call sets the goal only when its
+  result says "The goal is set"; with `ask_user` (the tool's default) it only
+  proposes the goal to the user. Prompts after the goal was set are turns of
+  the goal run (`turnIds`). After a turn that ran `/goal` or called `SetGoal`
+  ends, the driver reads the transcript again and emits
+  `x:ari.goal.updated` (thread-level, `derived: true`) when the goal was set,
+  replaced or cleared. `ext("ari.goal", "get", { threadId })` reads it from
+  the transcript. `set` and `clear` are `unsupported`: the host sends
+  `/goal ...` as a turn.
 
 ## Known limits
 
@@ -271,6 +301,15 @@ Each is listed in `capabilities.extensions` with version `1`. Payloads are in
 - **`ari.goal` through `ext`** is computed by the driver, so the conformance
   kit's check that an extension call reaches the agent does not apply to it
   (`capability-honesty.ext.ari.goal`).
+- **The `full_access` reply.** Under `full_access` Claude Code asks for no
+  ordinary approval, so the kit's check of the narrowest `full_access` reply
+  has nothing to check (`idempotent-responses.full-access`).
+- **A goal Claude Code records as a system row.** Claude Code 2.1.330 can
+  also record a local command's output as a `system` row of subtype
+  `local_command`. The pinned SDK's `getSessionMessages` drops that row's
+  content (and returns the row only with `includeSystemMessages`), so a goal
+  confirmed only there is not visible to the driver, which then reports no
+  goal rather than guess one from the prompt.
 - **Pending requests** die with the query: `canUseTool` is a live callback.
 
 ## Tests

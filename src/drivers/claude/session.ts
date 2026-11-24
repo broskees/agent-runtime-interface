@@ -199,8 +199,10 @@ interface LiveQuery {
   readonly query: ClaudeQuery;
   readonly input: PromptQueue;
   readonly abort: AbortController;
+  /** The text the query appended to Claude Code's system prompt when it started; a running query cannot change it. */
+  readonly append: string | undefined;
   /** Set when the driver closed it, with the reason. */
-  closedBy: "interrupt" | "unload" | "release" | "close" | "fork" | undefined;
+  closedBy: "interrupt" | "unload" | "release" | "close" | "fork" | "relaunch" | undefined;
   ended: boolean;
   initialized: boolean;
   /** Settles once Claude Code answered `initialize`, or rejects with why it did not start. */
@@ -236,6 +238,8 @@ interface ActiveTurn {
   assistantText: string | undefined;
   rejectedLimit: ClaudeRateLimitInfo | undefined;
   model: string | undefined;
+  /** The turn ran Claude Code's /goal command or called SetGoal: once it ends, the goal is read again from the transcript. */
+  goalMayChange: boolean;
 }
 
 interface QueuedTurn {
@@ -343,8 +347,8 @@ function hookSettings(hooks: { [event: string]: ClaudeHookMatcher[] }): ClaudeHo
   return settings;
 }
 
-/** The prompt text of a user transcript entry, or undefined when it is not a prompt (tool results, other content). */
-function promptTextOf(entry: ClaudeSessionMessage): string | undefined {
+/** The text of a main-thread user transcript entry, or undefined for tool results and other content. */
+function userTextOf(entry: ClaudeSessionMessage): string | undefined {
   if (entry.type !== "user" || entry.parent_tool_use_id !== null) return undefined;
   const content = asRecord(entry.message)["content"];
   if (typeof content === "string") return content;
@@ -352,6 +356,51 @@ function promptTextOf(entry: ClaudeSessionMessage): string | undefined {
   if (content.some((block) => asRecord(block)["type"] === "tool_result")) return undefined;
   const texts = content.flatMap((block) => (asRecord(block)["type"] === "text" && typeof asRecord(block)["text"] === "string" ? [asRecord(block)["text"] as string] : []));
   return texts.length === 0 ? undefined : texts.join("\n\n");
+}
+
+/** A prompt that runs Claude Code's /goal command. */
+const GOAL_COMMAND = /^\/goal(?:\s|$)/;
+/** How Claude Code 2.1.330's /goal command answers when it set or cleared the goal, and SetGoal's result when it set one. */
+const GOAL_SET = "Goal set: ";
+const GOAL_CLEARED = "Goal cleared: ";
+const SET_GOAL_DONE = "The goal is set";
+
+/**
+ * The slash command a transcript row records. Claude Code writes a command
+ * the user ran as tagged text: `<command-name>/goal</command-name>`,
+ * `<command-message>goal</command-message>`, `<command-args>…</command-args>`.
+ */
+function slashCommandIn(text: string): { name: string; args: string } | undefined {
+  const start = text.trimStart();
+  if (!start.startsWith("<command-name>") && !start.startsWith("<command-message>")) return undefined;
+  const name = /<command-name>\/?([^<]*)<\/command-name>/.exec(text)?.[1];
+  if (name === undefined || name === "") return undefined;
+  return { name, args: (/<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1] ?? "").trim() };
+}
+
+function slashCommandOf(entry: ClaudeSessionMessage): { name: string; args: string } | undefined {
+  const text = userTextOf(entry);
+  return text === undefined ? undefined : slashCommandIn(text);
+}
+
+/** What a local command printed, from the tagged output row Claude Code writes after the command row. */
+function localCommandOutputOf(entry: ClaudeSessionMessage): string | undefined {
+  const text = userTextOf(entry)?.trim();
+  if (text === undefined) return undefined;
+  return /^<local-command-stdout>([\s\S]*)<\/local-command-stdout>$/.exec(text)?.[1];
+}
+
+/**
+ * The prompt text of a user transcript entry, or undefined when it is not a
+ * prompt: tool results, and the rows Claude Code writes around a local
+ * command (its caveat and its output). A command row reads as the command
+ * the user typed.
+ */
+function promptTextOf(entry: ClaudeSessionMessage): string | undefined {
+  const text = userTextOf(entry);
+  if (text === undefined || /^\s*<local-command-(?:stdout|stderr|caveat)>/.test(text)) return undefined;
+  const command = slashCommandIn(text);
+  return command === undefined ? text : `/${command.name}${command.args === "" ? "" : ` ${command.args}`}`;
 }
 
 export class ClaudeSession implements Session {
@@ -437,16 +486,23 @@ export class ClaudeSession implements Session {
     const nativeId = "handle" in input.native ? input.native.handle : input.native.id;
     const known = [...this.#threads.values()].find((candidate) => candidate.nativeId === nativeId && candidate.thread.status !== "closed");
     if (known !== undefined) {
-      if (input.policy !== undefined) known.policy = input.policy;
-      this.#applyConfig(known, input.config);
-      if (input.launch !== undefined) known.launch = this.#mergeLaunch(input.launch);
+      // A history read changes nothing: it reports what the thread runs with.
       if (input.purpose === "history") return this.#applied(known);
-      if (known.live !== undefined && !known.live.ended) {
-        await this.#giveMcpServers(known, known.live);
-        if (input.policy !== undefined) await known.live.query.setPermissionMode(permissionModeFor(input.policy));
+      const launch = input.launch === undefined ? known.launch : this.#mergeLaunch(input.launch);
+      const live = known.live !== undefined && !known.live.ended ? known.live : undefined;
+      if (live !== undefined && this.#appendFor(known, launch) !== live.append) return this.#relaunch(known, live, launch, input);
+      known.launch = launch;
+      if (live === undefined) {
+        if (input.policy !== undefined) known.policy = input.policy;
+        this.#applyConfig(known, input.config);
+        await this.#ensureQuery(known, { kind: "resume" });
         return this.#applied(known);
       }
-      await this.#ensureQuery(known, { kind: "resume" });
+      // The running query takes the rest through its control methods; the thread records each change once Claude Code took it.
+      await this.#applyLiveConfig(known, live, input.config);
+      if (input.policy !== undefined && permissionModeFor(input.policy) !== permissionModeFor(known.policy)) await live.query.setPermissionMode(permissionModeFor(input.policy));
+      if (input.policy !== undefined) known.policy = input.policy;
+      await this.#giveMcpServers(known, live);
       return this.#applied(known);
     }
     const requested = input.policy === undefined ? undefined : await canonicalDirectory(input.policy.cwd);
@@ -479,6 +535,35 @@ export class ClaudeSession implements Session {
     }
     this.#announce(thread);
     if (input.quiet !== true) await this.#replayHistory(thread);
+    return this.#applied(thread);
+  }
+
+  /**
+   * A live thread with new instructions. Claude Code reads its system prompt
+   * only when a query starts, so the driver ends the running query and
+   * resumes the session in a new one that carries the new append. It refuses
+   * while the thread has work that would end with the old query.
+   */
+  async #relaunch(thread: ClaudeThread, live: LiveQuery, launch: LaunchContext, input: ResumeThreadInput): Promise<AppliedThread> {
+    const pendingRequest = [...this.#requests.values()].some((pending) => pending.thread === thread && pending.request.status === "pending");
+    const runningTask = [...thread.tasks.values()].some((task) => task.status === "running");
+    if (thread.turn !== undefined || thread.queued.length > 0 || pendingRequest || runningTask) {
+      throw callErrors.invalidState(
+        "thread_busy",
+        `Thread ${thread.thread.id} has a turn, request or background task running; Claude Code takes new instructions only in a new query, which would end them`,
+      );
+    }
+    const transcript = (await this.#context.sdk.getSessionInfo(thread.nativeId, { dir: thread.cwd })) !== undefined;
+    if (!transcript && thread.prompts.size > 0) {
+      throw callErrors.invalidState("not_resumable", `Claude Code keeps no transcript for thread ${thread.thread.id}, so a new query could not carry its conversation`);
+    }
+    thread.launch = launch;
+    if (input.policy !== undefined) thread.policy = input.policy;
+    this.#applyConfig(thread, input.config);
+    this.#closeQuery(live, "relaunch");
+    await this.#whenEnded(live);
+    // A session with no message yet has no transcript to resume: it starts again under the same id.
+    await this.#ensureQuery(thread, transcript ? { kind: "resume" } : { kind: "new" });
     return this.#applied(thread);
   }
 
@@ -606,9 +691,13 @@ export class ClaudeSession implements Session {
     return thread.starting;
   }
 
-  async #queryOptions(thread: ClaudeThread, mode: StartMode, abort: AbortController): Promise<ClaudeQueryOptions> {
+  /** The text appended to Claude Code's system prompt: the launch's instructions, then the thread's context. */
+  #appendFor(thread: ClaudeThread, launch: LaunchContext): string | undefined {
+    return joinText([...(launch.appendSystemPrompt ?? []), ...(launch.developerPrompt ?? []), thread.systemContext]);
+  }
+
+  async #queryOptions(thread: ClaudeThread, mode: StartMode, abort: AbortController, append: string | undefined): Promise<ClaudeQueryOptions> {
     const config = this.#context.config;
-    const append = joinText([...(thread.launch.appendSystemPrompt ?? []), ...(thread.launch.developerPrompt ?? []), thread.systemContext]);
     const identity: Partial<ClaudeQueryOptions> =
       mode.kind === "new"
         ? { sessionId: thread.nativeId }
@@ -642,7 +731,8 @@ export class ClaudeSession implements Session {
 
   async #startQuery(thread: ClaudeThread, mode: StartMode): Promise<LiveQuery> {
     const abort = new AbortController();
-    const options = await this.#queryOptions(thread, mode, abort);
+    const append = this.#appendFor(thread, thread.launch);
+    const options = await this.#queryOptions(thread, mode, abort, append);
     const input = new PromptQueue();
     let startFailed: (error: Error) => void = () => undefined;
     const failed = new Promise<never>((_resolve, reject) => {
@@ -652,7 +742,7 @@ export class ClaudeSession implements Session {
     const query = this.#context.sdk.query({ prompt: input, options });
     const ready = Promise.race([query.initializationResult().then(() => undefined), failed]);
     ready.catch(() => undefined);
-    const live: LiveQuery = { query, input, abort, closedBy: undefined, ended: false, initialized: false, ready, startFailed, endWaiters: new Set() };
+    const live: LiveQuery = { query, input, abort, append, closedBy: undefined, ended: false, initialized: false, ready, startFailed, endWaiters: new Set() };
     void this.#pump(thread, live);
     const timeoutMs = this.#open.handshakeTimeoutMs ?? 120_000;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -901,6 +991,7 @@ export class ClaudeSession implements Session {
       assistantText: undefined,
       rejectedLimit: undefined,
       model: thread.model,
+      goalMayChange: false,
     };
     thread.turn = turn;
     if (input.promptUuid !== undefined) thread.prompts.set(turn.id, input.promptUuid);
@@ -981,10 +1072,8 @@ export class ClaudeSession implements Session {
           status: "running",
           ...(parentItem === undefined ? {} : { parentItemId: parentItem.id }),
         });
-        if (tool.name === "SetGoal" && parentToolUseId === null) {
-          const condition = asString(asRecord(tool.input)["condition"]);
-          if (condition !== undefined) this.#setGoal(thread, { threadId: thread.thread.id, objective: condition, status: "active", derived: true, turnIds: [turn.id], updatedAt: nowIso() });
-        }
+        // A SetGoal call alone sets nothing: its result says whether Claude Code set the goal or only proposed it.
+        if (tool.name === "SetGoal" && parentToolUseId === null) turn.goalMayChange = true;
       }
     });
     turn.blocksSeen.set(message.message.id, seen + message.message.content.length);
@@ -1065,6 +1154,7 @@ export class ClaudeSession implements Session {
     });
     this.#emitTurn(thread, turn, { type: "turn.terminal", turnId: turn.id, status, ...(failure === undefined ? {} : { failure }), threadDisposition: "reusable" });
     if (thread.queued.length === 0) this.#setThreadStatus(thread, "idle");
+    if (turn.goalMayChange) void this.#refreshGoal(thread);
   }
 
   /** Claude dequeues a "later" prompt as soon as the running turn ends. */
@@ -1075,6 +1165,7 @@ export class ClaudeSession implements Session {
     const turn = this.#openTurn(thread, { id: next.id, promptUuid: next.promptUuid, origin: "user", hostTag: next.hostTag, clientTurnKey: next.clientTurnKey });
     this.#emitTurn(thread, turn, { type: "turn.upsert", turn: { id: turn.id, status: "running", startedAt: turn.startedAt } });
     this.#emitPrompt(thread, turn, next.promptUuid, next.text);
+    if (GOAL_COMMAND.test(next.text)) turn.goalMayChange = true;
   }
 
   #emitPrompt(thread: ClaudeThread, turn: ActiveTurn, promptUuid: string, text: string): void {
@@ -1294,23 +1385,32 @@ export class ClaudeSession implements Session {
     });
     const text = this.#plainText(input.content);
     this.#emitPrompt(thread, turn, uuid, text);
-    if (text.startsWith("/goal")) this.#goalCommand(thread, turn, text);
+    if (GOAL_COMMAND.test(text)) turn.goalMayChange = true;
     live.input.push({ type: "user", message: { role: "user", content }, parent_tool_use_id: null, uuid });
     return { status: "accepted", turnId: id, accepted: "started", providerMessageId: uuid };
   }
 
-  /** Per-turn model, effort and policy go through the query's control methods before the prompt. */
-  async #applyTurnSettings(thread: ClaudeThread, live: LiveQuery, input: StartTurnInput): Promise<void> {
-    const model = input.config?.["model"];
+  /**
+   * Model and effort reach a running query through its control methods. The
+   * thread records a value only once Claude Code took it, so the thread's
+   * model and effort are always what the query runs.
+   */
+  async #applyLiveConfig(thread: ClaudeThread, live: LiveQuery, config: { [key: string]: unknown } | undefined): Promise<void> {
+    const model = config?.["model"];
     if (typeof model === "string" && model !== "" && model !== thread.model) {
       await live.query.setModel(model);
       thread.model = model;
     }
-    const effort = input.config?.["effort"];
+    const effort = config?.["effort"];
     if (typeof effort === "string" && effort !== thread.effort && ["low", "medium", "high", "xhigh", "max"].includes(effort)) {
       await live.query.applyFlagSettings({ effortLevel: effort as NonNullable<ClaudeDriverConfig["effort"]> });
       thread.effort = effort as ClaudeDriverConfig["effort"];
     }
+  }
+
+  /** Per-turn model, effort and policy go through the query's control methods before the prompt. */
+  async #applyTurnSettings(thread: ClaudeThread, live: LiveQuery, input: StartTurnInput): Promise<void> {
+    await this.#applyLiveConfig(thread, live, input.config);
     if (input.policy !== undefined && permissionModeFor(input.policy) !== permissionModeFor(thread.policy)) {
       await live.query.setPermissionMode(permissionModeFor(input.policy));
     }
@@ -1742,47 +1842,61 @@ export class ClaudeSession implements Session {
     throw callErrors.unsupported(`extensions.${ns}`);
   }
 
-  #setGoal(thread: ClaudeThread, goal: AriGoal | null): void {
-    thread.goal = goal;
-    this.#emit(
-      { type: "x:ari.goal.updated", data: goal, fallback: { title: goal === null ? "Goal cleared" : "Goal", ...(goal === null ? {} : { text: goal.objective }) } },
-      { threadId: thread.thread.id, turnId: thread.turn?.id, hostTag: thread.turn?.hostTag },
-    );
+  /** Reads the goal again from the transcript and announces it when Claude Code set, replaced or cleared one. */
+  async #refreshGoal(thread: ClaudeThread): Promise<void> {
+    let goal: AriGoal | null;
+    try {
+      goal = await this.#goalFromTranscript(thread);
+    } catch (error) {
+      this.#context.host.diagnostics.log({ level: "warn", msg: `The goal of thread ${thread.thread.id} could not be read from the transcript: ${errorText(error)}` });
+      return;
+    }
+    const known = thread.goal;
+    if (goal === null ? known === null : known !== null && known.objective === goal.objective && known.status === goal.status) return;
+    thread.goal = goal === null ? null : { ...goal, updatedAt: nowIso() };
+    const data = thread.goal;
+    this.#emit({ type: "x:ari.goal.updated", data, fallback: { title: data === null ? "Goal cleared" : "Goal", ...(data === null ? {} : { text: data.objective }) } }, { threadId: thread.thread.id });
   }
 
-  /** A prompt `/goal <condition>` sets Claude's goal; `/goal clear` clears it. */
-  #goalCommand(thread: ClaudeThread, turn: ActiveTurn, text: string): void {
-    const argument = text.slice("/goal".length).trim();
-    if (argument === "") return;
-    if (argument === "clear") this.#setGoal(thread, null);
-    else this.#setGoal(thread, { threadId: thread.thread.id, objective: argument, status: "active", derived: true, turnIds: [turn.id], updatedAt: nowIso() });
-  }
-
-  /** The goal as the transcript shows it: the last SetGoal call or /goal prompt, unless a /goal clear came after. */
+  /**
+   * The goal as Claude Code confirmed it in the transcript. Claude Code
+   * 2.1.330 records its /goal command as a tagged command row and the
+   * command's answer as a tagged output row: "Goal set: <condition>" sets
+   * the goal, "Goal cleared: <condition>" clears it, and any other answer (a
+   * refusal, the status) changes nothing. A SetGoal call sets the goal only
+   * when its result says so; with ask_user it only proposes the goal to the
+   * user. Prompts after the goal was set are turns of the goal run.
+   */
   async #goalFromTranscript(thread: ClaudeThread): Promise<AriGoal | null> {
     let goal: AriGoal | null = null;
     let turnId: string | undefined;
+    let command: string | undefined;
+    const setGoalCalls = new Map<string, string>();
     for (const entry of await this.#transcript(thread)) {
-      const prompt = promptTextOf(entry);
-      if (prompt !== undefined) {
-        turnId = turnIdFor(thread.thread.id, entry.uuid);
-        if (prompt.startsWith("/goal")) {
-          const argument = prompt.slice("/goal".length).trim();
-          if (argument === "clear") goal = null;
-          else if (argument !== "") goal = { threadId: thread.thread.id, objective: argument, status: "active", derived: true, turnIds: [turnId] };
-        } else if (goal !== null) {
-          const known: AriGoal = goal;
-          goal = { ...known, turnIds: [...(known.turnIds ?? []), turnId] };
-        }
+      const output = localCommandOutputOf(entry);
+      if (output !== undefined) {
+        if (command === "goal" && output.startsWith(GOAL_SET)) goal = { threadId: thread.thread.id, objective: output.slice(GOAL_SET.length), status: "active", derived: true, turnIds: turnId === undefined ? [] : [turnId] };
+        else if (command === "goal" && output.startsWith(GOAL_CLEARED)) goal = null;
         continue;
       }
-      if (entry.type !== "assistant" || entry.parent_tool_use_id !== null) continue;
+      if (this.#startsTurn(thread, entry)) {
+        turnId = turnIdFor(thread.thread.id, entry.uuid);
+        command = slashCommandOf(entry)?.name;
+        if (goal !== null && command !== "goal") goal = { ...goal, turnIds: [...(goal.turnIds ?? []), turnId] };
+        continue;
+      }
+      if (entry.parent_tool_use_id !== null) continue;
       const content = asRecord(entry.message)["content"];
       for (const raw of Array.isArray(content) ? content : []) {
         const block = asRecord(raw);
-        if (block["type"] !== "tool_use" || block["name"] !== "SetGoal") continue;
-        const condition = asString(asRecord(block["input"])["condition"]);
-        if (condition !== undefined) goal = { threadId: thread.thread.id, objective: condition, status: "active", derived: true, turnIds: turnId === undefined ? [] : [turnId] };
+        if (entry.type === "assistant" && block["type"] === "tool_use" && block["name"] === "SetGoal" && typeof block["id"] === "string") {
+          const condition = asString(asRecord(block["input"])["condition"]);
+          if (condition !== undefined) setGoalCalls.set(block["id"], condition);
+        } else if (entry.type === "user" && block["type"] === "tool_result" && typeof block["tool_use_id"] === "string") {
+          const condition = setGoalCalls.get(block["tool_use_id"]);
+          if (condition === undefined || block["is_error"] === true || !toolResultText(block["content"]).startsWith(SET_GOAL_DONE)) continue;
+          goal = { threadId: thread.thread.id, objective: condition, status: "active", derived: true, turnIds: turnId === undefined ? [] : [turnId] };
+        }
       }
     }
     return goal;

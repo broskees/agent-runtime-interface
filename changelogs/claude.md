@@ -23,7 +23,15 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
 - Background tasks and subagents from `task_*` messages; `stopTask` backs
   `backgroundTasks.stop` and `stopSubagent`.
 - Extensions `claude.hooks` (settings hooks and `x:claude.hook` events),
-  `claude.fileCheckpoints` (`rewindFiles`) and the derived `ari.goal`.
+  `claude.fileCheckpoints` (`rewindFiles`) and the derived `ari.goal`, which
+  holds only what Claude Code confirms in the transcript: the `/goal`
+  command's `Goal set` and `Goal cleared` output, and a `SetGoal` result that
+  says the goal is set.
+- A resume of a live thread applies a new model and effort to the running
+  query, and a new system prompt append by resuming the session in a new
+  query; it rejects with `invalid_state` while the thread has work running.
+- A configured `executablePath` that names no executable file reports the
+  driver unavailable.
 - Ambient sign-in from `claude auth status --json`, or an API key the
   instance stores; 30-second runtime auth poison per scope.
 - Catalog from `supportedModels()`, limits from rate limit events, text

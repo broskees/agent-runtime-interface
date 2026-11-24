@@ -1,0 +1,83 @@
+// `ari/drivers/claude`: the Claude driver. It runs Claude Code through the
+// Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`, an optional peer),
+// which it loads with a dynamic `import()` the first time an instance needs
+// it. Importing this module loads no vendor code and spawns nothing, and
+// `create()` does neither: a missing SDK or native binary shows in
+// `status()` and fails `openSession` with `driver_unavailable`.
+//
+// `createClaudeDriver({ loadSdk, newUuid })` builds the driver with another
+// SDK loader (a host that bundles the SDK, or a test's fake) and another
+// source of the UUIDs it gives Claude; `claudeDriver` uses the defaults.
+
+import type { CliLaunchManifest } from "../../generated/driver.ts";
+import { CLAUDE_CONFIG_SCHEMA, CLAUDE_DRIVER_KIND, CLAUDE_METADATA, CLAUDE_TESTED_VERSIONS, claudeDefaultConfig } from "../../meta/claude.ts";
+import type { ClaudeDriverConfig } from "../../meta/claude.ts";
+import type { Driver } from "../../runtime.ts";
+import { ARI_VERSION } from "../../version.ts";
+import { CLAUDE_API_KEY_SECRET, CLAUDE_CREDENTIAL_VARIABLES, CLAUDE_SECRET_NAMESPACE, ClaudeInstance } from "./instance.ts";
+import type { ClaudeDriverOptions } from "./instance.ts";
+import { loadClaudeSdk } from "./sdk.ts";
+
+export type { ClaudeDriverConfig } from "../../meta/claude.ts";
+export type { ClaudeDriverOptions } from "./instance.ts";
+export type { ClaudeSdk, ClaudeSdkLoader, ClaudeSdkRuntime } from "./sdk.ts";
+export { CLAUDE_CAPABILITIES, CLAUDE_EXTENSIONS } from "./capabilities.ts";
+export {
+  CLAUDE_API_KEY_SECRET,
+  CLAUDE_AUTH_METHODS,
+  CLAUDE_CREDENTIAL_VARIABLES,
+  CLAUDE_POISON_MS,
+  CLAUDE_SECRET_NAMESPACE,
+  satisfiesVersionRange,
+  versionAdvisory,
+} from "./instance.ts";
+export {
+  CLAUDE_IDENTITY_VERSION,
+  CLAUDE_OPTION_ALLOW,
+  CLAUDE_OPTION_DENY,
+  CLAUDE_OPTION_DENY_INTERRUPT,
+  allowWithRulesOptionId,
+  itemIdFor,
+  permissionModeFor,
+  requestIdFor,
+  subagentIdFor,
+  taskIdFor,
+  threadIdFor,
+  turnIdFor,
+} from "./mapping.ts";
+export { loadClaudeSdk, nativeBinaryCandidates } from "./sdk.ts";
+export { CLAUDE_TESTED_VERSIONS };
+
+/**
+ * How a host runs Claude Code itself in a terminal: `claude`, `claude
+ * --resume <id>`, `claude --resume <id> --fork-session`, with MCP servers as
+ * `--mcp-config <json>`. Ambient Anthropic credentials are scrubbed.
+ */
+export const CLAUDE_CLI_MANIFEST: CliLaunchManifest = {
+  binary: "claude",
+  envScrubPrefixes: [...CLAUDE_CREDENTIAL_VARIABLES],
+  args: { fresh: [], resume: ["--resume", "{sessionId}"], fork: ["--resume", "{sessionId}", "--fork-session"] },
+  mcpInjection: { mode: "inline_json", flag: "--mcp-config" },
+};
+
+/** A Claude driver with another SDK loader or session id source. */
+export function createClaudeDriver(options: ClaudeDriverOptions = {}): Driver<ClaudeDriverConfig> {
+  const loadSdk = options.loadSdk ?? loadClaudeSdk;
+  return {
+    kind: CLAUDE_DRIVER_KIND,
+    ariVersion: ARI_VERSION,
+    metadata: CLAUDE_METADATA,
+    configSchema: CLAUDE_CONFIG_SCHEMA,
+    defaultConfig: claudeDefaultConfig,
+    cliManifest: CLAUDE_CLI_MANIFEST,
+    async create(host, input) {
+      // Only reads whether the instance holds its own API key; the SDK loads on first use.
+      const managed = (await host.secrets.get(CLAUDE_SECRET_NAMESPACE, CLAUDE_API_KEY_SECRET)) !== null;
+      return new ClaudeInstance(host, input.config, input.instanceId, input.environment, managed, options, loadSdk);
+    },
+  };
+}
+
+export const claudeDriver: Driver<ClaudeDriverConfig> = createClaudeDriver();
+
+export default claudeDriver;

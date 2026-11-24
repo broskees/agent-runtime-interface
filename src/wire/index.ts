@@ -11,12 +11,12 @@ export type { ConnectDriverOptions, WireDriverConnection, WireSession } from "./
 export { ARI_CALL_ERROR_CODE, WireConnection, callErrorOf, fromJsonRpcError, toJsonRpcError } from "./connection.ts";
 export type { ConsumeOptions, WireConnectionOptions, WireRequestContext, WireTransport } from "./connection.ts";
 
-export { methodUnavailable, negotiateGrammarVersion, negotiateHandshake } from "./handshake.ts";
-export type { NegotiatedVersions } from "./handshake.ts";
+export { CORE_METHODS, methodUnavailable, negotiateGrammarVersion, negotiateHandshake } from "./handshake.ts";
+export type { NegotiatedVersions, RefusedMethod } from "./handshake.ts";
 
 export { isDriver, isModulePath, loadDriver, pickDriver } from "./load-driver.ts";
 
-export { OPTIONAL_HOST_MEMBERS, OPTIONAL_INSTANCE_MEMBERS, OPTIONAL_SESSION_MEMBERS, WIRE_METHODS, defaultMethodVersions, wireMethod } from "./methods.ts";
+export { METHOD_HELPERS, OPTIONAL_HOST_MEMBERS, OPTIONAL_INSTANCE_MEMBERS, OPTIONAL_SESSION_MEMBERS, WIRE_METHODS, defaultMethodVersions, wireMethod } from "./methods.ts";
 export type { WireDirection, WireMethod } from "./methods.ts";
 
 export { serveDriver } from "./server.ts";

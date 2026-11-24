@@ -579,13 +579,13 @@ export const SessionExtParamsSchema: Effect.Schema.Codec<Wire.SessionExtParams> 
 export const HostConfigGetParamsSchema: Effect.Schema.Codec<Wire.HostConfigGetParams> = Schema.StructWithRest(
   Schema.Struct({
     instanceId: Schema.String,
-    /** Also start a change stream. */
+    /** Also start a change stream. The result is then a `HostConfigWatchResult`. */
     watch: Schema.optional(Schema.Boolean),
   }),
   [kit.OtherFields],
 ).annotate({ identifier: "HostConfigGetParams" });
 
-/** `streamId` is set when `watch` was true; changes arrive as `host/config.changed`. */
+/** The instance's config. Without `watch` it carries no `streamId`. With `watch: true` it must match `HostConfigWatchResult`: a driver refuses a watch answer without `streamId` as a protocol error. */
 export const HostConfigGetResultSchema: Effect.Schema.Codec<Wire.HostConfigGetResult> = Schema.StructWithRest(
   Schema.Struct({
     config: Schema.suspend(() => AnyValueSchema),
@@ -593,6 +593,15 @@ export const HostConfigGetResultSchema: Effect.Schema.Codec<Wire.HostConfigGetRe
   }),
   [kit.OtherFields],
 ).check(kit.hasFields(["config"])).annotate({ identifier: "HostConfigGetResult" });
+
+/** The answer to `host/config.get` with `watch: true`: the config and the id of its change stream. Later values arrive as `host/config.changed` until `stream/end`. A host with nothing to watch still starts the stream and ends it at once. */
+export const HostConfigWatchResultSchema: Effect.Schema.Codec<Wire.HostConfigWatchResult> = Schema.StructWithRest(
+  Schema.Struct({
+    config: Schema.suspend(() => AnyValueSchema),
+    streamId: Schema.String,
+  }),
+  [kit.OtherFields],
+).check(kit.hasFields(["config"])).annotate({ identifier: "HostConfigWatchResult" });
 
 export const HostSecretParamsSchema: Effect.Schema.Codec<Wire.HostSecretParams> = Schema.StructWithRest(
   Schema.Struct({
@@ -626,6 +635,8 @@ export const HostProcessSpawnParamsSchema: Effect.Schema.Codec<Wire.HostProcessS
     purpose: Schema.optional(Schema.suspend(() => SpawnPurposeSchema)),
     stdin: Schema.optional(Schema.Union([Schema.Literals(["pipe", "ignore"]), Schema.String])),
     timeoutMs: Schema.optional(kit.Integer.check(Schema.isGreaterThanOrEqualTo(0))),
+    /** The id the driver gives this child: unique on the connection and never reused, even after the child exits. The host names the child by it in `host/process.output` and `host/process.exit`, and the driver in `host/process.write`, `host/process.closeStdin` and `host/process.kill`. A host refuses a spawn whose `processId` it has seen before on the connection with `invalid_state` (`duplicate_process_id`) and starts nothing. */
+    processId: Schema.String,
   }),
   [kit.OtherFields],
 ).annotate({ identifier: "HostProcessSpawnParams" });

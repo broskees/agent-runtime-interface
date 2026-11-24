@@ -128,9 +128,20 @@ every method. Its mapping rules:
 - `driver/create` and `instance/openSession` answer descriptors whose
   `members` list the optional members the object has; `driver/create`'s
   `hostMembers` lists the optional host services the host serves.
+- `host/config.get` with `watch: true` always answers a `streamId`
+  (`HostConfigWatchResult`); a host with nothing to watch ends the stream at
+  once.
+- Every host service is a request the host answers, `host/diagnostics.log`
+  and `host/telemetry.track` included.
 - The host's `initialize` says whether it runs the driver's processes
   (`host.capabilities.process`). If not, the driver spawns locally with the
-  `envPolicy` sent there, and looks executables up locally.
+  `envPolicy` sent there, and looks executables up locally. If so, the driver
+  names each child with the `processId` of `host/process.spawn`: unique on the
+  connection and never reused, so a host refuses a repeated one.
+- A method whose versions differ in major is refused on its own, with the
+  methods that need it. `initialize`, `stream/end` and `stream/cancel` are the
+  exception: a driver must list them, at the host's major, or the connection
+  is refused.
 - Non-method members (`Session.id`, `Instance.bindingKey`, `Driver.metadata`,
   `HostServices.paths.stateDir` and so on) travel inside the params or results
   listed in the `properties` section of `methods.json`.

@@ -355,18 +355,27 @@
       "type": "object",
       "properties": {
         "instanceId": { "type": "string" },
-        "watch": { "type": "boolean", "description": "Also start a change stream." }
+        "watch": { "type": "boolean", "description": "Also start a change stream. The result is then a `HostConfigWatchResult`." }
       },
       "required": ["instanceId"]
     },
     "HostConfigGetResult": {
-      "description": "`streamId` is set when `watch` was true; changes arrive as `host/config.changed`.",
+      "description": "The instance's config. Without `watch` it carries no `streamId`. With `watch: true` it must match `HostConfigWatchResult`: a driver refuses a watch answer without `streamId` as a protocol error.",
       "type": "object",
       "properties": {
         "config": { "$ref": "common.schema.json#/$defs/AnyValue" },
         "streamId": { "type": "string" }
       },
       "required": ["config"]
+    },
+    "HostConfigWatchResult": {
+      "description": "The answer to `host/config.get` with `watch: true`: the config and the id of its change stream. Later values arrive as `host/config.changed` until `stream/end`. A host with nothing to watch still starts the stream and ends it at once.",
+      "type": "object",
+      "properties": {
+        "config": { "$ref": "common.schema.json#/$defs/AnyValue" },
+        "streamId": { "type": "string" }
+      },
+      "required": ["config", "streamId"]
     },
     "HostSecretParams": {
       "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/SecretKey" }]
@@ -386,7 +395,20 @@
       ]
     },
     "HostProcessSpawnParams": {
-      "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/SpawnRequest" }]
+      "allOf": [
+        { "$ref": "#/$defs/InstanceTarget" },
+        { "$ref": "host.schema.json#/$defs/SpawnRequest" },
+        {
+          "type": "object",
+          "properties": {
+            "processId": {
+              "type": "string",
+              "description": "The id the driver gives this child: unique on the connection and never reused, even after the child exits. The host names the child by it in `host/process.output` and `host/process.exit`, and the driver in `host/process.write`, `host/process.closeStdin` and `host/process.kill`. A host refuses a spawn whose `processId` it has seen before on the connection with `invalid_state` (`duplicate_process_id`) and starts nothing."
+            }
+          },
+          "required": ["processId"]
+        }
+      ]
     },
     "HostProcessResolveExecutableParams": {
       "allOf": [{ "$ref": "#/$defs/InstanceTarget" }, { "$ref": "host.schema.json#/$defs/ResolveExecutableInput" }]

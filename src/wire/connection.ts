@@ -305,9 +305,10 @@ export class WireConnection {
     this.#resolveDone(error);
   }
 
+  /** Refuses a method the handshake refused or does not know; only `initialize` itself comes before the handshake. */
   #checkAvailable(method: string): void {
     const negotiated = this.#negotiated;
-    if (negotiated === undefined || method === "initialize" || method.startsWith("stream/")) return;
+    if (negotiated === undefined || method === "initialize") return;
     if (negotiated.methodVersions[method] === undefined) throw methodUnavailable(method, negotiated);
   }
 
@@ -349,6 +350,11 @@ export class WireConnection {
     const entry = wireMethod(method);
     if (entry === undefined || entry.kind !== "notification" || !this.#accepts(entry.direction)) {
       this.#problem(`unknown notification ${method}`);
+      return;
+    }
+    const negotiated = this.#negotiated;
+    if (negotiated !== undefined && negotiated.methodVersions[method] === undefined) {
+      this.#problem(`dropped notification ${method}, which this connection refused`);
       return;
     }
     if (!entry.params.is(params)) {

@@ -11,7 +11,13 @@
 //   sends what an older side cannot read. A method listed with different
 //   majors is refused: calls to it reject with `unsupported`. A method the
 //   host does not list is spoken at the driver's version; a method the driver
-//   does not list does not exist on the connection.
+//   does not list does not exist on the connection. A method that needs a
+//   helper (a stream's item notification, a delegated child's output and
+//   exit) is refused when the helper is refused or missing, so a stream never
+//   opens without the notifications that carry it. The core methods
+//   (`initialize`, `stream/end`, `stream/cancel`) are the exception: no stream
+//   could end or be stopped without them, so a driver that does not list one,
+//   or a major mismatch on one, refuses the connection.
 // - `persistenceVersion`: stored handles and journals must share their major
 //   version; the connection uses the lower minor.
 //
@@ -20,6 +26,7 @@
 import { callErrors } from "../errors.ts";
 import type { Version } from "../generated/common.ts";
 import type { Handshake } from "../generated/handshake.ts";
+import { METHOD_HELPERS } from "./methods.ts";
 
 export interface NegotiatedVersions {
   /** The host's and the driver's contract versions; their majors are equal. */
@@ -28,11 +35,27 @@ export interface NegotiatedVersions {
   readonly grammarVersion: number;
   /** The version each usable method is spoken at. */
   readonly methodVersions: { readonly [method: string]: Version };
-  /** Methods both sides list with different major versions; calls to them are refused. */
-  readonly refusedMethods: { readonly [method: string]: { readonly host: Version; readonly driver: Version } };
+  /**
+   * Methods refused on this connection: both sides list them with different
+   * major versions, or (`because`) a helper they need is refused, such as a
+   * stream's item notification. Calls to them are refused.
+   */
+  readonly refusedMethods: { readonly [method: string]: RefusedMethod };
   /** The persistence version of stored handles and journals on this connection. */
   readonly persistenceVersion: Version;
 }
+
+/** Methods the connection cannot work without; a major mismatch on one refuses the connection. */
+export const CORE_METHODS = ["initialize", "stream/end", "stream/cancel"] as const;
+
+/**
+ * Why a method is refused: the two sides' versions of it, or the helper it
+ * needs (`because`) with that helper's versions, or no versions when the
+ * driver does not list the helper at all.
+ */
+export type RefusedMethod =
+  | { readonly host: Version; readonly driver: Version; readonly because?: string }
+  | { readonly because: string; readonly host?: undefined; readonly driver?: undefined };
 
 function contractMajor(version: string, side: string): number {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
@@ -96,7 +119,7 @@ export function negotiateHandshake(host: Handshake, driver: Handshake): Negotiat
   };
 
   const methodVersions: { [method: string]: Version } = {};
-  const refusedMethods: { [method: string]: { host: Version; driver: Version } } = {};
+  const refusedMethods: { [method: string]: RefusedMethod } = {};
   for (const [method, driverVersion] of Object.entries(driver.methodVersions)) {
     const hostVersion = host.methodVersions[method];
     if (hostVersion === undefined) {
@@ -105,6 +128,30 @@ export function negotiateHandshake(host: Handshake, driver: Handshake): Negotiat
       refusedMethods[method] = { host: { ...hostVersion }, driver: { ...driverVersion } };
     } else {
       methodVersions[method] = { major: driverVersion.major, minor: Math.min(hostVersion.minor, driverVersion.minor) };
+    }
+  }
+
+  // A method whose stream item or process helper is refused or missing cannot work either.
+  for (const [method, helpers] of Object.entries(METHOD_HELPERS)) {
+    if (methodVersions[method] === undefined) continue;
+    const unusableHelper = helpers.find((helper) => methodVersions[helper] === undefined);
+    if (unusableHelper === undefined) continue;
+    delete methodVersions[method];
+    const helperRefusal = refusedMethods[unusableHelper];
+    refusedMethods[method] =
+      helperRefusal?.host === undefined ? { because: unusableHelper } : { host: helperRefusal.host, driver: helperRefusal.driver, because: unusableHelper };
+  }
+
+  for (const method of CORE_METHODS) {
+    if (driver.methodVersions[method] === undefined) {
+      throw callErrors.protocol("core_method_missing", `The driver does not list the wire method ${method}, and the connection cannot work without it`);
+    }
+    const refused = refusedMethods[method];
+    if (refused?.host !== undefined) {
+      throw callErrors.protocol(
+        "core_method_version_mismatch",
+        `The wire method ${method} is incompatible: the host speaks version ${versionText(refused.host)} and the driver speaks ${versionText(refused.driver)}, and the connection cannot work without it`,
+      );
     }
   }
 
@@ -120,10 +167,14 @@ export function negotiateHandshake(host: Handshake, driver: Handshake): Negotiat
 /** The `unsupported` error for a call to a method this connection refused or does not have. */
 export function methodUnavailable(method: string, negotiated: NegotiatedVersions): Error {
   const refused = negotiated.refusedMethods[method];
-  if (refused !== undefined) {
+  if (refused?.host === undefined && refused?.because !== undefined) {
+    return callErrors.unsupported(method, `The wire method ${method} is unavailable because it needs ${refused.because}, which the driver does not list`);
+  }
+  if (refused?.host !== undefined) {
+    const which = refused.because === undefined ? "" : ` because it needs ${refused.because}, of which`;
     return callErrors.unsupported(
       method,
-      `The wire method ${method} is unavailable: the host speaks version ${versionText(refused.host)} and the driver speaks ${versionText(refused.driver)}`,
+      `The wire method ${method} is unavailable${which}: the host speaks version ${versionText(refused.host)} and the driver speaks ${versionText(refused.driver)}`,
     );
   }
   return callErrors.unsupported(method, `The wire method ${method} is not available on this connection`);

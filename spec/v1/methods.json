@@ -16,7 +16,7 @@
         "major": 1,
         "minor": 0
       },
-      "notes": "First message on a connection. Negotiates the contract version, the event grammar version (highest version in both ranges), per-method versions and the persistence version."
+      "notes": "First message on a connection. Negotiates the contract version, the event grammar version (highest version in both ranges), per-method versions and the persistence version. A method whose major version differs between the two sides is refused on its own, and so is a method whose helper (a stream's item notification, a delegated child's process methods) is refused or not listed by the driver. The core methods initialize, stream/end and stream/cancel are the exception: no stream can end or be stopped without them, so a driver that does not list one (detail core_method_missing) or a major mismatch on one (core_method_version_mismatch) refuses the connection. Other refusals: ari_version_mismatch, grammar_version_mismatch, persistence_version_mismatch. After a refusal the driver is still uninitialized and the host may send initialize again."
     },
     {
       "name": "stream/end",
@@ -45,7 +45,7 @@
         "major": 1,
         "minor": 0
       },
-      "notes": "The consumer of a stream stops it early. The producer answers and then sends stream/end."
+      "notes": "The consumer of a stream stops it early. The producer answers null and then sends stream/end. Cancelling a stream that already ended, or that the producer does not know, also answers null."
     },
     {
       "name": "driver/defaultConfig",
@@ -81,7 +81,7 @@
         "major": 1,
         "minor": 0
       },
-      "notes": "The host services for the new instance are this connection's host/* methods, scoped by instanceId; params.paths carries HostServices.paths."
+      "notes": "The host services for the new instance are this connection's host/* methods, scoped by params.instanceId: every host/* call for this instance names it by that id. The result's instanceId is the driver's id for the instance, which may differ; instance/* calls name it by that one. params.paths carries HostServices.paths; params.hostMembers lists the optional host services the host serves for this instance."
     },
     {
       "name": "instance/status",
@@ -691,7 +691,8 @@
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "Disposes the instance and closes its sessions. Later calls naming the instance or its sessions answer not_found."
     },
     {
       "name": "instance/statusChanged",
@@ -1283,7 +1284,7 @@
         },
         "end": "stream/end",
         "cancel": "stream/cancel",
-        "startedWhen": "params.watch is true; the result then carries streamId"
+        "startedWhen": "params.watch is true; the result then always carries streamId (HostConfigWatchResult), and a host with nothing to watch ends the stream at once"
       }
     },
     {
@@ -1353,7 +1354,7 @@
         "major": 1,
         "minor": 0
       },
-      "notes": "Sent only when the host advertised capabilities.process in initialize; otherwise the driver spawns locally with the envPolicy from initialize. Output and exit arrive as host/process.output and host/process.exit."
+      "notes": "Sent only when the host advertised capabilities.process in initialize; otherwise the driver spawns locally with the envPolicy from initialize. params.processId is the driver's id for the child, unique on the connection and never reused; the host uses it in host/process.output and host/process.exit, which it sends only after answering the spawn, and refuses a processId it has seen before with invalid_state (duplicate_process_id)."
     },
     {
       "name": "host/process.resolveExecutable",
@@ -1513,31 +1514,39 @@
     {
       "name": "host/diagnostics.log",
       "direction": "driver_to_host",
-      "kind": "notification",
+      "kind": "request",
       "interface": "HostServices",
       "member": "diagnostics.log",
       "params": {
         "$ref": "rpc.schema.json#/$defs/HostDiagnosticsLogParams"
       },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "A request like every host operation: the host answers null, or a call error. The TypeScript member returns nothing, so the driver does not wait for the answer; ari-driver reports an error answer on its stderr."
     },
     {
       "name": "host/telemetry.track",
       "direction": "driver_to_host",
-      "kind": "notification",
+      "kind": "request",
       "interface": "HostServices",
       "member": "telemetry.track",
       "optional": true,
       "params": {
         "$ref": "rpc.schema.json#/$defs/HostTelemetryTrackParams"
       },
+      "result": {
+        "$ref": "rpc.schema.json#/$defs/VoidResult"
+      },
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "A request like every host operation: the host answers null, or a call error. The TypeScript member returns nothing, so the driver does not wait for the answer; ari-driver reports an error answer on its stderr."
     },
     {
       "name": "host/ids.derive",
@@ -1568,7 +1577,8 @@
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "An item of the stream a host/config.get with watch: true started: the instance's new config."
     },
     {
       "name": "host/process.write",
@@ -1584,7 +1594,8 @@
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "params.processId names a child this instance spawned with host/process.spawn; any other answers not_found."
     },
     {
       "name": "host/process.closeStdin",
@@ -1600,7 +1611,8 @@
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "params.processId names a child this instance spawned with host/process.spawn; any other answers not_found."
     },
     {
       "name": "host/process.kill",
@@ -1616,7 +1628,8 @@
       "version": {
         "major": 1,
         "minor": 0
-      }
+      },
+      "notes": "params.processId names a child this instance spawned with host/process.spawn; any other answers not_found. Without params.signal the host ends the child its own way (the TypeScript host sends SIGTERM to the child's process group, then SIGKILL)."
     },
     {
       "name": "host/process.output",
@@ -1630,7 +1643,7 @@
         "major": 1,
         "minor": 0
       },
-      "notes": "Base64 output of a delegated child. The host sends all of a child's output before its host/process.exit."
+      "notes": "Output of a delegated child: data is standard base64 with padding, stream is stdout or stderr. The host sends it only after answering the spawn, and all of a child's output before its host/process.exit. Output or an exit for a processId that is not running is dropped, and ari-driver reports it on stderr."
     },
     {
       "name": "host/process.exit",

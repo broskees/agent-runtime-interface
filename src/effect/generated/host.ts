@@ -44,10 +44,10 @@ export const SpawnRequestSchema: Effect.Schema.Codec<Wire.SpawnRequest> = Schema
   [kit.OtherFields],
 ).annotate({ identifier: "SpawnRequest" });
 
-/** Wire form of a spawned child. Output and exit arrive as `host/process.output` and `host/process.exit` notifications for `processId`. */
+/** What the host answers to `host/process.spawn`. The child is named by the `processId` the driver chose in the request; its output and exit arrive as `host/process.output` and `host/process.exit` for that id. */
 export const SpawnResultSchema: Effect.Schema.Codec<Wire.SpawnResult> = Schema.StructWithRest(
   Schema.Struct({
-    processId: Schema.String,
+    /** The child's operating-system process id, when the host has one. */
     pid: Schema.optional(kit.Integer),
   }),
   [kit.OtherFields],

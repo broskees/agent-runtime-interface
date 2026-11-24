@@ -59,12 +59,37 @@ describe("negotiateHandshake", () => {
   });
 
   test("per-method versions: the lower minor of one major, refused across majors, the driver's when the host lists none", () => {
+    const core = { initialize: { major: 1, minor: 0 }, "stream/end": { major: 1, minor: 0 }, "stream/cancel": { major: 1, minor: 0 } };
     const negotiated = negotiateHandshake(
       { ...BASE, methodVersions: { "session/startTurn": { major: 1, minor: 0 }, "session/respond": { major: 2, minor: 0 } } },
-      { ...BASE, methodVersions: { "session/startTurn": { major: 1, minor: 3 }, "session/respond": { major: 1, minor: 4 }, "session/close": { major: 1, minor: 2 } } },
+      { ...BASE, methodVersions: { ...core, "session/startTurn": { major: 1, minor: 3 }, "session/respond": { major: 1, minor: 4 }, "session/close": { major: 1, minor: 2 } } },
     );
-    assert.deepEqual(negotiated.methodVersions, { "session/startTurn": { major: 1, minor: 0 }, "session/close": { major: 1, minor: 2 } });
+    assert.deepEqual(negotiated.methodVersions, { ...core, "session/startTurn": { major: 1, minor: 0 }, "session/close": { major: 1, minor: 2 } });
     assert.deepEqual(negotiated.refusedMethods, { "session/respond": { host: { major: 2, minor: 0 }, driver: { major: 1, minor: 4 } } });
+  });
+
+  test("a method is refused with the helper it needs: a stream's item notification refused or not listed", () => {
+    const { "ari/event": _event, ...withoutEvent } = defaultMethodVersions();
+    const missing = negotiateHandshake(BASE, { ...BASE, methodVersions: withoutEvent });
+    assert.equal(missing.methodVersions["session/events"], undefined);
+    assert.deepEqual(missing.refusedMethods["session/events"], { because: "ari/event" });
+    const refused = negotiateHandshake({ ...BASE, methodVersions: { "instance/usageRecord": { major: 2, minor: 0 } } }, BASE);
+    assert.deepEqual(refused.refusedMethods["instance/usageHistory.scan"], { host: { major: 2, minor: 0 }, driver: { major: 1, minor: 0 }, because: "instance/usageRecord" });
+    assert.ok(refused.methodVersions["instance/statusChanges"] !== undefined, "other streams are untouched");
+  });
+
+  test("the core methods: a driver that does not list one, or a major mismatch on one, refuses the connection", () => {
+    for (const method of ["initialize", "stream/end", "stream/cancel"]) {
+      const { [method]: _core, ...rest } = defaultMethodVersions();
+      assert.throws(
+        () => negotiateHandshake(BASE, { ...BASE, methodVersions: rest }),
+        (error: unknown) => isAriError(error, "protocol") && (error.callError as { detail?: string }).detail === "core_method_missing" && error.message.includes(method),
+      );
+      assert.throws(
+        () => negotiateHandshake({ ...BASE, methodVersions: { [method]: { major: 2, minor: 0 } } }, BASE),
+        (error: unknown) => isAriError(error, "protocol") && (error.callError as { detail?: string }).detail === "core_method_version_mismatch" && error.message.includes("2.0"),
+      );
+    }
   });
 
   test("contract and persistence majors must match; persistence uses the lower minor", () => {

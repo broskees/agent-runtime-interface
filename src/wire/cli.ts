@@ -94,7 +94,7 @@ export async function runAriDriver(argv: readonly string[]): Promise<number> {
       });
     });
   const server = serveDriver(driver, { ...transport, write: writeFrame }, {
-    onProblem: (message) => process.stderr.write(`ari-driver: protocol problem: ${message}\n`),
+    onProblem: (message) => process.stderr.write(`ari-driver: ${message}\n`),
   });
 
   const stop = (): void => void server.close();

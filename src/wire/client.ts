@@ -103,6 +103,11 @@ export interface WireDriverConnection {
 
 type Params = { readonly [key: string]: unknown };
 
+/** The change stream of a host that has nothing to watch: it ends at once. */
+const NO_CHANGES: AsyncIterable<never> = {
+  [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true as const, value: undefined }) }),
+};
+
 function without(params: Params, ...names: string[]): { [key: string]: unknown } {
   const rest: { [key: string]: unknown } = {};
   for (const [key, value] of Object.entries(params)) if (!names.includes(key)) rest[key] = value;
@@ -178,22 +183,22 @@ class WireClient {
   readonly #delegateProcesses: boolean;
   /** Host services by the host's instance id, which every `host/*` call names. */
   readonly #hosts = new Map<string, HostServices<ConfigValues>>();
-  /** Children the host spawned for the driver, by process id. */
-  readonly #processes = new Map<string, SpawnedProcess>();
-  #nextProcess = 1;
+  /** Children the host spawned for the driver, by the `processId` the driver gave each, with their instance. */
+  readonly #processes = new Map<string, { readonly child: SpawnedProcess; readonly instanceId: string }>();
+  /** Every `processId` the driver used on this connection; one is never accepted twice. */
+  readonly #usedProcessIds = new Set<string>();
 
   constructor(transport: WireTransport, options: ConnectDriverOptions) {
     this.#delegateProcesses = options.delegateProcesses === true;
     this.connection = new WireConnection(transport, {
       side: "host",
       onRequest: (method, params, context) => this.#hostRequest(method, params as Params, context),
-      onNotification: (method, params) => this.#hostNotification(method, params as Params),
       ...(options.onProblem === undefined ? {} : { onProblem: options.onProblem }),
       ...(options.describeClose === undefined ? {} : { describeClose: options.describeClose }),
     });
     this.connection.onClose(() => {
       // The driver is gone, so its children are too.
-      for (const child of this.#processes.values()) void child.kill().catch(() => undefined);
+      for (const { child } of this.#processes.values()) void child.kill().catch(() => undefined);
       this.#processes.clear();
     });
   }
@@ -234,9 +239,9 @@ class WireClient {
   }
 
   #process(params: Params): SpawnedProcess {
-    const child = this.#processes.get(params.processId as string);
-    if (child === undefined) throw callErrors.notFound({ resource: "process", id: params.processId as string });
-    return child;
+    const entry = this.#processes.get(params.processId as string);
+    if (entry === undefined || entry.instanceId !== params.instanceId) throw callErrors.notFound({ resource: "process", id: params.processId as string });
+    return entry.child;
   }
 
   async #hostRequest(method: string, params: Params, context: WireRequestContext): Promise<unknown> {
@@ -245,8 +250,9 @@ class WireClient {
       case "host/config.get": {
         const watch = params.watch === true;
         const reading = await host.config.get(params.watch === undefined ? undefined : { watch: params.watch as boolean });
-        if (!watch || reading.changes === undefined) return { config: reading.config };
-        return { config: reading.config, streamId: this.connection.produce(context, reading.changes, "host/config.changed") };
+        if (!watch) return { config: reading.config };
+        // A watch always answers a stream; with nothing to watch it ends at once.
+        return { config: reading.config, streamId: this.connection.produce(context, reading.changes ?? NO_CHANGES, "host/config.changed") };
       }
       case "host/secrets.get": {
         const value = await host.secrets.get(params.namespace as string, params.key as string);
@@ -293,28 +299,33 @@ class WireClient {
         if (ids === undefined) throw callErrors.unsupported("ids.derive", "The host does not derive ids");
         return ids.derive(params.kind as string, params.key as string);
       }
+      case "host/diagnostics.log":
+        host.diagnostics.log(without(params, "instanceId") as never);
+        return null;
+      case "host/telemetry.track": {
+        const telemetry = host.telemetry;
+        if (telemetry === undefined) throw callErrors.unsupported("telemetry.track", "The host does not take telemetry");
+        telemetry.track(params.name as string, params.props as never);
+        return null;
+      }
       default:
         throw callErrors.unsupported(method, `Method not served by the host: ${method}`);
     }
   }
 
-  #hostNotification(method: string, params: Params): void {
-    const host = this.#hosts.get(params.instanceId as string);
-    if (host === undefined) return;
-    if (method === "host/diagnostics.log") host.diagnostics.log(without(params, "instanceId") as never);
-    else if (method === "host/telemetry.track") host.telemetry?.track(params.name as string, params.props as never);
-  }
-
-  async #spawn(host: HostServices<ConfigValues>, params: Params, context: WireRequestContext): Promise<{ processId: string; pid?: number }> {
+  async #spawn(host: HostServices<ConfigValues>, params: Params, context: WireRequestContext): Promise<{ pid?: number }> {
     if (!this.#delegateProcesses) {
       throw callErrors.unsupported("host.process", "The host did not offer host.process; the driver spawns locally");
     }
-    const child = await host.process.spawn(without(params, "instanceId") as never);
-    const processId = `p${this.#nextProcess}`;
-    this.#nextProcess += 1;
-    this.#processes.set(processId, child);
+    const processId = params.processId as string;
+    if (this.#usedProcessIds.has(processId)) {
+      throw callErrors.invalidState("duplicate_process_id", `The driver already used processId ${processId} on this connection; process ids are never reused`);
+    }
+    this.#usedProcessIds.add(processId);
+    const child = await host.process.spawn(without(params, "instanceId", "processId") as never);
+    this.#processes.set(processId, { child, instanceId: params.instanceId as string });
     this.connection.afterResponse(context, () => void this.#pumpProcess(processId, child));
-    return child.pid === undefined ? { processId } : { processId, pid: child.pid };
+    return child.pid === undefined ? {} : { pid: child.pid };
   }
 
   /** Sends the child's output, then its exit, to the driver. */

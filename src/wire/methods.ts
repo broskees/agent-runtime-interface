@@ -195,8 +195,8 @@ export const WIRE_METHODS: readonly WireMethod[] = [
   request("host/background.shouldRun", DRIVER, HostBackgroundShouldRunParamsSchema),
   request("host/coordination.acquire", DRIVER, HostCoordinationAcquireParamsSchema),
   request("host/coordination.release", DRIVER, HostCoordinationReleaseParamsSchema),
-  notification("host/diagnostics.log", DRIVER, HostDiagnosticsLogParamsSchema),
-  notification("host/telemetry.track", DRIVER, HostTelemetryTrackParamsSchema),
+  request("host/diagnostics.log", DRIVER, HostDiagnosticsLogParamsSchema),
+  request("host/telemetry.track", DRIVER, HostTelemetryTrackParamsSchema),
   request("host/ids.derive", DRIVER, HostIdsDeriveParamsSchema),
   notification("host/config.changed", HOST, ConfigChangedParamsSchema),
   request("host/process.write", DRIVER, HostProcessWriteParamsSchema),
@@ -225,6 +225,19 @@ export const STREAM_ITEM_NOTIFICATIONS: { readonly [method: string]: string } = 
   "instance/statusChanged": "status",
   "instance/usageRecord": "record",
   "host/config.changed": "config",
+};
+
+/**
+ * Methods that only work together with others: a stream's item notification,
+ * and the helpers of a delegated child. The handshake refuses a method when
+ * one of its helpers is refused, so a stream or a child never hangs halfway.
+ */
+export const METHOD_HELPERS: { readonly [method: string]: readonly string[] } = {
+  "session/events": ["ari/event"],
+  "instance/statusChanges": ["instance/statusChanged"],
+  "instance/usageHistory.scan": ["instance/usageRecord"],
+  "host/config.get": ["host/config.changed"],
+  "host/process.spawn": ["host/process.output", "host/process.exit", "host/process.write", "host/process.closeStdin", "host/process.kill"],
 };
 
 /** The optional `Instance` members, by dotted path. */

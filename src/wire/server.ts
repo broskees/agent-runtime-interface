@@ -30,10 +30,8 @@ import { WireConnection } from "./connection.ts";
 import type { WireRequestContext, WireTransport } from "./connection.ts";
 import { negotiateHandshake } from "./handshake.ts";
 import type { NegotiatedVersions } from "./handshake.ts";
-import { createWireHostServices, routeProcessNotification } from "./host-proxy.ts";
-import type { ProcessEvent } from "./host-proxy.ts";
+import { DelegatedChildren, createWireHostServices } from "./host-proxy.ts";
 import { OPTIONAL_INSTANCE_MEMBERS, OPTIONAL_SESSION_MEMBERS, defaultMethodVersions, memberAt, presentMembers } from "./methods.ts";
-import { StreamRouter } from "./streams.ts";
 
 export interface ServeDriverOptions {
   /** The contract version this side speaks. Defaults to this package's. */
@@ -103,7 +101,8 @@ export function serveDriver(driver: Driver<any>, transport: WireTransport, optio
   };
   const instances = new Map<string, ServedInstance>();
   const sessions = new Map<string, { readonly session: Session; readonly instanceId: string }>();
-  const processRouter = new StreamRouter<ProcessEvent>();
+  const problem = options.onProblem ?? (() => undefined);
+  const children = new DelegatedChildren(problem);
   let negotiated: NegotiatedVersions | undefined;
   let delegatedProcesses = false;
   let envPolicy: EnvPolicy = { stripAmbient: [] };
@@ -155,7 +154,8 @@ export function serveDriver(driver: Driver<any>, transport: WireTransport, optio
       paths: params.paths as HostPaths,
       hostMembers: (params.hostMembers as string[] | undefined) ?? [],
       envPolicy,
-      processes: delegatedProcesses ? { mode: "delegated", router: processRouter } : { mode: "local", service: localProcessService },
+      processes: delegatedProcesses ? { mode: "delegated", children } : { mode: "local", service: localProcessService },
+      onProblem: problem,
     });
     const input: CreateInstanceRequest<unknown> = {
       instanceId: hostInstanceId,
@@ -310,14 +310,14 @@ export function serveDriver(driver: Driver<any>, transport: WireTransport, optio
     side: "driver",
     onRequest,
     onNotification: (method, params) => {
-      routeProcessNotification(processRouter, method, params);
+      if (!children.receive(method, params)) problem(`unexpected notification ${method}`);
     },
-    ...(options.onProblem === undefined ? {} : { onProblem: options.onProblem }),
+    onProblem: problem,
     describeClose: () => "The host closed the ari/wire connection",
   });
 
-  connection.onClose((error: AriError) => {
-    processRouter.closeAll(error);
+  connection.onClose(() => {
+    children.closeAll();
     void (async () => {
       const served = [...instances.values()];
       instances.clear();

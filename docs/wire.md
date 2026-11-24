@@ -38,12 +38,25 @@ ari-driver ./drivers.js --export mine  # a module with several drivers
 
 ## Framing
 
-Each frame is one JSON-RPC 2.0 object on one line, ending in `\n`. Batches
-are refused (`-32600`). A line that is not JSON is answered with a `-32700`
-error whose `id` is `null`, and the connection goes on.
+Each frame is one JSON-RPC 2.0 object on one line of UTF-8, ending in `\n`.
+Split lines on `\n` only: JSON strings may hold raw U+2028 and U+2029. A `\r`
+before the `\n` is dropped, blank lines are skipped, and a frame may be
+megabytes long. Batches are refused (`-32600`). A line that is not JSON is
+answered with a `-32700` error whose `id` is `null`, and the connection goes
+on.
 
 Both sides send requests: the host calls the driver, and the driver calls
-the host's services (`host/*`). Each side numbers its own request ids.
+the host's services (`host/*`). Each side numbers its own request ids; an id
+is a string or a number. `params` is always an object of named fields.
+
+- **Serve while you wait.** Keep reading and answering frames while your own
+  calls are pending. A driver often calls `host/*` before it answers the
+  host's request (a turn reads secrets and spawns processes), so a host that
+  blocks until its own call returns deadlocks. Answers come in any order.
+- **Notifications get no answer.** An unknown notification, one with invalid
+  params, or one for a method the handshake refused is dropped, and so is a
+  response whose id matches no pending call. `ari-driver` reports each on
+  stderr.
 
 ## The handshake
 
@@ -69,11 +82,33 @@ rules, which `negotiateHandshake` implements:
 |---|---|
 | `ariVersion` | Same major version, or the connection is refused. |
 | `grammarVersions` | Each side's ascending `[min, max]`. The connection uses the highest version both contain; ranges that do not overlap are refused, naming both ranges. |
-| `methodVersions` | Per method. Same major: the lower minor is used, so a newer side never sends what an older side cannot read. Different majors: that method is refused (calls to it reject with `unsupported`, naming both versions) and the rest works. A method the host does not list is spoken at the driver's version. |
+| `methodVersions` | Per method. Same major: the lower minor is used, so a newer side never sends what an older side cannot read. Different majors: that method is refused (calls to it reject with `unsupported`, naming both versions) and the rest works. A method the host does not list is spoken at the driver's version; a method the driver does not list does not exist on the connection. |
 | `persistenceVersion` | Same major, or the connection is refused; the lower minor is used for stored handles and journals. |
 
-A refusal is a `protocol` call error. `host.capabilities.process` and
-`host.envPolicy` decide how the driver spawns processes (see below).
+Two more rules keep a refused method from leaving a stream or a child
+half-working:
+
+- **Helpers.** Some methods work only with others: `session/events` needs
+  `ari/event`, `instance/statusChanges` needs `instance/statusChanged`,
+  `instance/usageHistory.scan` needs `instance/usageRecord`,
+  `host/config.get` needs `host/config.changed`, and `host/process.spawn`
+  needs `host/process.output`, `.exit`, `.write`, `.closeStdin` and `.kill`.
+  When a helper is refused, or the driver does not list it, the method is
+  refused too, and its `unsupported` error names the helper.
+- **Core methods.** `initialize`, `stream/end` and `stream/cancel` carry every
+  stream, so they are never refused alone. If the driver does not list one,
+  or the two sides list one with different majors, the connection is
+  refused. A driver lists every method it serves, these three included.
+
+A refused connection is a `protocol` call error naming both sides' values.
+Its `detail` names the rule: `ari_version_mismatch`,
+`grammar_version_mismatch`, `persistence_version_mismatch`,
+`core_method_missing` or `core_method_version_mismatch`. The driver is then
+still uninitialized, and the host may send `initialize` again. The host runs
+the same rules on the driver's answer, so both ends refuse the same methods.
+
+`host.capabilities.process` and `host.envPolicy` decide how the driver spawns
+processes (see below).
 
 ## Methods
 
@@ -89,6 +124,10 @@ A refusal is a `protocol` call error. `host.capabilities.process` and
   output and input).
 - Every incoming request and notification is checked against its params
   schema. Invalid params are refused with `validation`, naming the path.
+- **Instance ids.** `driver/create` takes the host's `instanceId`, and every
+  `host/*` call for that instance names it by that id. The result's
+  `instanceId` is the driver's id for the instance, which may differ;
+  `instance/*` calls name the instance by that one.
 
 ### Objects: instances and sessions
 
@@ -107,6 +146,8 @@ A refusal is a `protocol` call error. `host.capabilities.process` and
 - A call to a member the target lacks is refused with `unsupported`: for a
   session member its `capability` is the member's capability path from
   `methods.json`, for an instance member the member's path.
+- `instance/dispose` disposes the instance and closes its sessions; later
+  calls naming any of them answer `not_found`.
 
 ## Errors
 
@@ -126,16 +167,20 @@ pending call rejects with a `transport` call error.
 ## Streams
 
 `session/events`, `instance/statusChanges`, `instance/usageHistory.scan` and
-`host/config.get` with `watch: true` start streams.
+`host/config.get` with `watch: true` start streams. The side that answers the
+request produces the stream; the side that sent it consumes it.
 
-1. The request's result carries a `streamId`.
+1. The request's result carries a `streamId`, unique among the producer's
+   streams on the connection.
 2. Each item arrives as the method's notification (`ari/event`,
    `instance/statusChanged`, `instance/usageRecord`, `host/config.changed`),
    with `streamId` and the item. The producer sends them only **after** the
    response that carries the `streamId`.
-3. `stream/end` ends it, with `error` when it failed.
-4. The consumer may send `stream/cancel`; the producer answers `null`, then
-   sends `stream/end`.
+3. `stream/end` (`{ streamId, error? }`) ends it; `error` is a `CallError`
+   when the stream failed. Nothing follows it for that `streamId`.
+4. The consumer may send `stream/cancel`, a request; the producer answers
+   `null`, then sends `stream/end`. Cancelling a stream that already ended, or
+   one the producer does not know, also answers `null`.
 
 Even so, a consumer may read a stream's first notifications before its own
 code has stored the `streamId` (the response and the notifications can sit in
@@ -145,14 +190,28 @@ response is handled; the TypeScript client does.
 `session/events` takes `fromSeq`: the driver replays from that `seq`, then
 continues live.
 
+`host/config.get` with `watch: true` always answers `{ config, streamId }`
+(`HostConfigWatchResult`). A host with nothing to watch still starts the
+stream and ends it at once. The driver refuses a watch answer without
+`streamId` as a `protocol` error (`missing_stream_id`). Without `watch`, the
+answer is `{ config }`.
+
 ## Host services
 
-The driver calls the host's services as `host/<group>.<member>` requests
-naming the instance: `host/secrets.get`, `host/coordination.acquire`, … All
-17 operations of `HostServices` cross the wire. `host/diagnostics.log` and
-`host/telemetry.track` are notifications. `host/config.get` with `watch: true`
-returns `{ config, streamId }` and streams later values as
-`host/config.changed`.
+The driver calls the host's services as `host/<group>.<member>` JSON-RPC
+requests whose params name the instance: `host/secrets.get`,
+`host/coordination.acquire`, … All 17 operations of `HostServices` are
+requests, and the host answers each one with its result (`null` for a `void`
+member) or a call error.
+
+- `host/diagnostics.log` and `host/telemetry.track` return nothing in
+  TypeScript, so the driver does not wait for their answer. `ari-driver`
+  writes an error answer to its stderr and goes on.
+- The driver calls an optional service (`attachments.extractText`,
+  `hostTools.callDynamicTool`, `telemetry.track`, `ids.derive`) only when
+  `driver/create` listed it in `hostMembers`. A host answers one it does not
+  serve with `unsupported`.
+- A call naming an `instanceId` the host did not create answers `not_found`.
 
 ### Processes
 
@@ -162,14 +221,33 @@ returns `{ config, streamId }` and streams later values as
   ending in `*`), plus the request's `env`. Executable lookups are local too,
   since that is where the spawn happens. The host implements nothing.
 - **Delegated.** When the host says `process: true` (a remote or sandboxed
-  host), `host/process.spawn` asks the host to start the child and answers
-  `{ processId, pid? }`. The child's output comes as `host/process.output`
-  (base64), and after its last output, its exit as `host/process.exit`; the
-  driver ends the child's stdout and stderr there. The driver writes with
-  `host/process.write`, closes stdin with `host/process.closeStdin` and kills
-  with `host/process.kill`. `host/process.resolveExecutable` asks the host.
-  When the connection closes, the host kills the children it started for the
-  driver.
+  host), the host starts the driver's children. `host/process.resolveExecutable`
+  asks the host too.
+
+In delegated mode:
+
+1. `host/process.spawn` takes the `SpawnRequest` plus a `processId` the
+   driver chose. The id is unique on the connection and never reused, even
+   after its child exits. A host refuses an id it has seen before with
+   `invalid_state` (`reason: "duplicate_process_id"`) and starts nothing. The
+   answer is `{ pid? }`.
+2. Only after that answer, the host sends the child's output as
+   `host/process.output`: `{ processId, stream, data }`, where `stream` is
+   `stdout` or `stderr` and `data` is standard base64 with padding.
+3. After the child's last output, the host sends `host/process.exit`:
+   `{ processId, exit: { code, signal } }`, both present, either `null`. The
+   driver ends the child's stdout and stderr there.
+4. The driver writes stdin with `host/process.write` (base64 `data`), closes
+   it with `host/process.closeStdin`, and kills with `host/process.kill`.
+   Without `signal`, the host ends the child its own way; the TypeScript host
+   sends SIGTERM to the child's process group, then SIGKILL. These calls name
+   the instance and the `processId`; a child that instance did not spawn
+   answers `not_found`.
+5. When the connection closes, the host kills the children it started for
+   the driver.
+
+The driver drops output or an exit for a `processId` that is not running,
+and `ari-driver` reports it on stderr.
 
 ## Synchronous members
 

@@ -15,6 +15,7 @@ import { Console } from "node:console";
 import { realpathSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import type { Driver } from "../runtime.ts";
 import { ARI_VERSION } from "../version.ts";
 import { loadDriver } from "./load-driver.ts";
 import { serveDriver } from "./server.ts";
@@ -35,8 +36,19 @@ and stdout.
 /** How long cleanup may take after the host goes away before the process exits anyway. */
 const CLEANUP_LIMIT_MS = 10_000;
 
+export interface RunAriDriverOptions {
+  /**
+   * Finds the driver `<driver>` names. Defaults to `loadDriver`, which finds a
+   * first-party driver by its directory next to this module. A single-file
+   * executable has no such directory, and its bundler cannot follow an
+   * import by a computed name, so it passes a loader over a table of
+   * literally imported driver modules.
+   */
+  readonly loadDriver?: (spec: string, options: { readonly exportName?: string }) => Promise<Driver>;
+}
+
 /** Runs `ari-driver` with `argv` (the arguments after the program) and resolves with its exit code. */
-export async function runAriDriver(argv: readonly string[]): Promise<number> {
+export async function runAriDriver(argv: readonly string[], options: RunAriDriverOptions = {}): Promise<number> {
   let spec: string | undefined;
   let exportName: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
@@ -79,7 +91,7 @@ export async function runAriDriver(argv: readonly string[]): Promise<number> {
 
   let driver;
   try {
-    driver = await loadDriver(spec, exportName === undefined ? {} : { exportName });
+    driver = await (options.loadDriver ?? loadDriver)(spec, exportName === undefined ? {} : { exportName });
   } catch (error) {
     process.stderr.write(`ari-driver: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;

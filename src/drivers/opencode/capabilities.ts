@@ -28,7 +28,7 @@ export function opencodeCapabilities(shape: ServerShape): Capabilities {
     sessions: {
       multipleThreads: true,
       switchModel: true,
-      // 2.x rules can be replaced on a live session (`session.update`); 1.x reads a session's rules at prompt time but T3's 1.x column, and this driver, keep the mode fixed.
+      // 2.x rules can be replaced on a live session (`session.update`); the driver keeps a 1.x session's mode fixed, as the proposal's §1.2 1.x column has it.
       switchRuntimeMode: v2,
       pendingRequestsSurviveRestart: false,
       release: parks,

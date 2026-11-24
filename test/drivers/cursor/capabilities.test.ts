@@ -25,8 +25,8 @@ type Outcome = { readonly outcome: "absent" } | { readonly outcome: "unsupported
 /** The driver's outcome for each optional member of `Session` (inventory D) and `Instance` (inventory E). */
 const OUTCOMES: { readonly [member: string]: Outcome } = {
   "Session.readSnapshot": { outcome: "absent" },
-  "Session.forkThread": { outcome: "absent" },
-  "Session.rollbackThread": { outcome: "absent" },
+  "Session.forkThread": { outcome: "unsupported", capability: "threads.fork" },
+  "Session.rollbackThread": { outcome: "unsupported", capability: "threads.rollback" },
   "Session.compactThread": { outcome: "supported" },
   "Session.injectHistory": { outcome: "absent" },
   "Session.unloadThread": { outcome: "supported" },
@@ -120,11 +120,22 @@ test("each member the driver does not support is left out or rejects with unsupp
     if (outcome.outcome === "absent") assert.equal(value, undefined, `${member} is present but declared unsupported`);
     else assert.equal(typeof value, "function", `${member} is missing`);
   }
-  await assert.rejects(rig.instance.auth!.complete({ flowId: "cursor-flow-1", callbackUrl: "http://127.0.0.1/cb" }), (error: unknown) => {
-    assert.ok(isAriError(error, "unsupported"));
-    assert.equal((toCallError(error) as { capability?: string }).capability, "auth.complete");
-    return true;
-  });
+  const thread = await session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+  const rejections: Array<[string, () => Promise<unknown>]> = [
+    ["Session.forkThread", () => session.forkThread!({ threadId: thread.id, at: { type: "latest" } })],
+    ["Session.rollbackThread", () => session.rollbackThread!({ threadId: thread.id, to: { type: "start" } })],
+    ["Instance.auth.complete", () => rig.instance.auth!.complete({ flowId: "cursor-flow-1", callbackUrl: "http://127.0.0.1/cb" })],
+  ];
+  for (const [member, call] of rejections) {
+    const outcome = OUTCOMES[member]!;
+    assert.equal(outcome.outcome, "unsupported");
+    await assert.rejects(call(), (error: unknown) => {
+      assert.ok(isAriError(error, "unsupported"), `${member} rejected with ${String(error)}`);
+      assert.equal((toCallError(error) as { capability?: string }).capability, outcome.outcome === "unsupported" ? outcome.capability : undefined);
+      return true;
+    });
+  }
+  assert.equal(rig.world.creations.length, 1, "fork and rollback made no SDK call");
 });
 
 test("each session member the driver supports works against Cursor", async () => {

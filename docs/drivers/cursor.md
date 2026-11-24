@@ -13,7 +13,8 @@ lists every source the driver and its fake follow.
 
 The driver is thin on purpose (the proposal's §14: "thin capability set; host
 fallbacks do the heavy lifting"). Cursor's SDK has no fork, no rollback and no
-approval flow, so those members are left out and the host's fallbacks apply.
+approval flow: `forkThread` and `rollbackThread` reject with `unsupported`, no
+approval is declared, and the host's fallbacks apply.
 
 ```ts
 import { cursorDriver } from "ari/drivers/cursor";
@@ -289,9 +290,13 @@ where it has no row. Every difference names its source: the docs page
 ## Optional members
 
 Of the 44 optional `Session` and `Instance` members, the driver implements
-`compactThread`, `unloadThread` and the `auth` group. `auth.complete` rejects
-with `unsupported{capability: "auth.complete"}`, because no Cursor sign-in
-returns through a callback URL. Every other optional member is left out.
+`compactThread`, `unloadThread` and the `auth` group. `forkThread` rejects
+with `unsupported{capability: "threads.fork"}` and `rollbackThread` with
+`unsupported{capability: "threads.rollback"}`, before any SDK call: Cursor's
+SDK can neither fork nor rewind an agent's conversation. `auth.complete`
+rejects with `unsupported{capability: "auth.complete"}`, because no Cursor
+sign-in returns through a callback URL. Every other optional member is left
+out.
 `test/drivers/cursor/capabilities.test.ts` holds the full list.
 
 ## Limits

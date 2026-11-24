@@ -76,6 +76,7 @@ export async function openCursorRig(options: CursorTestRigOptions = {}): Promise
   });
   const instance = await driver.create(host, { instanceId, config, environment: options.environment ?? {} });
   const sessions: Session[] = [];
+  let turns = 0;
   const until = async <T>(events: readonly AriEvent[], find: (event: AriEvent) => T | undefined, what: string): Promise<T> => {
     const deadline = Date.now() + 10_000;
     for (;;) {
@@ -108,7 +109,8 @@ export async function openCursorRig(options: CursorTestRigOptions = {}): Promise
     until,
     terminal: (events, turnId) => until(events, (event) => (event.body.type === "turn.terminal" && event.body.turnId === turnId ? event.body : undefined), `turn.terminal of ${turnId}`),
     async turn(session, threadId, text, extra = {}) {
-      const started = await session.startTurn({ threadId, clientTurnKey: `key-${text}-${Math.random()}`, intent: "start", content: [{ type: "text", text }], ...extra });
+      turns += 1;
+      const started = await session.startTurn({ threadId, clientTurnKey: `turn-key-${turns}`, intent: "start", content: [{ type: "text", text }], ...extra });
       if (started.status !== "accepted") throw new Error(`startTurn returned ${JSON.stringify(started)}`);
       return { turnId: started.turnId, run: await world.nextRun() };
     },

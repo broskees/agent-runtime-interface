@@ -13,8 +13,8 @@
 //   `prompt_required`.
 // - Stop is `run.cancel()`; the run then ends `cancelled`.
 // - Cursor has no fork, no rollback and no approval flow: a local run answers
-//   its own interaction queries (dist/esm/977.js). The members are left out
-//   and the host's fallbacks apply.
+//   its own interaction queries (dist/esm/977.js). `forkThread` and
+//   `rollbackThread` reject with `unsupported`, and the host's fallbacks apply.
 // - The agent store is a `JsonlLocalAgentStore` under the instance's state
 //   directory, never the SDK's default store under ~/.cursor/projects.
 // - Host instructions go at the top of the thread's first prompt (channel
@@ -48,7 +48,7 @@ import type {
   StartTurnResult,
 } from "../../generated/session.ts";
 import type { HostToolServer } from "../../generated/host.ts";
-import type { Thread } from "../../generated/thread.ts";
+import type { Thread, ThreadSnapshot } from "../../generated/thread.ts";
 import type { HostServices, Session } from "../../runtime.ts";
 import { cursorCapabilities } from "./capabilities.ts";
 import type { CursorConfig } from "./config.ts";
@@ -223,6 +223,18 @@ export class CursorSession<Store> implements Session {
     }
     const thread = await this.#register(agent, cwd, policy, model, servers, launch.instructions, undefined);
     return { ...thread.thread, appliedConfig: { model } };
+  }
+
+  /** Cursor's SDK has no fork: nothing makes a new agent from another agent's conversation. */
+  async forkThread(): Promise<Thread> {
+    this.#open();
+    throw callErrors.unsupported("threads.fork", "Cursor's SDK cannot fork an agent's conversation");
+  }
+
+  /** Cursor's SDK has no rollback: nothing rewinds an agent's conversation. */
+  async rollbackThread(): Promise<ThreadSnapshot> {
+    this.#open();
+    throw callErrors.unsupported("threads.rollback", "Cursor's SDK cannot roll back an agent's conversation");
   }
 
   async compactThread(threadId: string): Promise<void> {

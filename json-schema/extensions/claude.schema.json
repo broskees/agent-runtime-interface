@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/extensions/claude.schema.json",
+  "title": "Claude driver extensions",
+  "description": "Extensions of the `claude` driver: `claude.hooks` (Claude Code's settings hooks, set for a live thread with `Query.applyFlagSettings`, and every hook run reported as an `x:claude.hook` event) and `claude.fileCheckpoints` (Claude Code's file checkpoints, rewound with `Query.rewindFiles`). The driver lists each in `capabilities.extensions` with version `1`; calls go through `session.ext(ns, method, params)`, and each extension event carries a plain-text `fallback`. Thread and turn ids are ARI ids. The driver also fills the shared `ari.goal` extension, derived from the transcript.",
+  "$defs": {
+    "ClaudeHookPhase": {
+      "description": "Which hook message Claude Code sent: `started`, `progress` or `response`.",
+      "anyOf": [
+        {
+          "enum": [
+            "started",
+            "progress",
+            "response"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ClaudeHookOutcome": {
+      "anyOf": [
+        {
+          "enum": [
+            "success",
+            "error",
+            "cancelled"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "ClaudeHookEventData": {
+      "description": "One hook message (`hook_started`, `hook_progress` or `hook_response`) Claude Code streamed.",
+      "type": "object",
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/ClaudeHookPhase"
+        },
+        "hookId": {
+          "type": "string"
+        },
+        "hookName": {
+          "type": "string"
+        },
+        "hookEvent": {
+          "type": "string",
+          "description": "The hook event, for example `PreToolUse` or `Stop`."
+        },
+        "output": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ClaudeHookOutcome"
+        },
+        "exitCode": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "phase",
+        "hookId",
+        "hookName",
+        "hookEvent"
+      ]
+    },
+    "ClaudeHookEvent": {
+      "description": "Event body: Claude Code ran a hook.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "x:claude.hook"
+        },
+        "data": {
+          "$ref": "#/$defs/ClaudeHookEventData"
+        },
+        "fallback": {
+          "$ref": "../common.schema.json#/$defs/Fallback"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    "ClaudeCommandHook": {
+      "description": "One settings-file command hook.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "command"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "number"
+        },
+        "statusMessage": {
+          "type": "string"
+        },
+        "once": {
+          "type": "boolean"
+        },
+        "async": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "command"
+      ]
+    },
+    "ClaudeHookMatcher": {
+      "type": "object",
+      "properties": {
+        "matcher": {
+          "type": "string",
+          "description": "Which tools or sources the hooks run for, for example `Bash` or `Edit|Write`."
+        },
+        "hooks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClaudeCommandHook"
+          }
+        }
+      },
+      "required": [
+        "hooks"
+      ]
+    },
+    "ClaudeHooksSetParams": {
+      "description": "Params of `claude.hooks` `set`: the hooks by hook event (`PreToolUse`, `PostToolUse`, `Stop`, ...), replacing the ones set before for the thread's live query; `null` removes them. Claude Code's settings files keep their own hooks. Result: `null`.",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "hooks": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ClaudeHookMatcher"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "threadId",
+        "hooks"
+      ]
+    },
+    "ClaudeRewindParams": {
+      "description": "Params of `claude.fileCheckpoints` `rewind`: restore the files Claude Code changed to their state when the turn's prompt was sent. `dryRun` reports what would change without changing it.",
+      "type": "object",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "dryRun": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId"
+      ]
+    },
+    "ClaudeRewindResult": {
+      "description": "Result of `claude.fileCheckpoints` `rewind`, as Claude Code reports it.",
+      "type": "object",
+      "properties": {
+        "canRewind": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "filesChanged": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "insertions": {
+          "type": "integer"
+        },
+        "deletions": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "canRewind"
+      ]
+    }
+  }
+}

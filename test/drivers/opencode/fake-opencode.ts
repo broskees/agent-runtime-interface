@@ -260,8 +260,8 @@ export class FakeRun implements NativeTurn {
   }
 
   /** Emits now, or holds the event while a completion is held back. */
-  #publish(type: string, properties: Json, durable = false): void {
-    const send = () => this.server.publish(this.session, type, properties, durable);
+  #publish(type: string, properties: Json, durable = false, created?: number): void {
+    const send = () => this.server.publish(this.session, type, properties, durable, created);
     if (this.#held !== undefined) this.#held.push(send);
     else send();
   }
@@ -339,6 +339,36 @@ export class FakeRun implements NativeTurn {
     return this.server.ask(this, approval);
   }
 
+  /**
+   * A shell command whose output arrives while it runs: 1.x streams it in the
+   * running part's `metadata.output` (1.x `tool/shell.ts`); 2.x reports it only
+   * with the result.
+   */
+  async runCommand(command: string, output: string): Promise<void> {
+    const message = this.#assistantMessage();
+    const v1 = this.world.generation === 1;
+    const entry: FakeTool = { id: this.world.nextId("prt"), callId: this.world.nextId("call"), tool: v1 ? "bash" : "shell", input: { command, description: command }, status: "pending", start: Date.now() };
+    message.content.push(entry);
+    if (v1) {
+      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
+      entry.status = "running";
+      const half = output.slice(0, Math.ceil(output.length / 2));
+      this.#publish("message.part.updated", { sessionID: this.session.id, part: { ...this.server.v1Tool(this.session, message, entry), state: { status: "running", input: entry.input, title: command, metadata: { output: half, description: command }, time: { start: entry.start } } }, time: Date.now() });
+      entry.status = "completed";
+      entry.output = output;
+      entry.end = Date.now();
+      this.#publish("message.part.updated", { sessionID: this.session.id, part: this.server.v1Tool(this.session, message, entry), time: Date.now() });
+      return;
+    }
+    this.#publish("session.tool.input.started", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, name: entry.tool }, true);
+    entry.status = "running";
+    this.#publish("session.tool.called", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, input: entry.input, executed: true }, true);
+    entry.status = "completed";
+    entry.output = output;
+    entry.end = Date.now();
+    this.#publish("session.tool.success", { sessionID: this.session.id, assistantMessageID: message.id, id: entry.callId, content: [{ type: "text", text: output }], executed: true }, true);
+  }
+
   /** A question from the agent (OpenCode's `question` tool), answered through the driver. */
   async askQuestion(question: { readonly text: string; readonly options: readonly string[] }): Promise<{ answers(): Promise<unknown> }> {
     return this.server.question(this, question);
@@ -371,7 +401,7 @@ export class FakeRun implements NativeTurn {
     this.#steers.push(text);
   }
 
-  #end(how: "succeeded" | { v1: Json; v2: Json } | "interrupted"): void {
+  #end(how: "succeeded" | { v1: Json; v2: Json; at?: number } | "interrupted"): void {
     const message = this.#assistantMessage();
     message.completed = Date.now();
     if (how === "succeeded") message.finish = "stop";
@@ -391,7 +421,8 @@ export class FakeRun implements NativeTurn {
         this.#publish("session.step.ended", { sessionID: id, assistantMessageID: message.id, finish: "stop", cost: 0, tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } }, true);
         this.#publish("session.execution.succeeded", { sessionID: id }, true);
       } else if (how === "interrupted") this.#publish("session.execution.interrupted", { sessionID: id, reason: "user" }, true);
-      else this.#publish("session.execution.failed", { sessionID: id, error: how.v2 }, true);
+      // OpenCode builds the structured error (its retryAfterMs counts from then) and publishes it at once.
+      else this.#publish("session.execution.failed", { sessionID: id, error: how.v2 }, true, how.at);
     }
     this.#steers.end();
   }
@@ -420,6 +451,7 @@ export class FakeRun implements NativeTurn {
       this.#end({
         v1: { name: "APIError", data: { message: failure.message, statusCode: 429, isRetryable: false, responseHeaders: { "retry-after": httpDate(failure.resetAt) } } },
         v2: { type: "provider.rate-limit", message: failure.message, status: 429, retryAfterMs: Math.max(0, Date.parse(failure.resetAt) - created) },
+        at: created,
       });
       return;
     }
@@ -610,7 +642,7 @@ export class FakeServer {
   // Events
 
   /** Sends an event to every subscriber of the session's directory (1.x) or to every subscriber (2.x). */
-  publish(session: FakeSession | undefined, type: string, properties: Json, durable = false): void {
+  publish(session: FakeSession | undefined, type: string, properties: Json, durable = false, created = Date.now()): void {
     if (!this.alive) return;
     const directory = session?.directory;
     const event: Json =
@@ -618,7 +650,7 @@ export class FakeServer {
         ? { id: this.world.nextId("evt"), type, properties }
         : {
             id: this.world.nextId("evt"),
-            created: Date.now(),
+            created,
             type,
             ...(durable && session !== undefined ? { durable: { aggregateID: session.id, seq: this.#seq(session.id), version: type === "session.tool.success" || type === "session.tool.failed" ? 2 : 1 } } : {}),
             ...(directory === undefined ? {} : { location: { directory } }),
@@ -822,7 +854,7 @@ export class FakeServer {
     }
     const { matched, problems } = this.world.validator.checkRequest(method, url, body, hasBody);
     for (const problem of problems) this.world.violation(problem);
-    this.world.frames.push({ server: this.number, direction: "request", operation: matched?.operationId ?? `${method} ${url.pathname}`, body: { query: Object.fromEntries(url.searchParams), body } });
+    this.world.frames.push({ server: this.number, direction: "request", operation: matched?.operationId ?? `${method} ${url.pathname}`, body: { path: url.pathname, query: Object.fromEntries(url.searchParams), body } });
     if (matched === undefined) {
       response.writeHead(404).end();
       return;

@@ -43,7 +43,8 @@ export function opencodeCapabilities(shape: ServerShape): Capabilities {
       injectHistory: false,
       unload: parks,
       exposesNativeIds: true,
-      fork: { supported: true, fromTurn: true, fromItem: false, fromSubagent: false, crossCwd: false },
+      // A subagent's session is a session like any other to 1.x's `session.fork`; the proposal's §1.2 has 2.x without it.
+      fork: { supported: true, fromTurn: true, fromItem: false, fromSubagent: !v2, crossCwd: false },
     },
     turns: {
       interrupt: true,
@@ -59,7 +60,8 @@ export function opencodeCapabilities(shape: ServerShape): Capabilities {
     approvals: { command: true, fileRead: true, fileChange: true, permission: true, fromSubagents: true },
     planning: { todoList: !v2, proposedPlan: false, planUpdates: false, structuredQuestions: true },
     subagents: { supported: true, exposesThreadIds: true, lifecycle: true, wait: true, stop: false },
-    context: { instructionChannels: ["system"], syntheticContext: false, summaries: false, handoffSummaries: false },
+    // Compaction writes a summary of the conversation in both generations (1.x `session.summarize`, 2.x `session.compaction.ended` `text`).
+    context: { instructionChannels: ["system"], syntheticContext: false, summaries: true, handoffSummaries: false },
     checkpointing: { workspace: false, conversationRollback: true, rollbackReturnsSnapshot: true },
     identity: { threadIds: "strong", turnIds: "strong", itemIds: "strong", requestIds: "strong", identityVersion: IDENTITY_VERSION },
     runtimePolicy: {

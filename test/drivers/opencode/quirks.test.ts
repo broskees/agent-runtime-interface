@@ -302,6 +302,50 @@ describe("subagents, questions, todo lists and steering", () => {
     });
   }
 
+  for (const generation of [1, 2] as const) {
+    test(`${generation}.x: a shell command is a command_execution item${generation === 1 ? " whose output streams while it runs" : ""}`, async () => {
+      const rig = await rigFor(generation);
+      const opened = await rig.open();
+      assert.equal(opened.session.capabilities().streaming.toolOutput, generation === 1);
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "c1", intent: "start", content: [{ type: "text", text: "Test it." }] });
+      assert.equal(started.status, "accepted");
+      if (started.status !== "accepted") return;
+      const native = await rig.nextTurn();
+      await native.runCommand("npm test", "12 passing\n0 failing");
+      await native.complete();
+      await rig.terminal(opened.events, started.turnId);
+      const upserts = opened.events.flatMap((event) => (event.body.type === "item.upsert" ? [event.body.item] : []));
+      // The tool opens pending, before OpenCode has its input; the command arrives with the call.
+      const opening = upserts.find((item) => item.kind === "command_execution")!;
+      assert.deepEqual(upserts.filter((item) => item.id === opening.id && item.command !== undefined).at(-1)?.command, ["npm test"]);
+      const outputs = upserts.filter((item) => item.id === opening.id && item.output !== undefined).map((item) => item.output);
+      if (generation === 1) assert.deepEqual(outputs, ["12 passing", "12 passing\n0 failing"], "the running output arrived before the result");
+      else assert.deepEqual(outputs, ["12 passing\n0 failing"]);
+      assert.equal(upserts.filter((item) => item.id === opening.id).at(-1)?.status, "completed");
+    });
+  }
+
+  test("1.x: a subagent's thread can be forked", async () => {
+    const rig = await rigFor(1);
+    const opened = await rig.open();
+    assert.equal(opened.session.capabilities().threads.fork.fromSubagent, true);
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "f1", intent: "start", content: [{ type: "text", text: "Delegate." }] });
+    assert.equal(started.status, "accepted");
+    if (started.status !== "accepted") return;
+    const native = await rig.nextTurn();
+    const child = await native.runSubagent("helper");
+    const subagent = await rig.until(opened.events, (event) => (event.body.type === "subagent.upsert" && event.body.subagent.threadId !== undefined ? (event.body.subagent as Subagent) : undefined), "the subagent");
+    await child.finish();
+    await native.complete();
+    await rig.terminal(opened.events, started.turnId);
+    const fork = await opened.session.forkThread!({ threadId: subagent.threadId!, at: { type: "latest" } });
+    assert.notEqual(fork.id, subagent.threadId);
+    assert.equal(fork.forkedFrom?.threadId, subagent.threadId);
+    assert.equal(rig.world.sessions.get(fork.native.id!)?.forkedFrom, child.childId, "OpenCode forked the subagent's own session");
+  });
+
   test("1.x: the todo list is a todo_list item of the turn", async () => {
     const rig = await rigFor(1);
     const opened = await rig.open();

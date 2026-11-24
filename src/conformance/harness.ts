@@ -250,10 +250,21 @@ export interface NativeApproval {
 
 /** The replies the native agent got for one approval. */
 export interface NativeApprovalHandle {
-  /** Resolves with the native option id of the first reply. */
+  /** Resolves with the option id (as the kit named it) of the first reply. */
   nextReply(): Promise<string>;
-  /** Every native option id the agent got as a reply to this approval, in order. */
+  /** Every option id (as the kit named it) the agent got as a reply to this approval, in order. */
   replies(): Promise<readonly string[]>;
+  /**
+   * For protocols whose approval options carry no id of their own (Codex
+   * app-server decisions are plain values such as `"accept"`), the native
+   * option id the driver sees for each of the kit's option ids: the harness
+   * cannot make an arbitrary string a native id there. Leave it out when the
+   * harness kept every `optionId` as the native id; the kit then uses the
+   * kit's ids as they are. `nextReply` and `replies` still answer with the
+   * kit's ids. The mapping must be one-to-one: the kit fails a scenario whose
+   * mapping sends two kit options to one native option.
+   */
+  readonly nativeOptionIds?: { readonly [optionId: string]: string };
 }
 
 /** How the native agent fails a turn. */

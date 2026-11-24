@@ -1,0 +1,6 @@
+{
+  "$comment": "HAND-WRITTEN: not upstream output. The schema bundle names each request's params but not its response type. scripts/codegen-codex.ts names a response <X>Response for params <X>Params; the methods below break that rule, so their response types are copied by hand from client_request_definitions! in codex-rs/app-server-protocol/src/protocol/common.rs at tag rust-v0.172.0 (commit 3d86e43b075adeba2193ec5c22ac92f55afd82e6).",
+  "responseTypes": {
+    "account/logout": "LogoutAccountResponse"
+  }
+}

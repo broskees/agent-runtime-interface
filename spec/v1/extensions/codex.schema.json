@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ari.invalid/spec/v1/extensions/codex.schema.json",
+  "title": "Codex driver extensions",
+  "description": "Extensions of the `codex` driver: `codex.goal` (native goals with their token and time budgets), `codex.review` (code review runs), `codex.readState` (per-thread read receipts) and `codex.memory` (the thread's memory summary). The driver lists each in `capabilities.extensions` with version `1`; calls go through `session.ext(ns, method, params)`, and each extension event carries a plain-text `fallback`. Thread and turn ids are ARI ids. Also here: the `x:codex.*` filters `nativeSessions.list` accepts, and the credential payload `auth.transferProfile` accepts.",
+  "$defs": {
+    "CodexGoalStatus": {
+      "description": "Codex's goal status: `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited` or `complete`.",
+      "anyOf": [
+        { "enum": ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"] },
+        { "type": "string" }
+      ]
+    },
+    "CodexGoal": {
+      "description": "A thread's native goal, as Codex reports it.",
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "objective": { "type": "string" },
+        "status": { "$ref": "#/$defs/CodexGoalStatus" },
+        "tokenBudget": { "type": ["integer", "null"] },
+        "tokensUsed": { "type": "integer" },
+        "timeUsedSeconds": { "type": "integer" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["threadId", "objective", "status", "tokensUsed", "timeUsedSeconds"]
+    },
+    "CodexGoalUpdatedEvent": {
+      "description": "Event body: a thread's native goal changed, or was cleared (`goal` null).",
+      "type": "object",
+      "properties": {
+        "type": { "const": "x:codex.goal.updated" },
+        "data": {
+          "type": "object",
+          "properties": {
+            "threadId": { "type": "string" },
+            "goal": { "anyOf": [{ "$ref": "#/$defs/CodexGoal" }, { "type": "null" }] }
+          },
+          "required": ["threadId", "goal"]
+        },
+        "fallback": { "$ref": "../common.schema.json#/$defs/Fallback" }
+      },
+      "required": ["type", "data"]
+    },
+    "CodexGoalGetParams": {
+      "type": "object",
+      "properties": { "threadId": { "type": "string" } },
+      "required": ["threadId"]
+    },
+    "CodexGoalSetParams": {
+      "description": "Sets or changes the goal. Leave out a field to keep it.",
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "objective": { "type": "string" },
+        "status": { "$ref": "#/$defs/CodexGoalStatus" },
+        "tokenBudget": { "type": ["integer", "null"] }
+      },
+      "required": ["threadId"]
+    },
+    "CodexGoalClearParams": {
+      "type": "object",
+      "properties": { "threadId": { "type": "string" } },
+      "required": ["threadId"]
+    },
+    "CodexGoalResult": {
+      "description": "Result of `codex.goal` `get` and `set`: the goal, or null when none is set.",
+      "anyOf": [{ "$ref": "#/$defs/CodexGoal" }, { "type": "null" }]
+    },
+    "CodexGoalClearResult": {
+      "type": "object",
+      "properties": { "cleared": { "type": "boolean" } },
+      "required": ["cleared"]
+    },
+    "CodexReviewStartParams": {
+      "description": "Starts a code review on the thread. `target` is Codex's review target, passed through: `{ type: \"uncommittedChanges\" }`, `{ type: \"baseBranch\", branch }`, `{ type: \"commit\", sha, title? }` or `{ type: \"custom\", instructions }`.",
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "target": { "type": "object" }
+      },
+      "required": ["threadId", "target"]
+    },
+    "CodexReviewStartResult": {
+      "description": "The thread the review runs on and the turn that runs it.",
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "turnId": { "type": "string" }
+      },
+      "required": ["threadId", "turnId"]
+    },
+    "CodexUnreadPosition": {
+      "description": "The first unread result: the start of the thread, or a turn.",
+      "type": "object",
+      "properties": {
+        "type": { "anyOf": [{ "enum": ["threadStart", "turn"] }, { "type": "string" }] },
+        "turnId": { "type": "string" }
+      },
+      "required": ["type"]
+    },
+    "CodexReadState": {
+      "description": "A thread's read receipt. `revision` is an opaque equality token for this thread only.",
+      "type": "object",
+      "properties": {
+        "firstUnread": { "anyOf": [{ "$ref": "#/$defs/CodexUnreadPosition" }, { "type": "null" }] },
+        "revision": { "type": "string" }
+      },
+      "required": ["revision"]
+    },
+    "CodexReadStateReadParams": {
+      "type": "object",
+      "properties": { "threadId": { "type": "string" } },
+      "required": ["threadId"]
+    },
+    "CodexReadStateUpdateParams": {
+      "description": "Marks the thread read or unread. `expectedRevision` must be the revision the user actually saw.",
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "expectedRevision": { "type": "string" },
+        "operation": { "anyOf": [{ "enum": ["read", "unread"] }, { "type": "string" }] }
+      },
+      "required": ["threadId", "expectedRevision", "operation"]
+    },
+    "CodexReadStateResult": {
+      "description": "Result of `codex.readState` `read` and `update`. `readState` is null when the thread has no durable read state.",
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "readState": { "anyOf": [{ "$ref": "#/$defs/CodexReadState" }, { "type": "null" }] }
+      },
+      "required": ["threadId", "readState"]
+    },
+    "CodexReadStateChangedEvent": {
+      "description": "Event body: a thread's read receipt changed.",
+      "type": "object",
+      "properties": {
+        "type": { "const": "x:codex.readState.changed" },
+        "data": { "$ref": "#/$defs/CodexReadStateResult" },
+        "fallback": { "$ref": "../common.schema.json#/$defs/Fallback" }
+      },
+      "required": ["type", "data"]
+    },
+    "CodexMemoryReadParams": {
+      "type": "object",
+      "properties": { "threadId": { "type": "string" } },
+      "required": ["threadId"]
+    },
+    "CodexMemoryReadResult": {
+      "description": "The thread's memory summary; null when memory is off or the summary is missing or blank.",
+      "type": "object",
+      "properties": {
+        "threadId": { "type": "string" },
+        "summary": { "type": ["string", "null"] }
+      },
+      "required": ["threadId", "summary"]
+    },
+    "CodexNativeSessionFilters": {
+      "description": "Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`, each passed to Codex's `thread/list`. Any other `x:codex.` field is refused.",
+      "type": "object",
+      "properties": {
+        "x:codex.limit": { "type": "integer", "minimum": 1 },
+        "x:codex.searchTerm": { "type": "string" },
+        "x:codex.archived": { "type": "boolean" },
+        "x:codex.modelProviders": { "type": "array", "items": { "type": "string" } },
+        "x:codex.sourceKinds": { "type": "array", "items": { "type": "string" } },
+        "x:codex.includedThreadIds": { "type": "array", "items": { "type": "string" }, "maxItems": 100 },
+        "x:codex.excludedThreadIds": { "type": "array", "items": { "type": "string" }, "maxItems": 100 },
+        "x:codex.useStateDbOnly": { "type": "boolean" },
+        "x:codex.currentAccountOnly": { "type": "boolean" },
+        "x:codex.parentThreadId": { "type": "string" },
+        "x:codex.ancestorThreadId": { "type": "string" },
+        "x:codex.projectId": { "type": "string" },
+        "x:codex.sortKey": { "anyOf": [{ "enum": ["created_at", "updated_at", "recency_at", "section_position"] }, { "type": "string" }] },
+        "x:codex.sortDirection": { "anyOf": [{ "enum": ["asc", "desc"] }, { "type": "string" }] }
+      }
+    },
+    "CodexTransferredTokens": {
+      "description": "`auth.transferProfile` data for format `codex.chatgpt_auth_tokens`: ChatGPT tokens another machine obtained. The instance signs in with them on every session and answers Codex's token refresh requests with the latest tokens handed over; it never refreshes them itself.",
+      "type": "object",
+      "properties": {
+        "accessToken": { "type": "string", "minLength": 1 },
+        "chatgptAccountId": { "type": "string", "minLength": 1 },
+        "chatgptPlanType": { "type": "string" }
+      },
+      "required": ["accessToken", "chatgptAccountId"]
+    }
+  }
+}

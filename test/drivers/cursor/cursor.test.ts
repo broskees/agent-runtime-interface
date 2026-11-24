@@ -11,5 +11,6 @@ import "./availability.suite.ts";
 import "./auth.suite.ts";
 import "./launch-context.suite.ts";
 import "./quirks.suite.ts";
+import "./resume.suite.ts";
 import "./real-sdk.suite.ts";
 import "./conformance.suite.ts";

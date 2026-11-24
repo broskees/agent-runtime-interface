@@ -335,12 +335,12 @@ test("resuming an agent Cursor does not hold: a fresh agent and session.replaced
   // Cursor finds a local agent by its directory, which only a policy gives for a thread this session does not know.
   await assert.rejects(session.resumeThread({ native: { id: missing, strength: "strong" } }), (error: unknown) => isAriError(error, "validation"));
   const known = await session.createThread({ cwd: target.cwd, policy: policy(target.cwd) });
+  const lost = await session.createThread({ cwd: target.cwd, policy: policy(target.cwd) });
   const other = await target.open();
   // An unloaded thread whose agent Cursor no longer holds, resumed without a policy: Cursor's own AgentNotFoundError.
-  await session.unloadThread!(known.id);
-  target.world.agents.delete(known.native.id!);
-  await assert.rejects(session.resumeThread({ native: { handle: known.handle! } }), (error: unknown) => isAriError(error, "not_found"));
-  target.world.agents.set(known.native.id!, { agentId: known.native.id!, cwd: target.cwd, prompts: [], replies: [], compactions: 0, finishedRuns: 0, activeRun: undefined, handles: new Set(), subagents: [] });
+  await session.unloadThread!(lost.id);
+  await target.world.forget(lost.native.id!);
+  await assert.rejects(session.resumeThread({ native: { handle: lost.handle! } }), (error: unknown) => isAriError(error, "not_found"));
   const replaced = await session.resumeThread({ native: { id: missing, strength: "strong" }, policy: policy(target.cwd) });
   assert.notEqual(replaced.native.id, missing);
   const event = await target.until(events, (candidate) => (candidate.body.type === "session.replaced" ? candidate : undefined), "session.replaced");
@@ -374,8 +374,8 @@ test("a run that reaches the driver's turn before send() resolves keeps every up
   const thread = await session.createThread({ cwd: target.cwd, policy: policy(target.cwd) });
   // Updates the fake sends synchronously from inside send(), before the driver has the run.
   const original = target.world.startRun.bind(target.world);
-  target.world.startRun = (agent, message, options) => {
-    const run: FakeRun = original(agent, message, options);
+  target.world.startRun = async (agent, message, options) => {
+    const run: FakeRun = await original(agent, message, options);
     void run.say("Early words.");
     return run;
   };

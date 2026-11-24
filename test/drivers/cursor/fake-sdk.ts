@@ -27,8 +27,18 @@
 // aborts it, `wait()` resolves when the run ended, `steer()` answers
 // `revert_to_followup` once the run's turn ended (977.js, the local
 // executor's `steer`) and `complete_delivered` while it runs, after which
-// Cursor appends the steer as a user message. A second `send()` while a run
-// is active fails as the SDK's store does ("already has active run").
+// Cursor appends the steer as a user message.
+//
+// Which run a `send()` gets is the real SDK's decision, made on the real
+// store: the fake calls the real handle's storage preflight
+// (index.js `getRunForSend`) and marks the run starting and terminal in the
+// real store as `sendImpl` and `Run.cancel` do. So `Agent.create` reserves a
+// queued first run that only the handle it returned can take; any other
+// handle (a resumed one) gets a follow-up run, which the store refuses with
+// "already has active run" while the agent's active run is not terminal
+// (the reservation of a creating handle that closed before it sent, or a run
+// still going); `send({ local: { force: true } })` expires that run first.
+// The fake's run ids stay its own deterministic ones; the store's are random.
 //
 // Like the SDK, the fake writes the conversation's transcript and the
 // descriptor of every inline MCP server under Cursor's data directory,
@@ -43,6 +53,7 @@ import type {
   ConversationTurn,
   CursorRequestOptions,
   InteractionUpdate,
+  LocalAgentStore,
   ModelSelection,
   Run,
   RunError,
@@ -192,10 +203,39 @@ export function toSdkMessage(update: InteractionUpdate, agentId: string, runId: 
   }
 }
 
+/**
+ * The real local agent's storage preflight and run bookkeeping, which the
+ * fake calls so the persisted run reservation behaves as the pinned SDK's
+ * (index.js, class `Qr`: `getRunForSend`, and `platform.store`, the local
+ * agent store's `markRunStarting` and `markRunTerminal`). Not public API.
+ */
+interface RealLocalAgent {
+  getRunForSend(options: SendOptions, model: ModelSelection, requestId: string): Promise<{ readonly runId: string }>;
+  readonly platform: {
+    readonly store: {
+      markRunStarting(agentId: string, runId: string, options: { requestId: string }): Promise<void>;
+      markRunTerminal(agentId: string, runId: string, options: { status: PersistedTerminal }): Promise<void>;
+    };
+  };
+}
+
+/** The lifecycle statuses `markRunTerminal` takes. */
+type PersistedTerminal = "FINISHED" | "ERROR" | "CANCELLED";
+
+function realLocalAgent(agent: SDKAgent): RealLocalAgent {
+  const candidate = agent as unknown as Partial<RealLocalAgent>;
+  if (typeof candidate.getRunForSend !== "function" || typeof candidate.platform?.store?.markRunTerminal !== "function") {
+    throw new Error("The SDK's local agent has no getRunForSend or platform.store: the fake follows @cursor/sdk 1.4.2's internals, which changed");
+  }
+  return candidate as RealLocalAgent;
+}
+
 /** One agent as the fake's Cursor holds it. */
 export interface FakeAgentRecord {
   readonly agentId: string;
   readonly cwd: string;
+  /** The real store the agent's rows are in. */
+  readonly store: LocalAgentStore | undefined;
   /** The text of every run's prompt, oldest first: the conversation's history. */
   readonly prompts: string[];
   /** Assistant text of each finished run, for the transcript. */
@@ -305,8 +345,7 @@ export class FakeCursorWorld {
     const agentId = `agent-00000000-0000-4000-8000-${String(this.#agentCount).padStart(12, "0")}`;
     this.keysUsed.push({ call: "Agent.create", apiKey: this.#resolveKey(options.apiKey) });
     const real = await Real.Agent.create({ ...options, agentId });
-    const record: FakeAgentRecord = { agentId, cwd: options.local.cwd ?? process.cwd(), prompts: [], replies: [], compactions: 0, finishedRuns: 0, activeRun: undefined, handles: new Set(), subagents: [] };
-    this.agents.set(agentId, record);
+    const record = this.#record(agentId, options.local.cwd, options.local.store);
     return new FakeSdkAgent(this, record, real, options);
   }
 
@@ -315,9 +354,38 @@ export class FakeCursorWorld {
     this.keysUsed.push({ call: "Agent.resume", apiKey: this.#resolveKey(options?.apiKey) });
     // The real SDK finds the agent in the store for this working directory, or throws AgentNotFoundError.
     const real = await Real.Agent.resume(agentId, options);
-    const record = this.agents.get(agentId);
-    if (record === undefined) throw new Real.AgentNotFoundError(`Agent ${agentId} not found`, { isRetryable: false });
+    // An agent the store holds that the fake did not create (a test made it with the real SDK) is one Cursor holds too.
+    const record = this.agents.get(agentId) ?? this.#record(agentId, options?.local?.cwd, options?.local?.store);
     return new FakeSdkAgent(this, record, real, { ...options });
+  }
+
+  #record(agentId: string, cwd: string | undefined, store: LocalAgentStore | undefined): FakeAgentRecord {
+    const record: FakeAgentRecord = { agentId, cwd: cwd ?? process.cwd(), store, prompts: [], replies: [], compactions: 0, finishedRuns: 0, activeRun: undefined, handles: new Set(), subagents: [] };
+    this.agents.set(agentId, record);
+    return record;
+  }
+
+  /** Cursor loses the agent: its rows leave the real store, so `Agent.resume` throws AgentNotFoundError. */
+  async forget(agentId: string): Promise<void> {
+    const store = this.agents.get(agentId)?.store;
+    if (store === undefined) throw new Error(`The fake holds no store for agent ${agentId}`);
+    await store.runs.delete({ filter: { agentIds: [agentId] } });
+    await store.agents.delete({ filter: { agentIds: [agentId] } });
+    this.agents.delete(agentId);
+  }
+
+  /** The agent's run rows in the real store, oldest first: what the SDK's preflight decides by. */
+  async persistedRuns(agentId: string): Promise<Array<{ readonly status: string; readonly error: string | null | undefined }>> {
+    const store = this.agents.get(agentId)?.store;
+    if (store === undefined) throw new Error(`The fake holds no store for agent ${agentId}`);
+    const rows = [];
+    let cursor: string | undefined;
+    do {
+      const page = await store.runs.list({ filter: { agentIds: [agentId], ...(cursor === undefined ? {} : { cursor }) } });
+      rows.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    return rows.sort((a, b) => a.turnNumber - b.turnNumber).map((row) => ({ status: row.status, error: row.error }));
   }
 
   async #me(options: CursorRequestOptions | undefined): Promise<SDKUser> {
@@ -356,8 +424,8 @@ export class FakeCursorWorld {
   // -------------------------------------------------------------------------
   // Runs
 
-  /** The local `send()`: checks the options as the SDK does, then starts a run a test drives. */
-  startRun(agent: FakeSdkAgent, message: string | SDKUserMessage, options: SendOptions | undefined): FakeRun {
+  /** The local `send()`: checks the options as the SDK does, takes a run as the SDK's store decides, then starts a run a test drives. */
+  async startRun(agent: FakeSdkAgent, message: string | SDKUserMessage, options: SendOptions | undefined): Promise<FakeRun> {
     if (options?.cloud !== undefined) throw new Real.ConfigurationError("Cloud send options are only supported for cloud SDK agents. Create the agent with cloud options or use local.* send options.", { isRetryable: false });
     const model = options?.model ?? agent.model;
     if (model === undefined) throw new Real.ConfigurationError('Local SDK agents require an explicit `model`. Pass `model: { id: "<model-id>" }` to Agent.create() or to send(), or run this agent in cloud mode.', { isRetryable: false });
@@ -367,9 +435,9 @@ export class FakeCursorWorld {
     if (typeof message !== "string" && (message.images ?? []).some((image) => "url" in image)) throw new Real.ConfigurationError("URL images are only supported for cloud SDK agents", { isRetryable: false });
     if (options?.mode !== undefined && options.mode !== "agent" && options.mode !== "plan") throw new Real.ConfigurationError(`Unknown mode ${String(options.mode)}`);
     const record = agent.record;
-    if (record.activeRun !== undefined) throw new Real.UnknownAgentError(`Agent ${record.agentId} already has active run`, { operation: "agent.send" });
+    const runId = `run-00000000-0000-4000-9000-${String(this.#runCount + 1).padStart(12, "0")}`;
+    const persist = await this.#reserve(agent, options ?? {}, model, runId, "agent.send");
     this.#runCount += 1;
-    const runId = `run-00000000-0000-4000-9000-${String(this.#runCount).padStart(12, "0")}`;
     const apiKey = this.#resolveKey(agent.options.apiKey);
     this.keysUsed.push({ call: "agent.send", apiKey });
     this.sends.push({ agentId: record.agentId, runId, message, options, apiKey });
@@ -377,19 +445,41 @@ export class FakeCursorWorld {
     record.prompts.push(text);
     const servers = options?.mcpServers ?? agent.options.mcpServers ?? {};
     this.#writeMcpDescriptors(record, Object.keys(servers));
-    const run = new FakeRun(this, record, runId, text, model, apiKey !== undefined && (apiKey === FAKE_AMBIENT_KEY || this.#acceptedKeys.has(apiKey)), options?.onDelta);
+    const run = new FakeRun(this, record, runId, text, model, apiKey !== undefined && (apiKey === FAKE_AMBIENT_KEY || this.#acceptedKeys.has(apiKey)), options?.onDelta, persist, agent.options.tools);
     record.activeRun = run;
     this.#runs.push(run);
     return run;
   }
 
-  /** `agent.summarize()`: a run that summarizes the saved conversation, which Cursor completes on its own. */
-  summarize(agent: FakeSdkAgent): FakeRun {
+  /**
+   * The SDK's storage preflight (index.js `sendImpl`, `getRunForSend`), on the
+   * real store: the handle's reserved first run, else a follow-up run, which the
+   * store refuses while the agent's active run is not terminal. Marks the run
+   * starting, and returns how to mark it terminal.
+   */
+  async #reserve(agent: FakeSdkAgent, options: SendOptions, model: ModelSelection, runId: string, operation: string): Promise<(status: PersistedTerminal) => Promise<void>> {
+    const requestId = runId.replace(/^run-/, "");
+    let persisted: { readonly runId: string };
+    try {
+      persisted = await agent.real.getRunForSend(options, model, requestId);
+    } catch (error) {
+      // `send` turns the store's plain Error into the SDK's UnknownAgentError (index.js errors `Nt`).
+      throw new Real.UnknownAgentError(error instanceof Error ? error.message : String(error), { operation, cause: error, isRetryable: false });
+    }
+    const store = agent.real.platform.store;
+    await store.markRunStarting(agent.agentId, persisted.runId, { requestId });
+    return (status) => store.markRunTerminal(agent.agentId, persisted.runId, { status });
+  }
+
+  /** `agent.summarize()`: a run that summarizes the saved conversation, which Cursor completes on its own. It takes a run as `send()` does, never forced. */
+  async summarize(agent: FakeSdkAgent): Promise<FakeRun> {
     const record = agent.record;
     if (record.finishedRuns === 0) throw new Real.ConfigurationError(`Agent ${record.agentId} has no saved conversation to summarize yet.`, { isRetryable: false });
-    if (record.activeRun !== undefined) throw new Real.UnknownAgentError(`Agent ${record.agentId} already has active run`, { operation: "agent.summarize" });
+    const model = agent.model ?? { id: "composer-2.5" };
+    const runId = `run-00000000-0000-4000-9000-${String(this.#runCount + 1).padStart(12, "0")}`;
+    const persist = await this.#reserve(agent, {}, model, runId, "agent.summarize");
     this.#runCount += 1;
-    const run = new FakeRun(this, record, `run-00000000-0000-4000-9000-${String(this.#runCount).padStart(12, "0")}`, "", agent.model ?? { id: "composer-2.5" }, true, undefined);
+    const run = new FakeRun(this, record, runId, "", model, true, undefined, persist, agent.options.tools);
     record.activeRun = run;
     void (async () => {
       await run.update({ type: "summary-started" });
@@ -431,6 +521,8 @@ export class FakeSdkAgent implements SDKAgent {
   readonly agentId: string;
   readonly record: FakeAgentRecord;
   readonly options: Partial<AgentOptions>;
+  /** The real SDK's handle, whose storage preflight decides which run a send gets. */
+  readonly real: RealLocalAgent;
   readonly #world: FakeCursorWorld;
   readonly #real: SDKAgent;
   #model: ModelSelection | undefined;
@@ -439,6 +531,7 @@ export class FakeSdkAgent implements SDKAgent {
   constructor(world: FakeCursorWorld, record: FakeAgentRecord, real: SDKAgent, options: Partial<AgentOptions>) {
     this.#world = world;
     this.#real = real;
+    this.real = realLocalAgent(real);
     this.record = record;
     this.agentId = record.agentId;
     this.options = options;
@@ -454,7 +547,7 @@ export class FakeSdkAgent implements SDKAgent {
     // A closed handle reacquires its local executor on the next send, as the SDK's does.
     this.closed = false;
     this.record.handles.add(this);
-    const run = this.#world.startRun(this, message, options);
+    const run = await this.#world.startRun(this, message, options);
     if (options?.model !== undefined) this.#model = options.model;
     return run;
   }
@@ -504,6 +597,9 @@ export class FakeRun implements Run {
   readonly #record: FakeAgentRecord;
   readonly #authorized: boolean;
   readonly #onDelta: SendOptions["onDelta"];
+  readonly #persist: (status: PersistedTerminal) => Promise<void>;
+  /** The built-in tools the run's handle offers (`AgentOptions.tools`); undefined for Cursor's default set. */
+  readonly #tools: ReadonlySet<string> | undefined;
   readonly #messages = new Queue<SDKMessage>();
   readonly #done = new Deferred<{ status: "finished" | "error" | "cancelled"; result?: string; error?: RunError }>();
   readonly #listeners = new Set<(status: RunStatus) => void>();
@@ -515,13 +611,27 @@ export class FakeRun implements Run {
   #steps = 0;
   /** True once the run's turn ended on Cursor's side, whether or not the driver has heard. */
   #ended = false;
+  /** True once the run ended; `wait()` resolves when the store has its terminal status. */
+  #over = false;
   #usage: TokenUsage | undefined;
   #result: string | undefined;
   #error: RunError | undefined;
 
-  constructor(world: FakeCursorWorld, record: FakeAgentRecord, runId: string, prompt: string, model: ModelSelection, authorized: boolean, onDelta: SendOptions["onDelta"]) {
+  constructor(
+    world: FakeCursorWorld,
+    record: FakeAgentRecord,
+    runId: string,
+    prompt: string,
+    model: ModelSelection,
+    authorized: boolean,
+    onDelta: SendOptions["onDelta"],
+    persist: (status: PersistedTerminal) => Promise<void>,
+    tools: readonly string[] | undefined,
+  ) {
     this.#world = world;
     this.#onDelta = onDelta;
+    this.#persist = persist;
+    this.#tools = tools === undefined ? undefined : new Set(tools);
     this.#record = record;
     this.id = runId;
     this.agentId = record.agentId;
@@ -597,11 +707,13 @@ export class FakeRun implements Run {
     };
   }
 
+  /** As the SDK's local `Run.cancel` (index.js `class Tr`): cancelled at once, a CANCELLED status, the executor aborted, the run cancelled in the store. */
   async cancel(): Promise<void> {
     if (this.#status !== "running") return;
     this.#setStatus("cancelled");
     this.#messages.push({ type: "status", agent_id: this.agentId, run_id: this.id, status: "CANCELLED" });
     this.#stop.resolve("cancel");
+    await this.#persist("CANCELLED");
   }
 
   async steer(text: string): Promise<SteerAckOutcome> {
@@ -631,7 +743,7 @@ export class FakeRun implements Run {
    * if it has one, is pushed (index.js `sendImpl` and run-interaction-accumulator `apply`).
    */
   async update(update: InteractionUpdate): Promise<void> {
-    if (this.#done.settled) throw new Error(`run ${this.id} already ended`);
+    if (this.#over) throw new Error(`run ${this.id} already ended`);
     Real.InteractionUpdateSchema.parse(update);
     this.#accumulate(update);
     if (update.type !== "summary" && update.type !== "summary-started" && update.type !== "summary-completed") await this.#onDelta?.({ update });
@@ -663,7 +775,7 @@ export class FakeRun implements Run {
    * be one the agent offers.
    */
   async runTool(callId: string, call: ToolCall, partials: readonly ToolCall[] = []): Promise<void> {
-    const allowed = this.#allowedTools();
+    const allowed = this.#tools;
     if (allowed !== undefined && !allowed.has(call.type)) throw new Error(`the agent does not offer the ${call.type} tool (tools: ${[...allowed].join(", ")})`);
     for (const partial of partials) await this.update({ type: "partial-tool-call", callId, toolCall: partial, modelCallId: `${callId}-model` });
     const { result, ...started } = call as ToolCall & { result?: unknown };
@@ -730,21 +842,22 @@ export class FakeRun implements Run {
     return undefined;
   }
 
-  #allowedTools(): Set<string> | undefined {
-    const handles = [...this.#record.handles];
-    const tools = handles.find((handle) => handle.options.tools !== undefined)?.options.tools;
-    return tools === undefined ? undefined : new Set(tools);
-  }
-
+  /** Ends the run. As the SDK's `sendImpl`, the store gets the run's terminal status before `wait()` resolves. */
   #settle(outcome: { status: "finished" | "error" | "cancelled"; result?: string; error?: RunError }, status: RunStatus): void {
-    if (this.#done.settled) return;
+    if (this.#over) return;
+    this.#over = true;
     if (this.#status === "running") this.#setStatus(status);
     if (outcome.result !== undefined) this.#result = outcome.result;
     if (outcome.error !== undefined) this.#error = outcome.error;
-    this.#done.settled = true;
-    this.#done.resolve(this.#status === "cancelled" ? { status: "cancelled" } : outcome);
     this.#messages.end();
     if (this.#record.activeRun === this) this.#record.activeRun = undefined;
+    const final = this.#status === "cancelled" ? { status: "cancelled" as const } : outcome;
+    const persisted: PersistedTerminal = this.#status === "cancelled" ? "CANCELLED" : this.#status === "error" ? "ERROR" : "FINISHED";
+    const resolve = () => {
+      this.#done.settled = true;
+      this.#done.resolve(final);
+    };
+    this.#persist(persisted).then(resolve, resolve);
   }
 
   #setStatus(status: RunStatus): void {

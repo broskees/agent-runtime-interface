@@ -188,9 +188,9 @@ on:
   followed by 20 or more token characters.
 
 A path counts only where it starts: at the start of a line, or after a
-character that cannot be part of a path. The token patterns other than
-`sk-ant-` count only at the start of a word, so `ask-...` or `mghp_...` do
-not match.
+character that cannot be part of a path segment. So `/var/home/x` is not a
+path starting `/home/`, but `"/home/x"` and `file:///home/x` are. The token
+patterns match anywhere in a line.
 
 Known limit: Claude Code streams text in chunks, and each chunk is its own
 `message` frame. A value split across two chunks matches neither the
@@ -203,17 +203,17 @@ scope for the scan.
 The recorded session must not load the user's settings, hooks, plugins,
 agents, MCP servers or `CLAUDE.md`, and must not change those files. Each
 scenario runs in its own temp workspace: `cwd/` (the thread's directory),
-`home/`, `claude-config/` and `instances/` (the host's directories). The
+`claude-home/`, `claude-config/` and `instances/` (the host's directories). The
 driver hands Claude Code only this environment:
 
 | Variable | Value | Why |
 |---|---|---|
 | `PATH` | the recorder's `PATH` | Claude Code needs its shell and tools |
-| `HOME` | `<workspace>/home`, empty | no shell profile or other home file of the user's |
+| `HOME` | `<workspace>/claude-home`, empty | no shell profile or other home file of the user's |
 | `CLAUDE_CONFIG_DIR` | `<workspace>/claude-config` | Claude Code keeps its settings, session history, plugins and global config file under this directory, so it never reads `~/.claude` or `~/.claude.json` |
 | `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | `1` | no auto memory |
 | `ENABLE_CLAUDEAI_MCP_SERVERS` | `false` | no claude.ai MCP connectors |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` | no auto-update, telemetry or error reports |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` | no auto-update, telemetry or error reports; it also stops feature-flag fetching, so Claude Code does not sync the skills and plugins enabled for the user's claude.ai account ("Features that need feature-flag fetching") |
 
 The driver config is `settingSources: []` and the recorder's `model`. The
 host gives the thread no tool server, so the session has no MCP server at

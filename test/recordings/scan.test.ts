@@ -29,10 +29,10 @@ const METADATA: RecordingMetadata = {
 
 // A plain recording: the frames a simple scenario has, with placeholders only.
 const CLEAN: Frame[] = [
-  { dir: "out", kind: "query", query: "q1", prompt: "stream", options: { cwd: "<WORKSPACE>/cwd", env: { PATH: "<PATH>", HOME: "<WORKSPACE>/home" } } },
+  { dir: "out", kind: "query", query: "q1", prompt: "stream", options: { cwd: "<WORKSPACE>/cwd", env: { PATH: "<PATH>", HOME: "<WORKSPACE>/claude-home" } } },
   { dir: "out", kind: "prompt", query: "q1", message: { type: "user", message: { role: "user", content: [{ type: "text", text: "Reply with one word" }] } } },
   { dir: "in", kind: "message", query: "q1", message: { type: "system", subtype: "init", cwd: "<WORKSPACE>/cwd", model: "claude-haiku", account: { email: "<EMAIL>" } } },
-  { dir: "in", kind: "message", query: "q1", message: { type: "assistant", message: { content: [{ type: "text", text: "ok, see https://example.com/home/docs and ask-anything" }] } } },
+  { dir: "in", kind: "message", query: "q1", message: { type: "assistant", message: { content: [{ type: "text", text: "ok, see https://example.com/home/docs, /var/home/shared and ask-anything" }] } } },
   { dir: "in", kind: "end", query: "q1" },
 ];
 
@@ -57,10 +57,12 @@ const PLANTED: ReadonlyArray<{ name: string; value: string; rule: string }> = [
   { name: "a path under /home/", value: "/home/alice/project/notes.txt", rule: "home-path" },
   { name: "a path under /Users/", value: "/Users/alice/Library/x", rule: "home-path" },
   { name: "a path under /root/", value: "/root/.claude/settings.json", rule: "home-path" },
+  { name: "a file URL into /home/", value: "file:///home/alice/notes.txt", rule: "home-path" },
   { name: "a path under the scanning machine's $HOME", value: `${SCANNING_HOME}/.claude.json`, rule: "machine-home" },
   { name: "an email address", value: "alice.smith+claude@example.co.uk", rule: "email" },
   { name: "an Anthropic key", value: "sk-ant-api03-AbCdEf0123456789", rule: "token" },
   { name: "an sk- key", value: "sk-proj0123456789abcdefABCDEF", rule: "token" },
+  { name: "an sk- key inside a word", value: "task-0123456789abcdefABCDEF", rule: "token" },
   { name: "a GitHub token", value: "ghp_0123456789abcdefABCDEF0123456789abcd", rule: "token" },
   { name: "a GitHub app token", value: "ghs_0123456789abcdefABCDEF", rule: "token" },
   { name: "a Slack token", value: "xoxb-1234-5678-abcdef", rule: "token" },

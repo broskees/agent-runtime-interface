@@ -130,18 +130,26 @@ for (const name of SCENARIO_NAMES) {
   });
 }
 
-test("the replay SDK imports neither driver code nor the fake SDK, directly or through other modules", () => {
+/** Every repository file `entry` reaches through relative imports and exports, type-only ones included. */
+function reachedFrom(entry: string): string[] {
   const seen = new Set<string>();
   const walk = (file: string): void => {
     if (seen.has(file)) return;
     seen.add(file);
     const text = fs.readFileSync(file, "utf8");
-    for (const match of text.matchAll(/(?:^|\n)\s*import\s+(?!type\b)[^;]*?from\s+"(\.[^"]+)"|import\("(\.[^"]+)"\)/g)) {
+    for (const match of text.matchAll(/(?:^|\n)\s*(?:import|export)\s[^;]*?from\s+"(\.[^"]+)"|import\("(\.[^"]+)"\)/g)) {
       walk(path.resolve(path.dirname(file), match[1] ?? match[2]!));
     }
   };
-  walk(path.join(REPO_ROOT, "test", "recordings", "claude", "replay-sdk.ts"));
-  const reached = [...seen].map((file) => path.relative(REPO_ROOT, file).split(path.sep).join("/"));
+  walk(path.join(REPO_ROOT, entry));
+  return [...seen].map((file) => path.relative(REPO_ROOT, file).split(path.sep).join("/"));
+}
+
+test("the replay SDK imports neither driver code nor the fake SDK, directly or through other modules, type-only imports included", () => {
+  // The walk finds driver code where it is: the rig imports the driver and the fake.
+  const rig = reachedFrom("test/drivers/claude/rig.ts");
+  assert.ok(rig.includes("src/drivers/claude/index.ts") && rig.includes("test/drivers/claude/fake-sdk.ts"), rig.join(", "));
+  const reached = reachedFrom("test/recordings/claude/replay-sdk.ts");
   assert.ok(reached.length > 3, reached.join(", "));
   assert.deepEqual(
     reached.filter((file) => file.startsWith("src/drivers/") || file.startsWith("test/drivers/")),

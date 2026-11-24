@@ -37,8 +37,9 @@ interface Pattern {
   readonly pattern: RegExp;
 }
 
-// A path starts at the beginning of the text or after a character that cannot be part of a path or a word.
-const PATH_START = "(?:^|(?<=[^A-Za-z0-9._~/-]))";
+// A path starts at the beginning of the text or after a character that cannot be part of a path segment
+// (so /var/home/x is not a path starting /home/, but "/home/x" and file:///home/x are).
+const PATH_START = "(?:^|(?<=[^A-Za-z0-9._~-]))";
 
 export const RECORDING_SCAN_PATTERNS: readonly Pattern[] = [
   { rule: "home-path", what: "a path starting /home/", pattern: new RegExp(`${PATH_START}/home/`, "g") },
@@ -46,11 +47,11 @@ export const RECORDING_SCAN_PATTERNS: readonly Pattern[] = [
   { rule: "home-path", what: "a path starting /root/", pattern: new RegExp(`${PATH_START}/root/`, "g") },
   { rule: "email", what: "an email address", pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g },
   { rule: "token", what: "an Anthropic key (sk-ant-)", pattern: /sk-ant-/g },
-  { rule: "token", what: "an API key (sk-...)", pattern: /\bsk-[A-Za-z0-9]{20,}/g },
-  { rule: "token", what: "a GitHub token (gh?_)", pattern: /\bgh[pousr]_/g },
-  { rule: "token", what: "a Slack token (xox?-)", pattern: /\bxox[baprs]-/g },
-  { rule: "token", what: "an AWS access key (AKIA...)", pattern: /\bAKIA[0-9A-Z]{16}/g },
-  { rule: "token", what: "a bearer token", pattern: /\bBearer [A-Za-z0-9._~+/=-]{20,}/g },
+  { rule: "token", what: "an API key (sk-...)", pattern: /sk-[A-Za-z0-9]{20,}/g },
+  { rule: "token", what: "a GitHub token (gh?_)", pattern: /gh[pousr]_/g },
+  { rule: "token", what: "a Slack token (xox?-)", pattern: /xox[baprs]-/g },
+  { rule: "token", what: "an AWS access key (AKIA...)", pattern: /AKIA[0-9A-Z]{16}/g },
+  { rule: "token", what: "a bearer token", pattern: /Bearer [A-Za-z0-9._~+/=-]{20,}/g },
 ];
 
 function escapeRegExp(text: string): string {

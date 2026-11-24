@@ -6,7 +6,9 @@
 //
 // The workspace (one temp directory per scenario) holds:
 //   cwd/            the thread's working directory
-//   home/           HOME for Claude Code, empty
+//   claude-home/    HOME for Claude Code, empty (not "home/": a path
+//                   under it would read <WORKSPACE>/home/..., which the
+//                   scan takes for a path starting /home/)
 //   claude-config/  CLAUDE_CONFIG_DIR for Claude Code: settings, transcripts,
 //                   plugins and its global config file all live here, so
 //                   the user's own ~/.claude and ~/.claude.json are never read
@@ -43,7 +45,7 @@ export interface ClaudeLayout {
 /** A fresh temp workspace, by its real path. */
 export function createClaudeLayout(prefix: string): ClaudeLayout {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
-  const layout = { root, cwd: path.join(root, "cwd"), home: path.join(root, "home"), configDir: path.join(root, "claude-config") };
+  const layout = { root, cwd: path.join(root, "cwd"), home: path.join(root, "claude-home"), configDir: path.join(root, "claude-config") };
   for (const directory of [layout.cwd, layout.home, layout.configDir]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   return layout;
 }

@@ -68,15 +68,15 @@ function osUser(): string | undefined {
 
 // What the scan refuses, as replacements. Each regex is global.
 export const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
-const OTHER_HOME_PATTERN = /(^|[^A-Za-z0-9._~/-])(?:\/home\/[^/\s"'`<>]*|\/Users\/[^/\s"'`<>]*|\/root(?=\/))/g;
+const OTHER_HOME_PATTERN = /(^|[^A-Za-z0-9._~-])(?:\/home\/[^/\s"'`<>]*|\/Users\/[^/\s"'`<>]*|\/root(?=\/))/g;
 const TOKEN_PATTERNS: readonly RegExp[] = [
   /sk-ant-[A-Za-z0-9_-]*/g,
-  /\bsk-[A-Za-z0-9]{20,}/g,
-  /\bgh[pousr]_[A-Za-z0-9_]*/g,
-  /\bxox[baprs]-[A-Za-z0-9-]*/g,
-  /\bAKIA[0-9A-Z]{16}/g,
+  /sk-[A-Za-z0-9]{20,}/g,
+  /gh[pousr]_[A-Za-z0-9_]*/g,
+  /xox[baprs]-[A-Za-z0-9-]*/g,
+  /AKIA[0-9A-Z]{16}/g,
 ];
-const BEARER_PATTERN = /\bBearer [A-Za-z0-9._~+/=-]{20,}/g;
+const BEARER_PATTERN = /Bearer [A-Za-z0-9._~+/=-]{20,}/g;
 
 /** Builds the sanitiser for one recording (or one replay). */
 export function createSanitiser(input: SanitiserInput): Sanitiser {

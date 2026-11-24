@@ -78,7 +78,7 @@ range, with no Node built-in.
 | `startTurn` start | `session/setModel` when the model changes, then `turn/start` (`commandId` = turn id, `reasoningEffort`) |
 | `startTurn` queue | `turn/start` with `ifBusy: "queue"`; the answer's `disposition: "queued"` names the queued turn, announced `pending` until Muse's `turn/started` |
 | `startTurn` steer | `turn/steer` with `expectedTurnId`; a steer whose turn already ended is `prompt_required`, a steer the busy session runtime refuses is sent again, and any other refusal is an error (see "Steer refusal") |
-| `interruptTurn` | `turn/interrupt` on the running turn, `turn/unqueue` on a queued one. An unqueue the busy session runtime refuses (`runtime_busy`) is sent again under its first `commandId`, as the SDK's `Session.run` does, until Muse takes it, or until Muse starts the turn, which is then interrupted |
+| `interruptTurn` | `turn/interrupt` on the running turn, `turn/unqueue` on a queued one. An unqueue the busy session runtime refuses (`runtime_busy`) is sent again under its first `commandId`, as the SDK's `Session.run` does, until Muse takes it, or until Muse starts the turn, which is then interrupted. Each wait ends when the turn ends, and the resends stop 30 s after the first busy refusal with `invalid_state` `runtime_busy`, the turn still queued |
 | `respond` (approval) | `approval/decide` with the chosen `choiceId` and the approval's `currentRequirementId` |
 | `respond` (question) | `userInput/answer`: one answer per question, `selectedLabel`, `selectedLabels` or `freeText` (`note` beside a selection) |
 | `readSnapshot` | `session/read` with `excludeItems: false`; an unloaded thread is read through a short-lived host, because `session/read` takes no lease. A turn is `running` when it is the session's `activeTurnId`; otherwise it ended as this session saw it end, or, for the last turn, as Muse's `lastTurn` says (`failed` with its failure, or `cancelled`). Muse stores no terminal for older turns, so an older turn this session did not see end is `completed` |
@@ -285,10 +285,21 @@ driver reads the reason:
   SDK connection's own backoff (a random wait under 50 ms, doubling to 2 s),
   until Muse takes it (`accepted`, `steered`) or the turn ends. A turn that
   ends first never got the steer, so the host then gets `prompt_required`.
-  There is no attempt cap: the SDK's own `Session.run` resends a busy
-  `turn/unqueue` the same way, "with no cap, until the host decides it", and
-  the turn's end bounds the wait. A `runtime_busy` refusal that says
-  `retryable: false` is not resent.
+  The SDK's own `Session.run` resends a busy `turn/unqueue` the same way.
+  A `runtime_busy` refusal that says `retryable: false` is not resent.
+- **Every wait is bounded.** The SDK sets no deadline on a command's answer
+  and does not settle one on a turn notification. So the driver waits for
+  each steer answer, and each backoff, only until the turn ends (its
+  `turn.terminal`); then the call settles. It answers `accepted` when Muse's
+  steered user message, which carries the steer's `commandId`, already shows
+  Muse took it, and `prompt_required` otherwise. Resends after a first
+  `runtime_busy` stop 30 s after that refusal (`MUSE_BUSY_LIMIT_MS`, at least
+  15 sends at the 2 s backoff ceiling); the call then fails with
+  `invalid_state`, reason `runtime_busy`, and the turn goes on. An answer that
+  arrives after the call settled and says Muse took the steer is reported once
+  as a `notice` (level `warning`, code `muse.steer_taken_late`) on the turn;
+  the call keeps its first answer, and Muse's steered message appears on the
+  turn as an item.
 - Any other refusal is an `invalid_state` error with Muse's reason, because
   the turn may still run. `turn/start` refusals carry Muse's reason the same
   way; the driver does not resend a busy `turn/start` (nothing bounds that

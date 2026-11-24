@@ -19,11 +19,13 @@ First version of the Muse Code driver.
 - Turns: start, queue (`ifBusy: "queue"`), steer (`turn/steer` with
   `expectedTurnId`; a steer whose turn already ended, `already_terminal`, is
   `prompt_required`; a steer the busy runtime refuses, `runtime_busy`, is sent
-  again under its `commandId` until Muse takes it or the turn ends; any other
-  refusal is `invalid_state` with Muse's reason), interrupt
+  again under its `commandId` until Muse takes it or the turn ends, for at
+  most 30 s; any other refusal is `invalid_state` with Muse's reason; the
+  turn's end settles a steer whose answer has not come, and a late answer
+  that says Muse took it is a `muse.steer_taken_late` notice), interrupt
   (`turn/interrupt`, `turn/unqueue` for a queued turn, sent again while the
-  runtime is busy). Turns settle only on `turn/completed`, `turn/unqueued` or
-  the host's exit.
+  runtime is busy, under the same bounds). Turns settle only on
+  `turn/completed`, `turn/unqueued` or the host's exit.
 - Requests: approvals answered with `approval/decide` and Muse's own choice
   ids, questions answered with `userInput/answer`; approvals from subagents.
 - Items, subagents, the todo list (`plan.upsert`), token and context usage

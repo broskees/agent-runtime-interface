@@ -45,7 +45,10 @@
 //   reason `already_terminal` (the SDK's facade-control-verbs test "a durably
 //   rejected steer retires to the composer"); `refuseSteer` makes the session
 //   runtime refuse a steer of the running turn, for example with the
-//   retryable `runtime_busy` the SDK changelog documents for `turn/steer`;
+//   retryable `runtime_busy` the SDK changelog documents for `turn/steer`,
+//   and `refuseUnqueue` the same for `turn/unqueue`; `stall` holds a request,
+//   or its answer, until a test releases it (the SDK sets no deadline on an
+//   answer);
 // - `turn/interrupt` and `turn/cancel` answer at admission and the turn ends
 //   with a `cancelled` terminal (cancel-mid-turn transcript);
 // - `session/compact` acks `accepted` and folds a `compaction` item, or acks
@@ -308,6 +311,14 @@ export class FakeMuseWorld {
   refuseSteer: (() => { reason: string; retryable: boolean } | undefined) | undefined;
   /** The same for each `turn/unqueue` of a queued turn (the SDK's `Session.run` documents a busy unqueue, `runtime_busy`). */
   refuseUnqueue: (() => { reason: string; retryable: boolean } | undefined) | undefined;
+  /**
+   * Asked for each request a host receives: `"request"` holds the request
+   * unread until `releaseStalled()` (a stalled host); `"reply"` handles it but
+   * holds its answer, and the frames the answer comes before, until then. The
+   * SDK sets no deadline on an answer, so a held one keeps its call waiting.
+   */
+  stall: ((method: string) => "request" | "reply" | undefined) | undefined;
+  readonly #stalled: Array<() => void> = [];
   readonly #commands = new Map<string, { signature: string; answer: unknown }>();
   #ids = 0;
 
@@ -320,6 +331,16 @@ export class FakeMuseWorld {
   mint(): string {
     this.#ids += 1;
     return `0198f0ac-0000-7000-8000-${this.#ids.toString(16).padStart(12, "0")}`;
+  }
+
+  /** Holds a stalled request or answer until `releaseStalled`. */
+  holdStalled(resume: () => void): void {
+    this.#stalled.push(resume);
+  }
+
+  /** Handles the stalled requests and writes the held answers, oldest first. */
+  releaseStalled(): void {
+    for (const resume of this.#stalled.splice(0)) resume();
   }
 
   /** A one-record source range on `kind` stream `streamId`. */
@@ -622,16 +643,32 @@ export class FakeMuseHost {
     this.#record({ direction: "client", shape: "request", method, frame });
     const params = frame["params"];
     this.world.requests.push({ method, params });
+    const stall = this.world.stall?.(method);
+    if (stall === "request") {
+      this.world.holdStalled(() => this.#answer(method, id, params, false));
+      return;
+    }
+    this.#answer(method, id, params, stall === "reply");
+  }
+
+  /** Handles one request and writes its answer, then the frames the answer comes before; with `hold`, the writing waits for `releaseStalled`. */
+  #answer(method: string, id: unknown, params: unknown, hold: boolean): void {
+    let write: () => void;
     try {
       const result = this.#handle(method, params as never);
-      this.#write({ jsonrpc: "2.0", id, result }, { direction: "server", shape: "result", method });
-      this.#after?.();
+      const after = this.#after;
+      write = () => {
+        this.#write({ jsonrpc: "2.0", id, result }, { direction: "server", shape: "result", method });
+        after?.();
+      };
     } catch (error) {
       const fault = error instanceof MspFault ? error : new MspFault(-32603, "internal", error instanceof Error ? error.message : String(error));
-      this.#write({ jsonrpc: "2.0", id, error: fault.error }, { direction: "server", shape: "error", method });
+      write = () => this.#write({ jsonrpc: "2.0", id, error: fault.error }, { direction: "server", shape: "error", method });
     } finally {
       this.#after = undefined;
     }
+    if (hold) this.world.holdStalled(write);
+    else write();
   }
 
   /** Frames a command sends after its answer, as Muse writes view events after the ack. */

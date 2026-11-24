@@ -19,7 +19,9 @@
 //   the host then gets `prompt_required`. A steer the busy session runtime
 //   refuses (`runtime_busy`) wrote nothing, so it goes out again under its
 //   first `commandId` until Muse takes it or the turn ends, as the SDK's own
-//   `Session.run` resends a busy unqueue. Any other refusal is an error.
+//   `Session.run` resends a busy unqueue, for at most `MUSE_BUSY_LIMIT_MS`.
+//   Any other refusal is an error. The SDK puts no deadline on an answer, so
+//   every wait for one also ends at the turn's end.
 // - Approval choices carry Muse's own `choiceId`, which is the native option
 //   id; `approval/decide` sends it with the approval's current requirement.
 // - Approvals and questions arrive both as view notifications
@@ -144,6 +146,8 @@ interface TurnState {
   settled: boolean;
   /** How the turn ended, once it settled. */
   outcome: { readonly status: Turn["status"]; readonly failure?: Failure } | undefined;
+  /** The `commandId`s of the steers Muse took into the turn: its steered user messages carry them. */
+  readonly steers: Set<string>;
   interruptRequested: boolean;
   usage: UsageSnapshot | undefined;
   readonly openItems: Set<string>;
@@ -237,9 +241,53 @@ const TODO_STATUSES: { readonly [status: string]: PlanEntry["status"] } = { pend
  * which its package does not export): a random wait under a ceiling that
  * starts at 50 ms and doubles up to 2 s.
  */
-function busyDelay(attempt: number): Promise<void> {
+function busyDelay(attempt: number): Promise<"slept"> {
   const ceilingMs = Math.min(2_000, 50 * 2 ** Math.max(0, attempt - 1));
-  return new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * (ceilingMs + 1))));
+  return new Promise((resolve) => setTimeout(() => resolve("slept"), Math.floor(Math.random() * (ceilingMs + 1))));
+}
+
+/**
+ * How long the driver keeps sending a command again while the busy session
+ * runtime refuses it (`runtime_busy`), from the first refusal: 30 s, at least
+ * 15 sends at the backoff's 2 s ceiling. After that the call fails with
+ * `invalid_state` `runtime_busy`, and the host may try again.
+ */
+const MUSE_BUSY_LIMIT_MS = 30_000;
+
+/** The busy limit of one command: `reached` resolves `MUSE_BUSY_LIMIT_MS` after the first `start()`, and never before it. */
+class BusyLimit {
+  readonly reached: Promise<"limit">;
+  #reach: (value: "limit") => void = () => undefined;
+  #timer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor() {
+    this.reached = new Promise((resolve) => {
+      this.#reach = resolve;
+    });
+  }
+
+  start(): void {
+    if (this.#timer === undefined) this.#timer = setTimeout(() => this.#reach("limit"), MUSE_BUSY_LIMIT_MS);
+  }
+
+  clear(): void {
+    clearTimeout(this.#timer);
+  }
+}
+
+/** A Muse command's answer as a value: taken, or refused with its error. */
+type MuseReply = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
+
+function replyOf(sent: Promise<unknown>): Promise<MuseReply> {
+  return sent.then(
+    (): MuseReply => ({ ok: true }),
+    (error: unknown): MuseReply => ({ ok: false, error }),
+  );
+}
+
+/** Resolves "ended" once the turn settled (after its `turn.terminal`). The SDK puts no deadline on a command's answer, so every wait for one also races this. */
+function ended(turn: TurnState): Promise<"ended"> {
+  return turn.done.then(() => "ended" as const);
 }
 
 /**
@@ -572,22 +620,36 @@ export class MuseSession implements Session {
       const host = thread.host;
       if (host === undefined || host.exited) return { status: "prompt_required" };
       const parts = await this.#inputParts(input.content, turnInstructions);
+      const steered: StartTurnResult = { status: "accepted", turnId: active.id, accepted: "steered" };
       // One commandId for every send: a busy refusal wrote nothing, so the resend is the same command.
       const commandId = host.mintCommandId();
-      for (let attempt = 1; ; attempt += 1) {
-        try {
-          await host.command("turn/steer", { sessionId: thread.nativeId, expectedTurnId: active.nativeId, input: parts }, commandId);
-          return { status: "accepted", turnId: active.id, accepted: "steered" };
-        } catch (error) {
-          const data = host.errorKind(error) === "commandRejected" ? host.errorData(error) : {};
+      const params = { sessionId: thread.nativeId, expectedTurnId: active.nativeId, input: parts };
+      const limit = new BusyLimit();
+      try {
+        for (let attempt = 1; ; attempt += 1) {
+          const reply = replyOf(host.command("turn/steer", params, commandId));
+          const answered = await Promise.race([reply, ended(active), limit.reached]);
+          if (answered === "ended" || answered === "limit") {
+            // No answer yet. Muse's steered message, which it writes after the answer, still shows it took the steer.
+            if (active.steers.has(commandId)) return steered;
+            this.#noticeLateSteer(reply, active);
+            if (answered === "ended") return { status: "prompt_required" };
+            throw callErrors.invalidState("runtime_busy", `Muse's session runtime stayed busy for ${MUSE_BUSY_LIMIT_MS / 1000} s and did not take the steer`);
+          }
+          if (answered.ok) return steered;
+          const data = host.errorKind(answered.error) === "commandRejected" ? host.errorData(answered.error) : {};
           // The turn already ended (Muse says so, or this session saw it end): the host must start a new turn.
           if (data["reason"] === "already_terminal" || active.settled) return { status: "prompt_required" };
           // Only the busy session runtime's refusal is resent; any other refusal is the host's to see.
-          if (data["reason"] !== "runtime_busy" || data["retryable"] === false || host.exited) throw callErrorFromMuse(this.#runtime.sdk, error, "turn");
+          if (data["reason"] !== "runtime_busy" || data["retryable"] === false || host.exited) throw callErrorFromMuse(this.#runtime.sdk, answered.error, "turn");
+          limit.start();
+          const waited = await Promise.race([busyDelay(attempt), ended(active), limit.reached]);
+          // The turn ended while Muse was busy: the steer was never taken.
+          if (active.settled || host.exited) return { status: "prompt_required" };
+          if (waited === "limit") throw callErrors.invalidState("runtime_busy", `Muse's session runtime stayed busy for ${MUSE_BUSY_LIMIT_MS / 1000} s and did not take the steer`);
         }
-        await Promise.race([busyDelay(attempt), active.done]);
-        // The turn ended while Muse was busy: the steer was never taken.
-        if (active.settled || host.exited) return { status: "prompt_required" };
+      } finally {
+        limit.clear();
       }
     }
 
@@ -637,6 +699,18 @@ export class MuseSession implements Session {
     }
   }
 
+  /**
+   * A steer call that settled before Muse answered (at the turn's end or the
+   * busy limit): if the answer then says Muse took the steer, the host hears
+   * it once, as a warning notice on the turn. The call keeps its one answer.
+   */
+  #noticeLateSteer(reply: Promise<MuseReply>, turn: TurnState): void {
+    void reply.then((late) => {
+      if (!late.ok) return;
+      this.#emit({ type: "notice", level: "warning", code: "muse.steer_taken_late", text: `Muse took a steer into turn ${turn.id} after the steer call had settled without it.` }, this.#envelope(turn));
+    });
+  }
+
   async interruptTurn(input: InterruptTurnInput): Promise<void> {
     this.#open();
     const turn = this.#turnsById.get(input.turnId);
@@ -650,20 +724,27 @@ export class MuseSession implements Session {
     turn.interruptRequested = true;
     // One commandId for every send of the unqueue: a busy refusal wrote nothing, so the resend is the same command.
     const unqueueId = host.mintCommandId();
-    for (let attempt = 1; ; attempt += 1) {
-      const queued = turn.phase === "pending";
-      try {
-        if (queued) await host.command("turn/unqueue", { sessionId: thread.nativeId, turnId: turn.nativeId }, unqueueId);
-        else await host.command("turn/interrupt", { sessionId: thread.nativeId, turnId: turn.nativeId });
-        break;
-      } catch (error) {
+    const limit = new BusyLimit();
+    const stillBusy = (): Error => callErrors.invalidState("runtime_busy", `Muse's session runtime stayed busy for ${MUSE_BUSY_LIMIT_MS / 1000} s and did not take the unqueue; the turn is still queued`);
+    try {
+      for (let attempt = 1; ; attempt += 1) {
+        const queued = turn.phase === "pending";
+        const sent = queued ? host.command("turn/unqueue", { sessionId: thread.nativeId, turnId: turn.nativeId }, unqueueId) : host.command("turn/interrupt", { sessionId: thread.nativeId, turnId: turn.nativeId });
+        // The busy limit bounds only the unqueue; a turn Muse started is interrupted, and its end bounds that wait.
+        const answered = await Promise.race([replyOf(sent), ended(turn), ...(queued ? [limit.reached] : [])]);
+        // The turn ended, however: nothing is left to stop.
+        if (answered === "ended") break;
+        if (answered === "limit") throw stillBusy();
+        if (answered.ok) break;
         if (turn.settled) return;
-        const kind = host.errorKind(error);
-        const data = kind === "commandRejected" ? host.errorData(error) : {};
+        const kind = host.errorKind(answered.error);
+        const data = kind === "commandRejected" ? host.errorData(answered.error) : {};
         // The busy session runtime did not take the unqueue: send it again, as the SDK's `Session.run` does, until Muse takes it or starts the turn (then the next pass interrupts it).
         if (queued && data["reason"] === "runtime_busy" && data["retryable"] !== false && !host.exited) {
-          await Promise.race([busyDelay(attempt), turn.done]);
+          limit.start();
+          const waited = await Promise.race([busyDelay(attempt), ended(turn), limit.reached]);
           if (turn.settled) return;
+          if (waited === "limit") throw stillBusy();
           continue;
         }
         // The turn already ended: nothing to stop.
@@ -673,6 +754,8 @@ export class MuseSession implements Session {
         this.#settle(turn, "interrupted");
         return;
       }
+    } finally {
+      limit.clear();
     }
     if (input.restartRuntime === true) {
       await turn.done;
@@ -1019,6 +1102,7 @@ export class MuseSession implements Session {
       phase: "unseen",
       settled: false,
       outcome: undefined,
+      steers: new Set(),
       interruptRequested: false,
       usage: undefined,
       openItems: new Set(),
@@ -1178,6 +1262,7 @@ export class MuseSession implements Session {
       case "item/completed": {
         const item = (params as unknown as MuseNotifications["item/started"]).item;
         const turn = item.turnId === undefined || item.turnId === null ? undefined : this.#turnsByNative.get(item.turnId);
+        if (turn !== undefined && item.kind === "userMessage" && item.steered === true && typeof item.commandId === "string") turn.steers.add(item.commandId);
         if (turn !== undefined && turn.phase !== "running" && !turn.settled) this.#begin(turn);
         this.#upsertItem(thread, item, turn?.id);
         return;

@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { VirtualClock } from "../../../src/conformance/index.ts";
 import { isAriError } from "../../../src/index.ts";
 import type { Session, StartTurnResult, Thread } from "../../../src/index.ts";
 import { MUSE_CAPABILITIES, threadIdFor, turnIdFor } from "../../../src/drivers/muse/index.ts";
@@ -23,6 +24,29 @@ async function start(rig: MuseTestRig, session: Session, thread: Thread, text: s
 
 async function terminal(opened: OpenedMuseSession, turnId: string): Promise<Extract<OpenedMuseSession["events"][number]["body"], { type: "turn.terminal" }>> {
   return until(() => opened.bodies("turn.terminal").find((body) => body.turnId === turnId), `turn.terminal for ${turnId}`);
+}
+
+/** What `pending` settled with within `ms` real milliseconds, or "still pending". */
+async function within<T>(pending: Promise<T>, ms: number): Promise<{ value: T } | { error: unknown } | "still pending"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = new Promise<"still pending">((resolve) => {
+    timer = setTimeout(() => resolve("still pending"), ms);
+  });
+  try {
+    return await Promise.race([pending.then((value) => ({ value }), (error: unknown) => ({ error })), waited]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Records how `pending` settles, without waiting for it; the returned function reads it (undefined while pending). */
+function watch<T>(pending: Promise<T>): () => { value: T } | { error: unknown } | undefined {
+  let outcome: { value: T } | { error: unknown } | undefined;
+  pending.then(
+    (value) => (outcome = { value }),
+    (error: unknown) => (outcome = { error }),
+  );
+  return () => outcome;
 }
 
 function turnIdOf(result: StartTurnResult): string {
@@ -147,6 +171,74 @@ describe("muse driver: Muse's protocol", () => {
       assert.deepEqual(await waiting, { status: "prompt_required" });
       await terminal(opened, turnId);
       assert.equal(opened.bodies("item.upsert").some((body) => body.item.kind === "user_message" && body.item.text === "Never taken."), false);
+    } finally {
+      rig.world.refuseSteer = undefined;
+      await rig.cleanup();
+    }
+  });
+
+  test("a steer whose resend Muse never answers settles when the turn ends: prompt_required; a reply that later says Muse took it becomes a notice, not a second answer", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const { result, native } = await start(rig, opened.session, thread, "Build it.");
+      const turnId = turnIdOf(result);
+      // Busy once; Muse takes the resend, but its answer (and the steered message after it) does not come.
+      let steers = 0;
+      rig.world.stall = (method) => (method === "turn/steer" && ++steers === 2 ? "reply" : undefined);
+      rig.world.refuseSteer = () => (steers === 1 ? { reason: "runtime_busy", retryable: true } : undefined);
+      const steering = opened.session.startTurn({ threadId: thread.id, clientTurnKey: "stalled-1", intent: "steer", expectedTurnId: turnId, content: [{ type: "text", text: "Late." }] });
+      const answered = watch(steering);
+      await until(() => (rig.requests("turn/steer").length === 2 ? true : undefined), "the resend of the busy steer");
+      await native.complete();
+      await terminal(opened, turnId);
+      assert.deepEqual(await within(steering, 1000), { value: { status: "prompt_required" } }, "the turn's end settles the steer");
+
+      // The held answer arrives: Muse took the steer after all. That is a notice on the turn; the call keeps its one answer.
+      rig.world.releaseStalled();
+      const notice = await until(() => opened.bodies("notice").find((body) => body.code === "muse.steer_taken_late"), "the notice for the late steer");
+      assert.equal(notice.level, "warning");
+      assert.match(notice.text, new RegExp(turnId));
+      const noticeEvent = opened.events.find((event) => event.body === notice);
+      assert.equal(noticeEvent?.turnId, turnId);
+      await until(() => opened.bodies("item.upsert").find((body) => body.item.kind === "user_message" && body.item.text === "Late."), "Muse's steered message");
+      assert.deepEqual(answered(), { value: { status: "prompt_required" } });
+      assert.equal(opened.bodies("notice").filter((body) => body.code === "muse.steer_taken_late").length, 1);
+    } finally {
+      rig.world.stall = undefined;
+      rig.world.refuseSteer = undefined;
+      await rig.cleanup();
+    }
+  });
+
+  test("a steer the session runtime refuses as busy for 30 s while the turn keeps running settles at that limit with invalid_state runtime_busy", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const { result, native } = await start(rig, opened.session, thread, "Build it.");
+      const turnId = turnIdOf(result);
+      rig.world.refuseSteer = () => ({ reason: "runtime_busy", retryable: true });
+      // Virtual time from here: the driver's backoff and limit timers are the clock's.
+      const clock = new VirtualClock();
+      clock.install();
+      const steered = watch(opened.session.startTurn({ threadId: thread.id, clientTurnKey: "busy-forever", intent: "steer", expectedTurnId: turnId, content: [{ type: "text", text: "Never taken." }] }));
+      try {
+        await clock.pass(29_000, 100);
+        assert.equal(steered(), undefined, "29 s in, the driver still sends the steer again");
+        assert.ok(rig.requests("turn/steer").length >= 10, `the steer went out ${rig.requests("turn/steer").length} times`);
+        await clock.pass(2_000, 100);
+      } finally {
+        clock.uninstall();
+      }
+      const outcome = steered();
+      assert.ok(outcome !== undefined && "error" in outcome, "the steer settled at the limit with an error");
+      assert.ok(isAriError(outcome.error, "invalid_state") && outcome.error.callError.code === "invalid_state" && outcome.error.callError.reason === "runtime_busy");
+      // The turn still runs, and ends normally.
+      rig.world.refuseSteer = undefined;
+      await native.complete();
+      assert.equal((await terminal(opened, turnId)).status, "completed");
     } finally {
       rig.world.refuseSteer = undefined;
       await rig.cleanup();
@@ -425,6 +517,69 @@ describe("muse driver: Muse's protocol", () => {
       await stopping;
       assert.equal(rig.requests("turn/interrupt").at(-1)?.["turnId"], launched.turnId);
       assert.equal((await terminal(opened, turnIdOf(late))).status, "interrupted");
+    } finally {
+      rig.world.refuseUnqueue = undefined;
+      await rig.cleanup();
+    }
+  });
+
+  test("Stop on a queued turn whose unqueue resend Muse never answers settles when the turn ends", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const first = await start(rig, opened.session, thread, "First.");
+      const queued = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "q1", intent: "queue", content: [{ type: "text", text: "Queued." }] });
+      const queuedId = turnIdOf(queued);
+      // Busy once; the resend stalls unread, so Muse still has the turn queued.
+      let unqueues = 0;
+      rig.world.stall = (method) => (method === "turn/unqueue" && ++unqueues === 2 ? "request" : undefined);
+      rig.world.refuseUnqueue = () => (unqueues === 1 ? { reason: "runtime_busy", retryable: true } : undefined);
+      const stopping = opened.session.interruptTurn({ turnId: queuedId });
+      await until(() => (rig.requests("turn/unqueue").length === 2 ? true : undefined), "the resend of the busy unqueue");
+      await first.native.complete();
+      const launched = await rig.nextTurn();
+      await launched.complete();
+      await terminal(opened, queuedId);
+      assert.deepEqual(await within(stopping, 1000), { value: undefined }, "the turn's end settles Stop");
+      rig.world.releaseStalled();
+    } finally {
+      rig.world.stall = undefined;
+      rig.world.refuseUnqueue = undefined;
+      await rig.cleanup();
+    }
+  });
+
+  test("Stop on a queued turn the session runtime refuses to unqueue as busy for 30 s settles at that limit with invalid_state runtime_busy; the turn stays queued", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const first = await start(rig, opened.session, thread, "First.");
+      const queued = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "q1", intent: "queue", content: [{ type: "text", text: "Queued." }] });
+      const queuedId = turnIdOf(queued);
+      rig.world.refuseUnqueue = () => ({ reason: "runtime_busy", retryable: true });
+      // Virtual time from here: the driver's backoff and limit timers are the clock's.
+      const clock = new VirtualClock();
+      clock.install();
+      const stopped = watch(opened.session.interruptTurn({ turnId: queuedId }));
+      try {
+        await clock.pass(29_000, 100);
+        assert.equal(stopped(), undefined, "29 s in, the driver still sends the unqueue again");
+        assert.ok(rig.requests("turn/unqueue").length >= 10, `the unqueue went out ${rig.requests("turn/unqueue").length} times`);
+        await clock.pass(2_000, 100);
+      } finally {
+        clock.uninstall();
+      }
+      const outcome = stopped();
+      assert.ok(outcome !== undefined && "error" in outcome, "Stop settled at the limit with an error");
+      assert.ok(isAriError(outcome.error, "invalid_state") && outcome.error.callError.code === "invalid_state" && outcome.error.callError.reason === "runtime_busy");
+      assert.equal(opened.bodies("turn.terminal").some((body) => body.turnId === queuedId), false, "the queued turn did not end");
+      // Once the runtime takes it, Stop works.
+      rig.world.refuseUnqueue = undefined;
+      await opened.session.interruptTurn({ turnId: queuedId });
+      assert.equal((await terminal(opened, queuedId)).status, "interrupted");
+      await first.native.complete();
     } finally {
       rig.world.refuseUnqueue = undefined;
       await rig.cleanup();

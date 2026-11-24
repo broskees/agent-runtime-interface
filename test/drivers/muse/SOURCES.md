@@ -26,6 +26,11 @@ devDependency.
   turn with the reason and retryability it returns, for example
   `runtime_busy`, and writes nothing. When the runtime is busy is not public,
   so the fake is busy only when a test says so.
+- **Slow answers.** The SDK's `Connection` sets no deadline on an answer
+  (`dist/src/connection/connection.js`), so how long a host may take to
+  answer is open. The fake answers at once, except when a test sets `stall`:
+  then it holds a request unread, or handles it and holds its answer and the
+  frames after it, until `releaseStalled()`.
 - **Parked sessions.** `parkedSession` stores a session that no host holds
   whose turn waits on one question or approval, the state the
   `userinput-answer-round-trip` transcript resumes. A real host reaches it

@@ -2,7 +2,7 @@
 
 The `acp` driver and its five flavors are tested against fake ACP agents.
 Their protocol comes from ACP's own published sources, at these pinned
-versions. `test/drivers/acp/vendor.test.ts` checks that the vendored schema
+versions. `test/drivers/acp/vendor.suite.ts` checks that the vendored schema
 files and the SDK devDependency match this file.
 
 ## Protocol schema
@@ -21,7 +21,7 @@ files and the SDK devDependency match this file.
 
 - Every frame the fake agent sends and every frame a driver sends in the
   conformance runs is checked against these schemas
-  (`test/drivers/acp/frames.ts`, run by each driver's `conformance.test.ts`).
+  (`test/drivers/acp/frames.ts`, run by each driver's `conformance.suite.ts`).
 
 ## Test agents
 
@@ -34,7 +34,7 @@ files and the SDK devDependency match this file.
   for ACP v2, so the SDK parses every frame the driver sends.
 - `standalone-agent.ts` is a self-contained ACP agent with no imports (it can
   be compiled into an executable that needs no Node). It follows the same
-  schemas, and its frames are checked by `standalone.test.ts`.
+  schemas, and its frames are checked by `standalone.suite.ts`.
 
 ## Protocol documents read
 

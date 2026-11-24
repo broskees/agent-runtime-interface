@@ -87,7 +87,7 @@ with the differences in the last rows.
 
 As the [ACP base driver](acp.md#optional-members-44), plus
 `subProviders.list`, `subProviders.set` and `subProviders.disable`, which
-work; `test/drivers/acp-registry/rules.test.ts` checks all 44.
+work; `test/drivers/acp-registry/rules.suite.ts` checks all 44.
 
 ## Missing agent
 

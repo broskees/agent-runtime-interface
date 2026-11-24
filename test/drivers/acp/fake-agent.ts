@@ -197,13 +197,14 @@ function fork(sessionId: string, cwd: string): StoredSession {
   return forked;
 }
 
-function setOption(sessionId: string, configId: string, value: unknown): AnyOption[] {
+async function setOption(sessionId: string, configId: string, value: unknown): Promise<AnyOption[]> {
   const options = optionsOf(sessionId);
   const target = options.find((entry) => (entry["configId"] ?? entry["id"]) === configId);
   if (target === undefined) throw acp1.RequestError.invalidParams(undefined, `no config option ${configId}`);
   target["currentValue"] = value;
-  // Options can depend on each other (fx's model list follows its provider), so the agent also re-announces the list.
-  setImmediate(() => void update(sessionId, { sessionUpdate: "config_option_update", configOptions: options }));
+  // Options can depend on each other (fx's model list follows its provider), so the agent also re-announces
+  // the list, before it answers, so the order of frames never depends on timing.
+  await update(sessionId, { sessionUpdate: "config_option_update", configOptions: options });
   return options;
 }
 
@@ -268,7 +269,7 @@ function buildV1(): acp1.AgentApp {
       loaded.delete(params.sessionId);
       return {};
     })
-    .onRequest("session/set_config_option", async ({ params }) => ({ configOptions: setOption(params.sessionId, params.configId, params.value) as acp1.SessionConfigOption[] }))
+    .onRequest("session/set_config_option", async ({ params }) => ({ configOptions: (await setOption(params.sessionId, params.configId, params.value)) as acp1.SessionConfigOption[] }))
     .onRequest("session/prompt", ({ params }) =>
       new Promise<acp1.PromptResponse>((resolve, reject) => {
         const turn = startTurn(params.sessionId, promptText(params.prompt as Array<{ type: string; text?: string }>), (stopReason, error) => {
@@ -317,7 +318,7 @@ function buildV2(): acp2.AgentApp {
       loaded.delete(params.sessionId);
       return {};
     })
-    .onRequest("session/set_config_option", async ({ params }) => ({ configOptions: setOption(params.sessionId, params.configId, params.value) as acp2.SessionConfigOption[] }))
+    .onRequest("session/set_config_option", async ({ params }) => ({ configOptions: (await setOption(params.sessionId, params.configId, params.value)) as acp2.SessionConfigOption[] }))
     .onRequest("session/prompt", async ({ params, client: context }) => {
       const text = promptText(params.prompt as Array<{ type: string; text?: string }>);
       messageCounter += 1;

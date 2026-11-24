@@ -1,7 +1,7 @@
 // The rules every driver meets, checked for one ACP driver (the base or a
 // flavor): honest optional members (44 of them), a missing runtime that fails
 // loudly only when used, no host prompts and host-chosen names, and its
-// metadata, docs and changelog. Each driver's `rules.test.ts` calls
+// metadata, docs and changelog. Each driver's `rules.suite.ts` calls
 // `driverRuleTests` with its profile.
 
 import assert from "node:assert/strict";

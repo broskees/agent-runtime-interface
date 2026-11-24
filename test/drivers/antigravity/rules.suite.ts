@@ -1,6 +1,6 @@
 // The driver rules for the antigravity driver, with the user's own CLI
 // (`installation: "path"`). Managed installs, which add `maintenance`, are
-// tested in antigravity.test.ts.
+// tested in antigravity.suite.ts.
 
 import { ANTIGRAVITY_DEFAULT_CONFIG, antigravityDriver } from "../../../src/drivers/antigravity/index.ts";
 import { meta } from "../../../src/meta/antigravity.ts";

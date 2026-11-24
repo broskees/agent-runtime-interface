@@ -21,7 +21,7 @@ holds its label, icon, config schema and form hints.
 Kiro's `autopilot` session option decides whether Kiro acts without asking.
 The driver sets it from the thread's runtime mode whenever Kiro offers it:
 off under `approval_required`, on under `full_access`
-(`test/drivers/kiro/kiro.test.ts`). The host's own config values win.
+(`test/drivers/kiro/kiro.suite.ts`). The host's own config values win.
 
 ## Config
 
@@ -63,7 +63,7 @@ with the differences in the last rows.
 
 ## Optional members
 
-As the [ACP base driver](acp.md#optional-members-44); `test/drivers/kiro/rules.test.ts`
+As the [ACP base driver](acp.md#optional-members-44); `test/drivers/kiro/rules.suite.ts`
 checks all 44.
 
 ## Missing CLI

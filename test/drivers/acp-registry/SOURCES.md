@@ -8,7 +8,7 @@ frame of the conformance run is checked against ACP's JSON Schemas, release
 `schema-v2.0.0-beta.3` (commit `94824f11ec78f7a6699323a9342e47fa5edf2530` of
 https://github.com/agentclientprotocol/agent-client-protocol), vendored in
 `vendor-schemas/acp/schema-v2.0.0-beta.3/`. `test/drivers/acp/SOURCES.md` has
-the file digests, and `test/drivers/acp/vendor.test.ts` checks them.
+the file digests, and `test/drivers/acp/vendor.suite.ts` checks them.
 
 ## The ACP Registry
 

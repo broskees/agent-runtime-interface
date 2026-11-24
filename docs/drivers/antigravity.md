@@ -36,7 +36,7 @@ with `GEMINI_HOME=<stateDir>/profile`, `AGY_ACP_FORCE_FILE_STORAGE=1` and
 - **No conversation rollback.** Antigravity can checkpoint the workspace but
   cannot roll back its conversation. `rollbackThread` is present and rejects
   with `unsupported{threads.rollback}` before it reads or writes any file,
-  calls the host or sends a frame (`test/drivers/antigravity/antigravity.test.ts`
+  calls the host or sends a frame (`test/drivers/antigravity/antigravity.suite.ts`
   watches all three). `checkpointing.workspace` stays false: the driver
   exposes no checkpoint extension.
 - **Managed installs and leases.** With `installation: "managed"`,
@@ -99,7 +99,7 @@ As the [ACP base driver](acp.md#optional-members-44), except that
 `rollbackThread` is present and rejects `unsupported`, and with
 `installation: "managed"` the instance has `maintenance.advisory`,
 `maintenance.install` and `maintenance.update` (exercised in
-`antigravity.test.ts`). `test/drivers/antigravity/rules.test.ts` checks all 44
+`antigravity.suite.ts`). `test/drivers/antigravity/rules.suite.ts` checks all 44
 for the default `path` installation.
 
 ## Missing CLI

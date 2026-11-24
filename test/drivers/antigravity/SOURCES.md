@@ -8,7 +8,7 @@ frame of the conformance run is checked against ACP's JSON Schemas, release
 `schema-v2.0.0-beta.3` (commit `94824f11ec78f7a6699323a9342e47fa5edf2530` of
 https://github.com/agentclientprotocol/agent-client-protocol), vendored in
 `vendor-schemas/acp/schema-v2.0.0-beta.3/`. `test/drivers/acp/SOURCES.md` has
-the file digests, and `test/drivers/acp/vendor.test.ts` checks them.
+the file digests, and `test/drivers/acp/vendor.suite.ts` checks them.
 
 ## Antigravity
 
@@ -22,5 +22,5 @@ the file digests, and `test/drivers/acp/vendor.test.ts` checks them.
   a public open-source ACP client of Antigravity, at the commit cited in
   `docs/drivers/antigravity.md` (the repository rule on host names keeps its
   name out of `test/`), and from the proposal's §1.3 Antigravity row.
-- `antigravity.test.ts` builds a release tar.gz and its manifest in the test
+- `antigravity.suite.ts` builds a release tar.gz and its manifest in the test
   and serves them through a fake `fetch`.

@@ -152,7 +152,7 @@ is false, `responseModes` is `live`. Diffs are emitted and can be turned off.
 | The other 15 Session members (`readSnapshot`, `rollbackThread`, `compactThread`, `injectHistory`, `unloadThread`, `backgroundTasks.*`, `stopSubagent`, `mcpApps.*`, `contextWindow`, `canReuseContextUsage`, `uploadFeedback`) | Left out |
 | All 27 optional Instance members (`invalidateCaches`, `maintenance.*`, `auth.*`, `catalog.refresh`, `workspace.snapshot`, `limits.*`, `usageHistory.scan`, `textGeneration.generate`, `nativeSessions.*`, `subProviders.*`) | Left out. Agents sign in through their own CLI, so `auth` is left out and an ACP `-32000` becomes `auth_required` |
 
-`test/drivers/acp/rules.test.ts` checks every one of the 44.
+`test/drivers/acp/rules.suite.ts` checks every one of the 44.
 
 ## Missing agent
 
@@ -166,12 +166,12 @@ gives no version advisory; it is tested against ACP protocol versions 1 and
 
 ## Tests
 
-- `test/drivers/acp/conformance.test.ts`: all 15 scenarios against an agent
+- `test/drivers/acp/conformance.suite.ts`: all 15 scenarios against an agent
   written with `@agentclientprotocol/sdk` 2.9.1, once over v1 and once over
   v2, with every frame checked against ACP's schema.
-- `test/drivers/acp/protocol.test.ts`: negotiation, the v2 lifecycle, upserts,
+- `test/drivers/acp/protocol.suite.ts`: negotiation, the v2 lifecycle, upserts,
   fork constraints, `dependsOn`, native option ids, `_meta` passthrough.
-- `test/drivers/acp/standalone.test.ts`: the self-contained fake agent under
+- `test/drivers/acp/standalone.suite.ts`: the self-contained fake agent under
   real `ari/node` host services.
 - `test/drivers/acp/SOURCES.md`: where the fakes' protocol comes from.
 

@@ -16,7 +16,7 @@ the provider. ACP config options cannot state a dependency, so the driver's
 default `configDependencies` is `{ "model": ["provider"] }`: the ARI model
 option carries `dependsOn: ["provider"]` on every option list fx sends,
 including the list fx sends again after the provider changes
-(`test/drivers/fx/fx.test.ts`). A host shows the provider first and
+(`test/drivers/fx/fx.suite.ts`). A host shows the provider first and
 re-reads the models after changing it.
 
 ## Config
@@ -60,7 +60,7 @@ with the differences in the last rows.
 
 ## Optional members
 
-As the [ACP base driver](acp.md#optional-members-44); `test/drivers/fx/rules.test.ts`
+As the [ACP base driver](acp.md#optional-members-44); `test/drivers/fx/rules.suite.ts`
 checks all 44.
 
 ## Missing CLI

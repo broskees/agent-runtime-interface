@@ -515,7 +515,6 @@ export class FakeRun implements Run {
   #steps = 0;
   /** True once the run's turn ended on Cursor's side, whether or not the driver has heard. */
   #ended = false;
-  #assistantText = "";
   #usage: TokenUsage | undefined;
   #result: string | undefined;
   #error: RunError | undefined;
@@ -691,10 +690,14 @@ export class FakeRun implements Run {
     this.#ended = true;
   }
 
-  /** The run finishes: a FINISHED status, then the stream ends and `wait()` resolves (index.js `sendImpl`, `class Tr`). */
+  /**
+   * The run finishes: a FINISHED status, then the stream ends and `wait()`
+   * resolves with the text of the run's last assistant message as `result`
+   * (index.js `sendImpl` and `finalAssistantText`, `class Tr`).
+   */
   finish(result?: string): void {
     this.#ended = true;
-    const text = result ?? (this.#assistantText === "" ? undefined : this.#assistantText);
+    const text = result ?? this.#finalAssistantText();
     this.#record.replies.push(text ?? "");
     this.#record.finishedRuns += 1;
     this.#messages.push({ type: "status", agent_id: this.agentId, run_id: this.id, status: "FINISHED" });
@@ -714,8 +717,17 @@ export class FakeRun implements Run {
   /** The executor stops after `cancel()`: the run ends cancelled. */
   finishCancelled(): void {
     this.#ended = true;
-    this.#record.replies.push(this.#assistantText);
+    this.#record.replies.push(this.#finalAssistantText() ?? "");
     this.#settle({ status: "cancelled" }, "cancelled");
+  }
+
+  #finalAssistantText(): string | undefined {
+    for (const turn of [...this.#turns].reverse()) {
+      if (turn.type !== "agentConversationTurn") continue;
+      const step = [...turn.turn.steps].reverse().find((candidate) => candidate.type === "assistantMessage");
+      if (step !== undefined && step.type === "assistantMessage") return step.message.text;
+    }
+    return undefined;
   }
 
   #allowedTools(): Set<string> | undefined {
@@ -755,7 +767,6 @@ export class FakeRun implements Run {
         this.#turns.push({ type: "agentConversationTurn", turn: { userMessage: { text: update.userMessage.text }, steps: [] } });
         return;
       case "text-delta": {
-        this.#assistantText += update.text;
         const turn = current();
         const last = turn.steps.at(-1);
         if (last?.type === "assistantMessage") turn.steps[turn.steps.length - 1] = { type: "assistantMessage", message: { text: `${last.message.text}${update.text}` } };

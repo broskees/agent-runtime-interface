@@ -352,6 +352,22 @@ test("resuming an agent Cursor does not hold: a fresh agent and session.replaced
   assert.equal(linked.cwd, target.cwd);
 });
 
+test("compaction is Cursor's summary run, which Cursor refuses before the agent has a saved conversation and while a run is active", async () => {
+  const target = await rig();
+  const { session, events } = await target.open();
+  const thread = await session.createThread({ cwd: target.cwd, policy: policy(target.cwd) });
+  await assert.rejects(session.compactThread!(thread.id), (error: unknown) => isAriError(error, "invalid_state") && (toCallError(error) as { reason?: string }).reason === "nothing_to_compact");
+  const { turnId, run } = await target.turn(session, thread.id, "Something to summarize.");
+  await assert.rejects(session.compactThread!(thread.id), (error: unknown) => isAriError(error, "invalid_state"));
+  await run.endTurn();
+  run.finish();
+  await target.terminal(events, turnId);
+  await session.compactThread!(thread.id);
+  assert.equal(target.world.agentFor(thread.native.id!)?.compactions, 1);
+  // The summary run is Cursor's own, not a turn the host started.
+  assert.equal(events.filter((event) => event.body.type === "turn.upsert" && event.body.turn.origin !== undefined).length, 1);
+});
+
 test("a run that reaches the driver's turn before send() resolves keeps every update", async () => {
   const target = await rig();
   const { session, events } = await target.open();

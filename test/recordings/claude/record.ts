@@ -27,6 +27,7 @@ import { createSanitiser } from "../sanitiser.ts";
 import { SCENARIOS, checkScenario } from "../scenarios.ts";
 import type { Scenario, ScenarioName } from "../scenarios.ts";
 import { claudeNativeAnswers } from "./frames.ts";
+import { CLAUDE_PROTOCOL_WORDS } from "./protocol-words.ts";
 import type { ClaudeRuntime } from "./frames.ts";
 import { DEFAULT_RECORD_MODEL, createClaudeLayout, runClaudeScenario } from "./run.ts";
 import type { ClaudeLayout } from "./run.ts";
@@ -177,7 +178,7 @@ async function recordOne(scenario: Scenario, options: RecordClaudeOptions): Prom
   }
   let file: string | undefined;
   if (frames.length > 0 && runtime !== undefined) {
-    const sanitise = createSanitiser({ workspace: layout.root, env: options.env, ...(options.user === undefined ? {} : { user: options.user }) });
+    const sanitise = createSanitiser({ workspace: layout.root, env: options.env, protocolWords: CLAUDE_PROTOCOL_WORDS, ...(options.user === undefined ? {} : { user: options.user }) });
     file = path.join(options.outDir, `${scenario.name}.ndjson`);
     await writeRecording(
       file,

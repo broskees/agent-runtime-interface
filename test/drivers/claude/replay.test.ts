@@ -367,6 +367,8 @@ for (const name of SCENARIO_NAMES) {
         assertDrift(error, file, line, [
           /replay drift: the scenario ended with 1 recorded inbound frame\(s\) the driver never took/,
           new RegExp(`not taken \\(line ${line}\\): ${escape(JSON.stringify(frame))}`),
+          // The last frame the driver did take: the stream's real end, on the line before.
+          new RegExp(`last taken by the driver \\(line ${line - 1}\\): ${escape(JSON.stringify(recording.frames.at(-1)!.frame))}`),
         ]),
       );
     });
@@ -393,7 +395,11 @@ test("at the replay SDK, a query the driver starts but never reads leaves its re
     assert.throws(
       () => replay.sequencer.finish(),
       (error: unknown) =>
-        assertDrift(error, file, line, [/the driver never took/, new RegExp(`not taken \\(line ${line}\\): ${escape(JSON.stringify(frames[line - 2]))}`)]),
+        assertDrift(error, file, line, [
+          /the driver never took/,
+          new RegExp(`not taken \\(line ${line}\\): ${escape(JSON.stringify(frames[line - 2]))}`),
+          reads === 0 ? /last taken by the driver \(line none\): \(none\)/ : new RegExp(`last taken by the driver \\(line 3\\): ${escape(JSON.stringify(frames[1]))}`),
+        ]),
     );
   }
   // A driver that reads to the end takes everything.

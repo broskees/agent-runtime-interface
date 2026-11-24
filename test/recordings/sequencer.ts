@@ -106,6 +106,8 @@ export class ReplaySequencer {
   /** Inbound frames delivered that the driver has not taken yet, by line, oldest first. */
   readonly #untaken = new Map<number, Frame>();
   #takes = 0;
+  /** The inbound frame the driver took last. */
+  #lastTaken: { line: number; frame: Frame } | undefined;
 
   constructor(options: ReplaySequencerOptions) {
     this.recording = options.recording;
@@ -210,11 +212,14 @@ export class ReplaySequencer {
 
   /** The driver took the inbound frame on `line`. */
   taken(line: number): void {
-    if (!this.#untaken.delete(line)) {
+    const frame = this.#untaken.get(line);
+    if (frame === undefined) {
       const entry = this.recording.frames.find((each) => each.line === line);
       this.#fail(new ReplayDriftError(this.recording.file, line, `replay handed the driver a frame it was not holding (taken twice, or never delivered)\n  recorded (line ${line}): ${showFrame(entry?.frame)}`));
       return;
     }
+    this.#untaken.delete(line);
+    this.#lastTaken = { line, frame };
     this.#takes += 1;
     this.#changed();
   }
@@ -297,7 +302,7 @@ export class ReplaySequencer {
       new ReplayDriftError(
         this.recording.file,
         untaken.line,
-        `replay drift: the scenario ended with ${this.#untaken.size} recorded inbound frame(s) the driver never took\n  not taken (line ${untaken.line}): ${showFrame(untaken.frame)}\n  last recorded (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}`,
+        `replay drift: the scenario ended with ${this.#untaken.size} recorded inbound frame(s) the driver never took\n  not taken (line ${untaken.line}): ${showFrame(untaken.frame)}\n  last taken by the driver (line ${this.#lastTaken?.line ?? "none"}): ${showFrame(this.#lastTaken?.frame)}`,
       ),
     );
   }

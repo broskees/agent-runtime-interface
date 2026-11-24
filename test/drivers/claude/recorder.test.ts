@@ -4,7 +4,7 @@
 // hidden; nothing starts Claude Code.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,7 +18,9 @@ import { recordClaude, recordModel, userCredentialFile } from "../../recordings/
 import type { RecordClaudeOptions } from "../../recordings/claude/record.ts";
 import { replayClaude } from "../../recordings/claude/replay.ts";
 import { readRecording } from "../../recordings/format.ts";
-import { SCENARIO_NAMES } from "../../recordings/scenarios.ts";
+import type { Frame } from "../../recordings/format.ts";
+import { CLAUDE_PROTOCOL_WORDS } from "../../recordings/claude/protocol-words.ts";
+import { SCENARIOS, SCENARIO_NAMES } from "../../recordings/scenarios.ts";
 import type { Scenario } from "../../recordings/scenarios.ts";
 import type { FakeClaudeWorld } from "./fake-sdk.ts";
 import { puppetRuntime, refreshCredential, startPuppet } from "./puppets.ts";
@@ -387,6 +389,87 @@ test("a live recording with neither a sign-in nor ANTHROPIC_API_KEY stops before
     assert.match(outcomes[0]!.error!.message, /no Claude sign-in found: neither .*\.claude\/\.credentials\.json nor ANTHROPIC_API_KEY/);
     assert.equal(loaded, 0);
     assert.deepEqual(fs.readdirSync(outDir), []);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+// The OS user name outside a path.
+
+const FRAME_FORMAT_FIELDS = new Set(["dir", "kind", "query", "id", "method", "toolName"]);
+
+/** Every place in a recording where `name` is a whole word, other than a protocol word of its key or a frame's format field. */
+function wholeWordsOf(name: string, frames: readonly Frame[]): string[] {
+  const word = new RegExp(`(?<![A-Za-z0-9_])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_])`);
+  const found: string[] = [];
+  const walk = (value: unknown, key: string | undefined, at: string): void => {
+    if (typeof value === "string") {
+      if (key !== undefined && CLAUDE_PROTOCOL_WORDS[key]?.includes(value)) return;
+      if (word.test(value)) found.push(`${at}: ${JSON.stringify(value)}`);
+    } else if (Array.isArray(value)) value.forEach((each, index) => walk(each, key, `${at}[${index}]`));
+    else if (typeof value === "object" && value !== null) for (const [field, entry] of Object.entries(value)) walk(entry, field, `${at}.${field}`);
+  };
+  frames.forEach((frame, index) => {
+    for (const [field, entry] of Object.entries(frame)) if (!FRAME_FORMAT_FIELDS.has(field)) walk(entry, field, `frame ${index + 2}.${field}`);
+  });
+  return found;
+}
+
+test("the owner column of `ls -ld .`, which reaches tool_use_result.stdout through turn.runBash, loses the OS user name, and the scan passes", async () => {
+  const osName = os.userInfo().username;
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-listing-")));
+  let listing = "";
+  // As the verifier ran it: the isolated HOME, no USER and no LOGNAME, the real ls in the recorder's workspace.
+  const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, ["approval_allowed"], {
+    bashOutput: (cwd) => {
+      listing = execFileSync("ls", ["-ld", "."], { cwd, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: home, LC_ALL: "C" } });
+      return `${listing}${SCENARIOS.find((scenario) => scenario.name === "approval_allowed")!.marker!}\n`;
+    },
+  });
+  try {
+    assert.equal(outcomes[0]!.error, undefined, outcomes[0]!.error?.message);
+    assert.ok(new RegExp(`(?<![A-Za-z0-9_])${osName}(?![A-Za-z0-9_])`).test(listing), `the listing shows the owner: ${listing}`);
+    const recording = await readRecording(outcomes[0]!.file!);
+    const frames = recording.frames.map((entry) => entry.frame);
+    const stdouts = frames.flatMap((frame) => {
+      const stdout = (frame["message"] as { tool_use_result?: { stdout?: unknown } } | undefined)?.tool_use_result?.stdout;
+      return frame.kind === "message" && typeof stdout === "string" ? [stdout] : [];
+    });
+    assert.equal(stdouts.length, 1, "the command's output reached the recording as tool_use_result.stdout");
+    assert.ok(stdouts[0]!.includes("<USER>"), `the owner column holds the placeholder: ${stdouts[0]}`);
+    assert.deepEqual(wholeWordsOf(osName, frames), [], "the OS user name is nowhere in the recording but in protocol words");
+    const text = fs.readFileSync(outcomes[0]!.file!, "utf8");
+    assert.deepEqual(scanRecordingText(text, outcomes[0]!.file!, { home }), []);
+    await replayClaude(outcomes[0]!.file!);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test("the OS user name in the agent's free text, in assistant text and on stderr, is replaced", async () => {
+  const osName = os.userInfo().username;
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-free-text-")));
+  // The fake streams a text in two halves; the name sits well inside the first.
+  const reply = `${osName} said ok. The rest of this sentence keeps the name inside the first streamed half.`;
+  const stderrLine = `warning: no keychain entry for ${osName}\n`;
+  const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, ["simple"], {
+    reply,
+    onTurn: (_turn, _index, world) => world.queries.at(-1)!.options.stderr!(stderrLine),
+  });
+  try {
+    assert.equal(outcomes[0]!.error, undefined, outcomes[0]!.error?.message);
+    const recording = await readRecording(outcomes[0]!.file!);
+    const frames = recording.frames.map((entry) => entry.frame);
+    const assistant = frames.find((frame) => frame.kind === "message" && (frame["message"] as { type: string }).type === "assistant")!;
+    assert.deepEqual((assistant["message"] as { message: { content: unknown } }).message.content, [{ type: "text", text: reply.replace(osName, "<USER>"), citations: null }]);
+    assert.deepEqual(
+      frames.filter((frame) => frame.kind === "stderr").map((frame) => frame["data"]),
+      ["warning: no keychain entry for <USER>\n"],
+    );
+    assert.deepEqual(wholeWordsOf(osName, frames), [], "the OS user name is nowhere in the recording but in protocol words");
+    await replayClaude(outcomes[0]!.file!);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(outDir, { recursive: true, force: true });

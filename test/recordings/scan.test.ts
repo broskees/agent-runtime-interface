@@ -13,6 +13,7 @@ import { recordingFiles, scanRecordingText, scanRecordings } from "../../scripts
 import { REPO_ROOT } from "../helpers/spec.ts";
 import { encodeRecording, parseRecording } from "./format.ts";
 import type { Frame, RecordingMetadata } from "./format.ts";
+import { CLAUDE_PROTOCOL_WORDS } from "./claude/protocol-words.ts";
 import { PLACEHOLDERS, createSanitiser, userNames } from "./sanitiser.ts";
 
 const METADATA: RecordingMetadata = {
@@ -173,17 +174,45 @@ test("the sanitiser replaces the workspace, $HOME, the user name in paths and th
   }
 });
 
-test("the sanitiser never turns a protocol word into the user placeholder, whatever the account is named", () => {
-  for (const user of ["user", "root", "assistant", "system", "text", "default"]) {
-    const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: user, LOGNAME: user }, user });
-    const frame: Frame = {
-      dir: "in",
-      kind: "message",
-      query: "q1",
-      message: { type: user, role: user, subtype: user, content: [{ type: "text", text: `the ${user} said ${user}`, media_type: `text/${user}` }], settingSources: [user], [user]: user },
+test("in an inbound frame the user name goes wherever it is a whole word, except in a protocol word of its key; in an outbound frame only from paths", () => {
+  for (const user of ["user", "root", "assistant", "system", "text", "default", "message", "end", "joe"]) {
+    const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: user, LOGNAME: user }, user, protocolWords: CLAUDE_PROTOCOL_WORDS });
+    // Every key whose protocol words hold this name, set to it: those values stay.
+    const protocol = Object.fromEntries(
+      Object.entries(CLAUDE_PROTOCOL_WORDS)
+        .filter(([, words]) => words.includes(user))
+        .map(([key]) => [key, user]),
+    );
+    const payload = {
+      ...protocol,
+      content: [{ type: "text", text: `the ${user} ran ls as ${user}'s shell` }],
+      tool_use_result: { stdout: `drwx------ 2 ${user} ${user} 4096 Nov 24 12:00 .\n`, stderr: "" },
+      error: `permission denied for ${user}`,
+      file: `/var/lib/${user}/x`,
+      [user]: "a key named like the account",
+      untouched: `${user}_name ${user}name`,
     };
-    assert.deepEqual(sanitise(frame), frame, `account ${user}: no value or key changes`);
-    assert.equal(sanitise(`/var/lib/${user}/x`), "/var/lib/<USER>/x", `account ${user}: a path segment is replaced`);
+    const inbound = sanitise({ dir: "in", kind: "message", query: "q1", message: payload } as Frame);
+    assert.deepEqual(
+      inbound,
+      {
+        dir: "in",
+        kind: "message",
+        query: "q1",
+        message: {
+          ...protocol,
+          content: [{ type: "text", text: "the <USER> ran ls as <USER>'s shell" }],
+          tool_use_result: { stdout: "drwx------ 2 <USER> <USER> 4096 Nov 24 12:00 .\n", stderr: "" },
+          error: "permission denied for <USER>",
+          file: "/var/lib/<USER>/x",
+          [user]: "a key named like the account",
+          untouched: `${user}_name ${user}name`,
+        },
+      },
+      `account ${user}, inbound`,
+    );
+    const outbound = sanitise({ dir: "out", kind: "prompt", query: "q1", message: payload } as Frame);
+    assert.deepEqual(outbound, { dir: "out", kind: "prompt", query: "q1", message: { ...payload, file: "/var/lib/<USER>/x" } }, `account ${user}, outbound: only the path changes`);
   }
 });
 

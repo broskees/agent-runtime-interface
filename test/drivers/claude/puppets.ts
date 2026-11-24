@@ -18,6 +18,10 @@ export interface PuppetOptions {
   readonly onTurn?: (turn: FakeTurn, index: number, world: FakeClaudeWorld) => void | Promise<void>;
   /** The Claude Code process dies in the first turn, so the scenario fails. */
   readonly crash?: boolean;
+  /** What the approval command prints, given the query's working directory; the scenario's marker when left out. */
+  readonly bashOutput?: (cwd: string) => string;
+  /** The answer of the simple scenario; `ok` when left out. */
+  readonly reply?: string;
 }
 
 export interface Puppet {
@@ -38,10 +42,10 @@ function rememberedWord(world: FakeClaudeWorld, sessionId: string): string {
   return "I do not remember a word.";
 }
 
-async function play(world: FakeClaudeWorld, scenario: Scenario, turn: FakeTurn, index: number): Promise<void> {
+async function play(world: FakeClaudeWorld, scenario: Scenario, turn: FakeTurn, index: number, options: PuppetOptions): Promise<void> {
   switch (scenario.name) {
     case "simple":
-      await turn.say("ok");
+      await turn.say(options.reply ?? "ok");
       return turn.complete();
     case "multi_turn":
     case "resume":
@@ -49,7 +53,8 @@ async function play(world: FakeClaudeWorld, scenario: Scenario, turn: FakeTurn, 
       return turn.complete();
     case "approval_allowed":
     case "approval_denied": {
-      const result = await turn.runBash(scenario.command!, `${scenario.marker!}\n`);
+      const cwd = world.queries.at(-1)!.cwd;
+      const result = await turn.runBash(scenario.command!, options.bashOutput?.(cwd) ?? `${scenario.marker!}\n`);
       await turn.say(result === undefined || result.behavior === "allow" ? "done" : "The command was refused, so I stopped.");
       return turn.complete();
     }
@@ -69,7 +74,7 @@ export function startPuppet(scenario: Scenario, options: PuppetOptions = {}): Pu
       const turn = await world.nextTurn();
       await options.onTurn?.(turn, index, world);
       if (options.crash === true) return turn.exitProcess();
-      await play(world, scenario, turn, index);
+      await play(world, scenario, turn, index, options);
     }
   })().catch((error: unknown) => {
     failure = error instanceof Error ? error : new Error(String(error));

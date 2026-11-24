@@ -172,7 +172,8 @@ checks this table against the code's list.
 
 The repository is public, so every recorder sanitises each frame before it
 writes. All recorders use one sanitiser, `test/recordings/sanitiser.ts`. It
-replaces, in every string and object key:
+replaces, in every string and object key (a frame's own format fields, `dir`,
+`kind`, `query`, `id`, `method` and `toolName`, stay as the tap wrote them):
 
 | What | Placeholder |
 |---|---|
@@ -180,7 +181,7 @@ replaces, in every string and object key:
 | a string that is exactly the value of `PATH` | `<PATH>` |
 | `$HOME`, and its real path | `<HOME>` |
 | the values of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` | `<ANTHROPIC_API_KEY>`, `<ANTHROPIC_AUTH_TOKEN>`, `<CLAUDE_CODE_OAUTH_TOKEN>` |
-| the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ), where it is a whole segment of a path | `<USER>` |
+| the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ): in an inbound frame wherever it is a whole word, except in a protocol word; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
 | email addresses | `<EMAIL>` |
 | another home directory: `/home/<name>`, `/Users/<name>`, `/root` | `<OTHER_HOME>` |
 | a token the scan looks for | `<TOKEN>` |
@@ -188,16 +189,48 @@ replaces, in every string and object key:
 Exact values go first, longest first, so a path inside the workspace is
 replaced whole.
 
-The user name is replaced only inside a path: a string part that starts with
-`/`, `\`, `~` or a drive letter, where the name is a whole segment, as in
-`/srv/<name>/x`, `C:\Users\<name>` or `~<name>/x`. It is not replaced where a
-string is nothing but the name, or where the name is a word of free text.
-There a name cannot be told apart from a word of the protocol: an account
-named `user`, `root` or `system` would otherwise turn Claude Code's
-`type: "user"` and `role: "user"` into the placeholder. The recording would
-then hold values the SDK never sent and would not replay on another account.
-`test/drivers/claude/replay.test.ts` records on accounts named `user` and
-`root` and replays on the other.
+How the user name goes depends on what the string is:
+
+- **Inbound frames** hold what the agent and the machine produced: tool
+  output (`tool_use_result.stdout`), assistant text, `stderr`, file contents.
+  There every whole-word occurrence of each user name is replaced in every
+  string value, so the owner column of an `ls -l` loses it. A whole word is
+  one not next to a letter, a digit or an underscore. The one exception is a
+  value that is one of the protocol words of its key (below): an account
+  named `user` keeps Claude Code's `type: "user"`, `role: "user"` and
+  `apiKeySource: "user"`, which the driver reads and replay needs.
+- **Outbound frames** hold what the driver sent, built from the scenario
+  module and the host's config. There, and in every object key, the name is
+  replaced only where it is a whole segment of a path: a string part that
+  starts with `/`, `\`, `~` or a drive letter, as in `/srv/<name>/x`,
+  `C:\Users\<name>` or `~<name>/x`. A prompt or option the driver sends is
+  then the same on every account, so a recording made on one account replays
+  byte-for-byte on another. `test/drivers/claude/replay.test.ts` records on
+  accounts named `user` and `root` and replays on the other.
+
+Known limit: an outbound frame that carries inbound text back, such as a
+`permission` answer with `updatedInput` or `updatedPermissions` copied from
+the request, gets only the path rule. A user name in that text as a free word
+would stay. The six scenarios send no such answer.
+
+### Claude protocol words
+
+`test/recordings/claude/protocol-words.ts` lists, for each object key the
+pinned SDK can put in an inbound Claude frame, the string literals its types
+allow as that key's value. `test/recordings/claude/derive-protocol-words.ts`
+derives them with the TypeScript checker from
+`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` (0.3.330) and the
+`@anthropic-ai/sdk` types it imports. It starts from `SDKMessage`, the return
+types of the `Query` methods and SDK functions the driver calls, and the
+options `CanUseTool` receives, and follows every property, union member,
+array element and index signature. `test/recordings/protocol-words.test.ts`
+fails when the committed list and the derivation differ; after an SDK bump,
+run `node test/recordings/claude/derive-protocol-words.ts` and paste the result.
+
+A value is kept only when it is one of its key's words: `type: "user"` stays,
+but `error: "permission denied for <name>"` loses the name, because `error`'s
+words are its enum values (`authentication_failed`, `rate_limit`, ...). The
+52 keys are `allowed_callers`, `apiKeySource`, `apiProvider`, `behavior`, `category`, `compact_result`, `costBasis`, `destination`, `direction`, `effort`, `error`, `errorCode`, `error_code`, `fast_mode_disabled_reason`, `fast_mode_state`, `file_type`, `first_stream_post_queued_behind`, `first_text_post_queued_behind`, `fromMode`, `kind`, `level`, `limitScope`, `lost`, `media_type`, `mode`, `model`, `name`, `outcome`, `overageDisabledReason`, `overageStatus`, `oversized_image`, `permissionMode`, `priority`, `rateLimitType`, `reason`, `response_inclusion`, `role`, `scope`, `service_tier`, `speed`, `startup_failure_reason`, `state`, `status`, `stop_reason`, `subkind`, `subtype`, `supportedEffortLevels`, `terminal_reason`, `trigger`, `ttl`, `type`, `view_mode`.
 
 `pnpm run check:recordings` (`scripts/check-recordings.ts`) is a step of both
 `gate` and `gate:bun`. It scans every file under `test/drivers/*/recordings/`,
@@ -217,6 +250,16 @@ A path counts only where it starts: at the start of a line, or after a
 character that cannot be part of a path segment. So `/var/home/x` is not a
 path starting `/home/`, but `"/home/x"` and `file:///home/x` are. The token
 patterns match anywhere in a line.
+
+The scan does not look for the scanning machine's OS user name as a word. It
+runs on every machine that runs the gate, and that name is not the recording
+machine's: CI runs as `runner`, a container often as `root`, and a laptop's
+account may be `user`. Recorded model text holds such words as ordinary
+English ("the user asked", "the root cause"), so a word check would fail
+recordings that hold no personal data. The recorder replaces the recording
+machine's own names before it writes, and
+`test/drivers/claude/recorder.test.ts` shows a real `ls -ld .` listing, free
+assistant text and a `stderr` line lose the name.
 
 Known limit: Claude Code streams text in chunks, and each chunk is its own
 `message` frame. A value split across two chunks matches neither the

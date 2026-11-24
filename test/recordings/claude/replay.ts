@@ -13,6 +13,7 @@ import { createSanitiser } from "../sanitiser.ts";
 import { ScenarioStallError, checkScenario, scenarioNamed } from "../scenarios.ts";
 import type { ScenarioRun } from "../scenarios.ts";
 import { claudeNativeAnswers } from "./frames.ts";
+import { CLAUDE_PROTOCOL_WORDS } from "./protocol-words.ts";
 import { createClaudeReplaySdk } from "./replay-sdk.ts";
 import type { ClaudeReplay } from "./replay-sdk.ts";
 import { createClaudeLayout, runClaudeScenario } from "./run.ts";
@@ -46,7 +47,7 @@ export async function replayClaude(source: Recording | string, options: ClaudeRe
   const layout = createClaudeLayout(`ari-claude-replay-${scenario.name}-`);
   try {
     const env = options.env ?? process.env;
-    const replay = createClaudeReplaySdk(recording, { workspace: layout.root, sanitise: createSanitiser({ workspace: layout.root, env, ...(options.user === undefined ? {} : { user: options.user }) }) });
+    const replay = createClaudeReplaySdk(recording, { workspace: layout.root, sanitise: createSanitiser({ workspace: layout.root, env, protocolWords: CLAUDE_PROTOCOL_WORDS, ...(options.user === undefined ? {} : { user: options.user }) }) });
     let result: { run: ScenarioRun; diagnostics: readonly DiagnosticEntry[] };
     try {
       result = await runClaudeScenario({

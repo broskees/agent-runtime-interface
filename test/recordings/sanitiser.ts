@@ -2,7 +2,9 @@
 // and every replay runs each outbound frame through before it compares, so
 // both sides are compared in the same placeholder form.
 //
-// It replaces, in every string and every object key:
+// It replaces, in every string and every object key (a frame's own format
+// fields, `dir`, `kind`, `query`, `id`, `method` and `toolName`, stay as the
+// tap wrote them):
 //   - the recording's temp workspace (and its real path) with <WORKSPACE>;
 //   - a string that is exactly the value of PATH with <PATH> (PATH differs
 //     between the recording machine and the replay machine);
@@ -11,13 +13,21 @@
 //     CLAUDE_CODE_OAUTH_TOKEN with <ANTHROPIC_API_KEY> and so on;
 //   - email addresses with <EMAIL>;
 //   - the OS user name (os.userInfo().username, and the values of USER and
-//     LOGNAME where they differ) with <USER>, only where it is a whole
-//     segment of a path (/srv/<name>/x, C:\Users\<name>, ~<name>/x).
-//     Nowhere else: a string that is just the name, or the name as a word in
-//     free text, cannot be told apart from a protocol word. An account named
-//     `user` or `root` would otherwise turn Claude Code's `type: "user"` and
-//     `role: "user"` into placeholders, and the recording would not replay
-//     on another account;
+//     LOGNAME where they differ) with <USER>. How depends on what the string
+//     is:
+//       - in an inbound frame (what the agent and the machine produced: tool
+//         output, assistant text, stderr, file contents), every whole-word
+//         occurrence, in every string value, except a value that is one of
+//         the protocol words of its key (the driver kit's `protocolWords`,
+//         for Claude derived from the pinned sdk.d.ts). So the owner column
+//         of an `ls -l` is replaced, and `type: "user"` stays on an account
+//         named `user`;
+//       - in an outbound frame (what the driver sent, built from the scenario
+//         and the host's config) and in every object key, only where the
+//         name is a whole segment of a path (/srv/<name>/x, C:\Users\<name>,
+//         ~<name>/x). A prompt or option the driver sends is then the same
+//         on every account, and a recording made on one account replays on
+//         another;
 // then the rest of what the scan (scripts/check-recordings.ts) refuses:
 //   - another user's home directory (/home/<name>, /Users/<name>, /root)
 //     with <OTHER_HOME>;
@@ -49,9 +59,31 @@ export interface SanitiserInput {
   readonly env: { readonly [name: string]: string | undefined };
   /** The OS user name; os.userInfo().username when left out. USER and LOGNAME are replaced too when they differ from it. */
   readonly user?: string;
+  /** For each object key, the values that are protocol words there; an inbound value that is one keeps the user name. */
+  readonly protocolWords?: { readonly [key: string]: readonly string[] };
 }
 
-export type Sanitiser = <T>(value: T) => T;
+/** Which way a frame went: `in` from the native side, `out` from the driver. */
+export type FrameSide = "in" | "out";
+
+/**
+ * Sanitises a value. A frame is sanitised by its own direction; any other
+ * value by `side`, which defaults to `in` (the rule that replaces more).
+ */
+export type Sanitiser = <T>(value: T, side?: FrameSide) => T;
+
+/** The fields the recording format itself defines: a frame keeps them as the tap wrote them. */
+const FRAME_FORMAT_FIELDS: ReadonlySet<string> = new Set(["dir", "kind", "query", "id", "method", "toolName"]);
+
+function isFrame(value: unknown): value is { readonly dir: FrameSide; readonly kind: string; readonly [field: string]: unknown } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const frame = value as { dir?: unknown; kind?: unknown };
+  return (frame.dir === "in" || frame.dir === "out") && typeof frame.kind === "string";
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function realPath(value: string): string {
   try {
@@ -116,31 +148,50 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
   for (const name of SECRET_VARIABLES) add(input.env[name], `<${name}>`);
   exact.sort((a, b) => b.value.length - a.value.length);
   const users = new Set(userNames(input));
+  const names = [...users].sort((a, b) => b.length - a.length);
+  // A whole word: not next to a letter, a digit or an underscore. "joe-laptop" and "joe's" hold the word; "joey" and "joe_x" do not.
+  const userWord = names.length === 0 ? undefined : new RegExp(`(?<![A-Za-z0-9_])(?:${names.map(escapeRegExp).join("|")})(?![A-Za-z0-9_])`, "g");
+  const protocolWords = new Map(Object.entries(input.protocolWords ?? {}).map(([key, words]) => [key, new Set(words)]));
 
-  const text = (value: string): string => {
+  /** `word` replaces every whole-word user name (inbound values); `path` only path segments (outbound values and every key). */
+  const text = (value: string, rule: "word" | "path"): string => {
     if (searchPath !== undefined && value === searchPath) return PLACEHOLDERS.path;
     let result = value;
     for (const entry of exact) result = result.split(entry.value).join(entry.placeholder);
     // Emails before the user name: a user name inside an address would otherwise break the address apart and keep its domain.
     result = result.replace(EMAIL_PATTERN, PLACEHOLDERS.email);
-    if (users.size > 0) result = result.replace(PATH_TOKEN, (token) => withoutUserSegments(token, users));
+    if (userWord !== undefined) {
+      result = rule === "word" ? result.replace(userWord, PLACEHOLDERS.user) : result.replace(PATH_TOKEN, (token) => withoutUserSegments(token, users));
+    }
     result = result.replace(OTHER_HOME_PATTERN, (_match, before: string) => `${before}${PLACEHOLDERS.otherHome}`);
     for (const pattern of TOKEN_PATTERNS) result = result.replace(pattern, PLACEHOLDERS.token);
     result = result.replace(BEARER_PATTERN, `Bearer ${PLACEHOLDERS.token}`);
     return result;
   };
 
-  const walk = (value: unknown): unknown => {
-    if (typeof value === "string") return text(value);
-    if (Array.isArray(value)) return value.map(walk);
+  /** `key` is the object key the value sits under (array elements take their array's key). */
+  const walk = (value: unknown, side: FrameSide, key: string | undefined): unknown => {
+    if (typeof value === "string") {
+      const protocolWord = key !== undefined && protocolWords.get(key)?.has(value) === true;
+      return text(value, side === "in" && !protocolWord ? "word" : "path");
+    }
+    if (Array.isArray(value)) return value.map((each) => walk(each, side, key));
     if (typeof value === "object" && value !== null) {
       const out: { [key: string]: unknown } = {};
-      for (const [key, entry] of Object.entries(value)) out[text(key)] = walk(entry);
+      for (const [field, entry] of Object.entries(value)) out[text(field, "path")] = walk(entry, side, field);
       return out;
     }
     return value;
   };
-  return <T>(value: T): T => walk(value) as T;
+
+  return <T>(value: T, side?: FrameSide): T => {
+    if (side === undefined && isFrame(value)) {
+      const out: { [key: string]: unknown } = {};
+      for (const [field, entry] of Object.entries(value)) out[FRAME_FORMAT_FIELDS.has(field) ? field : text(field, "path")] = FRAME_FORMAT_FIELDS.has(field) ? entry : walk(entry, value.dir, field);
+      return out as T;
+    }
+    return walk(value, side ?? "in", undefined) as T;
+  };
 }
 
 /** Puts a replay's own workspace where the recording says <WORKSPACE>, in every string of an inbound frame. */

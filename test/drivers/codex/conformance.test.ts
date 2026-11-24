@@ -17,7 +17,7 @@ conformanceTests(test, harness, {
   },
 });
 
-test("every applicable scenario passed, and the only one not exercised has the harness's stated reason", () => {
+test("every applicable scenario passed, and each check not exercised has the harness's stated reason", () => {
   assert.ok(report !== undefined, "the conformance suite did not report");
   assert.equal(report.passed, true, formatReport(report));
   assert.deepEqual(

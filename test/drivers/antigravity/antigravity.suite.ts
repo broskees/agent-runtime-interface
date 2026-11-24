@@ -187,3 +187,27 @@ test("a managed install refuses an archive that does not match the manifest's sh
     await rig.cleanup();
   }
 });
+
+test("maintenance.update installs a newer release beside the running one, and advisory() flags an installed version outside the tested range", async () => {
+  const first = release("1.5.2");
+  const newer = release("1.6.0");
+  const routes: { [url: string]: unknown } = { [first.manifestUrl]: first.manifest, [first.archiveUrl]: first.archive, [newer.archiveUrl]: newer.archive };
+  const fetch = fixtureFetch(routes);
+  const rig = await openRig({ name: "antigravity", driver: createAntigravityDriver({ fetch }), config: MANAGED, executable: "antigravity", protocol: 1 });
+  try {
+    await rig.instance.maintenance!.install!();
+    assert.equal((await rig.instance.probe()).version, "1.5.2");
+    // The release manifest moves on to 1.6.0.
+    routes[newer.manifestUrl] = newer.manifest;
+    await rig.instance.maintenance!.update!();
+    assert.ok(fs.existsSync(`${rig.host.paths.cacheDir}/adapters/${ANTIGRAVITY_PACKAGE}/1.6.0/antigravity`));
+    assert.ok(fs.existsSync(`${rig.host.paths.cacheDir}/adapters/${ANTIGRAVITY_PACKAGE}/1.5.2/antigravity`), "the older version stays until cleanup");
+    assert.equal((await rig.instance.probe()).version, "1.6.0", "sessions run the newest installed version");
+    const advisory = await rig.instance.maintenance!.advisory();
+    assert.equal(advisory?.kind, "untested_version");
+    assert.equal(advisory?.currentVersion, "1.6.0");
+    assert.equal(advisory?.testedRange, ">=1.5.0 <1.6.0");
+  } finally {
+    await rig.cleanup();
+  }
+});

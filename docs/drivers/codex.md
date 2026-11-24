@@ -130,7 +130,7 @@ schema `vendor-schemas/codex/3d86e43b075adeba2193ec5c22ac92f55afd82e6/codex_app_
 | Accepts system / developer context | Y/Y | developer only | `ThreadStartParams.baseInstructions` replaces Codex's whole base prompt rather than adding to it, so host system and developer text both go to `developerInstructions` (thread start, resume, fork) and per-turn text to `additionalContext`. `context.instructionChannels` is `["developer"]`. |
 | Can generate summaries | Y | – | No request returns a summary: `thread/compact/start` answers `{}` (schema: `ThreadCompactStartResponse`). Handoff summaries in `injectHistory` are accepted. |
 | Native turn / item / request ID strength | strong/strong/strong | strong/strong/strong | A request's native id is the server request kind plus its item id (JSON-RPC ids restart at 0 per process). |
-| Policy enforcement | native | native, all five modes | |
+| Policy enforcement | native | native, all five modes | `auto` is `approvalsReviewer: "auto_review"`; every other mode names `"user"`. The driver names the reviewer on every start, resume, fork and per-turn policy, because Codex keeps a thread's reviewer when a request leaves it out (app-server `thread_processor.rs:4782–4791`, `5788–5794`). |
 
 ARI additions the driver declares: `requests.responseModes` `live` and
 `message`; `requests.approvalScopes` `accept`/`once`,
@@ -173,12 +173,29 @@ supported member against the fake app-server.
 - **Settlement.** A turn settles only on Codex's `turn/completed` (or when the
   process exits: `failed`, class `transport_error`, thread reusable after a
   resume). No timer settles a turn.
-- **Goal runs.** Codex starts the next turn of an active goal on its own. A
-  `turn/started` the host did not ask for is `origin: "provider_initiated"`.
-  A host turn on a thread with an active goal opens a goal run; each turn
-  Codex starts after it carries the run's `hostTag` and `parentTurnId` (the
-  host's turn), and `x:ari.goal.updated` lists every turn of the run in
-  `turnIds`. Each native turn has its own `turn.terminal`.
+- **Goal runs.** Codex starts goal turns on its own: at once when an active
+  goal is set on an idle thread, and after each completed turn while the goal
+  stays active (`ext/goal/src/runtime.rs:223–239`). A `turn/started` the host
+  did not ask for is `origin: "provider_initiated"`. Setting an active goal
+  opens a goal run; when a host turn is running then, Codex counts that turn
+  toward the goal and it leads the run. A host turn on a thread whose goal is
+  active and has no open run opens one. Each turn Codex starts joins the open
+  run: it carries the run's `hostTag` and `parentTurnId` (the run's first
+  turn), and `x:ari.goal.updated` lists every turn of the run in `turnIds`.
+  The run ends when the goal stops being active. `ari.goal` `set` returns the
+  goal as set, with `turnIds: []`; the events report the turns. Each native
+  turn has its own `turn.terminal`.
+- **A host turn that meets a goal turn.** `turn/start` on a thread with a
+  running turn adds the input to that turn (`turn_processor.rs:722–763`).
+  Only the `turn/start` answer names the host's turn: a `turn/started` that
+  arrives before the answer while the goal is active is Codex's own. When the
+  answer then names that turn, `startTurn` returns
+  `{ accepted: "steered", turnId }` and the turn stays `provider_initiated`.
+- **Interrupts.** Codex answers `turn/interrupt` only once the turn completed
+  or aborted, just before its `turn/completed`
+  (`turn_processor.rs:1550–1605`), so `interruptTurn` returns after the turn
+  stopped. `no active turn to interrupt` and `expected active turn id ...`
+  mean the turn already ended.
 - **Async questions.** An `agentMessage` item with `delivery: "async"` and
   `questions` becomes a `user_input` request with `response: { mode:
   "message" }` and `survivesRestart: true`. It stays pending when its turn
@@ -186,11 +203,21 @@ supported member against the fake app-server.
   later user message answered it. `respond({ answers })` marks it resolved and
   returns `followUpPrompt`, the user message the host sends as its next turn.
 - **Approvals.** Codex decisions have no ids: a decision's canonical text is
-  its native option id (`accept`, `acceptForSession`,
-  `acceptWithExecpolicyAmendment:["git","status"]`, ...). Two "always"
-  decisions (two command prefixes) stay two options of one `command`
-  approval, never a question. Under `full_access` Codex asks only for a
-  managed human checkpoint (`kind: "humanCommand"`), marked
+  its native option id. A plain decision is its own text (`accept`,
+  `acceptForSession`, `decline`, `cancel`); an exec-policy amendment is
+  `acceptWithExecpolicyAmendment:` followed by the JSON prefix
+  (`acceptWithExecpolicyAmendment:["git","status"]`); a network amendment is
+  `applyNetworkPolicyAmendment:` followed by the JSON `[action, host]`
+  (`applyNetworkPolicyAmendment:["allow","registry.npmjs.org"]`). Codex's
+  ordinary command approval offers `accept`, at most one exec-policy
+  amendment and `cancel`; a network approval offers `accept`,
+  `acceptForSession`, an allowing network amendment and `cancel`
+  (`protocol/src/approvals.rs:379–411`). Two broader accepting decisions stay
+  two options of one `command` approval, never a question; so do any
+  decisions the schema allows, such as two prefixes, which ordinary Codex
+  does not produce. Under `full_access` (approval policy `never`) Codex asks
+  nothing for ordinary commands (`core/src/exec_policy.rs:907–911`), only for
+  a managed human checkpoint (`kind: "humanCommand"`), marked
   `fullAccessOverride: "ask_rule"`.
 - **Steering.** `startTurn({ intent: "steer", expectedTurnId })` sends
   `turn/steer` with the native id of the turn the host named. When Codex
@@ -246,12 +273,29 @@ text. Host instructions (`launch.appendSystemPrompt`, `launch.developerPrompt`,
 per-turn ones into `additionalContext` (`application` kind), and synthetic
 context into `additionalContext` entries of `untrusted` kind. MCP servers go
 into the thread's config overrides as `mcp_servers.<name>`, under the name
-the host gave: `launch.mcpServers` at start, resume and fork; the host's tool
-server from `hostTools.mcpServerFor(threadId)` whenever a known thread is
-resumed. Codex assigns thread ids itself and takes MCP servers only in
-`thread/start`, `thread/resume` and `thread/fork`, so a new thread gets that
-per-thread server from its first resume (a known limit: the host can pass the
-server in `launch.mcpServers` at creation). The driver writes no file.
+the host gave: `launch.mcpServers` in `thread/start`, `thread/fork` and every
+`thread/resume`, and the host's tool server from
+`hostTools.mcpServerFor(threadId)` in every `thread/resume`.
+
+Every thread has the host's tool server before its first turn runs. Codex
+assigns thread ids itself, so the server for a new or forked thread is known
+only after `thread/start` or `thread/fork` answered. Codex takes MCP servers
+only in the `config` of `thread/start`, `thread/fork` and a cold
+`thread/resume`: it ignores a resume's overrides while the thread is loaded
+(app-server `thread_processor.rs:4900–4955`), and it refuses to resume a
+thread before its first turn wrote a rollout (`no rollout found`,
+`tests/suite/v2/thread_resume.rs:521–566`). `thread/archive` writes the empty
+rollout without a turn and shuts the thread down
+(`thread_processor.rs:1895–1904`, `tests/suite/v2/thread_archive.rs:313–355`).
+So after `thread/start` or `thread/fork` the driver sends `thread/archive`,
+`thread/unarchive` and a cold `thread/resume` with the launch servers and the
+host's server. Codex reports these as `thread/archived` and
+`thread/unarchived` to its clients, and the thread is listed from its
+creation on. An ephemeral thread (`persistSession: false`) has no rollout to
+resume: it gets only `launch.mcpServers`. When a resume fails because the
+thread is missing or held by another process, the replacement thread gets
+that resume's `LaunchContext` and the host's server the same way. The driver
+writes no file.
 
 ## Regenerating the protocol client
 
@@ -265,6 +309,18 @@ vendor a newer tag.
 `test/drivers/codex/conformance.test.ts` runs all 15 conformance scenarios
 against a fake Codex CLI (`test/drivers/codex/fake-app-server.ts`) that sends
 only frames the vendored schema accepts and checks every frame the driver
-sends. All 15 pass; the `codex.review` extension call is checked in
-`quirks.test.ts` instead of scenario 14, because it runs a turn on the
-thread scenario 14 goes on to roll back.
+sends. The fake follows the pinned Codex source where the driver depends on
+it, and imports no driver code: the handshake, a second reply to a server
+request (recorded as a problem, so a driver that answers twice fails),
+interrupts answered after the turn aborted, `turn/start` steering into a
+running turn, threads without a rollout until their first turn, approval
+settings that persist, the approval shapes above, goal turns Codex starts
+itself, `i32` terminal process ids and the `thread/list` id filters.
+`fake-fidelity.test.ts` checks each against the fake directly, with the
+pinned source lines. In the conformance run the model meets a goal in the
+first turn Codex starts for it, so scenario 14's `ari.goal` call leaves no
+turn running. The harness maps each kit approval option to the native option
+id the driver shows, from the documented format above, not by calling the
+driver. All 15 pass; the `codex.review` extension call is checked in
+`quirks.test.ts` instead of scenario 14, because it runs a turn on the thread
+scenario 14 goes on to roll back.

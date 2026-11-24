@@ -56,7 +56,20 @@ describe("ari/meta/codex", () => {
   test("docs/drivers/codex.md and changelogs/codex.md exist and describe the driver as built", () => {
     const docs = fs.readFileSync(path.join(REPO_ROOT, "docs", "drivers", "codex.md"), "utf8");
     const changelog = fs.readFileSync(path.join(REPO_ROOT, "changelogs", "codex.md"), "utf8");
-    for (const fact of ["rust-v0.172.0", CODEX_TESTED_VERSIONS, "codex.goal", "codex.review", "codex.readState", "codex.memory", "ari.goal", "x:codex.searchTerm", "codex.chatgpt_auth_tokens"]) {
+    for (const fact of [
+      "rust-v0.172.0",
+      CODEX_TESTED_VERSIONS,
+      "codex.goal",
+      "codex.review",
+      "codex.readState",
+      "codex.memory",
+      "ari.goal",
+      "x:codex.searchTerm",
+      "codex.chatgpt_auth_tokens",
+      // How a new or forked thread gets the host's tool server, which launch-context.test.ts exercises.
+      "`thread/archive`,\n`thread/unarchive` and a cold `thread/resume`",
+      'applyNetworkPolicyAmendment:["allow","registry.npmjs.org"]',
+    ]) {
       assert.ok(docs.includes(fact), `docs/drivers/codex.md does not mention ${fact}`);
     }
     assert.match(changelog, /rust-v0\.172\.0/);

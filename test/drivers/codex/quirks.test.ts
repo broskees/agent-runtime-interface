@@ -1,7 +1,10 @@
 // Codex's quirks, each kept by the driver: questions answered by message,
-// goal runs, race-safe steering, duplicate "always" decisions, opting out of
-// diffs, rate limits, background terminals, fork, compaction, MCP apps,
-// feedback, native session filters and the codex.* extensions.
+// goal runs Codex starts itself, race-safe steering, interrupts Codex answers
+// only once the turn aborted, approvals whose decisions have no ids, opting
+// out of diffs, rate limits, background terminals, fork, compaction, MCP
+// apps, feedback, native session filters and the codex.* extensions. Each
+// case is the sequence pinned Codex (rust-v0.172.0) produces, except the one
+// named a synthetic robustness check.
 
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
@@ -30,6 +33,11 @@ function lastRequest(opened: OpenedCodexSession, id: string): Request | undefine
     found = found === undefined ? (body.request as Request) : ({ ...found, ...body.request } as Request);
   }
   return found;
+}
+
+/** The process id Codex lists for the thread's terminal. */
+function listedProcessId(current: CodexTestRig, nativeThreadId: string): string {
+  return current.world.storedThread(nativeThreadId)!.terminals[0]!.processId;
 }
 
 async function terminal(opened: OpenedCodexSession, turnId: string) {
@@ -96,59 +104,112 @@ describe("codex quirks", () => {
     strictGrammar(second.events);
   });
 
-  test("a goal run yields several native turns Codex started itself, under the one host request, and fills ari.goal", async () => {
+  test("an active goal set on an idle thread: Codex starts its turns itself, a host turn/start that meets one is steered into it, and ari.goal lists them all", async () => {
     rig = await codexRig();
     const opened = await rig.open();
     const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
-    const set = (await opened.session.ext!("ari.goal", "set", { threadId: thread.id, objective: "Ship the release." })) as { status: string; derived: boolean };
+    const set = (await opened.session.ext!("ari.goal", "set", { threadId: thread.id, objective: "Ship the release." })) as { status: string; derived: boolean; turnIds: string[] };
     assert.equal(set.status, "active");
     assert.equal(set.derived, false);
     assert.deepEqual(rig.requests("thread/goal/set").at(-1), { threadId: thread.native.id, objective: "Ship the release.", status: "active" });
 
-    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "goal-1", intent: "start", hostTag: "goal-run-1", content: [{ type: "text", text: "Work on the goal." }] });
-    const rootId = (started as { turnId: string }).turnId;
-    const first = await rig.nextTurn();
+    // Codex starts the first goal turn on its own, with no turn/start.
+    const first = await rig.nextAutonomousTurn();
+    const firstId = await opened.until(() => opened.bodies("turn.upsert").find((body) => body.turn.native?.id === first.nativeTurnId)?.turn.id, "the turn Codex started for the goal");
     await first.say("Step one done.");
+    // The host's next turn/start races Codex's next goal turn, and Codex wins: its turn/started arrives before the
+    // turn/start answer, which names Codex's turn because Codex added the host's message to it.
+    rig.world.continueGoalAtNextTurnStart(thread.native.id!);
     await first.complete();
+    await terminal(opened, firstId);
+    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "host-1", intent: "start", hostTag: "goal-run-1", content: [{ type: "text", text: "Also update the changelog." }] });
+    const second = await rig.nextAutonomousTurn();
+    const secondId = await opened.until(() => opened.bodies("turn.upsert").find((body) => body.turn.native?.id === second.nativeTurnId)?.turn.id, "the second goal turn");
+    assert.deepEqual(started, { status: "accepted", turnId: secondId, accepted: "steered" });
+    assert.equal(await second.nextSteer!(), "Also update the changelog.");
+    await second.complete();
+    await terminal(opened, secondId);
+
+    const third = await rig.nextAutonomousTurn();
+    const thirdId = await opened.until(() => opened.bodies("turn.upsert").find((body) => body.turn.native?.id === third.nativeTurnId)?.turn.id, "the third goal turn");
+    await third.reachGoal();
+    await third.complete();
+    await terminal(opened, thirdId);
+
+    const starts = opened.bodies("turn.upsert").filter((body) => body.turn.origin !== undefined).map((body) => body.turn);
+    assert.deepEqual(starts.map((turn) => [turn.id, turn.origin, turn.clientTurnKey, turn.parentTurnId]), [
+      [firstId, "provider_initiated", undefined, undefined],
+      [secondId, "provider_initiated", undefined, firstId],
+      [thirdId, "provider_initiated", undefined, firstId],
+    ]);
+    assert.deepEqual(
+      opened.bodies("turn.terminal").map((body) => [body.turnId, body.status]),
+      [firstId, secondId, thirdId].map((id) => [id, "completed"]),
+    );
+    const goal = await opened.until(() => {
+      const last = opened.bodies("x:ari.goal.updated").at(-1) as { data: { status: string; turnIds: string[]; objective: string } | null; fallback?: { text?: string } } | undefined;
+      return last?.data?.status === "completed" ? last : undefined;
+    }, "the goal to complete");
+    assert.deepEqual(goal.data!.turnIds, [firstId, secondId, thirdId]);
+    assert.match(goal.fallback?.text ?? "", /Goal completed: Ship the release\./);
+    assert.ok(opened.bodies("x:codex.goal.updated").length > 0);
+    assert.equal(rig.world.activeTurns().length, 0, "Codex starts no turn after the goal is met");
+    strictGrammar(opened.events);
+  });
+
+  test("a goal set during a host turn: that turn leads the run, and the turns Codex starts after it carry its hostTag and parentTurnId", async () => {
+    rig = await codexRig();
+    const opened = await rig.open();
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "goal-1", intent: "start", hostTag: "goal-run-1", content: [{ type: "text", text: "Work on the release." }] });
+    const rootId = (started as { turnId: string }).turnId;
+    const host = await rig.nextTurn();
+    await opened.session.ext!("ari.goal", "set", { threadId: thread.id, objective: "Ship the release." });
+    await host.say("Step one done.");
+    await host.complete();
     await terminal(opened, rootId);
     const later: string[] = [];
     for (const step of ["two", "three"]) {
-      const turn = rig.world.continueGoal(thread.native.id!);
+      const turn = await rig.nextAutonomousTurn();
       await turn.say(`Step ${step} done.`);
+      if (step === "three") await turn.reachGoal();
       await turn.complete();
       const id = await opened.until(() => opened.bodies("turn.upsert").find((body) => body.turn.native?.id === turn.nativeTurnId)?.turn.id, `the turn Codex started for step ${step}`);
       await terminal(opened, id);
       later.push(id);
     }
-    rig.world.setGoalStatus(thread.native.id!, "complete");
-
-    const starts = opened.bodies("turn.upsert").filter((body) => body.turn.origin !== undefined);
-    const root = starts.find((body) => body.turn.id === rootId)!.turn;
-    assert.equal(root.origin, "user");
-    assert.equal(root.clientTurnKey, "goal-1");
-    assert.equal(root.hostTag, "goal-run-1");
+    const starts = opened.bodies("turn.upsert").filter((body) => body.turn.origin !== undefined).map((body) => body.turn);
+    const root = starts.find((turn) => turn.id === rootId)!;
+    assert.deepEqual([root.origin, root.clientTurnKey, root.hostTag], ["user", "goal-1", "goal-run-1"]);
     for (const id of later) {
-      const turn = starts.find((body) => body.turn.id === id)!.turn;
-      assert.equal(turn.origin, "provider_initiated", "a turn Codex started on its own is not reported as the host's");
-      assert.equal(turn.hostTag, "goal-run-1");
-      assert.equal(turn.parentTurnId, rootId);
-      assert.equal(turn.clientTurnKey, undefined);
+      const turn = starts.find((candidate) => candidate.id === id)!;
+      assert.deepEqual([turn.origin, turn.hostTag, turn.parentTurnId, turn.clientTurnKey], ["provider_initiated", "goal-run-1", rootId, undefined]);
     }
-    // Each native turn settles on its own completion.
-    assert.deepEqual(
-      opened.bodies("turn.terminal").map((body) => [body.turnId, body.status]),
-      [rootId, ...later].map((id) => [id, "completed"]),
-    );
     const goal = await opened.until(() => {
-      const last = opened.bodies("x:ari.goal.updated").at(-1) as { data: { status: string; turnIds: string[]; objective: string; derived: boolean } | null; fallback?: { title: string; text?: string } } | undefined;
+      const last = opened.bodies("x:ari.goal.updated").at(-1) as { data: { status: string; turnIds: string[] } | null } | undefined;
       return last?.data?.status === "completed" ? last : undefined;
     }, "the goal to complete");
     assert.deepEqual(goal.data!.turnIds, [rootId, ...later]);
-    assert.equal(goal.data!.objective, "Ship the release.");
-    assert.equal(goal.data!.derived, false);
-    assert.match(goal.fallback?.text ?? "", /Goal completed: Ship the release\./);
-    assert.ok(opened.bodies("x:codex.goal.updated").length > 0);
     strictGrammar(opened.events);
+  });
+
+  test("interruptTurn returns only once Codex answered turn/interrupt, which it does when the turn has aborted", async () => {
+    rig = await codexRig();
+    const opened = await rig.open();
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "i-1", intent: "start", content: [{ type: "text", text: "Long task." }] });
+    const turnId = (started as { turnId: string }).turnId;
+    const native = await rig.nextTurn();
+    let returned = false;
+    const interrupting = opened.session.interruptTurn({ turnId }).then(() => {
+      returned = true;
+    });
+    assert.equal(await native.stopRequested(), "cancel");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(returned, false, "Codex holds the answer until the turn aborts");
+    await native.finishCancelled();
+    await interrupting;
+    assert.equal((await terminal(opened, turnId)).status, "interrupted");
   });
 
   test("steering sends expectedTurnId, and a steer Codex refuses because the turn ended returns prompt_required", async () => {
@@ -184,7 +245,47 @@ describe("codex quirks", () => {
     assert.notEqual((next as { turnId: string }).turnId, turnId);
   });
 
-  test("an exec approval with two allow_always decisions is an approval with both options, not a question", async () => {
+  test("the approvals pinned Codex produces keep each decision as its own option, and the reply is the exact decision chosen", async () => {
+    rig = await codexRig();
+    const opened = await rig.open();
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "a-1", intent: "start", content: [{ type: "text", text: "Check the status." }] });
+    const native = await rig.nextTurn();
+    const pending = (seen: Set<string>) => opened.until(() => opened.bodies("request.upsert").find((body) => body.request.status === "pending" && !seen.has(body.request.id))?.request as Request | undefined, "an approval");
+    const seen = new Set<string>();
+
+    // An ordinary command approval: accept, one exec-policy amendment, cancel (protocol/src/approvals.rs:379–411).
+    const prefix = { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["git", "status"] } };
+    const command = await native.commandApproval("git status", ["accept", prefix, "cancel"]);
+    const commandRequest = await pending(seen);
+    seen.add(commandRequest.id);
+    assert.equal(commandRequest.kind, "command");
+    assert.deepEqual(commandRequest.options?.map((option) => [option.optionId, option.decision, option.scope]), [
+      ["accept", "accept", "once"],
+      ['acceptWithExecpolicyAmendment:["git","status"]', "accept_always", "global"],
+      ["cancel", "cancel", undefined],
+    ]);
+    await opened.session.respond({ requestId: commandRequest.id, responseKey: "r-1", optionId: commandRequest.options![1]!.optionId });
+    assert.deepEqual(await command.decision, prefix);
+
+    // A network approval: two broader accepting decisions, a session grant and an allow rule (approvals.rs:385–397).
+    const allow = { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "registry.npmjs.org", action: "allow" as const } } };
+    const network = await native.commandApproval("", ["accept", "acceptForSession", allow, "cancel"], { network: { host: "registry.npmjs.org" } });
+    const networkRequest = await pending(seen);
+    seen.add(networkRequest.id);
+    assert.equal(networkRequest.questions, undefined, "two accepting options stay an approval, not a question");
+    assert.deepEqual(networkRequest.options?.map((option) => [option.optionId, option.decision, option.scope]), [
+      ["accept", "accept", "once"],
+      ["acceptForSession", "accept_for_session", "session"],
+      ['applyNetworkPolicyAmendment:["allow","registry.npmjs.org"]', "accept_always", "global"],
+      ["cancel", "cancel", undefined],
+    ]);
+    await opened.session.respond({ requestId: networkRequest.id, responseKey: "r-2", optionId: networkRequest.options![2]!.optionId });
+    assert.deepEqual(await network.decision, allow);
+  });
+
+  test("synthetic robustness, not ordinary Codex output: a schema-valid approval with two exec-policy prefixes keeps both, and the reply is the second", async () => {
+    // The ordinary pinned producer offers at most one prefix amendment (protocol/src/approvals.rs:405–411); the schema allows a list of any decisions.
     rig = await codexRig();
     const opened = await rig.open();
     const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
@@ -300,8 +401,10 @@ describe("codex quirks", () => {
     assert.deepEqual(await opened.session.backgroundTasks!.await({ threadId: thread.id, taskIds: [listed[0]!.id, "task_unknown"], awaited: true }), { matched: [listed[0]!.id] });
     assert.equal(opened.session.canRelease(), false, "a running terminal vetoes release");
     await opened.session.backgroundTasks!.stop({ threadId: thread.id, taskId: listed[0]!.id });
-    const processId = rig.world.inspect(thread.native.id!) && rig.requests("thread/backgroundTerminals/terminate").at(-1)!["processId"];
-    assert.match(String(processId), /^proc-/);
+    // Codex parses the process id as an i32 before it terminates anything (thread_processor.rs:2707–2721).
+    const processId = rig.requests("thread/backgroundTerminals/terminate").at(-1)!["processId"];
+    assert.equal(processId, rig.requests("thread/backgroundTerminals/list").length > 0 ? listedProcessId(rig, thread.native.id!) : undefined);
+    assert.match(String(processId), /^\d+$/);
     assert.deepEqual(rig.world.inspect(thread.native.id!)!.backgroundTasks, [{ title: "npm run dev", running: false }]);
     assert.deepEqual(await opened.session.backgroundTasks!.list(thread.id), []);
     assert.deepEqual(opened.bodies("background.updated").at(-1)!.tasks, []);

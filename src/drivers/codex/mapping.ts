@@ -83,13 +83,19 @@ export interface CodexPolicy {
   readonly approvalPolicy: AskForApproval;
   readonly sandbox: SandboxMode;
   readonly sandboxPolicy: SandboxPolicy;
-  readonly approvalsReviewer?: ApprovalsReviewer;
+  /**
+   * Always named: Codex keeps a thread's reviewer when a resume, a fork or a
+   * turn leaves it out (app-server thread_processor.rs:4782–4791, 5788–5794),
+   * so only an explicit reviewer moves a thread into or out of `auto`.
+   */
+  readonly approvalsReviewer: ApprovalsReviewer;
 }
 
 /**
  * ARI's runtime modes in Codex terms. Codex enforces all of them itself: the
- * sandbox limits what commands can touch, and the approval policy says when it
- * asks. `policy.native` may override any of the four fields.
+ * sandbox limits what commands can touch, the approval policy says when it
+ * asks, and the reviewer says who answers (`auto_review` in `auto`, the user
+ * otherwise). `policy.native` may override any of the four fields.
  */
 export function codexPolicy(policy: RuntimePolicy): CodexPolicy {
   const writableRoots = policy.additionalRoots ?? [];
@@ -97,20 +103,20 @@ export function codexPolicy(policy: RuntimePolicy): CodexPolicy {
   let mapped: CodexPolicy;
   switch (policy.mode) {
     case "read_only":
-      mapped = { approvalPolicy: "on-request", sandbox: "read-only", sandboxPolicy: { type: "readOnly" } };
+      mapped = { approvalPolicy: "on-request", sandbox: "read-only", sandboxPolicy: { type: "readOnly" }, approvalsReviewer: "user" };
       break;
     case "auto_accept_edits":
-      mapped = { approvalPolicy: "on-request", sandbox: "workspace-write", sandboxPolicy: workspaceWrite };
+      mapped = { approvalPolicy: "on-request", sandbox: "workspace-write", sandboxPolicy: workspaceWrite, approvalsReviewer: "user" };
       break;
     case "auto":
       mapped = { approvalPolicy: "on-request", sandbox: "workspace-write", sandboxPolicy: workspaceWrite, approvalsReviewer: "auto_review" };
       break;
     case "full_access":
-      mapped = { approvalPolicy: "never", sandbox: "danger-full-access", sandboxPolicy: { type: "dangerFullAccess" } };
+      mapped = { approvalPolicy: "never", sandbox: "danger-full-access", sandboxPolicy: { type: "dangerFullAccess" }, approvalsReviewer: "user" };
       break;
     default:
       // approval_required, and any mode this driver does not know: ask before anything that is not trusted.
-      mapped = { approvalPolicy: "untrusted", sandbox: "workspace-write", sandboxPolicy: workspaceWrite };
+      mapped = { approvalPolicy: "untrusted", sandbox: "workspace-write", sandboxPolicy: workspaceWrite, approvalsReviewer: "user" };
   }
   const native = policy.native;
   if (typeof native !== "object" || native === null || Array.isArray(native)) return mapped;
@@ -119,7 +125,7 @@ export function codexPolicy(policy: RuntimePolicy): CodexPolicy {
     approvalPolicy: overrides.approvalPolicy ?? mapped.approvalPolicy,
     sandbox: overrides.sandbox ?? mapped.sandbox,
     sandboxPolicy: overrides.sandboxPolicy ?? mapped.sandboxPolicy,
-    ...(overrides.approvalsReviewer ?? mapped.approvalsReviewer ? { approvalsReviewer: (overrides.approvalsReviewer ?? mapped.approvalsReviewer)! } : {}),
+    approvalsReviewer: overrides.approvalsReviewer ?? mapped.approvalsReviewer,
   };
 }
 

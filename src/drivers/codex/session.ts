@@ -6,10 +6,15 @@
 //
 // - A turn settles only on Codex's `turn/completed`, or when the process
 //   exits. No timer settles a turn.
-// - Codex starts goal turns on its own. A `turn/started` for a turn the host
-//   did not start is `origin: "provider_initiated"`; while a goal run is open,
-//   it carries the run's `hostTag` and `parentTurnId`, and the shared
-//   `ari.goal` extension lists it in `turnIds`.
+// - Codex starts goal turns on its own: at once when an active goal is set on
+//   an idle thread, and after each completed turn while the goal stays
+//   active. A `turn/started` for a turn the host did not start is
+//   `origin: "provider_initiated"`; while a goal run is open, it carries the
+//   run's `hostTag` and `parentTurnId`, and the shared `ari.goal` extension
+//   lists it in `turnIds`. Only the `turn/start` answer names the host's turn:
+//   a `turn/started` that arrives first while the goal is active is Codex's
+//   own, and when the answer then names that turn, Codex added the host's
+//   message to it (`accepted: "steered"`).
 // - Async questions arrive inside an `agentMessage` item (`delivery:
 //   "async"`), not as a server request. They become `message`-mode requests
 //   with `survivesRestart: true`; they stay pending when their turn ends or
@@ -21,9 +26,14 @@
 //   native option id, so two "always" decisions (a session grant and an
 //   exec-policy amendment) stay two options of one approval.
 // - Thread ids come from Codex, so the host's per-thread tool server
-//   (`hostTools.mcpServerFor`) can only be passed when a known thread is
-//   resumed: Codex takes MCP servers only in `thread/start`, `thread/resume`
-//   and `thread/fork` params, and never from a file the driver writes.
+//   (`hostTools.mcpServerFor`) is known only after `thread/start` or
+//   `thread/fork`. Codex takes MCP servers only in the `config` of
+//   `thread/start`, `thread/fork` and a cold `thread/resume` (it ignores a
+//   resume's overrides while the thread is loaded), and it cannot resume a
+//   thread before the thread has a rollout. `thread/archive` gives a fresh
+//   thread its empty rollout and shuts it down, so a new or forked thread is
+//   archived, unarchived and resumed with the host's server before its first
+//   turn (`#attachHostTools`). The driver writes no file.
 
 import { callErrors } from "../../errors.ts";
 import { JsonRpcError } from "../../driver-kit/json-rpc.ts";
@@ -131,8 +141,8 @@ export interface CodexSessionRuntime {
 interface PendingStart {
   readonly clientTurnKey?: string;
   readonly hostTag?: string;
-  /** Set once Codex answered `turn/start` with the turn's native id. */
-  nativeTurnId?: string;
+  /** The request's answer will name the turn (`turn/start`, `review/start`); a compaction's turn is the next `turn/started`. */
+  readonly answerNamesTurn: boolean;
   readonly settled?: () => void;
 }
 
@@ -155,7 +165,7 @@ interface TurnState {
 }
 
 interface GoalRun {
-  readonly hostTag: string | undefined;
+  hostTag: string | undefined;
   rootTurnId: string | undefined;
   readonly turnIds: string[];
 }
@@ -174,6 +184,8 @@ interface ThreadState {
   /** The host unloaded it; only `resumeThread` brings it back. */
   unloaded: boolean;
   goal: ThreadGoal | undefined;
+  /** Bumped by each goal notification, so an older call's answer does not overwrite a newer goal. */
+  goalSeq: number;
   goalRun: GoalRun | undefined;
   /** Native turn ids in order, as far as this session saw them. */
   readonly turnOrder: string[];
@@ -293,28 +305,71 @@ export class CodexSession implements Session {
   async createThread(input: CreateThreadInput): Promise<AppliedThread> {
     this.#open();
     const connection = await this.#agent();
-    const policy = codexPolicy(input.policy);
     const model = (input.config?.["model"] as string | undefined) ?? this.#runtime.defaultModel;
     const instructions = joinInstructions([...(input.launch?.appendSystemPrompt ?? []), ...(input.launch?.developerPrompt ?? []), input.context?.system, input.context?.developer]);
-    const config = mcpServerConfig(input.launch?.mcpServers ?? []);
+    const started = await this.#startNative(connection, { policy: input.policy, model, launch: input.launch, instructions, ephemeral: input.persistSession === false });
+    const thread = this.#register(started.nativeId, started.cwd, { ...input.policy, cwd: started.cwd }, started.model, input.launch, instructions, input.title);
+    return { ...thread, appliedConfig: { model: started.model, ...(started.reasoningEffort === undefined ? {} : { reasoningEffort: started.reasoningEffort }) } };
+  }
+
+  /** Starts a native thread, then gives it the host's tool server (`#attachHostTools`) unless it is ephemeral. */
+  async #startNative(
+    connection: CodexConnection,
+    spec: { policy: RuntimePolicy; model: string | undefined; launch: LaunchContext | undefined; instructions: string | undefined; ephemeral: boolean },
+  ): Promise<{ nativeId: string; cwd: string; model: string; reasoningEffort?: string }> {
+    const policy = codexPolicy(spec.policy);
+    const config = mcpServerConfig(spec.launch?.mcpServers ?? []);
     const params: ThreadStartParams = {
-      cwd: input.cwd,
+      cwd: spec.policy.cwd,
       approvalPolicy: policy.approvalPolicy,
       sandbox: policy.sandbox,
-      ...(policy.approvalsReviewer === undefined ? {} : { approvalsReviewer: policy.approvalsReviewer }),
-      ...(model === undefined ? {} : { model }),
-      ...(instructions === undefined ? {} : { developerInstructions: instructions }),
+      approvalsReviewer: policy.approvalsReviewer,
+      ...(spec.model === undefined ? {} : { model: spec.model }),
+      ...(spec.instructions === undefined ? {} : { developerInstructions: spec.instructions }),
       ...(Object.keys(config).length === 0 ? {} : { config }),
-      ...(input.launch?.dynamicTools === undefined || input.launch.dynamicTools.length === 0
+      ...(spec.launch?.dynamicTools === undefined || spec.launch.dynamicTools.length === 0
         ? {}
-        : { dynamicTools: input.launch.dynamicTools.map((tool) => ({ type: "function" as const, name: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema })) }),
-      ...(input.persistSession === false ? { ephemeral: true } : {}),
+        : { dynamicTools: spec.launch.dynamicTools.map((tool) => ({ type: "function" as const, name: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema })) }),
+      ...(spec.ephemeral ? { ephemeral: true } : {}),
     };
     const started = await connection.client.threadStart(params).catch((error: unknown) => {
       throw callErrorFromCodex(error, "thread");
     });
-    const thread = this.#register(started.thread.id, started.cwd, { ...input.policy, cwd: started.cwd }, started.model, input.launch, instructions, input.title);
-    return { ...thread, appliedConfig: { model: started.model, ...(started.reasoningEffort === null || started.reasoningEffort === undefined ? {} : { reasoningEffort: started.reasoningEffort }) } };
+    const effort = started.reasoningEffort === null || started.reasoningEffort === undefined ? {} : { reasoningEffort: started.reasoningEffort };
+    // An ephemeral thread never has a rollout to resume: it gets only the launch context's MCP servers.
+    if (spec.ephemeral) return { nativeId: started.thread.id, cwd: started.cwd, model: started.model, ...effort };
+    const attached = await this.#attachHostTools(connection, started.thread.id, { ...spec.policy, cwd: started.cwd }, spec.launch, spec.model, spec.instructions);
+    return { nativeId: started.thread.id, cwd: attached.cwd, model: attached.model, ...effort };
+  }
+
+  /**
+   * Gives a thread Codex just started or forked the host's tool server for its
+   * ARI thread id, before any turn runs. Codex ignores a resume's `config`
+   * while the thread is loaded (app-server thread_processor.rs:4900–4955) and
+   * refuses to resume a thread before its first turn wrote a rollout
+   * (tests/suite/v2/thread_resume.rs:521–566). `thread/archive` writes the
+   * empty rollout without a turn and shuts the thread down
+   * (thread_processor.rs:1895–1904, 1242–1267), so: archive, unarchive, and a
+   * cold resume with the launch servers and the host's server.
+   */
+  async #attachHostTools(
+    connection: CodexConnection,
+    nativeId: string,
+    policy: RuntimePolicy,
+    launch: LaunchContext | undefined,
+    model: string | undefined,
+    instructions: string | undefined,
+  ): Promise<{ cwd: string; model: string }> {
+    await connection.client.threadArchive({ threadId: nativeId }).catch((error: unknown) => {
+      throw callErrorFromCodex(error, "thread");
+    });
+    await connection.client.threadUnarchive({ threadId: nativeId }).catch((error: unknown) => {
+      throw callErrorFromCodex(error, "thread");
+    });
+    const resumed = await this.#resumeNative(connection, nativeId, threadIdFor(nativeId), policy, launch, model === undefined ? undefined : { model }, instructions).catch((error: unknown) => {
+      throw callErrorFromCodex(error, "thread");
+    });
+    return { cwd: resumed.cwd, model: resumed.model };
   }
 
   async resumeThread(input: ResumeThreadInput): Promise<AppliedThread> {
@@ -337,13 +392,11 @@ export class CodexSession implements Session {
       const locked = /already has an active writer/i.test(message);
       const missing = /no rollout found|thread not found/i.test(message);
       if ((!locked && !missing) || input.policy === undefined) throw callErrorFromCodex(error, "native session");
-      // Fall back to a fresh native session, and say so: the old context is gone.
-      const policy = codexPolicy(input.policy);
-      const fresh = await connection.client
-        .threadStart({ cwd: input.policy.cwd, approvalPolicy: policy.approvalPolicy, sandbox: policy.sandbox, ...(this.#runtime.defaultModel === undefined ? {} : { model: this.#runtime.defaultModel }) })
-        .catch((startError: unknown) => {
-          throw callErrorFromCodex(startError, "thread");
-        });
+      // Fall back to a fresh native session with the failed resume's launch context, and say so: the old context is gone.
+      const launch = input.launch ?? knownState?.launch;
+      const instructions = joinInstructions([...(launch?.appendSystemPrompt ?? []), ...(launch?.developerPrompt ?? [])]);
+      const model = typeof input.config?.["model"] === "string" ? input.config["model"] : this.#runtime.defaultModel;
+      const fresh = await this.#startNative(connection, { policy: input.policy, model, launch, instructions, ephemeral: false });
       this.#emit(
         {
           type: "session.replaced",
@@ -352,9 +405,9 @@ export class CodexSession implements Session {
           contextLost: true,
           showRuntimeNote: true,
         },
-        { threadId: threadIdFor(fresh.thread.id) },
+        { threadId: threadIdFor(fresh.nativeId) },
       );
-      return this.#register(fresh.thread.id, fresh.cwd, { ...input.policy, cwd: fresh.cwd }, fresh.model, input.launch, undefined);
+      return this.#register(fresh.nativeId, fresh.cwd, { ...input.policy, cwd: fresh.cwd }, fresh.model, launch, instructions);
     }
   }
 
@@ -375,20 +428,26 @@ export class CodexSession implements Session {
     const lastTurnId = input.at.type === "turn" ? this.#nativeTurnId(source, input.at.turnId) : undefined;
     const policyInput = input.policy ?? (input.cwd === undefined ? source.policy : { ...source.policy, cwd: input.cwd });
     const policy = codexPolicy(policyInput);
+    const model = typeof input.config?.["model"] === "string" ? input.config["model"] : undefined;
+    const launchServers = mcpServerConfig(source.launch?.mcpServers ?? []);
     const forked = await connection.client
       .threadFork({
         threadId: source.nativeId,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
+        approvalsReviewer: policy.approvalsReviewer,
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(lastTurnId === undefined ? {} : { lastTurnId }),
         ...(source.instructions === undefined ? {} : { developerInstructions: source.instructions }),
-        ...(typeof input.config?.["model"] === "string" ? { model: input.config["model"] } : {}),
+        ...(model === undefined ? {} : { model }),
+        ...(Object.keys(launchServers).length === 0 ? {} : { config: launchServers }),
       })
       .catch((error: unknown) => {
         throw callErrorFromCodex(error, "thread");
       });
-    return this.#register(forked.thread.id, forked.cwd, { ...policyInput, cwd: forked.cwd }, forked.model, source.launch, source.instructions, undefined, {
+    // The fork has a new id, so the host's tool server for it can follow only now.
+    const attached = await this.#attachHostTools(connection, forked.thread.id, { ...policyInput, cwd: forked.cwd }, source.launch, model, source.instructions);
+    return this.#register(forked.thread.id, attached.cwd, { ...policyInput, cwd: attached.cwd }, attached.model, source.launch, source.instructions, undefined, {
       threadId: source.thread.id,
       ...(input.at.type === "turn" ? { turnId: input.at.turnId } : {}),
     });
@@ -429,7 +488,7 @@ export class CodexSession implements Session {
     const connection = await this.#agent();
     await this.#ensureLoaded(connection, thread);
     // Codex runs the compaction as a turn of its own; the call resolves once that turn ends.
-    const done = this.#expectHostTurn(thread, {});
+    const done = this.#expectHostTurn(thread, { answerNamesTurn: false });
     await connection.client.threadCompactStart({ threadId: thread.nativeId }).catch((error: unknown) => {
       thread.pendingStart = undefined;
       throw callErrorFromCodex(error, "thread");
@@ -534,23 +593,28 @@ export class CodexSession implements Session {
     const turnInstructions = joinInstructions([input.context?.system, input.context?.developer]);
     if (turnInstructions !== undefined) additionalContext["host.instructions"] = { kind: "application", value: turnInstructions };
     for (const synthetic of input.context?.synthetic ?? []) additionalContext[synthetic.key] = { kind: "untrusted", name: synthetic.key, value: synthetic.text };
-    // A host turn on a thread with an active goal opens a new goal run, which the turns Codex starts after it join.
-    if (thread.goal?.status === "active") thread.goalRun = { hostTag: input.hostTag, rootTurnId: undefined, turnIds: [] };
-    this.#expectHostTurn(thread, { clientTurnKey: input.clientTurnKey, ...(input.hostTag === undefined ? {} : { hostTag: input.hostTag }) });
+    const marker = { clientTurnKey: input.clientTurnKey, ...(input.hostTag === undefined ? {} : { hostTag: input.hostTag }), answerNamesTurn: true };
+    this.#expectHostTurn(thread, marker);
+    const pending = thread.pendingStart;
     try {
       const response = await connection.client.turnStart({
         threadId: thread.nativeId,
         input: userInput,
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
-        ...(policy === undefined ? {} : { approvalPolicy: policy.approvalPolicy, sandboxPolicy: policy.sandboxPolicy, cwd: input.policy!.cwd }),
-        ...(policy?.approvalsReviewer === undefined ? {} : { approvalsReviewer: policy.approvalsReviewer }),
+        ...(policy === undefined ? {} : { approvalPolicy: policy.approvalPolicy, approvalsReviewer: policy.approvalsReviewer, sandboxPolicy: policy.sandboxPolicy, cwd: input.policy!.cwd }),
         ...(Object.keys(additionalContext).length === 0 ? {} : { additionalContext }),
       });
-      const turn = this.#turnsByNative.get(response.turn.id) ?? this.#beginTurn(thread, response.turn);
+      const known = this.#turnsByNative.get(response.turn.id);
+      if (known !== undefined && known.origin === "provider_initiated") {
+        // Codex had started a goal turn of its own and added the host's message to it.
+        if (thread.pendingStart === pending) thread.pendingStart = undefined;
+        return { status: "accepted", turnId: known.id, accepted: "steered" };
+      }
+      const turn = known ?? this.#beginTurn(thread, response.turn, true);
       return { status: "accepted", turnId: turn.id, accepted: "started" };
     } catch (error) {
-      thread.pendingStart = undefined;
+      if (thread.pendingStart === pending) thread.pendingStart = undefined;
       throw callErrorFromCodex(error, "thread");
     }
   }
@@ -562,9 +626,11 @@ export class CodexSession implements Session {
     const thread = this.#thread(turn.threadId);
     const connection = await this.#agent();
     try {
+      // Codex answers once the turn completed or aborted.
       await connection.client.turnInterrupt({ threadId: thread.nativeId, turnId: turn.nativeId });
     } catch (error) {
-      if (error instanceof JsonRpcError && /no active turn/i.test(error.message)) return;
+      // The turn already ended (another one may be running): nothing to stop.
+      if (error instanceof JsonRpcError && /no active turn|expected active turn id/i.test(error.message)) return;
       // Stop must end the turn even when Codex cannot be asked: restart the runtime.
       await this.#restart();
       this.#settle(turn, "interrupted");
@@ -798,12 +864,18 @@ export class CodexSession implements Session {
     };
     if (ns === "ari.goal" || ns === "codex.goal") {
       let goal: ThreadGoal | null | undefined;
+      // A goal notification that arrived meanwhile is newer than the call's answer.
+      const seq = thread.goalSeq;
       if (method === "get") goal = (await connection.client.threadGoalGet({ threadId: thread.nativeId }).catch(failed("goal"))).goal;
       else if (method === "set") {
         const objective = typeof args["objective"] === "string" ? args["objective"] : undefined;
         if (ns === "ari.goal" && objective === undefined) throw callErrors.validation([{ message: "ari.goal set needs an objective", path: ["objective"] }]);
         const status = ns === "ari.goal" ? "active" : typeof args["status"] === "string" ? (args["status"] as ThreadGoal["status"]) : undefined;
-        if (status === "active") thread.goalRun = { hostTag: undefined, rootTurnId: undefined, turnIds: [] };
+        // An active goal opens a run. Codex counts a running turn toward the goal (ext/goal/src/runtime.rs:223–239), so that turn leads the run.
+        if (status === "active") {
+          const current = thread.active;
+          thread.goalRun = current === undefined ? { hostTag: undefined, rootTurnId: undefined, turnIds: [] } : { hostTag: current.hostTag, rootTurnId: current.id, turnIds: [current.id] };
+        }
         goal = (
           await connection.client
             .threadGoalSet({
@@ -814,10 +886,15 @@ export class CodexSession implements Session {
             })
             .catch(failed("goal"))
         ).goal;
-        thread.goal = goal ?? undefined;
+        if (thread.goalSeq === seq) thread.goal = goal ?? undefined;
+        // The goal as set: the turns Codex starts for it are reported by x:ari.goal.updated.
+        if (goal !== null && goal !== undefined && ns === "ari.goal") return { ...this.#ariGoal(thread, goal), turnIds: [] };
       } else if (method === "clear") {
         const cleared = await connection.client.threadGoalClear({ threadId: thread.nativeId }).catch(failed("goal"));
-        thread.goal = undefined;
+        if (thread.goalSeq === seq) {
+          thread.goal = undefined;
+          thread.goalRun = undefined;
+        }
         return ns === "codex.goal" ? { cleared: cleared.cleared } : null;
       } else throw callErrors.notFound({ resource: "extension method", id: `${ns}.${method}` });
       if (goal === null || goal === undefined) return null;
@@ -827,10 +904,10 @@ export class CodexSession implements Session {
       if (method !== "start") throw callErrors.notFound({ resource: "extension method", id: `${ns}.${method}` });
       if (!isObject(args["target"])) throw callErrors.validation([{ message: "codex.review start needs a target", path: ["target"] }]);
       if (thread.active !== undefined) throw callErrors.invalidState("previous_turn_active", "A turn is still running on this thread");
-      this.#expectHostTurn(thread, {});
+      this.#expectHostTurn(thread, { answerNamesTurn: true });
       try {
         const started = await connection.client.reviewStart({ threadId: thread.nativeId, target: args["target"] as never, delivery: "inline" });
-        const turn = this.#turnsByNative.get(started.turn.id) ?? this.#beginTurn(thread, started.turn);
+        const turn = this.#turnsByNative.get(started.turn.id) ?? this.#beginTurn(thread, started.turn, true);
         return { threadId: thread.thread.id, turnId: turn.id };
       } catch (error) {
         thread.pendingStart = undefined;
@@ -932,9 +1009,10 @@ export class CodexSession implements Session {
     policyInput: RuntimePolicy | undefined,
     launch: LaunchContext | undefined,
     config: { [key: string]: unknown } | undefined,
+    instructionsOverride?: string,
   ): Promise<{ nativeId: string; cwd: string; model: string; instructions: string | undefined }> {
     const policy = policyInput === undefined ? undefined : codexPolicy(policyInput);
-    const instructions = joinInstructions([...(launch?.appendSystemPrompt ?? []), ...(launch?.developerPrompt ?? [])]);
+    const instructions = instructionsOverride ?? joinInstructions([...(launch?.appendSystemPrompt ?? []), ...(launch?.developerPrompt ?? [])]);
     // The thread id is known here, so the host's tool server for it can be passed under the name the host chose.
     const hostServer = await this.#runtime.host.hostTools.mcpServerFor(threadId, { transport: "http" });
     const mcp = mcpServerConfig([...(launch?.mcpServers ?? []), hostServer.config.name === hostServer.name ? hostServer.config : { ...hostServer.config, name: hostServer.name }]);
@@ -942,7 +1020,7 @@ export class CodexSession implements Session {
     const resumed = await connection.client.threadResume({
       threadId: nativeId,
       excludeTurns: true,
-      ...(policy === undefined ? {} : { approvalPolicy: policy.approvalPolicy, sandbox: policy.sandbox }),
+      ...(policy === undefined ? {} : { approvalPolicy: policy.approvalPolicy, approvalsReviewer: policy.approvalsReviewer, sandbox: policy.sandbox }),
       ...(policyInput?.cwd === undefined || policyInput.cwd === "" ? {} : { cwd: policyInput.cwd }),
       ...(model === undefined ? {} : { model }),
       ...(instructions === undefined ? {} : { developerInstructions: instructions }),
@@ -1063,6 +1141,7 @@ export class CodexSession implements Session {
         loaded: true,
         unloaded: false,
         goal: undefined,
+        goalSeq: 0,
         goalRun: undefined,
         turnOrder: [],
       });
@@ -1073,7 +1152,7 @@ export class CodexSession implements Session {
   }
 
   /** Marks the next turn Codex starts on `thread` as one the host asked for, and returns a promise that settles when that turn ends. */
-  #expectHostTurn(thread: ThreadState, host: { clientTurnKey?: string; hostTag?: string }): Promise<void> {
+  #expectHostTurn(thread: ThreadState, host: { clientTurnKey?: string; hostTag?: string; answerNamesTurn: boolean }): Promise<void> {
     let settled: () => void = () => undefined;
     const done = new Promise<void>((resolve) => {
       settled = resolve;
@@ -1092,25 +1171,38 @@ export class CodexSession implements Session {
     };
   }
 
-  /** Starts an ARI turn for a native turn of `thread`: the host's, or one Codex started on its own. */
-  #beginTurn(thread: ThreadState, native: CodexTurn): TurnState {
+  /**
+   * Starts an ARI turn for a native turn of `thread`: the host's, or one Codex
+   * started on its own. `named` is true when the host request's answer named
+   * this turn. A `turn/started` that arrives while the host's request awaits
+   * its answer is the host's turn only when no goal is active: Codex starts
+   * turns on its own only for a goal.
+   */
+  #beginTurn(thread: ThreadState, native: CodexTurn, named = false): TurnState {
     const id = turnIdFor(thread.thread.id, native.id);
-    const host = thread.pendingStart;
-    thread.pendingStart = undefined;
-    let origin: "user" | "provider_initiated" = "user";
+    const pending = thread.pendingStart;
+    const autonomous = pending === undefined || (!named && pending.answerNamesTurn && thread.goal?.status === "active");
+    const host = autonomous ? undefined : pending;
+    if (host !== undefined) thread.pendingStart = undefined;
+    const origin: "user" | "provider_initiated" = autonomous ? "provider_initiated" : "user";
     let hostTag = host?.hostTag;
     let parentTurnId: string | undefined;
-    if (host === undefined) {
-      origin = "provider_initiated";
-      const run = thread.goalRun;
+    const run = thread.goalRun;
+    if (autonomous) {
       if (run !== undefined) {
         hostTag = run.hostTag;
         parentTurnId = run.rootTurnId;
+        run.rootTurnId ??= id;
         run.turnIds.push(id);
       }
-    } else if (thread.goalRun !== undefined && thread.goalRun.rootTurnId === undefined && thread.goal?.status === "active") {
-      thread.goalRun.rootTurnId = id;
-      thread.goalRun.turnIds.push(id);
+    } else if (thread.goal?.status === "active") {
+      // A host turn on a thread whose goal is active joins the open goal run, or opens one.
+      if (run === undefined) thread.goalRun = { hostTag, rootTurnId: id, turnIds: [id] };
+      else {
+        run.rootTurnId ??= id;
+        run.hostTag ??= hostTag;
+        run.turnIds.push(id);
+      }
     }
     let finish: () => void = () => undefined;
     const done = new Promise<void>((resolve) => {
@@ -1332,14 +1424,19 @@ export class CodexSession implements Session {
         return;
       case "thread/goal/updated": {
         if (thread === undefined) return;
+        thread.goalSeq += 1;
         thread.goal = params["goal"] as ThreadGoal;
         this.#emitGoal(thread);
+        // A goal that is no longer active ends its run; Codex starts no more turns for it.
+        if (thread.goal.status !== "active") thread.goalRun = undefined;
         return;
       }
       case "thread/goal/cleared": {
         if (thread === undefined) return;
+        thread.goalSeq += 1;
         thread.goal = undefined;
         this.#emitGoal(thread);
+        thread.goalRun = undefined;
         return;
       }
       case "thread/readState/changed": {

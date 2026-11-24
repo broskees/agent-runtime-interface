@@ -268,3 +268,48 @@ describe("capability honesty: the 44 optional members", () => {
     assert.deepEqual(rig.requests("thread/delete").at(-1), { threadId: fork.id });
   });
 });
+
+describe("capability honesty: the runtime modes Codex enforces natively", () => {
+  let rig: CodexTestRig | undefined;
+  after(async () => rig?.cleanup());
+
+  /** Runs one turn on `threadId` with no per-turn policy and returns the reviewer Codex used for it. */
+  async function reviewerOfNextTurn(current: CodexTestRig, opened: OpenedCodexSession, threadId: string, key: string): Promise<string> {
+    const started = await opened.session.startTurn({ threadId, clientTurnKey: key, intent: "start", content: [{ type: "text", text: key }] });
+    const native = await current.nextTurn();
+    await native.complete();
+    await opened.until(() => opened.bodies("turn.terminal").find((body) => body.turnId === (started as { turnId: string }).turnId), `turn ${key} to end`);
+    return native.settings.approvalsReviewer;
+  }
+
+  test("auto reaches Codex as approvalsReviewer auto_review on start, resume, fork and the next turn, and leaving auto sets it back to user", async () => {
+    rig = await codexRig();
+    const first = await rig.open();
+    const thread = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    assert.equal(await reviewerOfNextTurn(rig, first, thread.id, "human-1"), "user");
+    await first.session.close();
+
+    // Resume a human-reviewed thread in auto; the next turn names no policy. Codex keeps an omitted reviewer, so the driver must name it.
+    const second = await rig.open();
+    await second.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(rig.cwd, "auto") });
+    assert.equal(rig.requests("thread/resume").at(-1)!["approvalsReviewer"], "auto_review");
+    assert.equal(await reviewerOfNextTurn(rig, second, thread.id, "auto-1"), "auto_review");
+
+    // Fork the now auto-reviewed thread back into approval_required: the fork must not keep the source's reviewer.
+    const fork = await second.session.forkThread!({ threadId: thread.id, at: { type: "latest" }, policy: policy(rig.cwd, "approval_required") });
+    assert.equal(rig.requests("thread/fork").at(-1)!["approvalsReviewer"], "user");
+    assert.equal(await reviewerOfNextTurn(rig, second, fork.id, "fork-human"), "user");
+
+    // Fork a human-reviewed thread into auto.
+    const autoFork = await second.session.forkThread!({ threadId: fork.id, at: { type: "latest" }, policy: policy(rig.cwd, "auto") });
+    assert.equal(await reviewerOfNextTurn(rig, second, autoFork.id, "fork-auto"), "auto_review");
+
+    // A per-turn switch out of auto names the reviewer too.
+    const switched = await second.session.startTurn({ threadId: thread.id, clientTurnKey: "switch", intent: "start", policy: policy(rig.cwd, "auto_accept_edits"), content: [{ type: "text", text: "switch" }] });
+    const native = await rig.nextTurn();
+    assert.equal(native.settings.approvalsReviewer, "user");
+    await native.complete();
+    await second.until(() => second.bodies("turn.terminal").find((body) => body.turnId === (switched as { turnId: string }).turnId), "the switched turn to end");
+    assert.equal(await reviewerOfNextTurn(rig, second, thread.id, "after-switch"), "user");
+  });
+});

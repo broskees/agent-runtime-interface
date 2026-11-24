@@ -10,11 +10,20 @@ First version of the Codex driver.
   `3d86e43b075adeba2193ec5c22ac92f55afd82e6`). Tested against Codex CLI
   `>=0.172.0 <0.173.0`; other versions get an `untested_version` advisory.
 - Threads: create, resume (with `session.replaced` when the thread is missing
-  or held by another process), snapshot, fork from a turn or into another
-  directory, roll back, compact, inject history, unload, release.
+  or held by another process; the replacement keeps that resume's launch
+  context), snapshot, fork from a turn or into another directory, roll back,
+  compact, inject history, unload, release. Every new, forked or replacement
+  thread gets the host's per-thread tool server before its first turn, by an
+  archive, unarchive and cold resume; forks get the launch MCP servers.
+- Runtime modes: the approvals reviewer is named on every start, resume, fork
+  and per-turn policy, so `auto` (`auto_review`) and the other modes (`user`)
+  reach Codex on every path.
 - Turns: start, steer with `expectedTurnId` (`prompt_required` after the turn
-  ended), interrupt; settlement only on `turn/completed` or process exit; goal
-  runs with `provider_initiated` turns and the shared `ari.goal` extension.
+  ended), interrupt (returns once Codex answered, after the turn aborted);
+  settlement only on `turn/completed` or process exit; goal runs with
+  `provider_initiated` turns Codex starts itself and the shared `ari.goal`
+  extension; a host `turn/start` that Codex adds to its own goal turn returns
+  `accepted: "steered"`.
 - Requests: command, file-change and permission approvals with
   decision-derived native option ids, live structured questions, MCP
   elicitations, async questions as `message`-mode requests that survive a

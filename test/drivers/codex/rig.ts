@@ -9,7 +9,7 @@ import { createFakeHost } from "../../../src/conformance/index.ts";
 import type { FakeHost, FakeHostOptions } from "../../../src/conformance/index.ts";
 import { codexDriver } from "../../../src/drivers/codex/index.ts";
 import type { CodexDriverConfig } from "../../../src/drivers/codex/index.ts";
-import type { AriEvent, Instance, OpenSessionInput, RuntimePolicy, Session } from "../../../src/index.ts";
+import type { AriEvent, Instance, OpenSessionInput, RuntimePolicy, Session, SpawnedProcess } from "../../../src/index.ts";
 import { FakeCodexWorld } from "./fake-app-server.ts";
 import type { CodexNativeTurn } from "./fake-app-server.ts";
 
@@ -22,6 +22,8 @@ export interface CodexTestRig {
   readonly otherCwd: string;
   open(input?: OpenSessionInput): Promise<OpenedCodexSession>;
   nextTurn(): Promise<CodexNativeTurn>;
+  /** The next turn Codex started on its own for an active goal. */
+  nextAutonomousTurn(): Promise<CodexNativeTurn>;
   /** Requests the fake app-servers received, by method, oldest first. */
   requests(method: string): Array<{ [key: string]: unknown }>;
   cleanup(): Promise<void>;
@@ -56,6 +58,8 @@ export async function codexRig(
     readonly host?: Partial<FakeHostOptions<CodexDriverConfig>>;
     readonly environment?: { [name: string]: string };
     readonly config?: Partial<CodexDriverConfig>;
+    /** Wraps each `codex app-server` process the driver spawns, for tests that change what crosses the pipe. */
+    readonly wrapAppServer?: (process: SpawnedProcess) => SpawnedProcess;
   } = {},
 ): Promise<CodexTestRig> {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-codex-rig-")));
@@ -70,7 +74,10 @@ export async function codexRig(
     paths,
     envScrubPrefixes: codexDriver.cliManifest?.envScrubPrefixes ?? [],
     ambientEnvironment: { HOME: path.join(root, "home"), PATH: "/usr/bin" },
-    spawn: async (request) => world.spawn(request),
+    spawn: async (request) => {
+      const process = world.spawn(request);
+      return request.args?.[0] === "app-server" && options.wrapAppServer !== undefined ? options.wrapAppServer(process) : process;
+    },
     resolveExecutable: async (name) => (options.missingBinary !== true && path.basename(name) === "codex" ? "/usr/local/bin/codex" : null),
     ...options.host,
   });
@@ -99,6 +106,11 @@ export async function codexRig(
     },
     async nextTurn() {
       const next = await Promise.race([world.turnQueue.next(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out waiting for a native turn")), 5000))]);
+      if (next.done === true) throw new Error("the fake was disposed");
+      return next.value;
+    },
+    async nextAutonomousTurn() {
+      const next = await Promise.race([world.autonomousTurns.next(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out waiting for a turn Codex starts itself")), 5000))]);
       if (next.done === true) throw new Error("the fake was disposed");
       return next.value;
     },

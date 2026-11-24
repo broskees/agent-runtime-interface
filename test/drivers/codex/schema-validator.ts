@@ -97,6 +97,11 @@ export class CodexFrameValidator {
     return false;
   }
 
+  /** Records a protocol problem that is not a schema mismatch: a second reply, a request before the handshake. */
+  problem(direction: FrameProblem["direction"], frame: unknown, message: string): void {
+    this.problems.push({ direction, frame, message });
+  }
+
   /** Checks a request or notification. Returns false and records the problem when it does not validate. */
   checkCall(direction: FrameProblem["direction"], frame: unknown): boolean {
     if (!isObject(frame) || typeof frame["method"] !== "string") {

@@ -7,20 +7,78 @@
 // `serverRequest/resolved` after each answered server request, and so on, as
 // the recorded app-server transcripts listed in SOURCES.md show.
 //
+// Its view of Codex comes from the vendored schema and the pinned Codex
+// source only; it imports no driver code (the protocol types it imports are
+// generated from the vendored schema). Each behavior below names the pinned
+// source it follows (paths under codex-rs/ at commit 3d86e43b):
+//
+// - Handshake: a request before `initialize` gets `Not initialized`, a second
+//   `initialize` gets `Already initialized`
+//   (app-server/src/message_processor.rs:1047–1049,
+//   request_processors/initialize_processor.rs:68–70). The server only logs
+//   the `initialized` notification (message_processor.rs:801–805); a request
+//   sent before it is recorded as a problem, because the protocol's handshake
+//   (the schema's `ClientNotification`) has the client send it first.
+// - Replies to server requests: a reply to a request no longer pending finds
+//   no callback, and Codex drops it (app-server/src/outgoing_message.rs:
+//   627–629). The fake validates every reply, and records any reply after the
+//   first as a problem, so a driver that answers twice fails its tests.
+// - `turn/interrupt` answers only when the target turn completes or aborts,
+//   just before its `turn/completed`
+//   (request_processors/turn_processor.rs:1550–1605,
+//   bespoke_event_handling.rs:202–203, 1288–1290, 1645–1662); a different
+//   active turn gets `expected active turn id ... but found ...`.
+// - `turn/start` on a thread with an active turn steers the input into that
+//   turn and answers with its id (turn_processor.rs:722–763,
+//   `start_or_steer_turn`).
+// - A fresh thread has no rollout until its first turn: resuming it fails with
+//   `no rollout found for thread id ...`
+//   (app-server/tests/suite/v2/thread_resume.rs:521–566), listing it finds
+//   nothing, and listing its turns fails (thread_processor.rs:6774). Archiving
+//   it materializes the empty rollout and shuts the thread down
+//   (thread_processor.rs:1895–1904, 1242–1267;
+//   tests/suite/v2/thread_archive.rs:313–355); `thread/inject_items`
+//   materializes it too (core/src/codex_thread.rs:1211–1218).
+// - `thread/resume` of a thread this connection has loaded ignores its
+//   overrides (thread_processor.rs:4900–4955); a cold resume applies them.
+//   Omitted approval settings keep the thread's persisted ones on resume and
+//   the source's on fork (thread_processor.rs:4782–4791, 5788–5794); the
+//   `config` overrides (MCP servers among them) last for that load only.
+//   `turn/start` overrides persist for later turns (turn_processor.rs:865–990).
+// - An ordinary command approval offers `accept`, at most one exec-policy
+//   amendment and `cancel`; a network approval `accept`, `acceptForSession`,
+//   at most one allowing network amendment and `cancel`
+//   (protocol/src/approvals.rs:379–411, core/src/session/mod.rs:3433–3439,
+//   core/src/tools/approvals.rs:800–985, app-server-protocol/src/protocol/v2/
+//   item.rs:91–113). Under approval policy `never` Codex asks nothing and
+//   runs the command (core/src/exec_policy.rs:907–911).
+// - Setting an active goal on an idle thread starts a turn at once, and Codex
+//   starts the next one when a turn of an active goal completes
+//   (ext/goal/src/runtime.rs:223–239,
+//   tests/suite/v2/thread_goal_empty_responses.rs:141–165). The fake
+//   continues only after a completed turn.
+// - Background terminal process ids are `i32` numbers; terminating parses the
+//   id as `i32` first (thread_processor.rs:2707–2721).
+// - `thread/list` refuses malformed or more than 100 included or excluded
+//   thread ids with -32602 (thread_processor.rs:6335–6348, README lines
+//   57–79); exclusions win; filters apply before pagination.
+//
 // Every frame it sends and every frame the driver sends is checked against
 // the vendored schema (`CodexFrameValidator`); `world.validator.problems`
-// lists any that does not validate.
+// lists any that does not validate, and every protocol problem above.
 //
-// The fake does nothing on its own. Each turn waits for its puppet: the
-// conformance kit's `NativeTurn` steps, plus Codex-only steps the quirk tests
-// use (async questions, goal turns Codex starts itself, file changes with
-// diffs, plan updates, rate-limit updates, structured questions).
+// The fake does nothing on its own beyond what Codex does on its own (goal
+// turns). Each turn waits for its puppet: the conformance kit's `NativeTurn`
+// steps, plus Codex-only steps the quirk tests use. A turn the host started
+// goes to `turnQueue`; a turn Codex started for a goal goes to
+// `autonomousTurns`, unless `goalAutopilot` is on: then the model meets the
+// goal in that turn at once.
 //
 // Native threads live in a store per Codex home (`CODEX_HOME`, else the
 // ambient home), shared by every app-server process of one world, so a
-// thread survives a process exit and a second process can resume it. A
-// thread loaded by a live process holds its writer lock: another process
-// cannot resume it, as with Codex's rollout writer locks.
+// materialized thread survives a process exit and a second process can
+// resume it. A thread loaded by a live process holds its writer lock: another
+// process cannot resume it, as with Codex's rollout writer locks.
 
 import * as http from "node:http";
 import * as path from "node:path";
@@ -29,9 +87,9 @@ import { createMemoryProcess } from "../../../src/conformance/index.ts";
 import type { FakeSpawnRequest, NativeActivity, NativeApproval, NativeApprovalHandle, NativeFailure, NativeSessionState, NativeTool, NativeTurn } from "../../../src/conformance/index.ts";
 import type { MemoryProcess } from "../../../src/conformance/index.ts";
 import { AsyncQueue } from "../../../src/conformance/util.ts";
-import { decisionOptionId } from "../../../src/drivers/codex/index.ts";
 import type {
   CommandExecutionApprovalDecision,
+  FileChangeApprovalDecision,
   RateLimitSnapshot,
   SandboxPolicy,
   Thread,
@@ -47,14 +105,24 @@ export const FAKE_CODEX_VERSION = "0.172.0";
 export const FAKE_MCP_SERVER = "fake-tools";
 export const FAKE_MCP_TOOL = "echo";
 export const FAKE_MCP_RESOURCE = "fake://readme";
+/** The host a network approval names. */
+export const FAKE_NETWORK_HOST = "registry.npmjs.org";
 
 type JsonObject = { [key: string]: unknown };
 type AmbientAuth = "authenticated" | "unauthenticated" | "unknown" | "unavailable" | "api_key";
 
 const LOCKED_MESSAGE = (threadId: string) => `error resuming thread: thread ${threadId} already has an active writer`;
+const NO_ROLLOUT = (threadId: string) => `no rollout found for thread id ${threadId}`;
+const MAX_FILTER_IDS = 100;
+/** A `SandboxPolicy` type as the `SandboxMode` it stands for. */
+const SANDBOX_MODES: { readonly [type: string]: string } = { readOnly: "read-only", workspaceWrite: "workspace-write", dangerFullAccess: "danger-full-access" };
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function seconds(): number {
@@ -63,6 +131,25 @@ function seconds(): number {
 
 function inputText(input: readonly UserInput[]): string {
   return input.flatMap((entry) => ("type" in entry && entry.type === "text" ? [entry.text] : [])).join("\n");
+}
+
+/** What `Uuid::parse_str` accepts: simple, hyphenated, braced and URN forms (codex-rs/protocol/src/thread_id.rs:41–45). */
+export function isUuid(value: string): boolean {
+  const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return /^[0-9a-f]{32}$/i.test(value) || hyphenated.test(value) || hyphenated.test(value.replace(/^\{(.*)\}$/, "$1")) || hyphenated.test(value.replace(/^urn:uuid:/i, ""));
+}
+
+/** Rust's `str::parse::<i32>`. */
+function parseI32(value: string): number | undefined {
+  if (!/^[+-]?\d+$/.test(value)) return undefined;
+  const number = Number(value);
+  return number >= -2_147_483_648 && number <= 2_147_483_647 ? number : undefined;
+}
+
+/** The MCP server names a `config` override registers (`mcp_servers.<name>`). */
+function mcpServerNames(config: unknown): string[] {
+  if (!isObject(config)) return [];
+  return Object.keys(config).flatMap((key) => (key.startsWith("mcp_servers.") ? [key.slice("mcp_servers.".length)] : []));
 }
 
 class RpcFailure extends Error {
@@ -75,6 +162,15 @@ class RpcFailure extends Error {
   }
 }
 
+/** The approval settings Codex keeps for a thread, and the MCP servers of the request that loaded it. */
+export interface ThreadSettings {
+  approvalPolicy: unknown;
+  approvalsReviewer: string;
+  sandbox: string;
+  /** From the `config` of the start, cold resume or fork that loaded the thread; config overrides are not persisted. */
+  mcpServers: string[];
+}
+
 interface StoredTurn {
   readonly id: string;
   status: "inProgress" | "completed" | "interrupted" | "failed";
@@ -84,6 +180,8 @@ interface StoredTurn {
   error: { message: string; codexErrorInfo?: string } | null;
   /** The prompt of the turn: its first user message. */
   readonly prompt: string | undefined;
+  /** The thread's settings when the turn started. */
+  readonly settings: ThreadSettings;
 }
 
 export interface StoredThread {
@@ -95,6 +193,9 @@ export interface StoredThread {
   compactions: number;
   readonly injected: string[];
   archived: boolean;
+  /** Has a rollout: a fresh thread gets one with its first turn (or an archive, or injected items). */
+  materialized: boolean;
+  readonly ephemeral: boolean;
   readonly forkedFromId: string | null;
   readonly parentThreadId: string | null;
   readonly agentNickname: string | null;
@@ -102,7 +203,8 @@ export interface StoredThread {
   readState: { revision: number; unread: boolean };
   readonly terminals: Array<{ processId: string; command: string; cwd: string; itemId: string; running: boolean }>;
   readonly subagents: Array<{ name: string; childThreadId: string; running: boolean }>;
-  /** What the client sent when it started, resumed or forked the thread, newest last. */
+  settings: ThreadSettings;
+  /** What the client sent when it started, resumed or forked the thread, newest last (only requests Codex applied). */
   readonly launches: JsonObject[];
 }
 
@@ -115,6 +217,7 @@ export class FakeCodexStore {
   #threadCount = 0;
   #turnCount = 0;
   #itemCount = 0;
+  #processCount = 0;
 
   constructor(home: string) {
     this.home = home;
@@ -134,6 +237,12 @@ export class FakeCodexStore {
     this.#itemCount += 1;
     return `${prefix}_${String(this.#itemCount).padStart(4, "0")}`;
   }
+
+  /** A unified-exec process id: an `i32`, as a string. */
+  newProcessId(): string {
+    this.#processCount += 1;
+    return String(1000 + this.#processCount);
+  }
 }
 
 /** One turn as the puppet drives it. */
@@ -150,6 +259,8 @@ export interface FakeTurn {
   stopRequest: Promise<"cancel" | "exit">;
   /** Completed natively; the `turn/completed` frame waits for `release`. */
   held: boolean;
+  /** `turn/interrupt` answers waiting for this turn to complete or abort. */
+  readonly interrupts: Array<() => void>;
 }
 
 interface PendingServerRequest {
@@ -158,20 +269,39 @@ interface PendingServerRequest {
   readonly resolve: (result: unknown) => void;
 }
 
+/** How a kit approval became a Codex approval: the native decision for each kit option. */
+export interface NativeApprovalMapping {
+  /** The decision Codex offers for each of the kit's option ids. */
+  readonly nativeDecisions: { readonly [kitOptionId: string]: CommandExecutionApprovalDecision | FileChangeApprovalDecision };
+}
+
 /** The Codex-only puppet steps, on top of the kit's `NativeTurn`. */
 export interface CodexNativeTurn extends NativeTurn {
   readonly nativeTurnId: string;
   readonly nativeThreadId: string;
   /** The params of the `turn/start` that started this turn (empty for a turn Codex started itself). */
   readonly startParams: JsonObject;
+  /** The thread's settings when the turn started. */
+  readonly settings: ThreadSettings;
+  /** Asks for an approval the way pinned Codex would for these kit options; the handle carries the native decisions. */
+  requestApproval(approval: NativeApproval): Promise<NativeApprovalHandle & NativeApprovalMapping>;
   /** An agent message that asks async questions: Codex reads the answers from the next user message. */
   askAsync(text: string, questions: ReadonlyArray<{ title: string; options?: string[] }>): Promise<void>;
   /** A file change with its diff. */
   changeFiles(changes: ReadonlyArray<{ path: string; kind: "add" | "delete" | "update"; diff: string }>): Promise<string>;
   /** A `turn/plan/updated`. */
   updatePlan(steps: ReadonlyArray<{ step: string; status: "pending" | "inProgress" | "completed" }>, explanation?: string): Promise<void>;
-  /** A command approval with these Codex decisions; resolves with the decision the client chose. */
-  commandApproval(command: string, decisions: readonly CommandExecutionApprovalDecision[], options?: { kind?: "command" | "humanCommand" }): Promise<{ decision: Promise<unknown> }>;
+  /**
+   * A command approval offering exactly these decisions (any list the schema
+   * allows, including ones the ordinary Codex producer never makes); resolves
+   * with the decision the client chose. `network` makes it a network
+   * approval: no command, a `networkApprovalContext` instead.
+   */
+  commandApproval(
+    command: string,
+    decisions: readonly CommandExecutionApprovalDecision[],
+    options?: { kind?: "command" | "humanCommand"; network?: { host: string } },
+  ): Promise<{ decision: Promise<unknown> }>;
   /** A file-change approval for an item `changeFiles` reported; resolves with the client's decision. */
   fileChangeApproval(itemId: string): Promise<{ decision: Promise<unknown> }>;
   /** A blocking `item/tool/requestUserInput`; resolves with the client's answers. */
@@ -180,7 +310,12 @@ export interface CodexNativeTurn extends NativeTurn {
   callDynamicTool(tool: string, args: unknown): Promise<unknown>;
   /** A `thread/tokenUsage/updated`. */
   reportUsage(totalTokens: number, contextWindow: number): Promise<void>;
+  /** The model reports the thread's goal met: Codex marks it `complete` (and starts no further goal turn). */
+  reachGoal(): Promise<void>;
 }
+
+/** A request the fake answers later, through `respond`. */
+const LATER = Symbol("answered later");
 
 /** One `codex app-server` process. */
 export class FakeAppServer {
@@ -188,10 +323,14 @@ export class FakeAppServer {
   readonly store: FakeCodexStore;
   readonly memory: MemoryProcess;
   readonly environment: { readonly [name: string]: string };
+  /** Threads this process has loaded, and its one connection is subscribed to. */
   readonly loaded = new Set<string>();
   readonly #pending = new Map<number, PendingServerRequest>();
+  /** Every server request this process sent, by id: what it asked. */
+  readonly #sent = new Map<number, string>();
   #nextServerRequest = 0;
   #initialized = false;
+  #initializedNotified = false;
   optOut: readonly string[] = [];
   /** Every client request this process handled, in order. */
   readonly requests: Array<{ method: string; params: unknown }> = [];
@@ -221,7 +360,7 @@ export class FakeAppServer {
     return !this.memory.exited;
   }
 
-  /** Ends the process: its loaded threads lose their writer, its turns stop. */
+  /** Ends the process: its loaded threads lose their writer, its turns stop, threads without a rollout are gone. */
   exit(code: number | null, signal: string | null): void {
     if (this.memory.exited) return;
     for (const turn of this.world.activeTurns()) {
@@ -231,8 +370,13 @@ export class FakeAppServer {
       turn.stop?.("exit");
       this.world.endTurn(turn);
     }
-    // Background terminals die with the process.
-    for (const threadId of this.loaded) for (const terminal of this.store.threads.get(threadId)?.terminals ?? []) terminal.running = false;
+    for (const threadId of this.loaded) {
+      const thread = this.store.threads.get(threadId);
+      if (thread === undefined) continue;
+      // Background terminals die with the process.
+      for (const terminal of thread.terminals) terminal.running = false;
+      if (!thread.materialized) this.store.threads.delete(threadId);
+    }
     this.loaded.clear();
     this.memory.exit(code, signal);
   }
@@ -254,6 +398,7 @@ export class FakeAppServer {
     this.#nextServerRequest += 1;
     const frame = { id, method, params };
     this.world.validator.checkCall("from_codex", frame);
+    this.#sent.set(id, method);
     return new Promise((resolve) => {
       this.#pending.set(id, { method, threadId: typeof params["threadId"] === "string" ? params["threadId"] : undefined, resolve });
       this.#write(frame);
@@ -261,52 +406,85 @@ export class FakeAppServer {
   }
 
   #receive(frame: unknown): void {
-    if (!isObject(frame)) return;
+    if (!isObject(frame)) {
+      this.world.validator.problem("to_codex", frame, "not a JSON object");
+      return;
+    }
     if (typeof frame["method"] === "string") {
       this.world.validator.checkCall("to_codex", frame);
       if (!("id" in frame)) {
-        if (frame["method"] === "initialized") this.#initialized = true;
+        if (frame["method"] === "initialized") {
+          if (!this.#initialized) this.world.validator.problem("to_codex", frame, "initialized before initialize");
+          this.#initializedNotified = true;
+        }
         return;
       }
-      const id = frame["id"] as number | string;
-      const method = frame["method"];
-      const params = (frame["params"] ?? {}) as JsonObject;
-      this.requests.push({ method, params });
-      this.world.requests.push({ method, params, server: this });
-      const fail = (error: unknown): void => {
-        const failure = error instanceof RpcFailure ? error : new RpcFailure(-32603, error instanceof Error ? error.message : String(error));
-        const response = { id, error: { code: failure.code, message: failure.message, ...(failure.data === undefined ? {} : { data: failure.data }) } };
-        this.world.validator.checkResponse("from_codex", response, method);
-        this.#write(response);
-      };
-      const answer = (result: unknown): void => {
-        const after = result instanceof Answer ? result.after : undefined;
-        const value = result instanceof Answer ? result.value : result;
-        const response = { id, result: value };
-        this.world.validator.checkResponse("from_codex", response, method);
-        this.#write(response);
-        after?.();
-      };
-      let result: unknown;
-      try {
-        result = this.#handle(method, params);
-      } catch (error) {
-        fail(error);
-        return;
-      }
-      // Most answers go out at once, in order; sign-in waits for its local listener.
-      if (result instanceof Promise) result.then(answer, fail);
-      else answer(result);
+      this.#call(frame, frame["method"]);
       return;
     }
-    if ("id" in frame) {
-      const pending = this.#pending.get(frame["id"] as number);
-      if (pending === undefined) return;
-      this.#pending.delete(frame["id"] as number);
-      this.world.validator.checkResponse("to_codex", frame, pending.method);
-      pending.resolve("result" in frame ? frame["result"] : { error: frame["error"] });
-      if (pending.threadId !== undefined) this.notify("serverRequest/resolved", { threadId: pending.threadId, requestId: frame["id"] as number });
+    if ("id" in frame) this.#reply(frame);
+  }
+
+  #call(frame: JsonObject, method: string): void {
+    const id = frame["id"] as number | string;
+    const params = (frame["params"] ?? {}) as JsonObject;
+    this.requests.push({ method, params });
+    this.world.requests.push({ method, params, server: this });
+    let answered = false;
+    const fail = (error: unknown): void => {
+      if (answered) return;
+      answered = true;
+      const failure = error instanceof RpcFailure ? error : new RpcFailure(-32603, error instanceof Error ? error.message : String(error));
+      const response = { id, error: { code: failure.code, message: failure.message, ...(failure.data === undefined ? {} : { data: failure.data }) } };
+      this.world.validator.checkResponse("from_codex", response, method);
+      this.#write(response);
+    };
+    const respond = (result: unknown): void => {
+      if (answered) return;
+      answered = true;
+      const after = result instanceof Answer ? result.after : undefined;
+      const value = result instanceof Answer ? result.value : result;
+      const response = { id, result: value };
+      this.world.validator.checkResponse("from_codex", response, method);
+      this.#write(response);
+      after?.();
+    };
+    if (method === "initialize") {
+      if (this.#initialized) return fail(new RpcFailure(-32600, "Already initialized"));
+    } else {
+      if (!this.#initialized) return fail(new RpcFailure(-32600, "Not initialized"));
+      if (!this.#initializedNotified) this.world.validator.problem("to_codex", frame, `${method} sent before the initialized notification`);
     }
+    let result: unknown;
+    try {
+      result = this.#handle(method, params, respond);
+    } catch (error) {
+      fail(error);
+      return;
+    }
+    if (result === LATER) return;
+    // Most answers go out at once, in order; sign-in waits for its local listener.
+    if (result instanceof Promise) result.then(respond, fail);
+    else respond(result);
+  }
+
+  /** A reply to a server request: validated and counted even when Codex has no callback for it any more. */
+  #reply(frame: JsonObject): void {
+    const id = frame["id"] as number;
+    const method = this.#sent.get(id);
+    if (method === undefined) {
+      this.world.validator.problem("to_codex", frame, `a reply to server request ${String(id)}, which this app-server never sent`);
+      return;
+    }
+    this.world.validator.checkResponse("to_codex", frame, method);
+    const pending = this.#pending.get(id);
+    if (pending === undefined) {
+      this.world.validator.problem("to_codex", frame, `a second reply to server request ${String(id)} (${method}); Codex has no callback left for it and drops it`);
+      return;
+    }
+    this.#pending.delete(id);
+    pending.resolve("result" in frame ? frame["result"] : { error: frame["error"] });
+    if (pending.threadId !== undefined) this.notify("serverRequest/resolved", { threadId: pending.threadId, requestId: id });
   }
 
   thread(threadId: string): StoredThread {
@@ -325,11 +503,12 @@ export class FakeAppServer {
     return this.#initialized;
   }
 
-  #handle(method: string, params: JsonObject): unknown {
+  #handle(method: string, params: JsonObject, respond: (result: unknown) => void): unknown {
     switch (method) {
       case "initialize": {
         const capabilities = (params["capabilities"] ?? {}) as JsonObject;
         this.optOut = Array.isArray(capabilities["optOutNotificationMethods"]) ? (capabilities["optOutNotificationMethods"] as string[]) : [];
+        this.#initialized = true;
         return { userAgent: `codex_cli_rs/${FAKE_CODEX_VERSION} (fake)`, codexHome: this.store.home, platformFamily: "unix", platformOs: "linux" };
       }
       case "account/read":
@@ -361,20 +540,27 @@ export class FakeAppServer {
         return this.#forkThread(params);
       case "thread/read": {
         const thread = this.thread(params["threadId"] as string);
+        if (params["includeTurns"] === true && !thread.materialized) throw new RpcFailure(-32600, `thread ${thread.id} is not materialized yet; includeTurns is unavailable before first user message`);
         const result = { thread: this.world.threadObject(thread, params["includeTurns"] === true), readState: this.world.readState(thread) };
         this.world.recordExtension("thread/read", params, result);
         return result;
       }
       case "thread/turns/list": {
         const thread = this.thread(params["threadId"] as string);
+        if (!thread.materialized) throw new RpcFailure(-32600, `thread ${thread.id} is not materialized yet; thread/turns/list is unavailable before first user message`);
         const turns = thread.turns.map((turn) => this.world.turnObject(turn, "full"));
         return { data: params["sortDirection"] === "asc" ? turns : turns.reverse(), nextCursor: null };
       }
       case "thread/list":
         return this.#listThreads(params);
       case "thread/archive":
-        this.thread(params["threadId"] as string).archived = true;
-        return {};
+        return this.#archive(params);
+      case "thread/unarchive": {
+        const thread = this.thread(params["threadId"] as string);
+        if (!thread.materialized) throw new RpcFailure(-32600, NO_ROLLOUT(thread.id));
+        thread.archived = false;
+        return new Answer({ thread: this.world.threadObject(thread, false) }, () => this.notify("thread/unarchived", { threadId: thread.id }));
+      }
       case "thread/delete":
         this.thread(params["threadId"] as string);
         this.store.threads.delete(params["threadId"] as string);
@@ -398,31 +584,17 @@ export class FakeAppServer {
       }
       case "thread/inject_items": {
         const thread = this.#loadedThread(params["threadId"] as string);
-        for (const item of params["items"] as JsonObject[]) {
+        const items = params["items"] as JsonObject[];
+        if (items.length === 0) throw new RpcFailure(-32600, "items must not be empty");
+        for (const item of items) {
           const content = (item["content"] ?? []) as Array<{ text?: string }>;
           thread.injected.push(content.map((part) => part.text ?? "").join("\n"));
         }
+        if (!thread.ephemeral) thread.materialized = true;
         return {};
       }
-      case "thread/goal/set": {
-        const thread = this.#loadedThread(params["threadId"] as string);
-        const now = seconds();
-        const previous = thread.goal;
-        const goal: ThreadGoal = {
-          threadId: thread.id,
-          objective: (params["objective"] as string | undefined) ?? previous?.objective ?? "",
-          status: (params["status"] as ThreadGoal["status"] | undefined) ?? previous?.status ?? "active",
-          tokensUsed: previous?.tokensUsed ?? 1200 + this.world.goalCounter(),
-          timeUsedSeconds: previous?.timeUsedSeconds ?? 7,
-          createdAt: previous?.createdAt ?? now,
-          updatedAt: now,
-          ...("tokenBudget" in params ? { tokenBudget: params["tokenBudget"] as number | null } : previous?.tokenBudget === undefined ? {} : { tokenBudget: previous.tokenBudget }),
-        };
-        thread.goal = goal;
-        const result = { goal };
-        this.world.recordExtension("thread/goal/set", params, result);
-        return new Answer(result, () => this.notify("thread/goal/updated", { threadId: thread.id, goal }));
-      }
+      case "thread/goal/set":
+        return this.#setGoal(params);
       case "thread/goal/get": {
         const thread = this.thread(params["threadId"] as string);
         const result = { goal: thread.goal ?? null };
@@ -440,8 +612,10 @@ export class FakeAppServer {
         return { data: thread.terminals.filter((terminal) => terminal.running).map(({ running: _running, ...terminal }) => terminal), nextCursor: null };
       }
       case "thread/backgroundTerminals/terminate": {
+        const processId = parseI32(String(params["processId"]));
+        if (processId === undefined) throw new RpcFailure(-32600, "invalid background terminal process id: invalid digit found in string");
         const thread = this.#loadedThread(params["threadId"] as string);
-        const terminal = thread.terminals.find((candidate) => candidate.processId === params["processId"] && candidate.running);
+        const terminal = thread.terminals.find((candidate) => parseI32(candidate.processId) === processId && candidate.running);
         if (terminal !== undefined) terminal.running = false;
         return { terminated: terminal !== undefined };
       }
@@ -466,7 +640,7 @@ export class FakeAppServer {
       case "turn/steer":
         return this.#steer(params);
       case "turn/interrupt":
-        return this.#interrupt(params);
+        return this.#interrupt(params, respond);
       case "mcpServerStatus/list": {
         const tools = { [FAKE_MCP_TOOL]: { name: FAKE_MCP_TOOL, description: "Echoes its arguments, numbering each call.", inputSchema: { type: "object", properties: { text: { type: "string" } } } } };
         const status = { name: FAKE_MCP_SERVER, authStatus: "unsupported", tools, resources: [{ name: "readme", uri: FAKE_MCP_RESOURCE, mimeType: "text/plain" }], resourceTemplates: [] };
@@ -527,8 +701,7 @@ export class FakeAppServer {
     throw new RpcFailure(-32602, `unsupported login type ${String(type)}`);
   }
 
-  #sandbox(params: JsonObject): SandboxPolicy {
-    const mode = params["sandbox"];
+  #sandboxPolicy(mode: string): SandboxPolicy {
     if (mode === "read-only") return { type: "readOnly" };
     if (mode === "danger-full-access") return { type: "dangerFullAccess" };
     return { type: "workspaceWrite" };
@@ -540,9 +713,9 @@ export class FakeAppServer {
       model: (params["model"] as string | undefined) ?? "fake-large",
       modelProvider: "openai",
       cwd: thread.cwd,
-      approvalPolicy: params["approvalPolicy"] ?? "on-request",
-      approvalsReviewer: params["approvalsReviewer"] ?? "user",
-      sandbox: this.#sandbox(params),
+      approvalPolicy: thread.settings.approvalPolicy,
+      approvalsReviewer: thread.settings.approvalsReviewer,
+      sandbox: this.#sandboxPolicy(thread.settings.sandbox),
     };
   }
 
@@ -558,6 +731,8 @@ export class FakeAppServer {
       compactions: 0,
       injected: [],
       archived: false,
+      materialized: false,
+      ephemeral: params["ephemeral"] === true,
       forkedFromId: null,
       parentThreadId: null,
       agentNickname: null,
@@ -565,6 +740,12 @@ export class FakeAppServer {
       readState: { revision: 1, unread: false },
       terminals: [],
       subagents: [],
+      settings: {
+        approvalPolicy: params["approvalPolicy"] ?? "on-request",
+        approvalsReviewer: (params["approvalsReviewer"] as string | undefined) ?? "user",
+        sandbox: (params["sandbox"] as string | undefined) ?? "workspace-write",
+        mcpServers: mcpServerNames(params["config"]),
+      },
       launches: [params],
     };
     this.store.threads.set(thread.id, thread);
@@ -575,18 +756,29 @@ export class FakeAppServer {
 
   #resumeThread(params: JsonObject): unknown {
     const threadId = params["threadId"] as string;
+    if (!isUuid(threadId)) throw new RpcFailure(-32600, `invalid session id: invalid character in ${JSON.stringify(threadId)}`);
     const thread = this.store.threads.get(threadId);
-    if (thread === undefined) throw new RpcFailure(-32600, `no rollout found for thread id ${threadId}`);
+    if (thread === undefined || !thread.materialized) throw new RpcFailure(-32600, NO_ROLLOUT(threadId));
+    // This connection has it loaded: Codex keeps the running thread as it is and ignores the overrides.
+    if (this.loaded.has(threadId)) return this.#threadResponse(thread, params, params["excludeTurns"] !== true);
     const heldElsewhere = this.world.servers.some((server) => server !== this && server.alive && server.loaded.has(threadId));
     if (this.store.locked.has(threadId) || heldElsewhere) throw new RpcFailure(-32603, LOCKED_MESSAGE(threadId));
     if (typeof params["cwd"] === "string") thread.cwd = this.world.realpath(params["cwd"]);
+    thread.settings = {
+      approvalPolicy: params["approvalPolicy"] ?? thread.settings.approvalPolicy,
+      approvalsReviewer: (params["approvalsReviewer"] as string | undefined) ?? thread.settings.approvalsReviewer,
+      sandbox: (params["sandbox"] as string | undefined) ?? thread.settings.sandbox,
+      mcpServers: mcpServerNames(params["config"]),
+    };
     thread.launches.push(params);
     this.loaded.add(threadId);
     return this.#threadResponse(thread, params, params["excludeTurns"] !== true);
   }
 
   #forkThread(params: JsonObject): unknown {
-    const source = this.thread(params["threadId"] as string);
+    const sourceId = params["threadId"] as string;
+    const source = this.store.threads.get(sourceId);
+    if (source === undefined || !source.materialized) throw new RpcFailure(-32600, NO_ROLLOUT(sourceId));
     let turns = source.turns;
     if (typeof params["lastTurnId"] === "string") {
       const index = turns.findIndex((turn) => turn.id === params["lastTurnId"]);
@@ -607,6 +799,9 @@ export class FakeAppServer {
       compactions: 0,
       injected: [],
       archived: false,
+      // A persistent fork has its own rollout at once (thread_processor.rs:6016).
+      materialized: params["ephemeral"] !== true,
+      ephemeral: params["ephemeral"] === true,
       forkedFromId: source.id,
       parentThreadId: null,
       agentNickname: null,
@@ -614,6 +809,12 @@ export class FakeAppServer {
       readState: { revision: 1, unread: false },
       terminals: [],
       subagents: [],
+      settings: {
+        approvalPolicy: params["approvalPolicy"] ?? source.settings.approvalPolicy,
+        approvalsReviewer: (params["approvalsReviewer"] as string | undefined) ?? source.settings.approvalsReviewer,
+        sandbox: (params["sandbox"] as string | undefined) ?? source.settings.sandbox,
+        mcpServers: mcpServerNames(params["config"]),
+      },
       launches: [params],
     };
     this.store.threads.set(thread.id, thread);
@@ -621,29 +822,96 @@ export class FakeAppServer {
     return new Answer(this.#threadResponse(thread, params, false), () => this.notify("thread/started", { thread: this.world.threadObject(thread, false) }));
   }
 
+  #archive(params: JsonObject): unknown {
+    const threadId = params["threadId"] as string;
+    if (!isUuid(threadId)) throw new RpcFailure(-32600, `invalid session id: invalid character in ${JSON.stringify(threadId)}`);
+    const thread = this.store.threads.get(threadId);
+    // A fresh loaded thread gets its empty rollout here, without a user turn.
+    if (thread !== undefined && this.loaded.has(threadId) && !thread.ephemeral) thread.materialized = true;
+    if (thread === undefined || !thread.materialized) throw new RpcFailure(-32600, NO_ROLLOUT(threadId));
+    if (thread.archived) return {};
+    if (this.world.activeTurns().some((turn) => turn.threadId === threadId)) throw new RpcFailure(-32600, `thread ${threadId} has an active turn`);
+    // The archive shuts the loaded thread down.
+    const wasLoaded = this.loaded.delete(threadId);
+    thread.archived = true;
+    return new Answer({}, () => {
+      if (wasLoaded) this.notify("thread/closed", { threadId });
+      this.notify("thread/archived", { threadId });
+    });
+  }
+
   #listThreads(params: JsonObject): unknown {
-    let threads = [...this.store.threads.values()].filter((thread) => thread.parentThreadId === null);
+    const filters: { [key: string]: string[] | undefined } = {};
+    for (const [key, kind] of [
+      ["includedThreadIds", "included"],
+      ["excludedThreadIds", "excluded"],
+    ] as const) {
+      const ids = params[key];
+      if (!Array.isArray(ids)) continue;
+      if (ids.length > MAX_FILTER_IDS) throw new RpcFailure(-32602, `${kind}ThreadIds accepts at most ${MAX_FILTER_IDS} entries`);
+      const invalid = (ids as string[]).find((id) => !isUuid(id));
+      if (invalid !== undefined) throw new RpcFailure(-32602, `invalid ${kind} thread id: invalid character in ${JSON.stringify(invalid)}`);
+      filters[key] = ids as string[];
+    }
+    let threads = [...this.store.threads.values()].filter((thread) => thread.parentThreadId === null && thread.materialized && !thread.ephemeral);
     const cwd = params["cwd"];
     if (typeof cwd === "string") threads = threads.filter((thread) => thread.cwd === this.world.realpath(cwd));
     if (Array.isArray(cwd)) threads = threads.filter((thread) => (cwd as string[]).map((entry) => this.world.realpath(entry)).includes(thread.cwd));
     threads = threads.filter((thread) => thread.archived === (params["archived"] === true));
     if (typeof params["searchTerm"] === "string") threads = threads.filter((thread) => (thread.turns[0]?.prompt ?? "").includes(params["searchTerm"] as string));
-    for (const key of ["excludedThreadIds", "includedThreadIds"] as const) {
-      const ids = params[key];
-      if (Array.isArray(ids) && ids.length > 100) throw new RpcFailure(-32602, `${key} takes at most 100 thread ids`);
-    }
-    if (Array.isArray(params["excludedThreadIds"])) threads = threads.filter((thread) => !(params["excludedThreadIds"] as string[]).includes(thread.id));
-    if (Array.isArray(params["includedThreadIds"])) threads = threads.filter((thread) => (params["includedThreadIds"] as string[]).includes(thread.id));
+    const included = filters["includedThreadIds"];
+    const excluded = filters["excludedThreadIds"];
+    if (included !== undefined) threads = threads.filter((thread) => included.includes(thread.id));
+    // Exclusions win when an id is in both.
+    if (excluded !== undefined) threads = threads.filter((thread) => !excluded.includes(thread.id));
     const limit = typeof params["limit"] === "number" ? params["limit"] : 25;
     const start = typeof params["cursor"] === "string" ? Number(params["cursor"]) : 0;
     const page = threads.slice(start, start + limit);
     return { data: page.map((thread) => this.world.threadObject(thread, false)), nextCursor: start + limit < threads.length ? String(start + limit) : null };
   }
 
+  #setGoal(params: JsonObject): unknown {
+    const thread = this.#loadedThread(params["threadId"] as string);
+    const now = seconds();
+    const previous = thread.goal;
+    const goal: ThreadGoal = {
+      threadId: thread.id,
+      objective: (params["objective"] as string | undefined) ?? previous?.objective ?? "",
+      status: (params["status"] as ThreadGoal["status"] | undefined) ?? previous?.status ?? "active",
+      tokensUsed: previous?.tokensUsed ?? 1200 + this.world.goalCounter(),
+      timeUsedSeconds: previous?.timeUsedSeconds ?? 7,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+      ...("tokenBudget" in params ? { tokenBudget: params["tokenBudget"] as number | null } : previous?.tokenBudget === undefined ? {} : { tokenBudget: previous.tokenBudget }),
+    };
+    thread.goal = goal;
+    const result = { goal };
+    this.world.recordExtension("thread/goal/set", params, result);
+    return new Answer(result, () => {
+      this.notify("thread/goal/updated", { threadId: thread.id, goal });
+      // An active goal on an idle thread: Codex starts working on it at once.
+      if (goal.status === "active" && !this.world.activeTurns().some((turn) => turn.threadId === thread.id)) this.world.startGoalTurn(this, thread);
+    });
+  }
+
   #startTurn(params: JsonObject): unknown {
     const thread = this.#loadedThread(params["threadId"] as string);
-    if (this.world.activeTurns().some((turn) => turn.threadId === thread.id && !turn.held)) throw new RpcFailure(-32600, "a turn is already running on this thread");
-    const turn = this.world.beginTurn(this, thread, inputText(params["input"] as UserInput[]), true, params);
+    // Overrides on turn/start are thread settings: they last for later turns too.
+    const sandboxPolicy = params["sandboxPolicy"];
+    thread.settings = {
+      ...thread.settings,
+      ...(params["approvalPolicy"] === undefined ? {} : { approvalPolicy: params["approvalPolicy"] }),
+      ...(typeof params["approvalsReviewer"] === "string" ? { approvalsReviewer: params["approvalsReviewer"] } : {}),
+      ...(isObject(sandboxPolicy) ? { sandbox: SANDBOX_MODES[String(sandboxPolicy["type"])] ?? "workspace-write" } : {}),
+    };
+    const text = inputText(params["input"] as UserInput[]);
+    this.world.goalTurnBeforeTurnStart(this, thread);
+    const active = this.world.activeTurns().find((turn) => turn.threadId === thread.id && !turn.held);
+    if (active !== undefined) {
+      // start_or_steer_turn: the input joins the running turn, and the answer names it.
+      return new Answer({ turn: this.world.turnObject(active.stored, "notLoaded", true) }, () => this.world.steerInto(active, text));
+    }
+    const turn = this.world.beginTurn(this, thread, text, true, params);
     return new Answer({ turn: this.world.turnObject(turn.stored, "notLoaded", true) }, () => this.world.announceTurn(turn));
   }
 
@@ -653,21 +921,21 @@ export class FakeAppServer {
     if (active === undefined) throw new RpcFailure(-32600, "no active turn to steer");
     if (active.id !== params["expectedTurnId"]) throw new RpcFailure(-32600, `expected active turn id \`${String(params["expectedTurnId"])}\` but found \`${active.id}\``);
     const text = inputText(params["input"] as UserInput[]);
-    return new Answer({ turnId: active.id }, () => {
-      const item: ThreadItem = { type: "userMessage", id: this.store.newItemId("user"), content: [{ type: "text", text, text_elements: [] }] };
-      this.world.emitItem(active, item);
-      active.steers.push(text);
-    });
+    return new Answer({ turnId: active.id }, () => this.world.steerInto(active, text));
   }
 
-  #interrupt(params: JsonObject): unknown {
+  #interrupt(params: JsonObject, respond: (result: unknown) => void): unknown {
     const threadId = params["threadId"] as string;
-    const active = this.world.activeTurns().find((turn) => turn.threadId === threadId && turn.id === params["turnId"] && !turn.held);
+    const thread = this.#loadedThread(threadId);
+    const active = this.world.activeTurns().find((turn) => turn.threadId === threadId && !turn.held);
+    if (active !== undefined && active.id !== params["turnId"]) throw new RpcFailure(-32600, `expected active turn id ${String(params["turnId"])} but found ${active.id}`);
     if (active === undefined) throw new RpcFailure(-32600, "no active turn to interrupt");
+    // The answer waits for the turn to complete or abort, and goes out just before its turn/completed.
+    active.interrupts.push(() => respond({}));
     // A subagent's turn stops at once; the kit decides when a root turn reports its cancel.
-    const thread = this.thread(threadId);
-    if (thread.parentThreadId !== null) return new Answer({}, () => this.world.finishTurn(active, "interrupted"));
-    return new Answer({}, () => active.stop?.("cancel"));
+    if (thread.parentThreadId !== null) this.world.finishTurn(active, "interrupted");
+    else active.stop?.("cancel");
+    return LATER;
   }
 
   #compact(thread: StoredThread): void {
@@ -688,8 +956,9 @@ export class FakeAppServer {
     const turnId = this.store.newTurnId();
     const now = seconds();
     const turn: Turn = { id: turnId, items: [], itemsView: "notLoaded", status: "inProgress", error: null, startedAt: null, completedAt: null, durationMs: null };
-    const stored: StoredTurn = { id: turnId, status: "inProgress", items: [], startedAt: now, completedAt: null, error: null, prompt: undefined };
+    const stored: StoredTurn = { id: turnId, status: "inProgress", items: [], startedAt: now, completedAt: null, error: null, prompt: undefined, settings: { ...thread.settings } };
     thread.turns.push(stored);
+    if (!thread.ephemeral) thread.materialized = true;
     return new Answer({ reviewThreadId: thread.id, turn }, () => {
       this.notify("turn/started", { threadId: thread.id, turn: { ...turn, startedAt: now } });
       const entered: ThreadItem = { type: "enteredReviewMode", id: this.store.newItemId("review"), review: "current changes" };
@@ -716,20 +985,68 @@ class Answer {
   }
 }
 
+/**
+ * The decisions pinned Codex would offer for the kit's options, and the one
+ * it offers for each kit option: an ordinary command approval (`accept`, at
+ * most one exec-policy amendment, `cancel`) unless the kit asks for two
+ * broader accepting options or a session-scoped one, which only a network
+ * approval offers (`accept`, `acceptForSession`, an allowing network
+ * amendment, `cancel`). A declining kit option is `cancel` there, the only
+ * declining decision either producer makes. A file-change approval offers
+ * the four `FileChangeApprovalDecision` values. Kit options no ordinary
+ * producer can offer throw.
+ */
+export function pinnedApproval(
+  approval: NativeApproval,
+  command: readonly string[],
+): { readonly network: boolean; readonly decisions: Array<CommandExecutionApprovalDecision | FileChangeApprovalDecision>; readonly byKit: Map<string, CommandExecutionApprovalDecision | FileChangeApprovalDecision> } {
+  const byKit = new Map<string, CommandExecutionApprovalDecision | FileChangeApprovalDecision>();
+  const once = approval.options.filter((option) => option.decision === "accept");
+  const broader = approval.options.filter((option) => option.decision === "accept_always" || option.decision === "accept_for_session");
+  const declining = approval.options.filter((option) => option.decision === "decline");
+  if (once.length > 1 || declining.length > 1) throw new Error(`pinned Codex offers one allow-once and one declining decision; the kit asked for ${approval.options.map((option) => option.decision).join(", ")}`);
+  if (approval.kind === "file_change") {
+    if (broader.length > 1) throw new Error("a pinned Codex file-change approval offers one broader decision (acceptForSession)");
+    for (const option of once) byKit.set(option.optionId, "accept");
+    for (const option of broader) byKit.set(option.optionId, "acceptForSession");
+    for (const option of declining) byKit.set(option.optionId, "decline");
+    return { network: false, decisions: ["accept", "acceptForSession", "decline", "cancel"], byKit };
+  }
+  if (broader.length > 2) throw new Error("pinned Codex offers at most two broader accepting decisions (a network approval's session grant and allow rule)");
+  const network = broader.length === 2 || broader.some((option) => option.decision === "accept_for_session");
+  for (const option of once) byKit.set(option.optionId, "accept");
+  for (const option of declining) byKit.set(option.optionId, "cancel");
+  if (network) {
+    const allowRule: CommandExecutionApprovalDecision = { applyNetworkPolicyAmendment: { network_policy_amendment: { host: FAKE_NETWORK_HOST, action: "allow" } } };
+    const sessionFirst = [...broader].sort((left, right) => (left.decision === "accept_for_session" ? -1 : right.decision === "accept_for_session" ? 1 : 0));
+    if (sessionFirst[0] !== undefined) byKit.set(sessionFirst[0].optionId, "acceptForSession");
+    if (sessionFirst[1] !== undefined) byKit.set(sessionFirst[1].optionId, allowRule);
+    return { network, decisions: ["accept", "acceptForSession", ...(sessionFirst[1] === undefined ? [] : [allowRule]), "cancel"], byKit };
+  }
+  const amendment: CommandExecutionApprovalDecision | undefined = broader[0] === undefined ? undefined : { acceptWithExecpolicyAmendment: { execpolicy_amendment: [...command] } };
+  if (broader[0] !== undefined) byKit.set(broader[0].optionId, amendment!);
+  return { network, decisions: ["accept", ...(amendment === undefined ? [] : [amendment]), "cancel"], byKit };
+}
+
 export interface FakeCodexOptions {
   readonly ambientAuth?: AmbientAuth;
   /** Turns a given path into the one the OS resolves (symbolic links followed). */
   readonly realpath: (path: string) => string;
   /** What `codex --version` reports. */
   readonly version?: string;
+  /** The model meets a goal in the first turn Codex starts for it. Off: each goal turn waits in `autonomousTurns`. */
+  readonly goalAutopilot?: boolean;
 }
 
-/** Everything one rig's fake Codex holds: stores, processes, the puppet queue and what was served. */
+/** Everything one rig's fake Codex holds: stores, processes, the puppet queues and what was served. */
 export class FakeCodexWorld {
   readonly validator = new CodexFrameValidator();
   readonly servers: FakeAppServer[] = [];
   readonly stores = new Map<string, FakeCodexStore>();
+  /** Turns the client started (`turn/start`), for the puppet. */
   readonly turnQueue = new AsyncQueue<CodexNativeTurn>();
+  /** Turns Codex started on its own for an active goal, for the puppet. */
+  readonly autonomousTurns = new AsyncQueue<CodexNativeTurn>();
   readonly requests: Array<{ method: string; params: unknown; server: FakeAppServer }> = [];
   readonly spawns: FakeSpawnRequest[] = [];
   readonly activityLog: { feedback: Array<{ feedbackId: string; reason?: string }>; mcp: NativeActivity["mcp"][number][]; extensions: Array<{ method: string; params: JsonObject; result: unknown }> } = {
@@ -749,6 +1066,8 @@ export class FakeCodexWorld {
   #processCount = 0;
   /** The first thread any process started, in order. */
   readonly threadOrder: string[] = [];
+  /** Threads whose next goal turn starts when the client's next `turn/start` arrives; true once that turn is due. */
+  readonly #continuationAtTurnStart = new Map<string, boolean>();
 
   constructor(options: FakeCodexOptions) {
     this.options = options;
@@ -852,7 +1171,7 @@ export class FakeCodexWorld {
       cliVersion: FAKE_CODEX_VERSION,
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
-      ephemeral: false,
+      ephemeral: thread.ephemeral,
       modelProvider: "openai",
       preview: thread.turns[0]?.prompt ?? "",
       projectId: null,
@@ -894,16 +1213,26 @@ export class FakeCodexWorld {
     this.#turns.delete(turn.id);
   }
 
-  /** A new turn on `thread` in `server`: the client's (`turn/start`) or one Codex starts itself. */
+  /** A new turn on `thread` in `server`: the client's (`turn/start`) or one Codex starts itself. Its first turn gives a thread its rollout. */
   beginTurn(server: FakeAppServer, thread: StoredThread, prompt: string, byClient: boolean, params: JsonObject): FakeTurn {
-    const stored: StoredTurn = { id: server.store.newTurnId(), status: "inProgress", items: [], startedAt: seconds(), completedAt: null, error: null, prompt: prompt === "" ? undefined : prompt };
+    const stored: StoredTurn = {
+      id: server.store.newTurnId(),
+      status: "inProgress",
+      items: [],
+      startedAt: seconds(),
+      completedAt: null,
+      error: null,
+      prompt: prompt === "" ? undefined : prompt,
+      settings: { ...thread.settings, mcpServers: [...thread.settings.mcpServers] },
+    };
     thread.turns.push(stored);
     thread.updatedAt = seconds();
+    if (!thread.ephemeral) thread.materialized = true;
     let stop: (how: "cancel" | "exit") => void = () => undefined;
     const stopRequest = new Promise<"cancel" | "exit">((resolve) => {
       stop = resolve;
     });
-    const turn: FakeTurn = { id: stored.id, threadId: thread.id, server, stored, byClient, params, steers: new AsyncQueue<string>(), stop, stopRequest, held: false };
+    const turn: FakeTurn = { id: stored.id, threadId: thread.id, server, stored, byClient, params, steers: new AsyncQueue<string>(), stop, stopRequest, held: false, interrupts: [] };
     this.#turns.set(turn.id, turn);
     return turn;
   }
@@ -918,6 +1247,26 @@ export class FakeCodexWorld {
       this.emitItem(turn, item);
     }
     this.turnQueue.push(this.#puppet(turn));
+  }
+
+  /** User input joins a running turn (a steer, or a `turn/start` while the turn runs). */
+  steerInto(turn: FakeTurn, text: string): void {
+    const item: ThreadItem = { type: "userMessage", id: turn.server.store.newItemId("user"), content: [{ type: "text", text, text_elements: [] }] };
+    this.emitItem(turn, item);
+    turn.steers.push(text);
+  }
+
+  /** Codex starts a turn of the thread's active goal on its own. */
+  startGoalTurn(server: FakeAppServer, thread: StoredThread): CodexNativeTurn {
+    const turn = this.beginTurn(server, thread, "", false, {});
+    server.notify("thread/status/changed", { threadId: turn.threadId, status: { type: "active", activeFlags: [] } });
+    server.notify("turn/started", { threadId: turn.threadId, turn: this.turnObject(turn.stored, "notLoaded") });
+    const puppet = this.#puppet(turn);
+    if (this.options.goalAutopilot === true) {
+      this.setGoalStatus(thread.id, "complete");
+      this.finishTurn(turn, "completed");
+    } else this.autonomousTurns.push(puppet);
+    return puppet;
   }
 
   emitItem(turn: FakeTurn, item: ThreadItem, open = true): void {
@@ -940,19 +1289,39 @@ export class FakeCodexWorld {
       if (entry !== undefined) entry.running = false;
     }
     if (turn.held) return;
-    turn.server.notify("thread/status/changed", { threadId: turn.threadId, status: { type: "idle" } });
-    turn.server.notify("turn/completed", { threadId: turn.threadId, turn: this.turnObject(turn.stored, "summary") });
+    this.#announceEnd(turn);
   }
 
-  /** Codex starts the next turn of a goal run on its own. */
-  continueGoal(nativeThreadId: string): CodexNativeTurn {
-    const server = this.servers.find((candidate) => candidate.alive && candidate.loaded.has(nativeThreadId));
-    if (server === undefined) throw new Error(`no live app-server holds thread ${nativeThreadId}`);
-    const thread = server.thread(nativeThreadId);
-    const turn = this.beginTurn(server, thread, "", false, {});
-    server.notify("thread/status/changed", { threadId: turn.threadId, status: { type: "active", activeFlags: [] } });
-    server.notify("turn/started", { threadId: turn.threadId, turn: this.turnObject(turn.stored, "notLoaded") });
-    return this.#puppet(turn);
+  /** What Codex sends when a turn ends: answers to interrupts of it, idle, `turn/completed`; then the next goal turn. */
+  #announceEnd(turn: FakeTurn): void {
+    for (const answer of turn.interrupts.splice(0)) answer();
+    turn.server.notify("thread/status/changed", { threadId: turn.threadId, status: { type: "idle" } });
+    turn.server.notify("turn/completed", { threadId: turn.threadId, turn: this.turnObject(turn.stored, "summary") });
+    const thread = turn.server.store.threads.get(turn.threadId);
+    if (turn.stored.status !== "completed" || thread?.goal?.status !== "active" || !turn.server.alive || !turn.server.loaded.has(thread.id)) return;
+    if (this.activeTurns().some((other) => other.threadId === thread.id)) return;
+    if (this.#continuationAtTurnStart.has(thread.id)) {
+      this.#continuationAtTurnStart.set(thread.id, true);
+      return;
+    }
+    this.startGoalTurn(turn.server, thread);
+  }
+
+  /**
+   * The race of a client's `turn/start` with Codex's next goal turn, decided
+   * for Codex: the goal turn the next completed turn would start waits for the
+   * client's next `turn/start`, starts just before Codex handles it, and so
+   * takes the client's input as a steer (turn_processor.rs:722–763).
+   */
+  continueGoalAtNextTurnStart(nativeThreadId: string): void {
+    this.#continuationAtTurnStart.set(nativeThreadId, false);
+  }
+
+  /** Starts the goal turn that waited for this `turn/start`, if one is due. */
+  goalTurnBeforeTurnStart(server: FakeAppServer, thread: StoredThread): void {
+    if (this.#continuationAtTurnStart.get(thread.id) !== true) return;
+    this.#continuationAtTurnStart.delete(thread.id);
+    if (thread.goal?.status === "active") this.startGoalTurn(server, thread);
   }
 
   /** Codex changes a goal on its own (for example when the objective is met). */
@@ -995,27 +1364,6 @@ export class FakeCodexWorld {
     const store = server.store;
     const world = this;
     const thread = server.thread(turn.threadId);
-    const approvals = (kitOptions: NativeApproval["options"], command: string[]): { decisions: CommandExecutionApprovalDecision[]; nativeIds: { [kit: string]: string }; kitFor: Map<string, string> } => {
-      let always = 0;
-      const decisions: CommandExecutionApprovalDecision[] = [];
-      const nativeIds: { [kit: string]: string } = {};
-      const kitFor = new Map<string, string>();
-      for (const option of kitOptions) {
-        let decision: CommandExecutionApprovalDecision;
-        if (option.decision === "accept") decision = "accept";
-        else if (option.decision === "accept_for_session") decision = "acceptForSession";
-        else if (option.decision === "decline") decision = "decline";
-        else {
-          // Each "always" is a command-prefix rule: the whole command first, then shorter prefixes.
-          decision = { acceptWithExecpolicyAmendment: { execpolicy_amendment: command.slice(0, Math.max(1, command.length - always)) } };
-          always += 1;
-        }
-        decisions.push(decision);
-        nativeIds[option.optionId] = decisionOptionId(decision);
-        kitFor.set(decisionOptionId(decision), option.optionId);
-      }
-      return { decisions, nativeIds, kitFor };
-    };
     const live = (): void => {
       if (!server.alive) throw new Error("the app-server process is gone");
     };
@@ -1024,6 +1372,7 @@ export class FakeCodexWorld {
       nativeTurnId: turn.id,
       nativeThreadId: turn.threadId,
       startParams: turn.params,
+      settings: turn.stored.settings,
       say: async (text) => {
         live();
         const id = store.newItemId("msg");
@@ -1049,7 +1398,7 @@ export class FakeCodexWorld {
         server.notify("item/completed", { threadId: turn.threadId, turnId: turn.id, item: done, completedAtMs: Date.now() });
         turn.stored.items.push(done);
       },
-      requestApproval: async (approval: NativeApproval): Promise<NativeApprovalHandle> => {
+      requestApproval: async (approval: NativeApproval) => {
         live();
         const replies: string[] = [];
         const waiters: Array<(reply: string) => void> = [];
@@ -1057,17 +1406,36 @@ export class FakeCodexWorld {
           replies.push(kitId);
           for (const waiter of waiters.splice(0)) waiter(kitId);
         };
-        const itemId = store.newItemId("call");
         const command = [...(approval.command ?? ["git", "status"])];
-        const mapped = approvals(approval.options, command);
+        const mapped = pinnedApproval(approval, command);
+        const handle = {
+          nextReply: () => (replies.length > 0 ? Promise.resolve(replies[0]!) : new Promise<string>((resolve) => waiters.push(resolve))),
+          replies: async () => [...replies],
+          nativeDecisions: Object.fromEntries(mapped.byKit),
+        };
+        // Under approval policy `never` Codex asks nothing: the command runs, as an allow-once would let it.
+        if (approval.kind === "command" && thread.settings.approvalPolicy === "never") {
+          const once = approval.options.find((option) => option.decision === "accept");
+          if (once === undefined) throw new Error("under approval policy never Codex runs the command without asking; the kit offered no allow-once option to report");
+          record(once.optionId);
+          return handle;
+        }
+        const itemId = store.newItemId("call");
         let pending: Promise<unknown>;
         if (approval.kind === "command") {
           pending = server.request("item/commandExecution/requestApproval", {
             threadId: turn.threadId,
             turnId: turn.id,
             itemId,
-            command: command.join(" "),
-            cwd: thread.cwd,
+            ...(mapped.network
+              ? {
+                  networkApprovalContext: { host: FAKE_NETWORK_HOST, protocol: "https" },
+                  proposedNetworkPolicyAmendments: [
+                    { host: FAKE_NETWORK_HOST, action: "allow" },
+                    { host: FAKE_NETWORK_HOST, action: "deny" },
+                  ],
+                }
+              : { command: command.join(" "), cwd: thread.cwd, ...(mapped.decisions.some((decision) => typeof decision === "object") ? { proposedExecpolicyAmendment: [...command] } : {}) }),
             availableDecisions: mapped.decisions,
             startedAtMs: Date.now(),
           });
@@ -1079,19 +1447,17 @@ export class FakeCodexWorld {
         }
         void pending.then((result) => {
           const decision = isObject(result) ? result["decision"] : undefined;
-          const kitId = decision === undefined ? undefined : mapped.kitFor.get(decisionOptionId(decision as CommandExecutionApprovalDecision));
-          if (kitId !== undefined) record(kitId);
+          if (decision === undefined) return;
+          const kitId = [...mapped.byKit].find(([, offered]) => sameJson(offered, decision))?.[0];
+          // A decision no kit option stands for still reaches the kit, as itself, so a check on the reply fails.
+          record(kitId ?? `native:${JSON.stringify(decision)}`);
         });
-        return {
-          nextReply: () => (replies.length > 0 ? Promise.resolve(replies[0]!) : new Promise<string>((resolve) => waiters.push(resolve))),
-          replies: async () => [...replies],
-          nativeOptionIds: mapped.nativeIds,
-        };
+        return handle;
       },
       startBackgroundTask: async (task) => {
         live();
         const id = store.newItemId("exec");
-        const processId = `proc-${store.newItemId("pty")}`;
+        const processId = store.newProcessId();
         thread.terminals.push({ processId, command: task.title, cwd: thread.cwd, itemId: id, running: true });
         const item: ThreadItem = { type: "commandExecution", id, command: task.title, commandActions: [{ type: "unknown", command: task.title }], cwd: thread.cwd, status: "inProgress", processId, source: "unifiedExecStartup" };
         server.notify("item/started", { threadId: turn.threadId, turnId: turn.id, item, startedAtMs: Date.now() });
@@ -1109,6 +1475,8 @@ export class FakeCodexWorld {
           compactions: 0,
           injected: [],
           archived: false,
+          materialized: true,
+          ephemeral: false,
           forkedFromId: null,
           parentThreadId: thread.id,
           agentNickname: subagent.name,
@@ -1116,6 +1484,7 @@ export class FakeCodexWorld {
           readState: { revision: 1, unread: false },
           terminals: [],
           subagents: [],
+          settings: { ...thread.settings, mcpServers: [] },
           launches: [],
         };
         store.threads.set(childId, child);
@@ -1144,8 +1513,7 @@ export class FakeCodexWorld {
         return {
           release: async () => {
             turn.held = false;
-            server.notify("thread/status/changed", { threadId: turn.threadId, status: { type: "idle" } });
-            server.notify("turn/completed", { threadId: turn.threadId, turn: world.turnObject(turn.stored, "summary") });
+            world.#announceEnd(turn);
           },
         };
       },
@@ -1196,12 +1564,12 @@ export class FakeCodexWorld {
       commandApproval: async (command, decisions, options) => {
         live();
         const itemId = store.newItemId("call");
+        const network = options?.network;
         const decision = server.request("item/commandExecution/requestApproval", {
           threadId: turn.threadId,
           turnId: turn.id,
           itemId,
-          command,
-          cwd: thread.cwd,
+          ...(network === undefined ? { command, cwd: thread.cwd } : { networkApprovalContext: { host: network.host, protocol: "https" } }),
           availableDecisions: [...decisions],
           startedAtMs: Date.now(),
           ...(options?.kind === undefined ? {} : { kind: options.kind, approvalId: `approval-${itemId}` }),
@@ -1233,6 +1601,10 @@ export class FakeCodexWorld {
         const breakdown = { inputTokens: totalTokens - 10, outputTokens: 10, cachedInputTokens: 0, reasoningOutputTokens: 0, totalTokens };
         server.notify("thread/tokenUsage/updated", { threadId: turn.threadId, turnId: turn.id, tokenUsage: { last: breakdown, total: breakdown, modelContextWindow: contextWindow } });
       },
+      reachGoal: async () => {
+        live();
+        world.setGoalStatus(turn.threadId, "complete");
+      },
     };
     return puppet;
   }
@@ -1256,6 +1628,15 @@ export class FakeCodexWorld {
     return undefined;
   }
 
+  /** The stored thread with this native id, in any Codex home. */
+  storedThread(nativeThreadId: string): StoredThread | undefined {
+    for (const store of this.stores.values()) {
+      const thread = store.threads.get(nativeThreadId);
+      if (thread !== undefined) return thread;
+    }
+    return undefined;
+  }
+
   lock(nativeThreadId: string): void {
     for (const store of this.stores.values()) if (store.threads.has(nativeThreadId)) store.locked.add(nativeThreadId);
   }
@@ -1263,6 +1644,7 @@ export class FakeCodexWorld {
   /** Ends every process. */
   dispose(): void {
     this.turnQueue.end();
+    this.autonomousTurns.end();
     for (const server of this.servers) server.exit(null, "SIGKILL");
     void this.#loginServer?.then((server) => server.close());
   }

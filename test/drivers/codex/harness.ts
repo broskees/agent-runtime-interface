@@ -4,12 +4,14 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ConformanceHarness, ConformanceWorkspace, FakeSpawnRequest, HarnessRig, NativeActivity } from "../../../src/conformance/index.ts";
+import type { ConformanceHarness, ConformanceWorkspace, FakeSpawnRequest, HarnessRig, NativeActivity, NativeTurn } from "../../../src/conformance/index.ts";
 import { codexDriver, threadIdFor } from "../../../src/drivers/codex/index.ts";
 import type { CodexDriverConfig } from "../../../src/drivers/codex/index.ts";
-import type { ThreadGoal } from "../../../src/drivers/codex/generated/protocol.ts";
+import type { SpawnedProcess } from "../../../src/index.ts";
+import type { CommandExecutionApprovalDecision, FileChangeApprovalDecision, ThreadGoal } from "../../../src/drivers/codex/generated/protocol.ts";
 import { createConformanceWorkspace, instanceDirectories, watchInstanceFiles } from "../../helpers/conformance.ts";
 import { FAKE_MCP_RESOURCE, FAKE_MCP_SERVER, FAKE_MCP_TOOL, FakeCodexWorld } from "./fake-app-server.ts";
+import type { CodexNativeTurn } from "./fake-app-server.ts";
 
 /** The managed API key the auth scenario's managed profile stores. */
 export const MANAGED_API_KEY = "sk-managed-profile-key";
@@ -18,6 +20,33 @@ const GOAL_STATUSES: { readonly [status: string]: string } = { active: "active",
 
 function iso(seconds: number): string {
   return new Date(seconds * 1000).toISOString();
+}
+
+/**
+ * The option id the driver shows for a Codex decision, as docs/drivers/codex.md
+ * documents it: a plain decision is its own text; an exec-policy amendment is
+ * `acceptWithExecpolicyAmendment:` and the JSON prefix; a network amendment is
+ * `applyNetworkPolicyAmendment:` and the JSON `[action, host]`. Written here
+ * from the documentation, not taken from the driver, so a driver that strays
+ * from it fails the scenarios.
+ */
+export function documentedOptionId(decision: CommandExecutionApprovalDecision | FileChangeApprovalDecision): string {
+  if (typeof decision === "string") return decision;
+  if ("acceptWithExecpolicyAmendment" in decision) return `acceptWithExecpolicyAmendment:${JSON.stringify(decision.acceptWithExecpolicyAmendment.execpolicy_amendment)}`;
+  const amendment = decision.applyNetworkPolicyAmendment.network_policy_amendment;
+  return `applyNetworkPolicyAmendment:${JSON.stringify([amendment.action, amendment.host])}`;
+}
+
+/** The kit's view of a fake turn: approval handles carry the native option id the driver shows for each kit option. */
+function kitTurn(turn: CodexNativeTurn): NativeTurn {
+  return {
+    ...turn,
+    requestApproval: async (approval) => {
+      const handle = await turn.requestApproval(approval);
+      const nativeOptionIds = Object.fromEntries(Object.entries(handle.nativeDecisions).map(([kitId, decision]) => [kitId, documentedOptionId(decision)]));
+      return { nextReply: handle.nextReply, replies: handle.replies, nativeOptionIds };
+    },
+  };
 }
 
 /** What the fake served for extension calls, in the shapes the driver returns them (the harness knows both protocols). */
@@ -60,7 +89,7 @@ export interface CodexHarness extends ConformanceHarness<CodexDriverConfig> {
   cleanup(): void;
 }
 
-export function codexHarness(): CodexHarness {
+export function codexHarness(options: { readonly wrapAppServer?: (process: SpawnedProcess) => SpawnedProcess } = {}): CodexHarness {
   const created = createConformanceWorkspace("ari-codex-conformance-");
   const worlds: FakeCodexWorld[] = [];
   return {
@@ -73,9 +102,13 @@ export function codexHarness(): CodexHarness {
     workspace: async (): Promise<ConformanceWorkspace> => created.workspace,
     async setup(request): Promise<HarnessRig<CodexDriverConfig>> {
       const rigRoot = path.join(created.root, "rigs", `${request.scenario}-${Math.random().toString(36).slice(2)}`);
-      const world = new FakeCodexWorld({ ambientAuth: request.ambientAuth, realpath: (value) => fs.realpathSync(value) });
+      // The model meets a goal in the first turn Codex starts for it, so scenario 14's ari.goal set leaves no turn running.
+      const world = new FakeCodexWorld({ ambientAuth: request.ambientAuth, realpath: (value) => fs.realpathSync(value), goalAutopilot: true });
       worlds.push(world);
-      const spawn = async (spawnRequest: FakeSpawnRequest) => world.spawn(spawnRequest);
+      const spawn = async (spawnRequest: FakeSpawnRequest) => {
+        const process = world.spawn(spawnRequest);
+        return spawnRequest.args?.[0] === "app-server" && options.wrapAppServer !== undefined ? options.wrapAppServer(process) : process;
+      };
       return {
         driver: codexDriver,
         config: codexDriver.defaultConfig(),
@@ -89,13 +122,15 @@ export function codexHarness(): CodexHarness {
           nextTurn: async () => {
             const next = await world.turnQueue.next();
             if (next.done === true) throw new Error("the rig was disposed");
-            return next.value;
+            return kitTurn(next.value);
           },
           lockSession: async (thread) => world.lock(thread.handle ?? thread.native.id ?? ""),
           inspectSession: async (thread) => world.inspect(thread.handle ?? thread.native.id ?? ""),
           activity: async (): Promise<NativeActivity> => ({ feedback: [...world.activityLog.feedback], mcp: [...world.activityLog.mcp], extensions: extensionActivity(world) }),
         },
         probeExecutables: ["codex"],
+        // Codex thread ids are UUIDs; a malformed id is a different error (`invalid session id`) than a missing one.
+        missingSession: { id: "019a0000-0000-7000-8000-0000deadbeef", strength: "strong" },
         inheritedCredentials: ["OPENAI_API_KEY", "CODEX_API_KEY"],
         watchInstanceFiles,
         exercise: {

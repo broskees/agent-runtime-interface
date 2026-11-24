@@ -79,6 +79,14 @@ export interface FakeTurn extends NativeTurn {
   runHook(name: string, event: string, output: string): Promise<void>;
   /** The API refuses the credential: an `authentication_failed` assistant error and a 401 result. */
   failAuthentication(): Promise<void>;
+  /**
+   * Claude runs a Bash command: the `tool_use`, then `canUseTool` (with a
+   * suggestion to allow the command in local settings) unless the permission
+   * mode runs it unasked, then the tool result: `output` when allowed, the
+   * denial message as an error result when denied. Resolves with the
+   * permission result, or undefined when Claude Code did not ask.
+   */
+  runBash(command: string, output: string): Promise<PermissionResult | undefined>;
 }
 
 /** Every call the driver made into the fake, oldest first. */
@@ -504,6 +512,21 @@ class FakeNativeTurn implements FakeTurn {
 
   async askQuestions(questions: Array<{ question: string; header: string; options: Array<{ label: string; description: string }>; multiSelect: boolean }>): Promise<PermissionResult> {
     return this.ask("AskUserQuestion", { questions });
+  }
+
+  async runBash(command: string, output: string): Promise<PermissionResult | undefined> {
+    this.#live();
+    const query = this.#query;
+    const input = { command, description: "Run the command the user asked for" };
+    const toolUseId = query.toolUse("Bash", input, null);
+    if (query.permissionMode === "bypassPermissions") {
+      query.toolResult(toolUseId, output, false, null);
+      return undefined;
+    }
+    const suggestions: PermissionUpdate[] = [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: command }], behavior: "allow", destination: "localSettings" }];
+    const result = await this.ask("Bash", input, { suggestions }, toolUseId);
+    query.toolResult(toolUseId, result.behavior === "allow" ? output : result.message, result.behavior === "deny", null);
+    return result;
   }
 
   async startBackgroundTask(task: { readonly title: string }): Promise<void> {

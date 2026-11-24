@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { checkRepository } from "../../scripts/check-rules.ts";
-import { installConsumer, packAsPublished } from "../helpers/consumer.ts";
+import { NOT_SET_UP, installConsumer, packAsPublished } from "../helpers/consumer.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
 
 const tempDirs: string[] = [];
@@ -59,7 +59,7 @@ function specifiersIn(base: string, condition: "default" | "development"): { mod
 }
 
 describe("a project without effect", () => {
-  let consumer = "";
+  let consumer = NOT_SET_UP;
 
   before(() => {
     const { tarball } = packAsPublished(tempDir("ari-effect-pack-"));

@@ -23,6 +23,19 @@
 //       allow it; otherwise a new thread seeded with the history up to the
 //       target. The host then continues in the new thread.
 //
+// Room for the new thread. With sessions.multipleThreads off, a Session that
+// holds a thread refuses createThread, and the Session holding the source
+// holds the source (or, for a subagent's thread, its parent's thread). So a
+// plan that creates a thread first makes room for it:
+//   fork      opens a fresh Session on the same Instance and creates the
+//             thread there, so the source stays loaded and usable, as a fork
+//             promises.
+//   rollback  unloads the source when threads.unload is on and the source is
+//             not a subagent's thread (the host is leaving the source anyway);
+//             otherwise opens a fresh Session, because unloading a subagent's
+//             thread would still leave its parent's thread in the Session.
+// The history is read before that step, while the source is still loaded.
+//
 // These are the same capability rules the capability guard enforces, so a plan
 // never calls something the guard would refuse.
 //
@@ -85,6 +98,13 @@ export type FallbackStep =
       readonly source: "provider_snapshot" | "host_transcript";
       readonly upTo: ForkPoint | RollbackTarget;
     }
+  /** Call `unloadThread` on `threadId`, so the Session holds no thread and a later `createThread` is allowed. */
+  | { readonly action: "unload_thread"; readonly threadId: string }
+  /**
+   * Open a fresh Session on the same Instance (`Instance.openSession`) and run
+   * the remaining steps in it. The Session that holds the source stays as it is.
+   */
+  | { readonly action: "open_session" }
   /** Call `createThread`; `cwd` is the new thread's directory when the plan fixes it. */
   | { readonly action: "create_thread"; readonly cwd?: string }
   /** Seed the new thread with the history read earlier. */
@@ -137,11 +157,28 @@ function planSteer(capabilities: Capabilities, request: Extract<FallbackRequest,
   };
 }
 
+/**
+ * The steps that let `createThread` through when the Session cannot hold
+ * another thread: none with sessions.multipleThreads on; otherwise unload the
+ * source when `mayUnloadSource` and threads.unload allow it, else open a fresh
+ * Session.
+ */
+function roomSteps(capabilities: Capabilities, sourceThreadId: string, mayUnloadSource: boolean): FallbackStep[] {
+  if (hasCapability(capabilities, "sessions.multipleThreads")) return [];
+  if (mayUnloadSource && hasCapability(capabilities, "threads.unload")) return [{ action: "unload_thread", threadId: sourceThreadId }];
+  return [{ action: "open_session" }];
+}
+
+function createThreadStep(cwd: string | undefined): FallbackStep {
+  return cwd === undefined ? { action: "create_thread" } : { action: "create_thread", cwd };
+}
+
 function historySteps(
   capabilities: Capabilities,
   threadId: string,
   upTo: ForkPoint | RollbackTarget,
   cwd: string | undefined,
+  room: readonly FallbackStep[],
 ): FallbackStep[] {
   return [
     {
@@ -150,7 +187,8 @@ function historySteps(
       source: hasCapability(capabilities, "threads.readSnapshot") ? "provider_snapshot" : "host_transcript",
       upTo,
     },
-    cwd === undefined ? { action: "create_thread" } : { action: "create_thread", cwd },
+    ...room,
+    createThreadStep(cwd),
     {
       action: "seed_history",
       method: hasCapability(capabilities, "threads.injectHistory") ? "inject_history" : "first_user_message",
@@ -179,10 +217,14 @@ function planFork(capabilities: Capabilities, request: Extract<FallbackRequest, 
         : { action: "fork_thread", threadId: request.threadId, at: request.at, cwd: request.cwd };
     return { native: true, steps: [step], reason: "The provider forks natively from this point." };
   }
+  const room = roomSteps(capabilities, request.threadId, false);
   return {
     native: false,
-    steps: historySteps(capabilities, request.threadId, request.at, request.cwd ?? request.sourceCwd),
-    reason: "The provider cannot make this fork, so the host seeds a new thread with the history up to the fork point.",
+    steps: historySteps(capabilities, request.threadId, request.at, request.cwd ?? request.sourceCwd, room),
+    reason:
+      room.length === 0
+        ? "The provider cannot make this fork, so the host seeds a new thread with the history up to the fork point."
+        : "The provider cannot make this fork and a Session holds one thread, so the host seeds a new thread in a fresh Session with the history up to the fork point.",
   };
 }
 
@@ -195,10 +237,11 @@ function planRollback(capabilities: Capabilities, request: Extract<FallbackReque
     };
   }
   const switchBack: FallbackStep = { action: "switch_thread", fromThreadId: request.threadId };
+  const room = roomSteps(capabilities, request.threadId, request.subagentThread !== true);
   if (request.to.type === "start") {
     return {
       native: false,
-      steps: [request.cwd === undefined ? { action: "create_thread" } : { action: "create_thread", cwd: request.cwd }, switchBack],
+      steps: [...room, createThreadStep(request.cwd), switchBack],
       reason: "The provider cannot roll back; rolling back to the start is a fresh thread.",
     };
   }
@@ -212,7 +255,7 @@ function planRollback(capabilities: Capabilities, request: Extract<FallbackReque
   }
   return {
     native: false,
-    steps: [...historySteps(capabilities, request.threadId, request.to, request.cwd), switchBack],
+    steps: [...historySteps(capabilities, request.threadId, request.to, request.cwd, room), switchBack],
     reason: "The provider can neither roll back nor fork from a turn, so the host seeds a new thread with the history up to the target turn.",
   };
 }

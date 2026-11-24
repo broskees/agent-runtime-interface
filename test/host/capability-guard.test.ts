@@ -9,6 +9,7 @@ import type { Capabilities, Session } from "../../src/index.ts";
 import { guardSession, planFallback } from "../../src/host/index.ts";
 import { fullCapabilities } from "../fixtures/capabilities.ts";
 import { fakeSession } from "../fixtures/fake-session.ts";
+import type { FakeSession } from "../fixtures/fake-session.ts";
 
 function capabilitiesWith(edit: (capabilities: Capabilities) => void): Capabilities {
   const capabilities = fullCapabilities();
@@ -586,6 +587,189 @@ describe("planFallback", () => {
     assert.deepEqual(rollback.steps[0], { action: "fork_thread", threadId: "thread-1", at: { type: "turn", turnId: "turn-2" } });
     const subagentRollback = planFallback(capabilities, { kind: "rollback", threadId: "thread-review", to: { type: "turn", turnId: "turn-2" }, subagentThread: true });
     assert.equal(subagentRollback.steps[0]?.action, "read_history");
+  });
+
+  test("a fork on a single-thread Session opens a fresh Session for the new thread", () => {
+    const singleThread = capabilitiesWith((value) => {
+      value.sessions.multipleThreads = false;
+      value.threads.fork.supported = false;
+      value.threads.readSnapshot = true;
+      value.threads.injectHistory = true;
+    });
+    const plan = planFallback(singleThread, { kind: "fork", threadId: "thread-1", at: { type: "latest" }, sourceCwd: "/work" });
+    assert.deepEqual(plan.steps, [
+      { action: "read_history", threadId: "thread-1", source: "provider_snapshot", upTo: { type: "latest" } },
+      { action: "open_session" },
+      { action: "create_thread", cwd: "/work" },
+      { action: "seed_history", method: "inject_history" },
+    ]);
+  });
+
+  test("a rollback on a single-thread Session unloads the source first, or opens a fresh Session when it cannot unload", () => {
+    const unloadable = capabilitiesWith((value) => {
+      value.sessions.multipleThreads = false;
+      value.threads.rollback = false;
+      value.threads.fork.fromTurn = false;
+      value.threads.unload = true;
+      value.threads.readSnapshot = false;
+    });
+    assert.deepEqual(planFallback(unloadable, { kind: "rollback", threadId: "thread-1", to: { type: "turn", turnId: "turn-1" }, cwd: "/work" }).steps, [
+      { action: "read_history", threadId: "thread-1", source: "host_transcript", upTo: { type: "turn", turnId: "turn-1" } },
+      { action: "unload_thread", threadId: "thread-1" },
+      { action: "create_thread", cwd: "/work" },
+      { action: "seed_history", method: "first_user_message" },
+      { action: "switch_thread", fromThreadId: "thread-1" },
+    ]);
+    assert.deepEqual(planFallback(unloadable, { kind: "rollback", threadId: "thread-1", to: { type: "start" } }).steps, [
+      { action: "unload_thread", threadId: "thread-1" },
+      { action: "create_thread" },
+      { action: "switch_thread", fromThreadId: "thread-1" },
+    ]);
+    const stuck = capabilitiesWith((value) => {
+      value.sessions.multipleThreads = false;
+      value.threads.rollback = false;
+      value.threads.unload = false;
+    });
+    assert.deepEqual(planFallback(stuck, { kind: "rollback", threadId: "thread-1", to: { type: "start" } }).steps, [
+      { action: "open_session" },
+      { action: "create_thread" },
+      { action: "switch_thread", fromThreadId: "thread-1" },
+    ]);
+    // Unloading a subagent's thread frees nothing: the session still holds its parent's thread.
+    assert.equal(planFallback(unloadable, { kind: "rollback", threadId: "thread-review", to: { type: "start" }, subagentThread: true }).steps[0]?.action, "open_session");
+  });
+
+  test("every plan's steps, run through the capability guard, are accepted", async () => {
+    const policy = { mode: "approval_required", interaction: "default", cwd: "/work" } as const;
+    const forkModes: Array<Capabilities["threads"]["fork"]> = [
+      { supported: false, fromTurn: false, fromItem: false, fromSubagent: false, crossCwd: false },
+      { supported: true, fromTurn: false, fromItem: false, fromSubagent: false, crossCwd: false },
+      { supported: true, fromTurn: true, fromItem: true, fromSubagent: true, crossCwd: true },
+    ];
+    const requests: Array<{ name: string; subagent: boolean; request: (sourceThreadId: string) => Parameters<typeof planFallback>[1] }> = [
+      { name: "steer unsupported", subagent: false, request: (threadId) => ({ kind: "steer", outcome: "unsupported", threadId, turnId: "turn-1" }) },
+      { name: "steer prompt_required", subagent: false, request: (threadId) => ({ kind: "steer", outcome: "prompt_required", threadId, turnId: "turn-1" }) },
+      { name: "fork latest", subagent: false, request: (threadId) => ({ kind: "fork", threadId, at: { type: "latest" }, sourceCwd: "/work" }) },
+      { name: "fork from a turn", subagent: false, request: (threadId) => ({ kind: "fork", threadId, at: { type: "turn", turnId: "turn-1" }, sourceCwd: "/work" }) },
+      { name: "fork into another directory", subagent: false, request: (threadId) => ({ kind: "fork", threadId, at: { type: "latest" }, cwd: "/elsewhere", sourceCwd: "/work" }) },
+      { name: "fork a subagent's thread", subagent: true, request: (threadId) => ({ kind: "fork", threadId, at: { type: "latest" }, subagentThread: true }) },
+      { name: "rollback to the start", subagent: false, request: (threadId) => ({ kind: "rollback", threadId, to: { type: "start" }, cwd: "/work" }) },
+      { name: "rollback to a turn", subagent: false, request: (threadId) => ({ kind: "rollback", threadId, to: { type: "turn", turnId: "turn-1" }, cwd: "/work" }) },
+      { name: "rollback a subagent's thread", subagent: true, request: (threadId) => ({ kind: "rollback", threadId, to: { type: "turn", turnId: "turn-1" }, subagentThread: true }) },
+    ];
+
+    let runs = 0;
+    for (const multipleThreads of [true, false]) {
+      for (const unload of [true, false]) {
+        for (const fork of forkModes) {
+          for (const native of [true, false]) {
+            const capabilities = capabilitiesWith((value) => {
+              value.sessions.multipleThreads = multipleThreads;
+              value.threads.unload = unload;
+              value.threads.fork = { ...fork };
+              value.threads.rollback = native;
+              value.threads.readSnapshot = native;
+              value.threads.injectHistory = native;
+              value.turns.steer = false;
+              value.turns.queue = native;
+            });
+            for (const { name, subagent, request } of requests) {
+              const label = `${name} (multipleThreads ${multipleThreads}, unload ${unload}, fork ${JSON.stringify(fork)}, native rollback/snapshot/inject/queue ${native})`;
+              const sessions: FakeSession[] = [];
+              const open = (): Session => {
+                const driver = fakeSession(capabilities, `session-${sessions.length + 1}`);
+                sessions.push(driver);
+                return guardSession(driver);
+              };
+              let session = open();
+              const source = await session.createThread({ cwd: "/work", policy });
+              await session.startTurn({ threadId: source.id, clientTurnKey: "k1", intent: "start", content: TEXT });
+              let sourceId = source.id;
+              if (subagent) {
+                // The provider opened a subagent's thread on its own; the guard learns of it from the events it reads.
+                const review = await sessions[0]!.createThread({ cwd: "/work", policy });
+                sessions[0]!.sequencer.emit({
+                  body: {
+                    type: "subagent.upsert",
+                    subagent: { id: "review-agent", native: { id: "n-review", strength: "strong" }, parentThreadId: source.id, status: "running", threadId: review.id },
+                  },
+                });
+                const lastSeq = sessions[0]!.sequencer.lastSeq;
+                for await (const event of session.events()) if (event.seq === lastSeq) break;
+                sourceId = review.id;
+              }
+              const setupCalls = sessions[0]!.calls.length;
+
+              const plan = planFallback(capabilities, request(sourceId));
+              let created: string | undefined;
+              for (const [index, step] of plan.steps.entries()) {
+                const where = `${label}: step ${index + 1} ${step.action}`;
+                try {
+                  switch (step.action) {
+                    case "read_history":
+                      if (step.source === "provider_snapshot") await session.readSnapshot!(step.threadId);
+                      break;
+                    case "unload_thread":
+                      await session.unloadThread!(step.threadId);
+                      break;
+                    case "open_session":
+                      session = open();
+                      break;
+                    case "create_thread":
+                      created = (await session.createThread({ cwd: step.cwd ?? "/work", policy: { ...policy, cwd: step.cwd ?? "/work" } })).id;
+                      break;
+                    case "seed_history": {
+                      assert.ok(created !== undefined, `${where}: no thread was created to seed`);
+                      if (step.method === "inject_history") {
+                        await session.injectHistory!({ threadId: created, messages: [{ role: "user", content: TEXT }], summary: "" });
+                      } else {
+                        const seeded = await session.startTurn({ threadId: created, clientTurnKey: "seed", intent: "start", content: TEXT });
+                        assert.equal(seeded.status, "accepted", where);
+                      }
+                      break;
+                    }
+                    case "fork_thread":
+                      await session.forkThread!(step.cwd === undefined ? { threadId: step.threadId, at: step.at } : { threadId: step.threadId, at: step.at, cwd: step.cwd });
+                      break;
+                    case "rollback_thread":
+                      await session.rollbackThread!({ threadId: step.threadId, to: step.to });
+                      break;
+                    case "start_turn": {
+                      const started = await session.startTurn({ threadId: step.threadId, clientTurnKey: "plan", intent: step.intent, content: TEXT });
+                      assert.equal(started.status, "accepted", where);
+                      break;
+                    }
+                    case "wait_for_turn_terminal":
+                    case "switch_thread":
+                      break;
+                  }
+                } catch (error) {
+                  if (isAriError(error, "unsupported")) {
+                    assert.fail(`${where} was refused for ${error.callError.code === "unsupported" ? error.callError.capability : "?"}`);
+                  }
+                  throw error;
+                }
+              }
+              // Every step that calls the session reached a driver: the guard refused none of them.
+              const reached = [...sessions[0]!.calls.slice(setupCalls), ...sessions.slice(1).flatMap((driver) => driver.calls)].map((entry) => entry.member);
+              const expected = plan.steps.flatMap((step): string[] => {
+                if (step.action === "read_history") return step.source === "provider_snapshot" ? ["readSnapshot"] : [];
+                if (step.action === "unload_thread") return ["unloadThread"];
+                if (step.action === "create_thread") return ["createThread"];
+                if (step.action === "seed_history") return [step.method === "inject_history" ? "injectHistory" : "startTurn"];
+                if (step.action === "fork_thread") return ["forkThread"];
+                if (step.action === "rollback_thread") return ["rollbackThread"];
+                if (step.action === "start_turn") return ["startTurn"];
+                return [];
+              });
+              assert.deepEqual(reached, expected, label);
+              runs += 1;
+            }
+          }
+        }
+      }
+    }
+    assert.equal(runs, 2 * 2 * forkModes.length * 2 * requests.length);
   });
 
   test("planning calls nothing on a session", () => {

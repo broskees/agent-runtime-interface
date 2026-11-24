@@ -45,6 +45,15 @@ A failed scenario fails its subtest with the reason; a scenario that does not
 apply is skipped with its reason; notes become test diagnostics. Pass
 `{ onReport }` to receive the whole report, for example to save fixtures.
 
+Under `bun test`, the same call works. Bun 1.3's `node:test` cannot run a
+test inside another test: `context.test()` throws an error with code
+`ERR_NOT_IMPLEMENTED`, and so does `context.skip()`. The adapter then runs
+every scenario in the harness's own test: each scenario's notes and
+not-applicable reason become diagnostics, and the test fails at the end with
+the reason of every failed scenario. Run each test file in its own `bun test`
+process, as this repository's `pnpm run test:bun` does: several files in one
+Bun process can share state between them.
+
 With any other runner:
 
 ```ts

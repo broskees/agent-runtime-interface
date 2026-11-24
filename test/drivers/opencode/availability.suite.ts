@@ -20,6 +20,7 @@ import type { FakeSpawnRequest } from "../../../src/conformance/index.ts";
 import { OPENCODE_V1_TESTED_VERSIONS, OPENCODE_V2_TESTED_VERSIONS, opencodeDriver } from "../../../src/drivers/opencode/index.ts";
 import type { OpencodeConfig } from "../../../src/drivers/opencode/index.ts";
 import { isAriError, toCallError } from "../../../src/index.ts";
+import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const DRIVER = pathToFileURL(path.join(ROOT, "src/drivers/opencode/index.ts")).href;
@@ -27,7 +28,8 @@ const META = pathToFileURL(path.join(ROOT, "src/meta/opencode.ts")).href;
 const CONFORMANCE = pathToFileURL(path.join(ROOT, "src/conformance/index.ts")).href;
 
 function runChild(source: string): unknown {
-  const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 60_000, cwd: ROOT });
+  // The child registers node:module hooks, which Bun lacks, so it runs on Node whichever runtime runs this test.
+  const result = spawnSync(NODE_EXECUTABLE, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 60_000, cwd: ROOT });
   assert.equal(result.status, 0, `the child failed: ${result.stderr}`);
   const line = result.stdout.trim().split("\n").at(-1) ?? "";
   return JSON.parse(line);

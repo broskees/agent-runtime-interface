@@ -17,7 +17,7 @@ import { checkManifest, checkPackage, checkPublishedManifest, checkTarball, publ
 import type { PackageJson } from "../scripts/check-package.ts";
 import { packedFiles } from "../scripts/check-rules.ts";
 import { REFUSE_REPOSITORY_PACK_MESSAGE, packPackage, publishedManifest } from "../scripts/pack.ts";
-import { installConsumer } from "./helpers/consumer.ts";
+import { NOT_SET_UP, installConsumer } from "./helpers/consumer.ts";
 import { REPO_ROOT } from "./helpers/spec.ts";
 
 const tempDirs: string[] = [];
@@ -47,7 +47,7 @@ describe("compiler settings", () => {
 });
 
 describe("the packed tarball", () => {
-  let consumer = "";
+  let consumer = NOT_SET_UP;
 
   before(() => {
     requireBuild();

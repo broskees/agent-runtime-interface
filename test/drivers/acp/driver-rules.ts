@@ -19,6 +19,7 @@ import type { Driver, Instance, Session } from "../../../src/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import type { HostPaths } from "../../../src/index.ts";
 import { openRig } from "./rig.ts";
+import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 
 /** The 17 optional Session members (inventory D) and 27 optional Instance members (inventory E). */
 export const OPTIONAL_SESSION_MEMBERS = [
@@ -211,7 +212,8 @@ export function driverRuleTests<Config>(profile: DriverProfile<Config>): void {
       await import(${JSON.stringify(path.join(REPO_ROOT, "src", "meta", `${kind}.ts`))});
       process.stdout.write(JSON.stringify({ resolved, spawned }));
     `;
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
+    // The hooks of node:module are Node's; Bun has none, so the child runs on Node whichever runtime runs this test.
+    const result = spawnSync(NODE_EXECUTABLE, ["--input-type=module", "-e", script], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     const { resolved, spawned } = JSON.parse(result.stdout) as { resolved: string[]; spawned: string[] };
     assert.deepEqual(spawned, []);

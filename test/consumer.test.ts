@@ -24,7 +24,8 @@ import * as path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { checkPublishedManifest } from "../scripts/check-package.ts";
 import type { PackageJson } from "../scripts/check-package.ts";
-import { TSC, filesUnder, installConsumer, packAsPublished, packRepositoryDependency } from "./helpers/consumer.ts";
+import { NOT_SET_UP, TSC, filesUnder, installConsumer, packAsPublished, packRepositoryDependency } from "./helpers/consumer.ts";
+import { NODE_EXECUTABLE } from "./helpers/runtime.ts";
 import { REPO_ROOT } from "./helpers/spec.ts";
 
 /** The export subpaths of the package (§17.2). */
@@ -100,7 +101,7 @@ function typeCheck(directory: string, files: readonly string[], types: readonly 
       files,
     }),
   );
-  const result = spawnSync(process.execPath, [TSC, "-p", path.join(directory, "tsconfig.json")], { cwd: directory, encoding: "utf8" });
+  const result = spawnSync(NODE_EXECUTABLE, [TSC, "-p", path.join(directory, "tsconfig.json")], { cwd: directory, encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
 }
 
@@ -149,8 +150,8 @@ describe("package.json exports", () => {
 });
 
 describe("a consumer project without effect or any vendor SDK", () => {
-  let consumer = "";
-  let installed = "";
+  let consumer = NOT_SET_UP;
+  let installed = NOT_SET_UP;
 
   before(() => {
     const packDir = tempDir("ari-consumer-pack-");
@@ -186,7 +187,7 @@ describe("a consumer project without effect or any vendor SDK", () => {
   });
 
   test("imports every subpath except ari/effect: 7 entries, 12 drivers, 12 metadata modules and a JSON Schema file", () => {
-    const found = lastJsonLine(run(process.execPath, ["--input-type=module", "-e", IMPORT_EVERYTHING], consumer)) as Found;
+    const found = lastJsonLine(run(NODE_EXECUTABLE, ["--input-type=module", "-e", IMPORT_EVERYTHING], consumer)) as Found;
     for (const specifier of SINGLE_ENTRIES) assert.ok(found.modules[specifier]! > 0, `${specifier} exported nothing`);
     for (const name of DRIVERS) {
       assert.deepEqual(found.drivers[name], [name], `ari/drivers/${name} exports a driver of kind ${name}`);
@@ -196,10 +197,10 @@ describe("a consumer project without effect or any vendor SDK", () => {
   });
 
   test("node --conditions=development loads every one of them from the tarball, the same as without the condition", () => {
-    const plain = lastJsonLine(run(process.execPath, ["--input-type=module", "-e", IMPORT_EVERYTHING], consumer));
-    const development = lastJsonLine(run(process.execPath, ["--conditions=development", "--input-type=module", "-e", IMPORT_EVERYTHING], consumer));
+    const plain = lastJsonLine(run(NODE_EXECUTABLE, ["--input-type=module", "-e", IMPORT_EVERYTHING], consumer));
+    const development = lastJsonLine(run(NODE_EXECUTABLE, ["--conditions=development", "--input-type=module", "-e", IMPORT_EVERYTHING], consumer));
     assert.deepEqual(development, plain);
-    const root = run(process.execPath, ["--conditions=development", "--input-type=module", "-e", 'console.log(import.meta.resolve("ari"))'], consumer).trim();
+    const root = run(NODE_EXECUTABLE, ["--conditions=development", "--input-type=module", "-e", 'console.log(import.meta.resolve("ari"))'], consumer).trim();
     assert.match(root, /\/node_modules\/ari\/dist\/index\.js$/);
   });
 
@@ -230,7 +231,7 @@ describe("a consumer project without effect or any vendor SDK", () => {
 
   test("each SDK driver is created without its SDK, and status() names the package to install", () => {
     for (const sdk of new Set(Object.values(SDK_PACKAGES))) {
-      const missing = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(sdk)})`], { cwd: consumer, encoding: "utf8" });
+      const missing = spawnSync(NODE_EXECUTABLE, ["--input-type=module", "-e", `await import(${JSON.stringify(sdk)})`], { cwd: consumer, encoding: "utf8" });
       assert.match(missing.stderr, /ERR_MODULE_NOT_FOUND/, `${sdk} must not be installed in the consumer`);
     }
     const script = `
@@ -272,7 +273,7 @@ for (const [name, [driver, host]] of Object.entries(cases)) {
 }
 console.log(JSON.stringify(results));
 `;
-    const results = lastJsonLine(run(process.execPath, ["--input-type=module", "-e", script], consumer)) as Record<
+    const results = lastJsonLine(run(NODE_EXECUTABLE, ["--input-type=module", "-e", script], consumer)) as Record<
       string,
       { state: string; error?: { code: string; package?: string; message: string }; opened: { code?: string; package?: string } | string; spawned: string[] }
     >;
@@ -308,7 +309,7 @@ console.log(JSON.stringify({ runtime: typeof Bun === "undefined" ? "not bun" : "
 });
 
 describe("a consumer project with effect installed", () => {
-  let consumer = "";
+  let consumer = NOT_SET_UP;
 
   before(() => {
     const packDir = tempDir("ari-effect-consumer-pack-");
@@ -329,7 +330,7 @@ const tagged = toTaggedError(callErrors.unsupported("threads.fork"));
 const kind = await Effect.runPromise(Effect.gen(function* () { return (yield* AriDriver).kind; }).pipe(Effect.provide(AriDriver.layer(referenceDriver))));
 console.log(JSON.stringify({ tag: tagged._tag, unsupported: tagged instanceof UnsupportedError, capability: tagged.capability, kind }));
 `;
-    assert.deepEqual(lastJsonLine(run(process.execPath, ["--input-type=module", "-e", script], consumer)), {
+    assert.deepEqual(lastJsonLine(run(NODE_EXECUTABLE, ["--input-type=module", "-e", script], consumer)), {
       tag: "UnsupportedError",
       unsupported: true,
       capability: "threads.fork",

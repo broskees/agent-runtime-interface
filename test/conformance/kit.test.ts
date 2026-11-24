@@ -17,7 +17,7 @@ import {
   createFakeHost,
   referenceHarness,
 } from "../../src/conformance/index.ts";
-import type { ConformanceHarness, NodeTestContext, ReferenceDriverConfig } from "../../src/conformance/index.ts";
+import type { ConformanceHarness, ConformanceReport, NodeTestContext, ReferenceDriverConfig } from "../../src/conformance/index.ts";
 import { callErrors, isAriError } from "../../src/index.ts";
 import type { Session, SpawnedProcess } from "../../src/index.ts";
 import { brokenHarness, override, runScenario } from "./broken-drivers.ts";
@@ -443,6 +443,44 @@ describe("the node:test adapter", () => {
     assert.equal(events[0], "register ARI conformance: reference driver (full, in memory)");
     assert.ok(events.includes("skip scenario 3 (turn-interrupted): A turn ends by interrupt (Stop): not applicable (harness): the agent cannot be stopped"), events.join("\n"));
     assert.ok(events.some((event) => /^fail scenario 9 \(session-replaced\).*failed: the harness's native agent has no lockSession/.test(event)), events.join("\n"));
+  });
+
+  test("where node:test cannot nest tests (Bun's ERR_NOT_IMPLEMENTED), every scenario runs in the harness's test and its failures fail that test", async () => {
+    const events: string[] = [];
+    const notImplemented = (what: string): never => {
+      throw Object.assign(new Error(`${what} inside another test() is not yet implemented`), { code: "ERR_NOT_IMPLEMENTED" });
+    };
+    const context: NodeTestContext = {
+      test: () => notImplemented("test()"),
+      skip: () => notImplemented("skip()"),
+      diagnostic: (message) => events.push(`note ${message}`),
+    };
+    let registered: Promise<void> | undefined;
+    let report: ConformanceReport | undefined;
+    conformanceTests(
+      (name, fn) => {
+        events.push(`register ${name}`);
+        registered = fn(context);
+      },
+      adjustedHarness({ withoutLockSession: true, notApplicable: { "turn-interrupted": "the agent cannot be stopped" } }),
+      { scenarios: ["turn-completed", "turn-interrupted", "session-replaced"], timeoutMs: 1500, onReport: (value) => void (report = value) },
+    );
+    const failure = await registered!.then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    assert.ok(failure instanceof Error, "the harness's test must fail when a scenario fails");
+    assert.match(failure.message, /^scenario 9 \(session-replaced\) failed: the harness's native agent has no lockSession/);
+    assert.deepEqual(
+      report?.results.map((result) => [result.id, result.status]),
+      [
+        [2, "passed"],
+        [3, "not_applicable"],
+        [9, "failed"],
+      ],
+    );
+    assert.equal(report?.passed, false);
+    assert.ok(events.includes("note scenario 3 (turn-interrupted): A turn ends by interrupt (Stop): skipped, not applicable (harness): the agent cannot be stopped"), events.join("\n"));
   });
 });
 

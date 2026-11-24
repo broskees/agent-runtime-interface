@@ -8,80 +8,44 @@
 // being handed out.
 //
 // The fixture tarball is made by `npm pack` from a throwaway package, so the
-// installer reads the format npm publishes.
+// installer reads the format npm publishes (test/node/installer-fixture.ts).
+// The two installer tests that need Node's own fs semantics are in
+// test/node/node-semantics.test.ts, which the Bun run leaves out.
 
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
-import nodeFs, { createReadStream } from "node:fs";
+import { createReadStream } from "node:fs";
 import * as http from "node:http";
-import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gzipSync } from "node:zlib";
 import { after, before, describe, test } from "node:test";
 import { isAriError } from "../../src/index.ts";
 import { createAdapterInstaller, extractTarball, npmRegistryFetch } from "../../src/node/index.ts";
 import type { TarballFetch } from "../../src/node/index.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
 import { createSymlinkedRoot, exists } from "../helpers/symlinked-root.ts";
+import {
+  CHUNK_FILES,
+  PKG,
+  assertCompleteInstall,
+  fromFile,
+  newCacheDir,
+  packageEntries,
+  packedTarball,
+  plainTarball,
+  removeInstallerFixture,
+  scratch,
+  setUpInstallerFixture,
+} from "./installer-fixture.ts";
 
 const run = promisify(execFile);
-const PKG = "@ari-test/fake-adapter";
-const LONG_DIRECTORY = `lib/${"very-long-directory-name-".repeat(5)}`;
-const CHUNK_FILES = 48;
 const INSTALLER_MODULE = pathToFileURL(path.join(REPO_ROOT, "src", "node", "installer.ts")).href;
-
-let scratch: string;
-/** The gzip tarball `npm pack` made. */
-let packedTarball: string;
-/** The same archive, uncompressed, so that half of its bytes is half of its files. */
-let plainTarball: string;
-let fileContents: Map<string, string>;
-
-async function makeFixturePackage(): Promise<void> {
-  const packageDir = path.join(scratch, "fixture-package");
-  fileContents = new Map();
-  const add = async (relative: string, content: string, mode = 0o644): Promise<void> => {
-    await fs.mkdir(path.join(packageDir, path.dirname(relative)), { recursive: true });
-    await fs.writeFile(path.join(packageDir, relative), content, { mode });
-    fileContents.set(relative, content);
-  };
-  await add("package.json", JSON.stringify({ name: PKG, version: "1.0.0", bin: { "fake-adapter": "bin/agent.js" } }));
-  await add("bin/agent.js", "#!/usr/bin/env node\nconsole.log('fake adapter');\n", 0o755);
-  await add(`${LONG_DIRECTORY}/data.txt`, "a file whose path is longer than 100 bytes\n");
-  for (let index = 0; index < CHUNK_FILES; index += 1) {
-    const name = `lib/chunk-${String(index).padStart(3, "0")}.txt`;
-    // Distinct, poorly compressible content, so the files are spread through the archive.
-    await add(name, createHash("sha512").update(name).digest("hex").repeat(64));
-  }
-  const home = path.join(scratch, "npm-home");
-  await fs.mkdir(home);
-  const { stdout } = await run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", scratch], {
-    cwd: packageDir,
-    env: { PATH: process.env.PATH, HOME: home, npm_config_cache: path.join(home, ".npm"), npm_config_update_notifier: "false" },
-  });
-  const [{ filename }] = JSON.parse(stdout) as [{ filename: string }];
-  packedTarball = path.join(scratch, filename);
-  plainTarball = path.join(scratch, "fixture.tar");
-  await fs.writeFile(plainTarball, gunzipSync(await fs.readFile(packedTarball)));
-}
-
-// Joined with "/" rather than path.join, which would collapse a `..` that `dir` may hold on purpose.
-async function assertCompleteInstall(dir: string): Promise<void> {
-  for (const [relative, content] of fileContents) {
-    assert.equal(await fs.readFile(`${dir}/${relative}`, "utf8"), content, relative);
-  }
-  const agentMode = (await fs.stat(`${dir}/bin/agent.js`)).mode;
-  assert.equal(agentMode & 0o100, 0o100, "the bin file stays executable");
-}
-
-const fromFile = (file: string): TarballFetch => () => createReadStream(file);
 
 /** A fetch that yields the file in 4 KiB chunks, pausing `delayMs` between them, and counts its calls. */
 function slowFetch(file: string, delayMs: number): { fetch: TarballFetch; calls: () => number } {
@@ -97,18 +61,6 @@ function slowFetch(file: string, delayMs: number): { fetch: TarballFetch; calls:
       }
     },
   };
-}
-
-// The installer's own bookkeeping directories: version locks and lease files.
-const BOOKKEEPING = new Set([".locks", ".leases"]);
-
-/** What a package directory holds besides bookkeeping: installed versions and any staging or trash left behind. */
-async function packageEntries(packageDir: string): Promise<string[]> {
-  return (await fs.readdir(packageDir)).filter((name) => !BOOKKEEPING.has(name)).sort();
-}
-
-async function newCacheDir(): Promise<string> {
-  return fs.mkdtemp(path.join(scratch, "cache-"));
 }
 
 /** Runs an ES module script in a child Node process, with PATH and HOME set by the caller. */
@@ -189,13 +141,8 @@ async function* yieldOnce(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
 }
 
 describe("ari/node adapter installer", () => {
-  before(async () => {
-    scratch = await fs.mkdtemp(path.join(os.tmpdir(), "ari-installer-"));
-    await makeFixturePackage();
-  });
-  after(async () => {
-    await fs.rm(scratch, { recursive: true, force: true });
-  });
+  before(setUpInstallerFixture);
+  after(removeInstallerFixture);
 
   test("installs a version from a local tarball into <cacheDir>/adapters/<pkg>/<version>", async () => {
     const cacheDir = await newCacheDir();
@@ -394,53 +341,6 @@ describe("ari/node adapter installer", () => {
     assert.equal(await fs.stat(held.dir).then(() => true, () => false), false);
   });
 
-  test("cleanup never moves a version while a lease on it is being handed out", async () => {
-    const cacheDir = await newCacheDir();
-    const installer = createAdapterInstaller({ cacheDir, fetchTarball: fromFile(packedTarball) });
-    const versionDir = (await installer.install(PKG, "1.0.0")).dir;
-
-    // Pause cleanup at the moment it moves the version aside.
-    const realRename = nodeFs.promises.rename;
-    let cleanupPaused = (): void => {};
-    const paused = new Promise<void>((resolve) => {
-      cleanupPaused = resolve;
-    });
-    let resumeCleanup = (): void => {};
-    const resumed = new Promise<void>((resolve) => {
-      resumeCleanup = resolve;
-    });
-    nodeFs.promises.rename = async (from, to) => {
-      if (String(from) === versionDir && String(to).includes(".trash-")) {
-        cleanupPaused();
-        await resumed;
-      }
-      return realRename(from, to);
-    };
-    syncBuiltinESMExports();
-    try {
-      const cleaning = installer.cleanup();
-      await paused;
-      let leaseSettled = false;
-      const leasing = installer.lease(PKG, "1.0.0").finally(() => {
-        leaseSettled = true;
-      });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      assert.equal(leaseSettled, false, "the lease waits while cleanup is removing its version");
-      resumeCleanup();
-      const [removed, lease] = await Promise.all([cleaning, leasing]);
-      assert.deepEqual(removed.map((entry) => entry.version), ["1.0.0"], "cleanup removed the version it had started removing");
-      // The lease was handed out after cleanup finished, so its version was installed again and stays.
-      await assertCompleteInstall(lease.dir);
-      assert.deepEqual(await installer.cleanup(), [], "a held lease keeps its version");
-      await assertCompleteInstall(lease.dir);
-      await lease.release();
-    } finally {
-      resumeCleanup();
-      nodeFs.promises.rename = realRename;
-      syncBuiltinESMExports();
-    }
-  });
-
   test("four processes leasing, releasing and cleaning one version never fetch at once or lose a leased version", async () => {
     const cacheDir = await newCacheDir();
     const markers = await fs.mkdtemp(path.join(scratch, "stress-"));
@@ -524,24 +424,6 @@ describe("ari/node adapter installer", () => {
     const removed = await installer.cleanup({ keep: (pkg, version) => pkg === PKG && version === "2.0.0" });
     assert.deepEqual(removed.map((entry) => entry.version), ["1.0.0"]);
     await assertCompleteInstall(installer.pathFor(PKG, "2.0.0"));
-  });
-
-  test("a cache dir with `..` after a symbolic link is used as the operating system reads it", async () => {
-    const layout = await createSymlinkedRoot("ari-installer-symlink-");
-    try {
-      const installer = createAdapterInstaller({ cacheDir: layout.throughSymlink("cache"), fetchTarball: fromFile(packedTarball) });
-      const lease = await installer.lease(PKG, "1.0.0");
-      await installer.install(PKG, "2.0.0");
-      await assertCompleteInstall(lease.dir);
-      assert.equal(await fs.realpath(lease.dir), layout.real("cache/adapters/@ari-test/fake-adapter/1.0.0"));
-      assert.deepEqual((await installer.cleanup()).map((entry) => entry.version), ["2.0.0"], "cleanup finds the lease in the real cache");
-      await assertCompleteInstall(lease.dir);
-      assert.deepEqual(await packageEntries(layout.real("cache/adapters/@ari-test/fake-adapter")), ["1.0.0"]);
-      assert.equal(await exists(layout.collapsed("cache")), false, "nothing is written where lexical normalization points");
-      await lease.release();
-    } finally {
-      await fs.rm(layout.root, { recursive: true, force: true });
-    }
   });
 
   test("a tarball extracts into a destination with `..` after a symbolic link as the operating system reads it", async () => {

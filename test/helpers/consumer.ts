@@ -15,6 +15,14 @@ import { packPackage } from "../../scripts/pack.ts";
 import type { PackedPackage } from "../../scripts/pack.ts";
 import { REPO_ROOT } from "./spec.ts";
 
+/**
+ * What a consumer test's project directory holds until its `before` hook set
+ * it up: a path that does not exist and cannot be created. Bun's `node:test`
+ * still runs a suite's tests when its `before` hook failed; starting from this
+ * path, such a test fails instead of writing into the current directory.
+ */
+export const NOT_SET_UP = "/nonexistent/ari-consumer-project-not-set-up";
+
 /** Consumer tests read dist/; the gate builds before it tests. */
 export function requireBuild(): void {
   assert.ok(fs.existsSync(path.join(REPO_ROOT, "dist", "index.js")), "dist/ is missing: run `pnpm run build` first (the gate does)");

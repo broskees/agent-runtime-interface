@@ -8,9 +8,12 @@ importers:
 
   .:
     devDependencies:
+      '@agentclientprotocol/sdk':
+        specifier: 2.9.1
+        version: 2.9.1(zod@4.6.7)
       '@earendil-works/pi-coding-agent':
         specifier: 1.6.0
-        version: 1.6.0
+        version: 1.6.0(zod@4.6.7)
       '@opencode-ai/sdk':
         specifier: 1.19.6
         version: 1.19.6
@@ -35,8 +38,20 @@ importers:
       typescript:
         specifier: 6.0.3
         version: 6.0.3
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
 
 packages:
+
+  '@agentclientprotocol/sdk@2.9.1':
+    resolution: {integrity: sha512-8iJdxGa3SunLfzqLLb3RfQFmr4hnmWeAyeAK6MbkJiXJbrRlMRgKsVnDl/7Hu48yu/30gAlytNDzh5W77rv5SA==}
+    peerDependencies:
+      '@modelcontextprotocol/server': ^2.4.0
+      zod: ^3.25.76 || ^4.0.0
+    peerDependenciesMeta:
+      '@modelcontextprotocol/server':
+        optional: true
 
   '@anthropic-ai/sdk@0.129.0':
     resolution: {integrity: sha512-MH7LB20kNpGLUpPTe2OG5XvL/KhX8HUO9XyBaFjgFk6TLS4Xjt0VPIuMKywe7POKKPslX+QxSlVok9e+8kG5Nw==}
@@ -758,12 +773,21 @@ packages:
     engines: {node: '>= 14.6'}
     hasBin: true
 
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
+
 snapshots:
 
-  '@anthropic-ai/sdk@0.129.0':
+  '@agentclientprotocol/sdk@2.9.1(zod@4.6.7)':
+    dependencies:
+      zod: 4.6.7
+
+  '@anthropic-ai/sdk@0.129.0(zod@4.6.7)':
     dependencies:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.3.0
+    optionalDependencies:
+      zod: 4.6.7
 
   '@aws-sdk/client-bedrock-runtime@3.1127.0':
     dependencies:
@@ -949,9 +973,9 @@ snapshots:
 
   '@babel/runtime@7.29.15': {}
 
-  '@earendil-works/pi-agent-core@1.6.0(undici@8.12.4)':
+  '@earendil-works/pi-agent-core@1.6.0(undici@8.12.4)(zod@4.6.7)':
     dependencies:
-      '@earendil-works/pi-ai': 1.6.0(undici@8.12.4)
+      '@earendil-works/pi-ai': 1.6.0(undici@8.12.4)(zod@4.6.7)
       '@earendil-works/pi-schema': 1.6.0
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
@@ -967,9 +991,9 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-ai@1.6.0(undici@8.12.4)':
+  '@earendil-works/pi-ai@1.6.0(undici@8.12.4)(zod@4.6.7)':
     dependencies:
-      '@anthropic-ai/sdk': 0.129.0
+      '@anthropic-ai/sdk': 0.129.0(zod@4.6.7)
       '@aws-sdk/client-bedrock-runtime': 3.1127.0
       '@earendil-works/pi-schema': 1.6.0
       '@earendil-works/pi-telemetry': 1.6.0
@@ -977,7 +1001,7 @@ snapshots:
       '@smithy/node-http-handler': 4.12.1
       http-proxy-agent: 9.1.0
       https-proxy-agent: 9.1.0
-      openai: 7.59.0(undici@8.12.4)
+      openai: 7.59.0(undici@8.12.4)(zod@4.6.7)
       partial-json: 0.1.7
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
@@ -997,10 +1021,10 @@ snapshots:
     dependencies:
       quickjs-wasi: 3.6.2
 
-  '@earendil-works/pi-coding-agent@1.6.0':
+  '@earendil-works/pi-coding-agent@1.6.0(zod@4.6.7)':
     dependencies:
-      '@earendil-works/pi-agent-core': 1.6.0(undici@8.12.4)
-      '@earendil-works/pi-ai': 1.6.0(undici@8.12.4)
+      '@earendil-works/pi-agent-core': 1.6.0(undici@8.12.4)(zod@4.6.7)
+      '@earendil-works/pi-ai': 1.6.0(undici@8.12.4)(zod@4.6.7)
       '@earendil-works/pi-codemode': 1.6.0
       '@earendil-works/pi-mcp': 1.6.0
       '@earendil-works/pi-tui': 1.6.0
@@ -1445,9 +1469,10 @@ snapshots:
       fetch-blob: 3.2.0
       formdata-polyfill: 4.0.10
 
-  openai@7.59.0(undici@8.12.4):
+  openai@7.59.0(undici@8.12.4)(zod@4.6.7):
     optionalDependencies:
       undici: 8.12.4
+      zod: 4.6.7
 
   p-retry@4.6.2:
     dependencies:
@@ -1526,3 +1551,5 @@ snapshots:
   ws@8.23.0: {}
 
   yaml@2.9.0: {}
+
+  zod@4.6.7: {}

@@ -2,22 +2,23 @@
 #
 # The gate (`pnpm install --frozen-lockfile && pnpm run gate`) is the one
 # command that runs every check: the codegen drift checks, the repository
-# rules, the type-check, the build, the test suite, the package-contents
-# check, the standalone binary, the Rust, Python and Go clients, and
-# actionlint on these workflows. Besides Node and pnpm it needs Bun (the
-# standalone ari-driver is built with `bun build --compile`, and the consumer
-# tests run the installed package and the README quickstarts under Bun), Go
-# (gofmt, the Go client, actionlint), Rust and uv (the Python client).
+# rules, the type-check, the build, the test suite under Node and under Bun,
+# the package-contents check, the standalone binary, the Rust, Python and Go
+# clients, and actionlint on these workflows. Besides Node and pnpm it needs
+# Bun (the Bun test run, the standalone ari-driver built with
+# `bun build --compile`, and the consumer tests that run the installed package
+# and the README quickstarts under Bun), Go (gofmt, the Go client, actionlint),
+# Rust and uv (the Python client).
 #
-# The Node legs run the gate on each supported Node major with the Bun
-# release the repository is developed with. The Bun leg runs the same gate
-# with the newest Bun release, so a Bun change shows up without moving the
-# pinned toolchain. The test suite runs on Node's test runner, which Bun
-# implements only in part (the conformance kit's node:test adapter fails
-# under it), so in every leg Bun runs the package through the consumer tests
-# (the installed ari, ari/host and ari/conformance, the conformance suite
-# against the reference driver, both README quickstarts) and through the
-# compiled ari-driver.
+# The Node legs run `pnpm run gate` on each supported Node major with the Bun
+# release the repository is developed with, so each runs the test suite under
+# Node (`pnpm run test`) and under that Bun (`pnpm run test:bun`). The Bun leg
+# runs `pnpm run gate:bun` with the newest Bun release: every gate step, with
+# the test suite under Bun only (each test file in its own `bun test`
+# process, scripts/test-bun.ts), so a Bun change shows up without moving the
+# pinned toolchain. Its Node runs the gate's scripts (codegen, build, checks)
+# and the test children that need Node. The Bun run leaves out only the test
+# files test/bun-excluded.txt lists, each with the Node-only feature it needs.
 
 name: CI
 
@@ -45,15 +46,19 @@ jobs:
           - runtime: Node 22
             node: "22"
             bun: "1.3.14"
+            gate: gate
           - runtime: Node 24
             node: "24"
             bun: "1.3.14"
+            gate: gate
           - runtime: Node 26
             node: "26"
             bun: "1.3.14"
+            gate: gate
           - runtime: Bun
             node: "26"
             bun: latest
+            gate: gate:bun
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,4 +105,4 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Gate
-        run: pnpm run gate
+        run: pnpm run ${{ matrix.gate }}

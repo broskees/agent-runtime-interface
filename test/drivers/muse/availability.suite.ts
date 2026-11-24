@@ -15,6 +15,7 @@ import { loadMuseSdk } from "../../../src/drivers/muse/index.ts";
 import { MUSE_SDK_PACKAGE, MUSE_TESTED_VERSIONS } from "../../../src/meta/muse.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { museRig } from "./rig.ts";
+import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 
 /** Runs `body` in a fresh Node process that records every @muse-code resolution and traps every child_process call. */
 function inChild(body: string, options: { hideSdk: boolean }): { resolved: string[]; spawned: string[]; result: unknown } {
@@ -51,7 +52,8 @@ let result;
 ${body}
 process.stdout.write(JSON.stringify({ resolved, spawned, result }));
 `;
-  const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], { cwd: REPO_ROOT, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "" } });
+  // The child registers node:module hooks, which Bun lacks, so it runs on Node whichever runtime runs this test.
+  const output = execFileSync(NODE_EXECUTABLE, ["--input-type=module", "-e", script], { cwd: REPO_ROOT, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "" } });
   return JSON.parse(output) as { resolved: string[]; spawned: string[]; result: unknown };
 }
 

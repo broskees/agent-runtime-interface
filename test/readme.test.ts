@@ -11,8 +11,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { TSC, installConsumer, packAsPublished, packRepositoryDependency } from "./helpers/consumer.ts";
+import { NOT_SET_UP, TSC, installConsumer, packAsPublished, packRepositoryDependency } from "./helpers/consumer.ts";
 import { REPO_ROOT } from "./helpers/spec.ts";
+import { NODE_EXECUTABLE } from "./helpers/runtime.ts";
 
 const DRIVERS = ["pi", "acp", "grok", "fx", "kiro", "acp-registry", "antigravity", "codex", "claude", "opencode", "cursor", "muse"];
 const SUBPATH_IMPORTS = ["ari", "ari/host", "ari/driver-kit", "ari/node", "ari/wire", "ari/conformance", "ari/effect", "ari/drivers/<name>", "ari/meta/<name>", "ari/cli-manifests", "ari/json-schema/*.json"];
@@ -93,7 +94,7 @@ describe("the other documents", () => {
 });
 
 describe("the README quickstarts, run from the installed tarball", () => {
-  let consumer = "";
+  let consumer = NOT_SET_UP;
 
   before(() => {
     const packDir = tempDir("ari-readme-pack-");
@@ -119,7 +120,7 @@ describe("the README quickstarts, run from the installed tarball", () => {
     for (const file of ["in-process.ts", "over-the-wire.ts"]) {
       test(`${file} runs under ${runtime === "node" ? "Node" : "Bun"} and prints what README.md shows`, () => {
         const home = tempDir("ari-readme-home-");
-        const result = spawnSync(runtime === "node" ? process.execPath : "bun", [file], {
+        const result = spawnSync(runtime === "node" ? NODE_EXECUTABLE : "bun", [file], {
           cwd: consumer,
           encoding: "utf8",
           timeout: 60_000,

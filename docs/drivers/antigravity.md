@@ -68,6 +68,18 @@ The Antigravity CLI `>=1.5.0 <1.6.0` (`agy acp` 1.5.x; the ACP registry
 lists `antigravity-acp` 1.5.2). `status()` reports the version and an
 `untested_version` advisory outside that range.
 
+## Resuming conversations ARI did not create
+
+The Antigravity driver is the ACP base driver with the `agy acp` launch, so it
+resumes the way [the `acp`
+driver](acp.md#resuming-conversations-ari-did-not-create) does: it asks the
+agent for any session id the host names, with only the host's LaunchContext,
+and replaces a session the agent cannot resume with a fresh one and
+`session.replaced`. It lists no native sessions. Each instance runs `agy` with
+its own profile directory, which holds that instance's session files, so a
+session the user's own `agy` keeps in their profile is not found there and is
+replaced.
+
 ## Capabilities
 
 The proposal's §1.2 has no column for this provider (its Grok column was

@@ -171,6 +171,20 @@ exist for it.
 - Directories are resolved to their real path, so a path through a symbolic
   link names the same thread.
 
+## Resuming conversations ARI did not create
+
+The driver resumes any Claude Code session the host names, including one
+started outside ARI and every session `nativeSessions.list` returns.
+`resumeThread` looks the session up with the SDK's `getSessionInfo` and
+resumes it with `query({ options: { resume } })`, carrying only the
+LaunchContext the host passed: its instructions as the system prompt's
+`append` (not recorded in the transcript) and its MCP servers through
+`Query.setMcpServers` under the names the host chose. Nothing is written to
+Claude Code's settings or other files. A session Claude Code has no record of,
+or refuses to resume because another process holds it, is replaced by a fresh
+session with `session.replaced` (`contextLost: true`) when the host passed
+`policy`, and rejects with `not_found` otherwise.
+
 ## Capabilities against the proposal's §1.2 Claude column
 
 | Capability | §1.2 | Driver | Source for a difference |

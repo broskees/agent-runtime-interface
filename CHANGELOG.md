@@ -30,7 +30,8 @@ The first version. Nothing is published yet.
 - `ari/cli-manifests`: CLI launch manifests and launch building for fresh,
   resume and fork launches.
 - `ari/conformance`: 15 conformance scenarios, a recording fake host, a
-  `node:test` adapter, virtual time and an in-memory reference driver.
+  `node:test` adapter (which also runs under `bun test`), virtual time and an
+  in-memory reference driver.
 - `ari/node`: process spawning with environment rules and process-group
   cleanup, file-backed secrets, an atomic managed adapter installer, instance
   paths, coordination leases, diagnostics and sign-in callbacks.

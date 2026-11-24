@@ -144,6 +144,21 @@ const instance = await acpDriver.create(host, {
   `session.ext("acp", "_method", params)` sends an ACP extension request.
   Schemas: `spec/v1/extensions/acp.schema.json`.
 
+## Resuming conversations ARI did not create
+
+The driver resumes any ACP session the host names, whoever created it: it
+keeps no record of which sessions it started. `resumeThread` sends
+`session/resume` (v2, or v1 when the agent advertises it) or `session/load`
+(v1) for that id in the directory `policy.cwd` names; for a session this ARI
+session has not seen, a missing `policy.cwd` is refused with `validation`. The
+request carries only what the host supplied: the host's MCP servers under the
+names it chose, and its launch instructions (`systemPrompt` where the agent
+takes one, the rest in the thread's first prompt). When the agent cannot
+resume the session (missing, held elsewhere, or no resume support), the driver
+starts a fresh session in that directory and emits `session.replaced` with
+`contextLost: true`. The driver lists no native sessions (`nativeSessions` is
+absent). The five flavors below share this behaviour.
+
 ## Capabilities
 
 The proposal's §1.2 column for the ACP base, against what this driver

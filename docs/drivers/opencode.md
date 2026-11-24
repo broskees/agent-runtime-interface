@@ -276,6 +276,21 @@ Without host text the driver sends none: it never adds instruction text of its
 own. OpenCode keeps the text in its session database (1.x on the user
 message, 2.x as the instruction entry), never in its config files.
 
+## Resuming conversations ARI did not create
+
+The driver resumes any session the OpenCode server holds, including one
+created outside ARI: `resumeThread` asks the server for the id the host named.
+It then gives that session what it gives a session it created: the permission
+rules for the host's runtime policy (plus, on a shared server, deny rules for
+other threads' host MCP entries), the host's MCP servers registered on the
+running server under the names the host chose, and the host's instructions
+through the system channel above. All of it goes through the server's API;
+nothing is written to OpenCode's config files. For OpenCode 1.x, a session
+this ARI session has not seen needs `policy.cwd` (`validation` otherwise). A
+session the server does not have is replaced by a fresh one with
+`session.replaced` when the host passed `policy`, and rejects with `not_found`
+otherwise. The driver lists no native sessions (`nativeSessions` is absent).
+
 ## The `opencode.permissionRules` extension
 
 `capabilities.extensions` lists `{ ns: "opencode.permissionRules", version:

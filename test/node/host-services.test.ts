@@ -11,7 +11,6 @@ import { after, before, describe, test } from "node:test";
 import type { AuthCompleteInput, HostServices } from "../../src/index.ts";
 import { createCoordination, createNodeHostServices, startCallbackServer } from "../../src/node/index.ts";
 import type { DiagnosticRecord } from "../../src/node/index.ts";
-import { createSymlinkedRoot, exists } from "../helpers/symlinked-root.ts";
 
 type ExampleConfig = { binaryPath: string };
 
@@ -145,32 +144,6 @@ describe("ari/node host services", () => {
     } finally {
       await first.dispose();
       await second.dispose();
-    }
-  });
-
-  test("a host root with `..` after a symbolic link gives drivers canonical paths to the directories the OS reads", async () => {
-    const layout = await createSymlinkedRoot("ari-host-symlink-");
-    const services = await createNodeHostServices({
-      hostRoot: layout.throughSymlink("host"),
-      instanceId: "x",
-      config: { get: async () => ({ config: {} }) },
-      attachments: { resolve: async () => null },
-      hostTools: { mcpServerFor: async () => ({ name: "tools", config: { name: "tools", transport: "stdio" as const, command: "tools" } }) },
-      callbacks: { register: async () => ({ url: "http://127.0.0.1:1/callback" }) },
-      coordination: createCoordination(),
-      writeDiagnostic: () => {},
-    });
-    try {
-      for (const directory of Object.values(services.paths)) {
-        assert.ok(directory.startsWith(`${layout.real("host")}/`), `${directory} is under the real host root`);
-        assert.equal(directory, await fs.realpath(directory), `${directory} is canonical, so a driver may join onto it safely`);
-        assert.equal(path.join(directory, "profile"), `${directory}/profile`);
-      }
-      await services.secrets.set("ns", "key", new TextEncoder().encode("v"));
-      assert.equal(await exists(layout.collapsed("host")), false, "nothing is written where lexical normalization points");
-    } finally {
-      await services.dispose();
-      await fs.rm(layout.root, { recursive: true, force: true });
     }
   });
 

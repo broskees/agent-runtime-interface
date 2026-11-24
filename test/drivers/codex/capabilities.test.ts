@@ -313,3 +313,57 @@ describe("capability honesty: the runtime modes Codex enforces natively", () => 
     assert.equal(await reviewerOfNextTurn(rig, second, thread.id, "after-switch"), "user");
   });
 });
+
+describe("native sessions ARI did not create", () => {
+  test("a thread nativeSessions.list returns that ARI did not create resumes with only the host's LaunchContext, and runs a turn", async () => {
+    const rig = await codexRig();
+    try {
+      // Listing starts the account's app-server, whose Codex home then holds a thread the user's own codex wrote.
+      await rig.instance.nativeSessions!.list({ cwd: rig.cwd });
+      assert.equal(rig.world.stores.size, 1);
+      const store = [...rig.world.stores.values()][0]!;
+      const nativeId = store.newThreadId();
+      const now = Math.floor(Date.now() / 1000);
+      store.threads.set(nativeId, {
+        id: nativeId,
+        cwd: rig.cwd,
+        createdAt: now,
+        updatedAt: now,
+        turns: [],
+        compactions: 0,
+        injected: [],
+        archived: false,
+        materialized: true,
+        ephemeral: false,
+        forkedFromId: null,
+        parentThreadId: null,
+        agentNickname: null,
+        goal: undefined,
+        readState: { revision: 1, unread: false },
+        terminals: [],
+        subagents: [],
+        settings: { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write", mcpServers: [] },
+        launches: [],
+      });
+
+      const listed = (await rig.instance.nativeSessions!.list({ cwd: rig.cwd })).items.find((item) => item.id === nativeId);
+      assert.ok(listed?.handle !== undefined, "nativeSessions.list returns the thread");
+      const opened = await rig.open();
+      const thread = await opened.session.resumeThread({ native: { handle: listed.handle }, policy: policy(rig.cwd), launch: { appendSystemPrompt: ["HOST-LAUNCH-MARKER"] } });
+      assert.equal(thread.native.id, nativeId);
+      const resume = rig.requests("thread/resume").at(-1)!;
+      assert.equal(resume["threadId"], nativeId);
+      assert.equal(resume["developerInstructions"], "HOST-LAUNCH-MARKER");
+      assert.deepEqual(Object.keys(resume["config"] as object), [`mcp_servers.host-tools-${thread.id}`], "only the host's tool server, under the name the host chose");
+      const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "carry-on", intent: "start", content: [{ type: "text", text: "Carry on." }] });
+      assert.equal(started.status, "accepted");
+      const native = await rig.nextTurn();
+      await native.say("Done.");
+      await native.complete();
+      await opened.until(() => opened.bodies("turn.terminal").find((body) => body.status === "completed"), "the turn to complete");
+      assert.equal(opened.bodies("session.replaced").length, 0, "the thread itself was resumed, not replaced");
+    } finally {
+      await rig.cleanup();
+    }
+  });
+});

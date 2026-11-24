@@ -21,6 +21,7 @@ import { createCoordination, createNodeHostServices } from "../../../src/node/in
 import { FAKE_PI, framesUnder } from "./harness.ts";
 import { checkRunsAgainstPiTypes } from "./pi-types.ts";
 import { openPiTestRig, policy } from "./rig.ts";
+import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const temporary: string[] = [];
@@ -44,7 +45,8 @@ test("importing ari/drivers/pi and ari/meta/pi loads no vendor package, no Node 
     const meta = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, "src/meta/pi.ts")).href)});
     console.log(JSON.stringify({ resolved, spawns, kind: driver.piDriver.kind, label: meta.label }));
   `;
-  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
+  // The child registers node:module hooks, which Bun lacks, so it runs on Node whichever runtime runs this test.
+  const result = spawnSync(NODE_EXECUTABLE, ["--input-type=module", "-e", script], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const report = JSON.parse(result.stdout.trim().split("\n").at(-1)!) as { resolved: string[]; spawns: number; kind: string; label: string };
   assert.equal(report.kind, "pi");

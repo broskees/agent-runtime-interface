@@ -74,6 +74,15 @@ reports the installed version and gives an `untested_version` advisory:
 `test/drivers/acp-registry/registry.suite.ts` checks the listed-version
 advisory, and `test/drivers/acp-registry/rules.suite.ts` the protocol one.
 
+## Resuming conversations ARI did not create
+
+The ACP Registry driver is the ACP base driver with the agent the host chose
+from the registry, so it resumes the way [the `acp`
+driver](acp.md#resuming-conversations-ari-did-not-create) does: it asks the
+agent for any session id the host names, with only the host's LaunchContext,
+and replaces a session the agent cannot resume with a fresh one and
+`session.replaced`. It lists no native sessions.
+
 ## Capabilities
 
 The proposal's §1.2 has no column for this provider (its Grok column was

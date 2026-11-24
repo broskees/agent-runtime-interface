@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { CURSOR_TESTED_VERSIONS, versionAdvisory, versionInRange } from "../../../src/drivers/cursor/index.ts";
 import { openCursorRig } from "./rig.ts";
 import type { CursorTestRig } from "./rig.ts";
+import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const HOME = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-cursor-home-")));
@@ -62,7 +63,8 @@ let result;
 ${body}
 process.stdout.write(JSON.stringify({ resolved, spawned, result }));
 `;
-  const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], { cwd: ROOT, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME } });
+  // The child registers node:module hooks, which Bun lacks, so it runs on Node whichever runtime runs this test.
+  const output = execFileSync(NODE_EXECUTABLE, ["--input-type=module", "-e", script], { cwd: ROOT, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME } });
   return JSON.parse(output) as { resolved: string[]; spawned: string[]; result: unknown };
 }
 

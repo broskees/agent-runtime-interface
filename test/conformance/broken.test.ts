@@ -53,6 +53,9 @@ describe("the settlement scenario and the quiet timer", () => {
 
     const honest = await runScenario(referenceHarness(), 6);
     assert.equal(honest.status, "passed", honest.reason);
-    assert.ok(honest.notes.some((note) => /^36\.5 s of virtual time passed between the tool result and the completion$/.test(note)), honest.notes.join("\n"));
+    // The pause is 36.5 s; virtual time also follows the real time the kit spends polling, so a loaded machine can add a tenth or so.
+    const passed = honest.notes.map((note) => /^(\d+\.\d) s of virtual time passed between the tool result and the completion$/.exec(note)).find((match) => match !== null);
+    assert.ok(passed !== undefined, honest.notes.join("\n"));
+    assert.ok(Number(passed[1]) >= 36.5, honest.notes.join("\n"));
   });
 });

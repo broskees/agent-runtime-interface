@@ -8,8 +8,9 @@
 //   goes to Cursor.
 // - Cursor's SDK writes per-workspace data (transcripts, MCP descriptors)
 //   under `$CURSOR_DATA_DIR/projects`, else `~/.cursor/projects` (dist/esm
-//   977.js). Tests must never write the user's ~/.cursor, so the data
-//   directory is a temporary one unless a test sets its own.
+//   977.js), and keeps its stored login in `~/.cursor/sdk/auth.json`. Tests
+//   must never read or write the user's ~/.cursor, so HOME and the data
+//   directory are temporary ones unless a test sets its own.
 // - Every outbound connection to a host other than this machine is refused
 //   and recorded, so a test that reached Cursor's hosted service would fail.
 
@@ -26,7 +27,10 @@ export const FAKE_CURSOR_MODELS = [
 process.env["CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON"] = JSON.stringify(FAKE_CURSOR_MODELS);
 
 export const TEST_DATA_ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-cursor-data-")));
-process.env["CURSOR_DATA_DIR"] ??= TEST_DATA_ROOT;
+export const TEST_HOME = path.join(TEST_DATA_ROOT, "home");
+fs.mkdirSync(TEST_HOME);
+process.env["HOME"] = TEST_HOME;
+process.env["CURSOR_DATA_DIR"] ??= path.join(TEST_DATA_ROOT, "cursor-data");
 process.on("exit", () => fs.rmSync(TEST_DATA_ROOT, { recursive: true, force: true }));
 
 const attempts: string[] = [];

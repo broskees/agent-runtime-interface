@@ -261,7 +261,8 @@ export interface NativeApprovalHandle {
    * cannot make an arbitrary string a native id there. Leave it out when the
    * harness kept every `optionId` as the native id; the kit then uses the
    * kit's ids as they are. `nextReply` and `replies` still answer with the
-   * kit's ids.
+   * kit's ids. The mapping must be one-to-one: the kit fails a scenario whose
+   * mapping sends two kit options to one native option.
    */
   readonly nativeOptionIds?: { readonly [optionId: string]: string };
 }

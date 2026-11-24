@@ -205,6 +205,10 @@ Rules every harness keeps:
   id: it then returns `nativeOptionIds`, the native option id the driver will
   see for each of the kit's option ids, and the scenarios look for and answer
   with those. `nextReply()` and `replies()` still answer with the kit's ids.
+  The mapping must be one-to-one, and the harness must work it out from the
+  protocol and the driver's documented option ids, not by calling the driver:
+  the kit fails a scenario whose mapping sends two kit options to one native
+  option, because a reply could then not say which one the host chose.
 - **`runTool`'s `path` is workspace-relative.** Report it the way the vendor
   does, normally as an absolute path in the agent's own (canonical) working
   directory.

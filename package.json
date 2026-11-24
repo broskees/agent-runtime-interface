@@ -69,15 +69,18 @@
     "./json-schema/*": "./json-schema/*"
   },
   "scripts": {
-    "codegen": "node scripts/codegen.ts && node scripts/codegen-effect.ts",
+    "codegen": "node scripts/codegen.ts && node scripts/codegen-effect.ts && node scripts/codegen-codex.ts",
     "codegen:check": "node scripts/codegen.ts --check",
     "codegen:effect:check": "node scripts/codegen-effect.ts --check",
+    "codegen:codex:check": "node scripts/codegen-codex.ts --check",
+    "codegen:acp": "node scripts/codegen-acp.ts",
+    "codegen:acp:check": "node scripts/codegen-acp.ts --check",
     "build": "node scripts/build.ts",
     "check:rules": "node scripts/check-rules.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test \"test/**/*.test.ts\"",
     "check:package": "node scripts/check-package.ts",
-    "gate": "pnpm run codegen:check && pnpm run codegen:effect:check && pnpm run build && pnpm run check:rules && pnpm run typecheck && pnpm run test && pnpm run check:package"
+    "gate": "pnpm run codegen:check && pnpm run codegen:effect:check && pnpm run codegen:codex:check && pnpm run codegen:acp:check && pnpm run build && pnpm run check:rules && pnpm run typecheck && pnpm run test && pnpm run check:package"
   },
   "dependencies": {},
   "peerDependencies": {
@@ -109,8 +112,10 @@
     }
   },
   "devDependencies": {
+    "@agentclientprotocol/sdk": "2.9.1",
     "@anthropic-ai/claude-agent-sdk": "0.3.330",
     "@anthropic-ai/sdk": "1.12.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@types/node": "22.20.5",
     "ajv": "8.20.0",

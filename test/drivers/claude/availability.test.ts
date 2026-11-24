@@ -4,14 +4,18 @@
 // the driver unavailable naming the package, and openSession rejects with
 // driver_unavailable; with the SDK present (the pinned devDependency),
 // status() reports its version; a version outside the tested range gets an
-// advisory; a missing native Claude Code binary is reported unavailable, not
-// a crash. The child-process checks run the driver's real loader, with
+// advisory; a missing native Claude Code binary, bundled or at the configured
+// path, is reported unavailable, not a crash. The child-process checks run the driver's real loader, with
 // every child_process entry point trapped so nothing can start Claude Code.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, test } from "node:test";
 import { nativeBinaryCandidates } from "../../../src/drivers/claude/index.ts";
+import type { ClaudeDriverConfig } from "../../../src/drivers/claude/index.ts";
 import { CLAUDE_TESTED_VERSIONS } from "../../../src/meta/claude.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { openClaudeRig } from "./rig.ts";
@@ -153,6 +157,46 @@ result = { version: runtime.version, claudeCodeVersion: runtime.claudeCodeVersio
     const configuredStatus = await configured.status();
     assert.equal(configuredStatus.error?.code, "driver_unavailable");
     assert.equal((configuredStatus.error as { binary?: string }).binary, "claude-nightly");
+  });
+
+  test("an explicit executablePath that names no executable file is reported unavailable, naming it, and openSession refuses", async () => {
+    const { createClaudeDriver } = await import("../../../src/drivers/claude/index.ts");
+    const { createFakeHost } = await import("../../../src/conformance/fake-host.ts");
+    const { resolveExecutable } = await import("../../../src/node/process.ts");
+    const { FakeClaudeWorld } = await import("./fake-sdk.ts");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ari-claude-executable-"));
+    try {
+      const missing = path.join(home, "no-claude");
+      const notExecutable = path.join(home, "claude-notes");
+      fs.writeFileSync(notExecutable, "not a program\n", { mode: 0o644 });
+      const present = path.join(home, "claude");
+      fs.writeFileSync(present, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const world = new FakeClaudeWorld();
+      // The node host's own lookup, as a real host resolves the configured path.
+      const host = createFakeHost<ClaudeDriverConfig>({ resolveExecutable: (name) => resolveExecutable(name, "/usr/bin:/bin") });
+      const driver = createClaudeDriver({ loadSdk: async () => ({ sdk: world.sdk, version: "0.3.330", claudeCodeVersion: "2.1.330", bundledExecutable: null }), newUuid: () => world.newUuid() });
+      for (const configured of [missing, notExecutable]) {
+        const instance = await driver.create(host, { instanceId: path.basename(configured), config: { executablePath: configured }, environment: {} });
+        const status = await instance.status();
+        assert.equal(status.state, "unavailable", `${configured} was reported ${status.state}`);
+        assert.equal(status.installed, false);
+        assert.equal(status.error?.code, "driver_unavailable");
+        assert.equal((status.error as { binary?: string }).binary, configured);
+        await assert.rejects(instance.openSession({}), (error: { callError?: { code: string } }) => error.callError?.code === "driver_unavailable");
+        await instance.dispose();
+      }
+      assert.equal(world.queries.length, 0);
+      // An executable file at the path is the one every query runs.
+      const instance = await driver.create(host, { instanceId: "present", config: { executablePath: present }, environment: {} });
+      assert.equal((await instance.probe()).installed, true);
+      const session = await instance.openSession({});
+      await session.createThread({ cwd: home, policy: { mode: "approval_required", interaction: "default", cwd: home } });
+      assert.equal(world.queries.at(-1)?.options.pathToClaudeCodeExecutable, present);
+      await session.close();
+      await instance.dispose();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("the native binary is looked for in the SDK's own platform packages, in the SDK's order", () => {

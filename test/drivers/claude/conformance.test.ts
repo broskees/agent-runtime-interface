@@ -17,7 +17,7 @@ conformanceTests(test, harness, {
   },
 });
 
-test("every scenario passed, and the only checks not exercised are the two with the harness's stated reasons", () => {
+test("every scenario passed, and the only checks not exercised are the three with the harness's stated reasons", () => {
   assert.ok(report !== undefined, "the conformance suite did not report");
   assert.equal(report.passed, true, formatReport(report));
   assert.deepEqual(
@@ -28,6 +28,10 @@ test("every scenario passed, and the only checks not exercised are the two with 
   const notes = report.results.flatMap((result) => result.notes).join("\n");
   assert.match(notes, /steer-after-end\.race/);
   assert.match(notes, /capability-honesty\.ext\.ari\.goal/);
+  // Under full_access Claude Code calls canUseTool for nothing it auto-approves, so scenario 15 reports that branch not checked, with the harness's reason, rather than a reply nobody sent.
+  const idempotent = report.results.find((result) => result.key === "idempotent-responses")!;
+  assert.match(idempotent.notes.join("\n"), /not checked \(idempotent-responses\.full-access\): under full_access the driver runs Claude Code in bypassPermissions/);
+  assert.doesNotMatch(idempotent.notes.join("\n"), /answered the full_access approval/);
 });
 
 test("the fake served every rig, and the driver ran its turns through queries in each", () => {

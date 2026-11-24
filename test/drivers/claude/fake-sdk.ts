@@ -12,11 +12,17 @@
 // priority "next", interrupts it with priority "now" (the aborted native
 // turn ends with terminal_reason "aborted_streaming") and waits with
 // priority "later"; `canUseTool` is called for each permission prompt
-// unless the permission mode allows the tool; `resume` of a session that is
+// unless the permission mode allows the tool (then the tool runs and no
+// permission reply exists); `resume` of a session that is
 // missing exits, and of one another process holds exits after a startup
 // failure result (with CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1); `forkSession`
 // copies the transcript up to `resumeSessionAt` into a new session;
-// `stopTask` ends a task with a `task_notification` of status "stopped".
+// `stopTask` ends a task with a `task_notification` of status "stopped";
+// `setModel` and `applyFlagSettings` change the model and effort the
+// process runs. Claude Code's goal command and tool follow its 2.1.330
+// code: `/goal` records the tagged command and its tagged output in the
+// transcript, and SetGoal's result says whether the goal was set or only
+// proposed.
 //
 // The fake does nothing on its own: each turn waits for the conformance
 // kit's puppet calls (`NativeTurn`), and each step resolves once its frames
@@ -67,8 +73,8 @@ export interface FakeTurn extends NativeTurn {
   ask(toolName: string, input: Record<string, unknown>, extra?: { suggestions?: PermissionUpdate[]; agentID?: string; suppressAlwaysAllowRule?: boolean }): Promise<PermissionResult>;
   /** Streams a rate limit event, as Claude Code does on claude.ai subscriptions. */
   rateLimit(info: { status: "allowed" | "allowed_warning" | "rejected"; resetsAt?: number; rateLimitType?: "five_hour" | "seven_day"; utilization?: number }): Promise<void>;
-  /** Claude calls its SetGoal tool. */
-  proposeGoal(condition: string): Promise<void>;
+  /** Claude calls its SetGoal tool; `askUser` (the tool's default) only proposes the goal to the user. */
+  proposeGoal(condition: string, options?: { askUser?: boolean }): Promise<void>;
   /** Streams a hook's started and response messages (`includeHookEvents`). */
   runHook(name: string, event: string, output: string): Promise<void>;
   /** The API refuses the credential: an `authentication_failed` assistant error and a 401 result. */
@@ -107,6 +113,8 @@ interface StoredSession {
   archived: boolean;
   createdAt: number;
   lastModified: number;
+  /** The goal Claude Code holds, set by /goal or SetGoal. */
+  goal?: string;
 }
 
 class Deferred<T> {
@@ -148,6 +156,13 @@ class Waiters<T> {
 
 const CLAUDE_CODE_VERSION = "2.1.330";
 const MODEL = "claude-sonnet-5";
+
+// What Claude Code 2.1.330 says for its goal tool and command (strings in its bundled code).
+const SET_GOAL_SET = "The goal is set, without an approval dialog. The user can see it and can clear it with /goal clear. The stop check applies from your next stop.";
+const SET_GOAL_PROPOSED =
+  'Sent the goal proposal to the user for approval. If they approve, any previously set goal ends, the proposed goal is set, and you will receive a "Goal set" message; until they answer, any previously set goal remains in effect. A decline is not reported.';
+const GOAL_CONDITION_LIMIT = 4000;
+const GOAL_CLEAR_WORDS = new Set(["clear", "stop", "off", "reset", "none", "cancel"]);
 
 function usage(input: number, output: number): BetaUsage {
   return {
@@ -443,11 +458,10 @@ class FakeNativeTurn implements FakeTurn {
       replies.push(optionId);
       replied.push(optionId);
     };
-    // The permission mode decides first: bypassPermissions runs everything, acceptEdits runs edits, without asking.
+    // The permission mode decides first: bypassPermissions runs everything, acceptEdits runs edits.
+    // Claude Code then runs the tool without calling canUseTool, so no reply to any option exists.
     const mode = query.permissionMode;
     if (mode === "bypassPermissions" || (mode === "acceptEdits" && tool.name === "Edit")) {
-      const narrowest = approval.options.find((option) => option.decision === "accept") ?? approval.options.find((option) => option.decision !== "decline");
-      if (narrowest !== undefined) record(narrowest.optionId);
       query.toolResult(toolUseId, "ok", false, null);
     } else {
       void this.ask(tool.name, tool.input, { suggestions }, toolUseId).then(
@@ -640,10 +654,13 @@ class FakeNativeTurn implements FakeTurn {
     this.#query.emit({ type: "rate_limit_event", rate_limit_info: info, uuid: this.#query.world.uuid(), session_id: this.sessionId });
   }
 
-  async proposeGoal(condition: string): Promise<void> {
+  async proposeGoal(condition: string, options: { askUser?: boolean } = {}): Promise<void> {
     this.#live();
-    const toolUseId = this.#query.toolUse("SetGoal", { condition, ask_user: false }, null);
-    this.#query.toolResult(toolUseId, `Goal set: ${condition}`, false, null);
+    const askUser = options.askUser !== false;
+    const toolUseId = this.#query.toolUse("SetGoal", { condition, ask_user: askUser }, null);
+    // Claude Code 2.1.330's SetGoal results: without ask_user it sets the goal; with it (the default) it only shows the user a proposal.
+    if (!askUser) this.#query.session!.goal = condition;
+    this.#query.toolResult(toolUseId, askUser ? SET_GOAL_PROPOSED : SET_GOAL_SET, false, null);
   }
 
   async runHook(name: string, event: string, output: string): Promise<void> {
@@ -663,6 +680,10 @@ export class FakeQuery implements Query {
   sessionId: string | undefined;
   cwd: string;
   permissionMode: NonNullable<Options["permissionMode"]>;
+  /** The model the process runs: `Options.model` at start, then each `setModel`. */
+  model: string;
+  /** The effort level the process runs: `Options.effort` at start, then each `applyFlagSettings` effortLevel. */
+  effort: Options["effort"];
   alive = true;
   readonly #out: SDKMessage[] = [];
   #waiter: ((result: IteratorResult<SDKMessage, void>) => void) | undefined;
@@ -679,6 +700,8 @@ export class FakeQuery implements Query {
     this.options = params.options ?? {};
     this.cwd = this.options.cwd ?? process.cwd();
     this.permissionMode = this.options.permissionMode ?? "default";
+    this.model = this.options.model ?? MODEL;
+    this.effort = this.options.effort;
     world.queries.push(this);
     world.calls.push({ kind: "query", options: this.options, prompt: typeof params.prompt === "string" ? "string" : "stream" });
     this.#startup();
@@ -741,7 +764,10 @@ export class FakeQuery implements Query {
     }
     const id = options.sessionId ?? this.world.uuid();
     if (!UUID_PATTERN.test(id)) return this.#refuse(`Invalid session ID: ${id}`);
-    if (this.world.sessions.has(id)) return this.#refuse(`Session ID ${id} is already in use`);
+    // An id is in use once its transcript exists or a running process holds it; an id that never got a message is free again after its process ended.
+    const existing = this.world.sessions.get(id);
+    const held = this.world.queries.some((query) => query !== this && query.alive && query.sessionId === id);
+    if ((existing !== undefined && existing.entries.length > 0) || held) return this.#refuse(`Session ID ${id} is already in use`);
     const session: StoredSession = { id, cwd: this.cwd, entries: [], turnPrompts: new Set(), tasks: new Map(), title: options.title, archived: false, createdAt: Date.now(), lastModified: Date.now() };
     if (options.persistSession !== false) this.world.sessions.set(id, session);
     this.#attach(session);
@@ -834,7 +860,7 @@ export class FakeQuery implements Query {
         cwd: this.cwd,
         tools: ["Bash", "Read", "Edit", "Agent", "SetGoal"],
         mcp_servers: [],
-        model: this.options.model ?? MODEL,
+        model: this.model,
         permissionMode: this.permissionMode,
         slash_commands: ["compact", "goal"],
         output_style: "default",
@@ -844,13 +870,73 @@ export class FakeQuery implements Query {
         session_id: session.id,
       });
     }
-    const entry = this.#entry(message);
-    session.turnPrompts.add(entry.uuid);
-    this.world.append(session, entry, this.options);
-    if (session.entries.length === 1) this.world.persist(session, this.options, this.#recordedPrompt());
+    const firstMessage = session.entries.length === 0;
+    const text = promptText(message);
+    const goal = /^\/goal(?:\s|$)/.test(text) ? this.#goalCommand(message, text.slice("/goal".length).trim()) : undefined;
+    if (goal === undefined) {
+      const entry = this.#entry(message);
+      session.turnPrompts.add(entry.uuid);
+      this.world.append(session, entry, this.options);
+    }
+    if (firstMessage) this.world.persist(session, this.options, this.#recordedPrompt());
+    if (goal?.modelTurn === false) {
+      // Claude Code answers this command itself: the prompt ends with a result and no model turn.
+      this.emit({
+        type: "result",
+        subtype: "success",
+        uuid: this.world.uuid(),
+        session_id: session.id,
+        duration_ms: 1,
+        duration_api_ms: 0,
+        is_error: false,
+        num_turns: 0,
+        result: goal.output,
+        stop_reason: null,
+        total_cost_usd: 0,
+        usage: { ...usage(0, 0), cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } as Extract<SDKResultMessage, { subtype: "success" }>["usage"],
+        modelUsage: {},
+        permission_denials: [],
+        terminal_reason: "completed",
+        ...(message.uuid === undefined ? {} : { user_message_uuid: message.uuid, user_message_uuids: [message.uuid] }),
+      });
+      this.afterTurn();
+      return;
+    }
     const turn = new FakeNativeTurn(this, message);
     this.#turn = turn;
     this.world.turnStarted(turn);
+  }
+
+  /**
+   * Claude Code's /goal command, as 2.1.330 runs it. The transcript gets the
+   * command as tagged text (under the prompt's uuid) and its output as
+   * tagged text, which getSessionMessages returns as two user rows. Only an
+   * accepted condition ("Goal set: …") goes on to a model turn. Claude Code
+   * also streams the output as an assistant message; the fake leaves that
+   * out, because goals are read from the transcript.
+   */
+  #goalCommand(message: SDKUserMessage, args: string): { output: string; modelTurn: boolean } {
+    const session = this.session!;
+    let output: string;
+    let modelTurn = false;
+    if (args === "") {
+      output = session.goal === undefined ? "No goal set. Usage: `/goal <condition>`" : `Goal active: ${session.goal} (not yet evaluated)`;
+    } else if (GOAL_CLEAR_WORDS.has(args.toLowerCase())) {
+      output = session.goal === undefined ? "No goal set" : `Goal cleared: ${session.goal}`;
+      session.goal = undefined;
+    } else if (args.length > GOAL_CONDITION_LIMIT) {
+      output = `Goal condition is limited to ${GOAL_CONDITION_LIMIT} characters (got ${args.length})`;
+    } else {
+      output = `Goal set: ${args}`;
+      session.goal = args;
+      modelTurn = true;
+    }
+    const commandUuid = message.uuid ?? this.world.uuid();
+    const row = (uuid: string, content: string): SessionMessage => ({ type: "user", uuid, session_id: session.id, message: { role: "user", content }, parent_tool_use_id: null, parent_agent_id: null });
+    session.turnPrompts.add(commandUuid);
+    this.world.append(session, row(commandUuid, `<command-name>/goal</command-name>\n            <command-message>goal</command-message>\n            <command-args>${args}</command-args>`), this.options);
+    this.world.append(session, row(this.world.uuid(), `<local-command-stdout>${output}</local-command-stdout>`), this.options);
+    return { output, modelTurn };
   }
 
   /** @internal */
@@ -987,11 +1073,15 @@ export class FakeQuery implements Query {
   async setModel(model?: string): Promise<void> {
     this.#requireAlive("setModel");
     this.world.calls.push({ kind: "setModel", sessionId: this.sessionId!, model });
+    // No model means Claude Code's default.
+    this.model = model ?? MODEL;
   }
 
   async applyFlagSettings(settings: Parameters<Query["applyFlagSettings"]>[0]): Promise<void> {
     this.#requireAlive("applyFlagSettings");
     this.world.calls.push({ kind: "applyFlagSettings", sessionId: this.sessionId!, settings: structuredClone(settings) });
+    // null removes the flag, back to Claude Code's default.
+    if (settings.effortLevel !== undefined) this.effort = settings.effortLevel ?? undefined;
   }
 
   async initializationResult(): Promise<Awaited<ReturnType<Query["initializationResult"]>>> {

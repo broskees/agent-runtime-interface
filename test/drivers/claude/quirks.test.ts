@@ -2,10 +2,9 @@
 // live requests answered through respond; a fork from a turn uses the SDK's
 // forkSession and resumeSessionAt options; model, permission mode and MCP
 // server changes go through the query's control methods; stopTask backs
-// backgroundTasks.stop; steering interrupts the running native turn;
-// ari.goal is filled from the transcript and marked derived; MCP servers
-// with alwaysLoad keep it; claude.hooks and claude.fileCheckpoints are
-// listed extensions that work.
+// backgroundTasks.stop; steering interrupts the running native turn; MCP
+// servers with alwaysLoad keep it; claude.hooks and claude.fileCheckpoints
+// are listed extensions that work. goal.test.ts covers ari.goal.
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -132,6 +131,37 @@ describe("claude driver quirks", () => {
     }
   });
 
+  test("under full_access Claude Code runs a command without calling canUseTool: no request reaches the host and no permission reply exists", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.thread({ policy: rig.policy("full_access") });
+      const opened = rig.world.calls.find((call) => call.kind === "query");
+      assert.equal(opened?.kind === "query" ? opened.options.permissionMode : undefined, "bypassPermissions");
+      const { turnId, native } = await rig.turn(thread.id, "Deploy the site.");
+      const approval = await native.requestApproval({
+        kind: "command",
+        command: ["npm", "run", "deploy"],
+        options: [
+          { optionId: "approve-always", label: "Always allow", decision: "accept_always" },
+          { optionId: "approve-once", label: "Allow once", decision: "accept" },
+          { optionId: "reject", label: "Reject", decision: "decline" },
+        ],
+      });
+      await native.complete();
+      await rig.terminal(turnId);
+      assert.deepEqual(await approval.replies(), [], "Claude Code made a permission reply under bypassPermissions");
+      assert.deepEqual(rig.world.calls.filter((call) => call.kind === "canUseTool"), []);
+      assert.deepEqual(requests(rig), []);
+      // The command ran: its tool item completed with Claude Code's output.
+      const snapshot = await rig.session.readSnapshot!(thread.id);
+      const command = snapshot.items.find((item) => item.kind === "command_execution");
+      assert.equal(command?.status, "completed");
+      assert.equal(command?.output, "ok");
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("a fork from a turn starts a query with resume, forkSession and resumeSessionAt at that turn's last transcript entry", async () => {
     const rig = await openClaudeRig();
     try {
@@ -188,6 +218,35 @@ describe("claude driver quirks", () => {
       assert.deepEqual(latest.servers["search"], { type: "stdio", command: "search-mcp", alwaysLoad: true });
       assert.deepEqual(latest.servers["docs"], { type: "http", url: "http://127.0.0.1:9/mcp", alwaysLoad: true });
       assert.equal(setServers().length, 2);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a resume of a live thread with a new model and effort applies them to the running query before it reports them applied", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.thread();
+      const handle = thread.handle!;
+      await rig.simpleTurn(thread.id, "Hello.");
+      const query = rig.world.queries.at(-1)!;
+      const controls = () => rig.world.calls.filter((call) => call.kind === "setModel" || call.kind === "applyFlagSettings").map((call) => (call.kind === "setModel" ? ["setModel", call.model] : call.kind === "applyFlagSettings" ? ["applyFlagSettings", call.settings] : []));
+      const resumed = await rig.session.resumeThread({ native: { handle }, config: { model: "opus", effort: "high" } });
+      assert.equal(rig.world.queries.length, 1, "the resume started another Claude Code process");
+      assert.deepEqual(controls(), [["setModel", "opus"], ["applyFlagSettings", { effortLevel: "high" }]]);
+      assert.deepEqual([query.model, query.effort], ["opus", "high"], "the running query did not get the new model and effort");
+      assert.deepEqual(resumed.appliedConfig, { model: "opus", effort: "high" });
+      // The next turn repeating the selection needs no second change, and it runs on the new model.
+      const { turnId, native } = await rig.turn(thread.id, "Again.", { config: { model: "opus", effort: "high" } });
+      assert.deepEqual(controls(), [["setModel", "opus"], ["applyFlagSettings", { effortLevel: "high" }]]);
+      assert.equal(query.model, "opus");
+      await native.complete();
+      await rig.terminal(turnId);
+      // A history read changes nothing on the live thread, so it reports what the query runs.
+      const read = await rig.session.resumeThread({ native: { handle }, config: { model: "sonnet", effort: "low" }, purpose: "history" });
+      assert.deepEqual(read.appliedConfig, { model: "opus", effort: "high" });
+      assert.deepEqual([query.model, query.effort], ["opus", "high"]);
+      assert.equal(controls().length, 2);
     } finally {
       await rig.cleanup();
     }
@@ -271,34 +330,6 @@ describe("claude driver quirks", () => {
       const snapshot = await rig.session.readSnapshot!(thread.id);
       assert.deepEqual(snapshot.turns.map((turn) => turn.id), [turnId]);
       assert.deepEqual(snapshot.items.filter((item) => item.kind === "user_message").map((item) => item.text), ["Refactor the parser.", "Keep the public API."]);
-    } finally {
-      await rig.cleanup();
-    }
-  });
-
-  test("ari.goal is filled from the transcript and marked derived", async () => {
-    const rig = await openClaudeRig();
-    try {
-      const thread = await rig.thread();
-      const { turnId, native } = await rig.turn(thread.id, "Make the tests pass.");
-      await native.proposeGoal("all tests in test/auth pass");
-      const updated = await until(() => rig.log.find((event) => event.body.type === "x:ari.goal.updated"), "x:ari.goal.updated");
-      assert.deepEqual((updated.body as { data: unknown }).data, { threadId: thread.id, objective: "all tests in test/auth pass", status: "active", derived: true, turnIds: [turnId], updatedAt: ((updated.body as { data: { updatedAt: string } }).data).updatedAt });
-      await native.complete();
-      await rig.terminal(turnId);
-      const second = await rig.simpleTurn(thread.id, "Keep going.");
-      // A fresh session reads the same goal back from the transcript alone.
-      const { session } = await rig.openAnother();
-      const resumed = await session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy() });
-      assert.deepEqual(await session.ext!("ari.goal", "get", { threadId: resumed.id }), { threadId: thread.id, objective: "all tests in test/auth pass", status: "active", derived: true, turnIds: [turnId, second] });
-      await assert.rejects(session.ext!("ari.goal", "set", { threadId: resumed.id, objective: "x" }), (error: { callError?: { code: string; capability?: string } }) => error.callError?.capability === "extensions.ari.goal.set");
-      // A /goal prompt sets the goal, and /goal clear clears it.
-      const { native: goalTurn } = await rig.turn(thread.id, "/goal the build is green");
-      await goalTurn.complete();
-      assert.equal(((await rig.session.ext!("ari.goal", "get", { threadId: thread.id })) as { objective: string }).objective, "the build is green");
-      const { native: clearTurn } = await rig.turn(thread.id, "/goal clear");
-      await clearTurn.complete();
-      assert.equal(await rig.session.ext!("ari.goal", "get", { threadId: thread.id }), null);
     } finally {
       await rig.cleanup();
     }

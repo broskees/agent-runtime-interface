@@ -117,6 +117,8 @@ export function claudeHarness(): ClaudeHarness {
       "steer-after-end.race":
         "Claude Code has no refusal for a late steer: a prompt that reaches an idle session starts a new turn (SDKUserMessage priority, Agent SDK docs), so a turn ending just before a steer cannot come back as prompt_required",
       "capability-honesty.ext.ari.goal": "ari.goal is derived by the driver from the transcript (derived: true); Claude has no goal call to observe",
+      "idempotent-responses.full-access":
+        "under full_access the driver runs Claude Code in bypassPermissions, and Claude Code then runs the tool without calling canUseTool (Agent SDK TypeScript reference, Options.canUseTool: not invoked for calls auto-approved by permissionMode), so no reply exists to check",
     },
     workspace: async () => workspace,
     async setup(request): Promise<HarnessRig<ClaudeDriverConfig>> {

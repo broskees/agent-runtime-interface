@@ -3,7 +3,8 @@
 // reaches Claude through a channel the driver declares; host MCP servers
 // appear only under the names the host chose; and nothing from the
 // LaunchContext is written under Claude's config directory. Thread
-// creation, resume (in a new session) and fork are each checked.
+// creation, resume (in a new session and of a live thread) and fork are
+// each checked.
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -24,6 +25,7 @@ const MARKERS = {
   turnSystem: "ARI-MARKER-turn-system",
   turnDeveloper: "ARI-MARKER-turn-developer",
   synthetic: "ARI-MARKER-turn-synthetic",
+  resumeAppend: "ARI-MARKER-resume-append",
   launchServer: "ari-marker-launch-server",
   launchCommand: "ari-marker-launch-command",
 } as const;
@@ -106,6 +108,46 @@ describe("claude driver: host instructions and host-chosen names", () => {
       const forked = queryOptions(rig).at(-1)!;
       assert.equal(forked.forkSession, true);
       for (const marker of [MARKERS.appendSystemPrompt, MARKERS.threadDeveloper]) assert.ok(((forked.systemPrompt as { append?: string }).append ?? "").includes(marker));
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a resume of a live thread with new instructions reopens its query with resume, so Claude Code reads the new append; the same instructions keep the query", async () => {
+    const rig = await openClaudeRig();
+    const append = (options: Options): string | undefined => (options.systemPrompt as { append?: string }).append;
+    try {
+      const thread = await rig.thread({ launch: { appendSystemPrompt: [MARKERS.appendSystemPrompt] } });
+      const handle = thread.handle!;
+      await rig.simpleTurn(thread.id, "Work.");
+      const first = rig.world.queries.at(-1)!;
+      // The same instructions again: the running query already has them.
+      await rig.session.resumeThread({ native: { handle }, launch: { appendSystemPrompt: [MARKERS.appendSystemPrompt] } });
+      assert.equal(queryOptions(rig).length, 1);
+      // New instructions: a running query's system prompt cannot change, so Claude Code resumes the session in a new query that has them.
+      await rig.session.resumeThread({ native: { handle }, launch: { appendSystemPrompt: [MARKERS.resumeAppend] } });
+      assert.equal(queryOptions(rig).length, 2);
+      const resumed = queryOptions(rig).at(-1)!;
+      assert.equal(resumed.resume, handle);
+      assert.equal(append(resumed), MARKERS.resumeAppend);
+      assert.equal(first.alive, false, "the old query still runs");
+      const turnId = await rig.simpleTurn(thread.id, "Work again.");
+      assert.equal(rig.world.queries.at(-1)!.alive, true);
+      assert.equal(rig.world.calls.filter((call) => call.kind === "prompt").at(-1)?.sessionId, handle);
+      assert.equal((await rig.terminal(turnId)).status, "completed");
+      // While a turn runs the query cannot be replaced: the resume is refused and changes nothing.
+      const running = await rig.turn(thread.id, "Long work.");
+      await assert.rejects(rig.session.resumeThread({ native: { handle }, launch: { appendSystemPrompt: ["ARI-MARKER-refused"] } }), (error: { callError?: { code: string } }) => error.callError?.code === "invalid_state");
+      assert.equal(queryOptions(rig).length, 2);
+      await running.native.complete();
+      await rig.terminal(running.turnId);
+      // A thread with no transcript yet starts its session again under the same id, with the new append.
+      const fresh = await rig.thread({ launch: { appendSystemPrompt: [MARKERS.appendSystemPrompt] } });
+      await rig.session.resumeThread({ native: { handle: fresh.handle! }, launch: { appendSystemPrompt: [MARKERS.resumeAppend] } });
+      const restarted = queryOptions(rig).at(-1)!;
+      assert.equal(queryOptions(rig).length, 4);
+      assert.deepEqual([restarted.sessionId, restarted.resume, append(restarted)], [fresh.handle, undefined, MARKERS.resumeAppend]);
+      await rig.simpleTurn(fresh.id, "First words.");
     } finally {
       await rig.cleanup();
     }

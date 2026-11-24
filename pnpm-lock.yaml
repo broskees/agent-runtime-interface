@@ -29,6 +29,15 @@ importers:
       '@muse-code/sdk':
         specifier: 1.4.25
         version: 1.4.25(@types/node@22.20.5)
+      '@opencode-ai/sdk':
+        specifier: 1.19.6
+        version: 1.19.6
+      '@opencode/client':
+        specifier: 2.1.2
+        version: 2.1.2(effect@4.1.5)
+      '@opencode/protocol':
+        specifier: 2.1.2
+        version: 2.1.2
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5
@@ -490,6 +499,26 @@ packages:
       '@types/node':
         optional: true
 
+  '@opencode-ai/sdk@1.19.6':
+    resolution: {integrity: sha512-jYV7s+Tlc5jDILOyWFIgISkPlfk7z3ByqeC8/T9aESZBgSZosQR784U2UoM3ZrJ8S0LJ2cB+IA9xZN7Jj8tnhQ==}
+
+  '@opencode/client@2.1.2':
+    resolution: {integrity: sha512-c7FqI/zMy6HrdVGHynzouiz3y1smokGuimh2+Is2iVWz8I8VzJEty9eTrvQkQzXG1Hj5K2FL1K5fytQ7yJEd9w==}
+    peerDependencies:
+      effect: 4.0.1
+      solid-js: '>=1.9.0'
+    peerDependenciesMeta:
+      effect:
+        optional: true
+      solid-js:
+        optional: true
+
+  '@opencode/protocol@2.1.2':
+    resolution: {integrity: sha512-dNJuZrJlcUnc3mP7GFoawXECpUoUA+1TEbXvXkFKteq9tpZbO5Qsi1AWqocRJH2cIfG8v5rddyBTyX4+0ax9Yw==}
+
+  '@opencode/schema@2.1.2':
+    resolution: {integrity: sha512-gYbneOINd0Tt41krlC79OWjcXMPlW9EjIR+tmG3EYD8SEA4xCdZh0WhZLrFDlLMKDcb6d9xeHTFwhqGACt0IRg==}
+
   '@opentelemetry/api@1.10.0':
     resolution: {integrity: sha512-lMkyes8iHrG+mk6WH7X70MdCLI2RS0FwNBY1PyQ8UemaijE2m5mv5A0Niy3HtbYTFrgkUEQjFMXmSAk2hQDuPQ==}
     engines: {node: '>=8.0.0'}
@@ -554,6 +583,9 @@ packages:
 
   '@stablelib/base64@1.0.1':
     resolution: {integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==}
+
+  '@standard-schema/spec@1.1.0':
+    resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
   '@statsig/client-core@3.31.0':
     resolution: {integrity: sha512-SuxQD6TmVszPG7FoMKwTk/uyBuVFk7XnxI3T/E0uyb7PL7GNjONtfsoh+NqBBVUJVse0CUeSFfgJPoZy1ZOslQ==}
@@ -688,6 +720,9 @@ packages:
 
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
+
+  effect@4.0.1:
+    resolution: {integrity: sha512-b1VlQG9g8fwxE5QnIZuPoOP/0MsqHJSRKxUijjoM80E5q95FXrX5yWtY5XI8G+GJsBQAVSDbLS458z9a++uVvw==}
 
   effect@4.1.5:
     resolution: {integrity: sha512-xyR20KhQI0vg2gD8ILUSQRTTESEYJ0JKdP+QD8J37xbwPTqXRxFM/l0+vUVD9fuSvoYruoTqyt33C4FZv1s4TQ==}
@@ -1707,6 +1742,27 @@ snapshots:
     optionalDependencies:
       '@types/node': 22.20.5
 
+  '@opencode-ai/sdk@1.19.6':
+    dependencies:
+      cross-spawn: 7.0.6
+
+  '@opencode/client@2.1.2(effect@4.1.5)':
+    dependencies:
+      '@opencode/protocol': 2.1.2
+      '@opencode/schema': 2.1.2
+    optionalDependencies:
+      effect: 4.1.5
+
+  '@opencode/protocol@2.1.2':
+    dependencies:
+      '@opencode/schema': 2.1.2
+      effect: 4.0.1
+
+  '@opencode/schema@2.1.2':
+    dependencies:
+      '@standard-schema/spec': 1.1.0
+      effect: 4.0.1
+
   '@opentelemetry/api@1.10.0': {}
 
   '@protobufjs/aspromise@1.1.2': {}
@@ -1771,6 +1827,8 @@ snapshots:
       tslib: 2.9.1
 
   '@stablelib/base64@1.0.1': {}
+
+  '@standard-schema/spec@1.1.0': {}
 
   '@statsig/client-core@3.31.0': {}
 
@@ -1888,6 +1946,8 @@ snapshots:
       safe-buffer: 5.2.1
 
   ee-first@1.1.1: {}
+
+  effect@4.0.1: {}
 
   effect@4.1.5: {}
 

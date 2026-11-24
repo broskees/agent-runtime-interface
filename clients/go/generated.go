@@ -2652,6 +2652,45 @@ type CodexTransferredTokens struct {
 	ChatgptPlanType  *string `json:"chatgptPlanType,omitzero"`
 }
 
+// Open: any string is kept; Recognized reports whether this client knows it.
+type OpencodePermissionEffect string
+
+const (
+	OpencodePermissionEffectAllow OpencodePermissionEffect = "allow"
+	OpencodePermissionEffectDeny  OpencodePermissionEffect = "deny"
+	OpencodePermissionEffectAsk   OpencodePermissionEffect = "ask"
+)
+
+// Recognized reports whether this client knows the value.
+func (v OpencodePermissionEffect) Recognized() bool {
+	switch v {
+	case OpencodePermissionEffectAllow, OpencodePermissionEffectDeny, OpencodePermissionEffectAsk:
+		return true
+	}
+	return false
+}
+
+// One rule: `action` is the permission or tool name (1.x `permission`, for example `bash`, `edit`, `read` or `<server>_<tool>` for an MCP tool), `resource` the pattern it applies to (1.x `pattern`); both take `*` and `?` wildcards.
+type OpencodePermissionRule struct {
+	Action   string                   `json:"action"`
+	Resource string                   `json:"resource"`
+	Effect   OpencodePermissionEffect `json:"effect"`
+}
+
+type OpencodePermissionRulesGetParams struct {
+	ThreadID string `json:"threadId"`
+}
+
+type OpencodePermissionRulesSetParams struct {
+	ThreadID string                   `json:"threadId"`
+	Rules    []OpencodePermissionRule `json:"rules"`
+}
+
+// Result of `get` and `set`: the thread's session rules as the server holds them.
+type OpencodePermissionRulesResult struct {
+	Rules []OpencodePermissionRule `json:"rules"`
+}
+
 // The driver that produced the recording.
 type FixtureDriver struct {
 	Kind string `json:"kind"`

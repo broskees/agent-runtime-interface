@@ -2261,6 +2261,42 @@ pub struct CodexTransferredTokens {
     pub chatgpt_plan_type: Option<String>,
 }
 
+crate::open_enum! {
+    /// Open: a value this client does not know is kept as `Unrecognized`.
+    OpencodePermissionEffect {
+        Allow = "allow",
+        Deny = "deny",
+        Ask = "ask",
+    }
+}
+
+/// One rule: `action` is the permission or tool name (1.x `permission`, for example `bash`, `edit`, `read` or `<server>_<tool>` for an MCP tool), `resource` the pattern it applies to (1.x `pattern`); both take `*` and `?` wildcards.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpencodePermissionRule {
+    pub action: String,
+    pub resource: String,
+    pub effect: OpencodePermissionEffect,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpencodePermissionRulesGetParams {
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpencodePermissionRulesSetParams {
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    pub rules: Vec<OpencodePermissionRule>,
+}
+
+/// Result of `get` and `set`: the thread's session rules as the server holds them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpencodePermissionRulesResult {
+    pub rules: Vec<OpencodePermissionRule>,
+}
+
 /// The driver that produced the recording.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FixtureDriver {

@@ -14,7 +14,7 @@ describe("each scenario fails its deliberately broken variant", () => {
     test(`scenario ${scenario.id} (${scenario.key}) fails a driver that ${variant.bug}`, async () => {
       const harness = variant.harness();
       try {
-        const result = await runScenario(harness, variant.scenario);
+        const result = await runScenario(harness, variant.scenario, variant.timeoutMs);
         assert.equal(result.status, "failed", `expected the broken variant to fail; got ${result.status}: ${result.reason ?? ""}`);
         assert.match(result.reason ?? "", variant.reason);
       } finally {

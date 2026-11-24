@@ -140,6 +140,14 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
   readonly reason: RegExp;
   /** A harness with `cleanup` holds real files; the caller calls it when the scenario is done. */
   readonly harness: () => ConformanceHarness<ReferenceDriverConfig> & { cleanup?(): void };
+  /**
+   * The scenario's step budget in milliseconds, when the default 1500 ms of
+   * `runScenario` is too short. A harness whose agent is a real child
+   * process needs more on a loaded machine: there the step that starts the
+   * agent can outlast 1500 ms, and the scenario then fails on that timeout
+   * instead of on the bug the variant holds.
+   */
+  readonly timeoutMs?: number;
 }> = [
   {
     scenario: 1,
@@ -745,6 +753,8 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
     scenario: 12,
     bug: "writes a scratch file under the instance's tmpDir during probe() and deletes it before returning",
     reason: /probe\(\) wrote files under the instance's paths: .*\/tmp\/provider-probe\.json/,
+    // The agent runs as a real child process. The variant still has to fail with the reason above.
+    timeoutMs: 15_000,
     harness: () =>
       brokenChildHarness("probe scratch file", {
         instance: (instance, host) =>

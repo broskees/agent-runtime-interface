@@ -5,6 +5,7 @@
 // driver's docs and changelog exist.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -61,6 +62,15 @@ test("the driver declares the OpenCode versions it is tested against, which matc
   for (const name of ["@opencode-ai/sdk", "@opencode/client"]) {
     assert.ok(packageJson.peerDependencies[name] !== undefined, `${name} is a peer`);
     assert.equal(packageJson.peerDependenciesMeta[name]?.optional, true, `${name} is optional`);
+  }
+});
+
+test("each vendored OpenAPI document is the file its SOURCES.md names, by sha256", () => {
+  for (const version of ["1.19.6", "2.1.2"]) {
+    const directory = path.join(ROOT, "vendor-schemas/opencode", version);
+    const recorded = /sha256 `([0-9a-f]{64})`/.exec(fs.readFileSync(path.join(directory, "SOURCES.md"), "utf8"))?.[1];
+    const actual = createHash("sha256").update(fs.readFileSync(path.join(directory, "openapi.json"))).digest("hex");
+    assert.equal(actual, recorded, `vendor-schemas/opencode/${version}/openapi.json changed without SOURCES.md`);
   }
 });
 

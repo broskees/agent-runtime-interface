@@ -262,6 +262,108 @@ describe("MCP isolation on a shared server", () => {
     assert.equal(entries.has("shared-tools"), false, "the last holder took it off");
   });
 
+  for (const [generation, external] of [
+    [2, false],
+    [2, true],
+    [1, true],
+  ] as const) {
+    test(`${generation}.x${external ? " external" : ""}: a thread that drops a shared entry on resume is denied it from then on, and so are its subagents, while the other holder keeps it`, async () => {
+      const shared = { name: "shared-tools", transport: "http" as const, url: "http://127.0.0.1:1/shared" };
+      const rig = await rigFor(generation, external);
+      const one = await rig.open();
+      const two = await rig.open();
+      const a = await one.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch: { mcpServers: [shared] } });
+      const d = await two.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch: { mcpServers: [shared] } });
+      const server = liveServer(rig);
+      // A subagent of a's that OpenCode created while a still held the entry.
+      const started = await one.session.startTurn({ threadId: a.id, clientTurnKey: "delegate", intent: "start", content: [{ type: "text", text: "Delegate." }] });
+      assert.equal(started.status, "accepted");
+      if (started.status !== "accepted") return;
+      const native = await rig.nextTurn();
+      const child = await native.runSubagent("helper");
+      const childSession = rig.world.sessions.get(child.childId)!;
+      await rig.until(one.events, () => (rig.world.frames.some((frame) => frame.direction === "request" && frame.operation === "session.update" && JSON.stringify(frame.body).includes(child.childId)) ? true : undefined), "the driver to write the subagent's rules");
+      await child.finish();
+      await native.complete();
+      await rig.terminal(one.events, started.turnId);
+      const sessionA = () => rig.world.sessions.get(a.native.id!)!;
+      assert.deepEqual(reaches(rig, server, sessionA(), shared.name), { tool: true, list: true, read: true }, "while a holds the entry it reaches it");
+      assert.deepEqual(reaches(rig, server, childSession, shared.name), { tool: true, list: true, read: true });
+
+      // a resumes with a LaunchContext that no longer lists the entry; d still holds it.
+      await one.session.resumeThread({ native: { handle: a.handle! }, policy: policy(rig.cwd), launch: { appendSystemPrompt: ["No shared tools now."] } });
+      assert.ok(server.mcp.get(rig.cwd)!.has(shared.name), "the entry stays for d");
+      assert.deepEqual(reaches(rig, server, sessionA(), shared.name), { tool: false, list: false, read: false }, "a is denied what is now only d's entry");
+      assert.deepEqual(reaches(rig, server, childSession, shared.name), { tool: false, list: false, read: false }, "and so is a's subagent");
+      assert.deepEqual(reaches(rig, server, rig.world.sessions.get(d.native.id!)!, shared.name), { tool: true, list: true, read: true }, "d keeps it");
+      assert.deepEqual(reaches(rig, server, sessionA(), nameOf(a.id)), { tool: true, list: true, read: true }, "a keeps its own host entry");
+
+      // Asking for a different server under the name d holds is refused, and d's entry is unchanged.
+      const before = JSON.stringify(server.mcp.get(rig.cwd)!.get(shared.name));
+      await assert.rejects(one.session.resumeThread({ native: { handle: a.handle! }, policy: policy(rig.cwd), launch: { mcpServers: [{ ...shared, url: "http://127.0.0.1:1/other" }] } }), (error: unknown) => isAriError(error, "invalid_state") && (toCallError(error) as { reason?: string }).reason === "mcp_name_conflict");
+      assert.equal(JSON.stringify(server.mcp.get(rig.cwd)!.get(shared.name)), before);
+      assert.deepEqual(reaches(rig, server, sessionA(), shared.name), { tool: false, list: false, read: false }, "the refused resume opened nothing");
+    });
+  }
+
+  test("1.x external: a shared 1.x server keeps an always grant for every session of the directory, checked after their own rules, so a file read (always *) offers no always, and once or reject widens nothing", async () => {
+    const rig = await rigFor(1, true);
+    const one = await rig.open();
+    const two = await rig.open();
+    const a = await one.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const c = await two.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const server = liveServer(rig);
+    const both = () => [reaches(rig, server, rig.world.sessions.get(c.native.id!)!, nameOf(a.id)), reaches(rig, server, rig.world.sessions.get(a.native.id!)!, nameOf(c.id))];
+    assert.deepEqual(both(), [
+      { tool: false, list: false, read: false },
+      { tool: false, list: false, read: false },
+    ]);
+    const started = await one.session.startTurn({ threadId: a.id, clientTurnKey: "read", intent: "start", content: [{ type: "text", text: "Read the env file." }] });
+    assert.equal(started.status, "accepted");
+    if (started.status !== "accepted") return;
+    const native = await rig.nextTurn();
+    // 1.19.6 `tool/read.ts` asks `read` for the file with always ["*"]: a grant that would match mcp:<any server>:*.
+    const first = await native.requestPermission("read", ".env", {});
+    const read = await rig.until(one.events, () => pendingRequest(one.events), "the file read request");
+    assert.deepEqual(read.subject?.tool?.input, { resources: [".env"] });
+    assert.deepEqual(
+      read.options?.map((option) => option.optionId),
+      ["once", "reject"],
+      "no always that would reach another thread's entry",
+    );
+    await one.session.respond({ requestId: read.id, responseKey: "once", optionId: "once" });
+    assert.equal(await first.nextReply(), "once");
+    const second = await native.requestPermission("read", "secrets.env", {});
+    const again = await rig.until(one.events, () => {
+      for (const event of one.events) if (event.body.type === "request.upsert" && event.body.request.status === "pending" && event.body.request.id !== read.id) return event.body.request as Request;
+      return undefined;
+    }, "the second read request");
+    await one.session.respond({ requestId: again.id, responseKey: "reject", optionId: "reject" });
+    assert.equal(await second.nextReply(), "reject");
+    assert.deepEqual(both(), [
+      { tool: false, list: false, read: false },
+      { tool: false, list: false, read: false },
+    ], "after once and reject no thread reaches another's entry");
+    // An always whose patterns cannot match mcp:<server>:* is still offered: an external directory's glob.
+    const outside = await native.requestPermission("external_directory", "/elsewhere/*", { filepath: "/elsewhere/notes.md" });
+    const directory = await rig.until(one.events, () => {
+      for (const event of one.events) if (event.body.type === "request.upsert" && event.body.request.status === "pending" && event.body.request.id !== read.id && event.body.request.id !== again.id) return event.body.request as Request;
+      return undefined;
+    }, "the external directory request");
+    assert.deepEqual(
+      directory.options?.map((option) => option.optionId),
+      ["once", "always", "reject"],
+    );
+    await one.session.respond({ requestId: directory.id, responseKey: "always", optionId: "always" });
+    assert.equal(await outside.nextReply(), "always");
+    assert.deepEqual(both(), [
+      { tool: false, list: false, read: false },
+      { tool: false, list: false, read: false },
+    ], "that grant reaches no MCP entry");
+    await native.complete();
+    await rig.terminal(one.events, started.turnId);
+  });
+
   test("host names that OpenCode's tool names cannot keep apart are refused", async () => {
     const rig = await openOpencodeTestRig({ generation: 2, host: { mcpServerName: (threadId) => (threadId.endsWith("0") || threadId.endsWith("2") || threadId.endsWith("4") || threadId.endsWith("6") || threadId.endsWith("8") || threadId.endsWith("a") || threadId.endsWith("c") || threadId.endsWith("e") ? "tools" : "tools_more") } });
     rigs.push(rig);

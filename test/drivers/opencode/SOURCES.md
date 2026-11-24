@@ -60,6 +60,17 @@ Source read at the tags (sparse clones of https://github.com/anomalyco/opencode)
   (`permission/index.ts` `approved`); 2.x saves it for the project
   (`PermissionSaved.add` with `location.project.id`). Both reach every session
   there.
+- The patterns an "always" grants are the tool's, not the request's resource
+  (`FakeServer.alwaysFor`): `*` for file reads and edits, web fetches and
+  searches, globs, greps and MCP tools (1.x `tool/read.ts`, `tool/edit.ts`,
+  `tool/write.ts`, `tool/apply_patch.ts`, `tool/webfetch.ts`,
+  `tool/websearch.ts`, `tool/glob.ts`, `tool/grep.ts`, `session/tools.ts`;
+  2.x `core/src/file-access.ts`, `core/src/tool/plugin/*.ts`,
+  `core/src/tool/mcp.ts`); the glob for `external_directory`
+  (`tool/external-directory.ts`); for MCP resources 1.x `mcp:<server>:*`
+  (`session/tools.ts`), 2.x the server name to list and `<server>:*` to read
+  (`core/src/tool/plugin/mcp-resource.ts`). A shell command's is its arity
+  prefix and ` *` (1.x `tool/shell.ts`); the fake uses the first word.
 - MCP tools ask for the permission `<server>_<tool>`, both names sanitized to
   `[a-zA-Z0-9_-]` (1.x `mcp/catalog.ts` `toolName`, 2.x `core/src/tool/mcp.ts`
   `name`), with the pattern `*`.

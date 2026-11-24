@@ -903,8 +903,30 @@ export class FakeServer {
     return this.#askAs(session, run, new FakeApprovalHandle(approval), action, [target], always, metadata);
   }
 
+  /**
+   * The patterns an "always" reply grants for a request, as the pinned tool
+   * asks them. Both generations ask "*" for file reads and edits, web fetches
+   * and searches, globs, greps and MCP tools (1.19.6 `tool/read.ts`,
+   * `tool/edit.ts`, `tool/write.ts`, `tool/apply_patch.ts`, `tool/webfetch.ts`,
+   * `tool/websearch.ts`, `tool/glob.ts`, `tool/grep.ts`,
+   * `session/tools.ts`; 2.1.2 `core/src/file-access.ts` and
+   * `core/src/tool/plugin/*.ts`, `core/src/tool/mcp.ts`), the directory glob
+   * for `external_directory`, and the server for MCP resources: 1.x
+   * `mcp:<server>:*`, 2.x the server name to list and `<server>:*` to read.
+   */
+  alwaysFor(action: string, resource: string): string[] {
+    const v1 = this.world.generation === 1;
+    if (action === "read" && v1 && resource.startsWith("mcp:")) return [`mcp:${resource.split(":")[1] ?? ""}:*`];
+    if (action === "opencode_list_mcp_resources" && !v1) return [resource];
+    if (action === "opencode_read_mcp_resource" && !v1) return [`${resource.split(":")[0] ?? ""}:*`];
+    if (action === "external_directory") return [resource];
+    if (["read", "edit", "webfetch", "websearch", "glob", "grep"].includes(action) || /^[a-zA-Z0-9-]+_[a-zA-Z0-9_-]+$/.test(action)) return ["*"];
+    this.world.violation(`the fake does not know which always patterns OpenCode ${this.world.version} asks for ${action}`);
+    return [resource];
+  }
+
   askPermission(run: FakeRun, action: string, resource: string, metadata: { [key: string]: string }): FakeApprovalHandle {
-    return this.#askAs(run.session, run, new FakeApprovalHandle({ kind: "command", options: [] }), action, [resource], [resource], metadata);
+    return this.#askAs(run.session, run, new FakeApprovalHandle({ kind: "command", options: [] }), action, [resource], this.alwaysFor(action, resource), metadata);
   }
 
   question(run: FakeRun, question: { readonly text: string; readonly options: readonly string[] }): { answers(): Promise<unknown> } {
@@ -965,7 +987,7 @@ export class FakeServer {
 
   askPermissionFrom(sessionId: string, run: FakeRun, action: string, resource: string, metadata: { [key: string]: string }): FakeApprovalHandle {
     const session = this.world.sessions.get(sessionId)!;
-    return this.#askAs(session, run, new FakeApprovalHandle({ kind: "command", options: [] }), action, [resource], [resource], metadata);
+    return this.#askAs(session, run, new FakeApprovalHandle({ kind: "command", options: [] }), action, [resource], this.alwaysFor(action, resource), metadata);
   }
 
   #reply(id: string, reply: "once" | "always" | "reject"): boolean {

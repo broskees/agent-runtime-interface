@@ -187,6 +187,22 @@ describe("packing as published", () => {
     assert.deepEqual([...packed.files], contents.files);
   });
 
+  test("check-package.ts --tarball passes the packed tarball and fails one packed straight from the repository", () => {
+    requireBuild();
+    const checkScript = path.join(REPO_ROOT, "scripts", "check-package.ts");
+    const { tarball } = packPackage(REPO_ROOT, tempDir("ari-tarball-check-"));
+    const passed = spawnSync(process.execPath, [checkScript, "--tarball", tarball], { encoding: "utf8" });
+    assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+    assert.match(passed.stdout, /the published package\.json sends every export condition and the bin to a shipped file/);
+    // Skipping the prepack refusal ships the repository's own package.json, development condition included.
+    const rawDirectory = tempDir("ari-raw-pack-");
+    const output = execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", rawDirectory], { cwd: REPO_ROOT, encoding: "utf8" });
+    const rawTarball = path.join(rawDirectory, (JSON.parse(output) as Array<{ filename: string }>)[0]!.filename);
+    const failed = spawnSync(process.execPath, [checkScript, "--tarball", rawTarball], { encoding: "utf8" });
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.match(failed.stderr, /exports\["\."\] condition development sends \.\/src\/index\.ts, which the tarball does not ship/);
+  });
+
   test("npm pack in the repository itself is refused by the prepack script", () => {
     const destination = tempDir("ari-refused-pack-");
     const result = spawnSync("npm", ["pack", "--pack-destination", destination], { cwd: REPO_ROOT, encoding: "utf8" });

@@ -17,8 +17,8 @@ npm install ari
 ```
 
 - Node 22.16 or later for the Node subpaths and the drivers. The browser-safe
-  subpaths (see the table) run on any modern JavaScript runtime; CI also runs
-  the suite with Bun.
+  subpaths (see the table) run on any modern JavaScript runtime. CI runs the
+  conformance kit and both quickstarts below under Bun as well as Node.
 - TypeScript consumers need `moduleResolution` set to `node16`, `nodenext` or
   `bundler`.
 - `dependencies` is empty. Vendor SDKs and `effect` are optional peers: install

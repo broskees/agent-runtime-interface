@@ -12,9 +12,12 @@
 # The Node legs run the gate on each supported Node major with the Bun
 # release the repository is developed with. The Bun leg runs the same gate
 # with the newest Bun release, so a Bun change shows up without moving the
-# pinned toolchain. The test suite itself uses Node's test runner, which Bun
-# does not implement, so Bun runs the package through those consumer tests
-# and the compiled binary rather than through `node --test`.
+# pinned toolchain. The test suite runs on Node's test runner, which Bun
+# implements only in part (the conformance kit's node:test adapter fails
+# under it), so in every leg Bun runs the package through the consumer tests
+# (the installed ari, ari/host and ari/conformance, the conformance suite
+# against the reference driver, both README quickstarts) and through the
+# compiled ari-driver.
 
 name: CI
 

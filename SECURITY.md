@@ -59,8 +59,8 @@ These rules protect users from a compromised release:
 - **The tested tarball is the published tarball.** The release job runs the
   full gate, packs the package once with `scripts/pack.ts`, checks that
   tarball's own `package.json`, and publishes that file.
-- **Pinned actions.** Every third-party action in the workflows is pinned to a
-  full commit SHA.
+- **Pinned actions.** Every action the workflows use is pinned to a full
+  commit SHA.
 - **Release binaries carry checksums.** The standalone `ari-driver`
   executables are attached to the GitHub release with a `SHA256SUMS` file.
 - **Signed tags and a changelog.** Each release is cut from a signed tag and

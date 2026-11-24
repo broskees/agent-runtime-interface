@@ -64,6 +64,56 @@ export function evaluate(action: string, resource: string, ...rulesets: Rule[][]
   return rulesets.flat().findLast((rule) => wildcard(action, rule.action) && wildcard(resource, rule.resource))?.effect ?? "ask";
 }
 
+/**
+ * The rules of OpenCode 1.19.6's `general` subagent (1.19.6 `agent/agent.ts`:
+ * the defaults, then `todowrite: deny`; the external-directory allow list of
+ * OpenCode's own directories is left out). A 1.x child session is evaluated
+ * with these before its own rules.
+ */
+export const V1_GENERAL_AGENT_RULES: readonly Rule[] = [
+  { action: "*", resource: "*", effect: "allow" },
+  { action: "doom_loop", resource: "*", effect: "ask" },
+  { action: "external_directory", resource: "*", effect: "ask" },
+  { action: "question", resource: "*", effect: "deny" },
+  { action: "plan_enter", resource: "*", effect: "deny" },
+  { action: "plan_exit", resource: "*", effect: "deny" },
+  { action: "read", resource: "*", effect: "allow" },
+  { action: "read", resource: "*.env", effect: "ask" },
+  { action: "read", resource: "*.env.*", effect: "ask" },
+  { action: "read", resource: "*.env.example", effect: "allow" },
+  { action: "todowrite", resource: "*", effect: "deny" },
+];
+
+/**
+ * A 1.x child session's own rules (1.19.6 `tool/task.ts` and
+ * `agent/subagent-permissions.ts`): the parent session's deny and
+ * `external_directory` rules, then a deny of `task` for a subagent whose agent
+ * has no `task` rule. Nothing else of the parent's reaches the child.
+ */
+export function v1ChildRules(parent: readonly Rule[]): Rule[] {
+  return [...parent.filter((rule) => rule.action === "external_directory" || rule.effect === "deny").map((rule) => ({ ...rule })), { action: "task", resource: "*", effect: "deny" }];
+}
+
+/** A 2.x message cursor (2.1.2 `server/src/handlers/message.ts`): the anchor message, the order, and the direction, as base64url JSON. */
+interface MessageCursor {
+  readonly id: string;
+  readonly order: "asc" | "desc";
+  readonly direction: "previous" | "next";
+}
+
+function encodeCursor(cursor: MessageCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeCursor(input: string): MessageCursor {
+  const value = JSON.parse(Buffer.from(input, "base64url").toString("utf8")) as { id?: unknown; order?: unknown; direction?: unknown };
+  if (typeof value.id !== "string" || (value.order !== "asc" && value.order !== "desc") || (value.direction !== "previous" && value.direction !== "next")) throw new Error("not a cursor");
+  return { id: value.id, order: value.order, direction: value.direction };
+}
+
+/** The 2.x default page of `GET /api/session/{id}/message` (2.1.2 `DefaultMessagesLimit`). */
+export const V2_DEFAULT_MESSAGES_LIMIT = 50;
+
 interface FakePart {
   readonly id: string;
   readonly kind: "text" | "reasoning";
@@ -113,6 +163,16 @@ export interface FakeSession {
   model: { providerID: string; id: string };
   agent: string;
   readonly forkedFrom?: string;
+  /** 2.x: where a fork's copy of its source ends (2.1.2 `SessionFork.Boundary`). */
+  readonly forkBoundary?: { readonly type: "before" | "through"; readonly messageID: string };
+}
+
+/** What a 2.x `permission.evaluate` plugin hook sees (2.1.2 `core/src/permission.ts` `evaluateInput`); it may change the effect. */
+export interface PermissionHookInput {
+  readonly sessionId: string;
+  readonly action: string;
+  readonly resources: readonly string[];
+  readonly effect: "allow" | "ask";
 }
 
 export interface Frame {
@@ -136,6 +196,8 @@ export class FakeWorld {
   readonly turns = new AsyncQueue<FakeRun>();
   /** 2.x saved "always" grants, by directory (the project), as OpenCode keeps them in its database. */
   readonly saved = new Map<string, Rule[]>();
+  /** A 2.x plugin's `permission.evaluate` hook, as a user's OpenCode config may install one; undefined keeps the effect. */
+  permissionHook: ((input: PermissionHookInput) => "allow" | "ask" | "deny" | undefined) | undefined;
   /** Every `opencode` spawn: its arguments and environment. */
   readonly spawns: Array<{ readonly args: readonly string[]; readonly env: { readonly [name: string]: string }; readonly cwd?: string }> = [];
   #counter = 0;
@@ -437,6 +499,11 @@ export class FakeRun implements NativeTurn {
     return this.server.askFrom(childSessionId, this, approval);
   }
 
+  /** Any OpenCode permission request (`read`, `webfetch`, ...) from a subagent's own session. */
+  async requestPermissionFrom(childSessionId: string, action: string, resource: string, metadata: { [key: string]: string }): Promise<NativeApprovalHandle> {
+    return this.server.askPermissionFrom(childSessionId, this, action, resource, metadata);
+  }
+
   nextSteer(): Promise<string> {
     return this.#steers.next().then((next) => {
       if (next.done === true) throw new Error("the run ended");
@@ -534,7 +601,12 @@ export class FakeServer {
   readonly number: number;
   readonly password: string | undefined;
   readonly known = new Set<string>();
+  /** The MCP entries each directory's instance (1.x) or location (2.x) serves, by name. */
   readonly mcp = new Map<string, Map<string, Json>>();
+  /** 1.x: every name ever added in a directory. Disconnecting keeps the config (1.19.6 `mcp/index.ts` `disconnect`). */
+  readonly #mcpConfigured = new Map<string, Set<string>>();
+  /** Operations whose requests the server drops without answering, as a server that went away would. */
+  readonly dropRequests = new Set<string>();
   readonly #subscribers = new Set<Subscriber>();
   readonly #permissions = new Map<string, PendingPermission>();
   readonly #questions = new Map<string, PendingQuestion>();
@@ -606,7 +678,7 @@ export class FakeServer {
     return {
       id: session.id,
       ...(session.parentId === undefined ? {} : { parentID: session.parentId }),
-      ...(session.forkedFrom === undefined ? {} : { fork: { sessionID: session.forkedFrom, boundary: { type: "before", messageID: session.messages[0]?.id ?? "msg_none" } } }),
+      ...(session.forkedFrom === undefined || session.forkBoundary === undefined ? {} : { fork: { sessionID: session.forkedFrom, boundary: { ...session.forkBoundary } } }),
       projectID: "global",
       agent: session.agent,
       model: { ...session.model },
@@ -700,7 +772,7 @@ export class FakeServer {
       id: this.world.nextId("evt"),
       created,
       type,
-      ...(durable ? { durable: { aggregateID: session.id, seq: this.#seq(session.id), version: type === "session.tool.success" || type === "session.tool.failed" ? 2 : 1 } } : {}),
+      ...(durable ? { durable: { aggregateID: session.id, seq: this.#seq(session.id), version: type === "session.tool.success" || type === "session.tool.failed" || type === "session.forked" ? 2 : 1 } } : {}),
       location: { directory: session.directory },
       data,
     };
@@ -771,37 +843,68 @@ export class FakeServer {
     for (const [id, pending] of this.#questions) if (pending.run === run) this.#questions.delete(id);
   }
 
+  /**
+   * How this server decides a permission request of `session`, in OpenCode's
+   * own order. 1.x (1.19.6 `permission/index.ts` `ask`): for each resource,
+   * the agent's rules, the session's, then the instance's in-memory "always"
+   * grants, the last match winning; a deny anywhere denies, an ask anywhere
+   * asks. 2.x (2.1.2 `core/src/permission.ts` `evaluateInput`): a resource the
+   * session's rules deny denies before any saved grant is read; otherwise the
+   * session's rules and the project's saved grants, then the plugin hook.
+   * The fake models agent rules only for a 1.x child session (the `general`
+   * subagent's); everywhere else no rule matching means ask.
+   */
+  decide(session: FakeSession, action: string, resources: readonly string[]): Rule["effect"] {
+    if (this.world.generation === 1) {
+      const agent = session.parentId === undefined ? [] : [...V1_GENERAL_AGENT_RULES];
+      const granted = this.#approved.get(session.directory) ?? [];
+      const effects = resources.map((resource) => evaluate(action, resource, agent, session.rules, granted));
+      return effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow";
+    }
+    if (resources.some((resource) => evaluate(action, resource, session.rules) === "deny")) return "deny";
+    const saved = this.world.saved.get(session.directory) ?? [];
+    const effect = resources.map((resource) => evaluate(action, resource, session.rules, saved)).includes("ask") ? "ask" : "allow";
+    return this.world.permissionHook?.({ sessionId: session.id, action, resources, effect }) ?? effect;
+  }
+
+  /**
+   * 1.x: whether the model of `session` is shown the tool asking `permission`
+   * at all. 1.19.6 leaves out a tool whose last matching agent or session rule
+   * denies every resource (`permission/index.ts` `disabled`, used by
+   * `session/llm/request.ts` and code mode); "always" grants play no part.
+   */
+  v1Hidden(session: FakeSession, permission: string): boolean {
+    const agent = session.parentId === undefined ? [] : [...V1_GENERAL_AGENT_RULES];
+    const rule = [...agent, ...session.rules].findLast((candidate) => wildcard(permission, candidate.action));
+    return rule?.resource === "*" && rule.effect === "deny";
+  }
+
+  /** Asks the host, as OpenCode does when `decide` says ask; the puppet asking for anything else is a mistake in the test. */
+  #askAs(session: FakeSession, run: FakeRun, handle: FakeApprovalHandle, action: string, resources: string[], always: string[], metadata: { [key: string]: string }): FakeApprovalHandle {
+    const effect = this.decide(session, action, resources);
+    if (effect !== "ask") {
+      this.world.violation(`the puppet asked for an approval OpenCode's rules answer with ${effect}: ${action} ${resources.join(", ")} in session ${session.id}`);
+      return handle;
+    }
+    const id = this.world.nextId("per");
+    this.#permissions.set(id, { id, sessionId: session.id, action, resources, always, run, handle });
+    if (this.world.generation === 1) this.publishV1(session, "permission.asked", { id, sessionID: session.id, permission: action, patterns: resources, metadata, always });
+    else this.publishV2(session, "permission.asked", { id, sessionID: session.id, action, resources, save: always, metadata });
+    return handle;
+  }
+
   ask(run: FakeRun, approval: NativeApproval): FakeApprovalHandle {
     const session = run.session;
-    const handle = new FakeApprovalHandle(approval);
     const v1 = this.world.generation === 1;
     const action = approval.kind === "command" ? (v1 ? "bash" : "shell") : "edit";
     const target = approval.kind === "command" ? (approval.command ?? []).join(" ") : path.join(session.directory, approval.path ?? "");
     const always = approval.kind === "command" ? [`${(approval.command ?? [])[0] ?? ""} *`] : [target];
-    // The session's rules decide first; 2.x checks a deny before saved grants (`evaluateInput`), 1.x adds its in-memory grants last.
-    const granted = v1 ? (this.#approved.get(session.directory) ?? []) : (this.world.saved.get(session.directory) ?? []);
-    const denied = !v1 && evaluate(action, target, session.rules) === "deny";
-    const effect = denied ? "deny" : evaluate(action, target, session.rules, granted);
-    if (effect !== "ask") {
-      this.world.violation(`the puppet asked for an approval the session's rules answer with ${effect}: ${action} ${target}`);
-      return handle;
-    }
-    const id = this.world.nextId("per");
-    const metadata = approval.kind === "command" ? { command: target } : { filepath: target };
-    this.#permissions.set(id, { id, sessionId: session.id, action, resources: [target], always, run, handle });
-    if (v1) this.publishV1(session, "permission.asked", { id, sessionID: session.id, permission: action, patterns: [target], metadata, always });
-    else this.publishV2(session, "permission.asked", { id, sessionID: session.id, action, resources: [target], save: always, metadata });
-    return handle;
+    const metadata: { [key: string]: string } = approval.kind === "command" ? { command: target } : { filepath: target };
+    return this.#askAs(session, run, new FakeApprovalHandle(approval), action, [target], always, metadata);
   }
 
   askPermission(run: FakeRun, action: string, resource: string, metadata: { [key: string]: string }): FakeApprovalHandle {
-    const session = run.session;
-    const handle = new FakeApprovalHandle({ kind: "command", options: [] });
-    const id = this.world.nextId("per");
-    this.#permissions.set(id, { id, sessionId: session.id, action, resources: [resource], always: [resource], run, handle });
-    if (this.world.generation === 1) this.publishV1(session, "permission.asked", { id, sessionID: session.id, permission: action, patterns: [resource], metadata, always: [resource] });
-    else this.publishV2(session, "permission.asked", { id, sessionID: session.id, action, resources: [resource], save: [resource], metadata });
-    return handle;
+    return this.#askAs(run.session, run, new FakeApprovalHandle({ kind: "command", options: [] }), action, [resource], [resource], metadata);
   }
 
   question(run: FakeRun, question: { readonly text: string; readonly options: readonly string[] }): { answers(): Promise<unknown> } {
@@ -829,14 +932,16 @@ export class FakeServer {
   async subagent(run: FakeRun, name: string): Promise<{ readonly childId: string; finish(): Promise<void> }> {
     const parent = run.session;
     const now = Date.now();
-    const child: FakeSession = { id: this.world.nextId("ses"), directory: parent.directory, created: now, updated: now, title: name, parentId: parent.id, rules: [], messages: [], compactions: 0, instructions: new Map(), model: { ...parent.model }, agent: "general" };
+    // The child's own rules, fixed when OpenCode creates it: 2.x copies the parent's (2.1.2 `core/src/session.ts` `create`), 1.x keeps only its denies and directory rules (1.19.6 `tool/task.ts`).
+    const rules = this.world.generation === 1 ? v1ChildRules(parent.rules) : parent.rules.map((rule) => ({ ...rule }));
+    const child: FakeSession = { id: this.world.nextId("ses"), directory: parent.directory, created: now, updated: now, title: name, parentId: parent.id, rules, messages: [], compactions: 0, instructions: new Map(), model: { ...parent.model }, agent: "general" };
     this.world.sessions.set(child.id, child);
     this.known.add(child.id);
     if (this.world.generation === 1) {
       this.publishV1(child, "session.created", { sessionID: child.id, info: this.v1Session(child) });
       this.publishV1(child, "session.status", { sessionID: child.id, status: { type: "busy" } });
     } else {
-      this.publishV2(child, "session.created", { sessionID: child.id, projectID: "global", location: { directory: child.directory }, parentID: parent.id, slug: child.id.slice(4, 12), title: name, version: this.world.version }, true);
+      this.publishV2(child, "session.created", { sessionID: child.id, projectID: "global", location: { directory: child.directory }, parentID: parent.id, slug: child.id.slice(4, 12), title: name, permissions: rules.map((rule) => ({ ...rule })), version: this.world.version }, true);
       this.publishV2(child, "session.execution.started", { sessionID: child.id }, true);
     }
     return {
@@ -853,15 +958,14 @@ export class FakeServer {
   /** A subagent's permission request (it comes from the child session). */
   askFrom(sessionId: string, run: FakeRun, approval: NativeApproval): FakeApprovalHandle {
     const session = this.world.sessions.get(sessionId)!;
-    const handle = new FakeApprovalHandle(approval);
-    const id = this.world.nextId("per");
-    const v1 = this.world.generation === 1;
-    const action = v1 ? "bash" : "shell";
+    const action = this.world.generation === 1 ? "bash" : "shell";
     const target = (approval.command ?? ["true"]).join(" ");
-    this.#permissions.set(id, { id, sessionId, action, resources: [target], always: [target], run, handle });
-    if (v1) this.publishV1(session, "permission.asked", { id, sessionID: sessionId, permission: action, patterns: [target], metadata: { command: target }, always: [target] });
-    else this.publishV2(session, "permission.asked", { id, sessionID: sessionId, action, resources: [target], save: [target], metadata: { command: target } });
-    return handle;
+    return this.#askAs(session, run, new FakeApprovalHandle(approval), action, [target], [target], { command: target });
+  }
+
+  askPermissionFrom(sessionId: string, run: FakeRun, action: string, resource: string, metadata: { [key: string]: string }): FakeApprovalHandle {
+    const session = this.world.sessions.get(sessionId)!;
+    return this.#askAs(session, run, new FakeApprovalHandle({ kind: "command", options: [] }), action, [resource], [resource], metadata);
   }
 
   #reply(id: string, reply: "once" | "always" | "reject"): boolean {
@@ -922,6 +1026,10 @@ export class FakeServer {
       response.writeHead(404).end();
       return;
     }
+    if (this.dropRequests.has(matched.operationId)) {
+      request.socket.destroy();
+      return;
+    }
     if (matched.operationId === "event.subscribe" || matched.operationId === "v2.event.subscribe") {
       this.#subscribe(url, response);
       return;
@@ -966,11 +1074,23 @@ export class FakeServer {
     return session;
   }
 
-  /** A fork copies the messages before the boundary into a new session (1.x `Session.fork`, 2.x `session.fork`). */
-  #fork(source: FakeSession, before: string | undefined): FakeSession {
+  /**
+   * A fork copies the messages before the boundary into a new session. 1.x
+   * (1.19.6 `Session.fork`) copies everything when the message is unknown and
+   * forks an empty session too. 2.x (2.1.2 `core/src/session.ts` `fork`,
+   * `server/src/handlers/session.ts`) refuses an unknown `before` as
+   * `MessageNotFoundError` and a session without messages as `InvalidRequestError`
+   * `empty_session`, and the fork takes the parent's rules and instruction entries.
+   */
+  #fork(source: FakeSession, before: string | undefined): FakeSession | { status: number; body: unknown } {
     const index = before === undefined ? -1 : source.messages.findIndex((message) => message.id === before);
+    const v2 = this.world.generation === 2;
+    if (v2 && before !== undefined && index === -1) return { status: 404, body: { _tag: "MessageNotFoundError", sessionID: source.id, messageID: before, message: `Message not found: ${before}` } };
+    if (v2 && source.messages.length === 0) return { status: 400, body: { _tag: "InvalidRequestError", message: `Cannot fork empty session: ${source.id}`, kind: "empty_session" } };
     const kept = index < 0 ? source.messages : source.messages.slice(0, index);
-    const fork = this.#createSession(source.directory, `${source.title} (fork #1)`, this.world.generation === 2 ? source.rules.map((rule) => ({ ...rule })) : [], { forkedFrom: source.id, model: { ...source.model }, agent: source.agent });
+    const boundary = v2 ? { forkBoundary: before === undefined ? { type: "through" as const, messageID: source.messages.at(-1)!.id } : { type: "before" as const, messageID: before } } : {};
+    const fork = this.#createSession(source.directory, `${source.title} (fork #1)`, v2 ? source.rules.map((rule) => ({ ...rule })) : [], { forkedFrom: source.id, model: { ...source.model }, agent: source.agent, ...boundary });
+    if (v2) for (const [key, value] of source.instructions) fork.instructions.set(key, value);
     const ids = new Map<string, string>();
     for (const message of kept) {
       const id = this.world.nextId("msg");
@@ -1009,6 +1129,9 @@ export class FakeServer {
       case "session.messages": {
         const session = this.#session(sessionId!);
         if (session === undefined) return this.#notFound(`Session ${sessionId}`);
+        // Without `limit`, 1.19.6 pages through the whole history and answers it oldest first (`session/session.ts` `messages`).
+        // With `limit` it answers one newest-first page and a `Link` header, which the fake does not serve.
+        if (url.searchParams.has("limit") || url.searchParams.has("before")) this.world.violation("the fake serves the 1.x message list only without limit and before");
         return { status: 200, body: session.messages.map((message) => ({ info: this.v1Message(session, message), parts: this.v1Parts(session, message) })) satisfies V1.SessionMessagesResponses[200] };
       }
       case "session.prompt_async": {
@@ -1035,6 +1158,7 @@ export class FakeServer {
         const source = this.#session(sessionId!);
         if (source === undefined) return this.#notFound(`Session ${sessionId}`);
         const fork = this.#fork(source, typeof body?.["messageID"] === "string" ? body["messageID"] : undefined);
+        if (!("id" in fork)) return fork;
         this.publishV1(fork, "session.created", { sessionID: fork.id, info: this.v1Session(fork) });
         return { status: 200, body: this.v1Session(fork) };
       }
@@ -1077,12 +1201,17 @@ export class FakeServer {
       }
       case "mcp.add": {
         const entries = this.mcp.get(directory) ?? new Map<string, Json>();
-        entries.set(String(body?.["name"]), (body?.["config"] ?? {}) as Json);
+        const name = String(body?.["name"]);
+        entries.set(name, (body?.["config"] ?? {}) as Json);
         this.mcp.set(directory, entries);
+        this.#mcpConfigured.set(directory, new Set([...(this.#mcpConfigured.get(directory) ?? []), name]));
         return { status: 200, body: Object.fromEntries([...entries.keys()].map((name) => [name, { status: "connected" as const }])) satisfies V1.McpAddResponses[200] };
       }
       case "mcp.disconnect": {
-        this.mcp.get(directory)?.delete(matched.pathParams["name"]!);
+        // 1.19.6 `MCP.disconnect` needs a configured server; it closes the client and keeps the config.
+        const name = matched.pathParams["name"]!;
+        if (!(this.#mcpConfigured.get(directory)?.has(name) ?? false)) return { status: 404, body: { _tag: "McpServerNotFoundError", name, message: `MCP server not found: ${name}` } };
+        this.mcp.get(directory)?.delete(name);
         return { status: 200, body: true };
       }
       case "config.providers":
@@ -1110,6 +1239,54 @@ export class FakeServer {
       variants: {},
     });
     return { id: "fake", name: "Fake", source: "custom", env: [], options: {}, models: { "fake-small": model("fake-small", "Fake Small", 128000), "fake-large": model("fake-large", "Fake Large", 200000) } };
+  }
+
+  /**
+   * One page of a 2.x session's messages, as 2.1.2 serves it
+   * (`server/src/handlers/message.ts`, `core/src/session/store.ts` `messages`):
+   * newest first unless `order` says otherwise, 50 messages unless `limit`
+   * says otherwise, and a `next` cursor after the last message of every
+   * non-empty page, so the page after the oldest message is empty. A cursor
+   * keeps its page's order and may not be combined with `order`; one whose
+   * message is gone yields an empty page. The fake's messages are in the order
+   * OpenCode stored them, its `seq`.
+   */
+  #messagePage(session: FakeSession, url: URL): { status: number; body: unknown } {
+    const cursorText = url.searchParams.get("cursor") ?? undefined;
+    const orderText = url.searchParams.get("order") ?? undefined;
+    if (cursorText !== undefined && orderText !== undefined) return { status: 400, body: { _tag: "InvalidCursorError", message: "Cursor cannot be combined with order" } };
+    let cursor: MessageCursor | undefined;
+    if (cursorText !== undefined) {
+      try {
+        cursor = decodeCursor(cursorText);
+      } catch {
+        return { status: 400, body: { _tag: "InvalidCursorError", message: "Invalid cursor" } };
+      }
+    }
+    if (orderText !== undefined && orderText !== "asc" && orderText !== "desc") return { status: 400, body: { _tag: "InvalidRequestError", message: `order is asc or desc, got ${orderText}`, field: "order" } };
+    const limitText = url.searchParams.get("limit");
+    const limit = limitText === null ? V2_DEFAULT_MESSAGES_LIMIT : Number(limitText);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) return { status: 400, body: { _tag: "InvalidRequestError", message: `limit is an integer from 1 to 200, got ${String(limitText)}`, field: "limit" } };
+    const type = url.searchParams.get("type") ?? undefined;
+    const order: "asc" | "desc" = cursor?.order ?? (orderText as "asc" | "desc" | undefined) ?? "desc";
+    const direction = cursor?.direction ?? "next";
+    const walk = direction === "previous" ? (order === "asc" ? "desc" : "asc") : order;
+    const seqs = session.messages.map((message, seq) => ({ message, seq }));
+    const anchor = cursor === undefined ? undefined : seqs.find((entry) => entry.message.id === cursor.id);
+    let rows: typeof seqs = [];
+    if (cursor === undefined || anchor !== undefined) {
+      rows = seqs.filter((entry) => (type === undefined || entry.message.role === type) && (anchor === undefined || (walk === "asc" ? entry.seq > anchor.seq : entry.seq < anchor.seq)));
+      if (walk === "desc") rows.reverse();
+      rows = rows.slice(0, limit);
+      if (direction === "previous") rows.reverse();
+    }
+    const first = rows[0]?.message;
+    const last = rows.at(-1)?.message;
+    const pageCursor = {
+      ...(first === undefined ? {} : { previous: encodeCursor({ id: first.id, order, direction: "previous" }) }),
+      ...(last === undefined ? {} : { next: encodeCursor({ id: last.id, order, direction: "next" }) }),
+    };
+    return { status: 200, body: { data: rows.map((entry) => this.v2Message(session, entry.message)), cursor: pageCursor } satisfies V2.MessageListOutput };
   }
 
   #routeV2(matched: MatchedOperation, url: URL, body: Json | undefined): { status: number; body?: unknown; after?: () => void } {
@@ -1177,7 +1354,9 @@ export class FakeServer {
         const source = this.#session(sessionId!);
         if (source === undefined) return this.#notFound(sessionId!);
         const fork = this.#fork(source, typeof body?.["before"] === "string" ? body["before"] : undefined);
-        this.publishV2(fork, "session.created", { sessionID: fork.id, projectID: "global", location: { directory: fork.directory }, slug: fork.id.slice(4, 12), title: fork.title, permissions: fork.rules, version: this.world.version }, true);
+        if (!("id" in fork)) return fork;
+        // A fork is published as `session.forked`, not `session.created` (2.1.2 `schema/src/session-event.ts` `Forked`).
+        this.publishV2(fork, "session.forked", { sessionID: fork.id, parentID: source.id, boundary: { ...fork.forkBoundary! } }, true);
         return { status: 200, body: { data: this.v2Session(fork) } };
       }
       case "session.compact": {
@@ -1242,7 +1421,7 @@ export class FakeServer {
       case "session.message.list": {
         const session = this.#session(sessionId!);
         if (session === undefined) return this.#notFound(sessionId!);
-        return { status: 200, body: { data: session.messages.map((message) => this.v2Message(session, message)), cursor: {} } satisfies V2.MessageListOutput };
+        return this.#messagePage(session, url);
       }
       case "session.permission.reply": {
         const decision = body?.["decision"];
@@ -1254,8 +1433,10 @@ export class FakeServer {
       case "experimental.mcp.remove": {
         const directory = url.searchParams.get("location[directory]") ?? process.cwd();
         const entries = this.mcp.get(directory) ?? new Map<string, Json>();
-        if (matched.operationId === "experimental.mcp.add") entries.set(matched.pathParams["server"]!, (body?.["config"] ?? {}) as Json);
-        else entries.delete(matched.pathParams["server"]!);
+        const server = matched.pathParams["server"]!;
+        // `MCP.add` replaces any entry of that name in the location; `MCP.remove` needs one (2.1.2 `core/src/mcp/index.ts`).
+        if (matched.operationId === "experimental.mcp.add") entries.set(server, (body?.["config"] ?? {}) as Json);
+        else if (!entries.delete(server)) return { status: 404, body: { _tag: "McpServerNotFoundError", server, message: `MCP server not found: ${server}` } };
         this.mcp.set(directory, entries);
         return { status: 204 };
       }

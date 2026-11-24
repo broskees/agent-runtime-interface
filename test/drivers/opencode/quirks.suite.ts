@@ -14,7 +14,7 @@ import { fullAccessAutoReply } from "../../../src/host/approval-reviewer.ts";
 import { isAriError, toCallError } from "../../../src/index.ts";
 import type { AriEvent, Request, Session, Subagent } from "../../../src/index.ts";
 import { evaluate } from "./fake-opencode.ts";
-import type { Generation } from "./fake-opencode.ts";
+import type { FakeServer, FakeSession, Generation } from "./fake-opencode.ts";
 import { openOpencodeTestRig, policy } from "./rig.ts";
 import type { OpencodeTestRig } from "./rig.ts";
 
@@ -32,6 +32,39 @@ async function rigFor(generation: Generation, external = false): Promise<Opencod
 function pendingRequest(events: readonly AriEvent[]): Request | undefined {
   for (const event of events) if (event.body.type === "request.upsert" && event.body.request.status === "pending" && event.body.request.kind !== undefined) return event.body.request as Request;
   return undefined;
+}
+
+const nameOf = (threadId: string): string => `host-tools-${threadId}`;
+
+/** The live server that holds the rig's directory's MCP entries. */
+function liveServer(rig: OpencodeTestRig): FakeServer {
+  const alive = [...rig.world.servers].filter((server) => server.alive);
+  return alive.find((server) => server.mcp.has(rig.cwd)) ?? alive[0]!;
+}
+
+/**
+ * Whether OpenCode lets `session` reach the MCP entry `name`, by OpenCode's
+ * own rule order (`FakeServer.decide`): call one of its tools, list its
+ * resources, read one. 1.x asks `read` for `mcp:<server>:*` to list and
+ * `mcp:<server>:<uri>` to read (1.19.6 `session/tools.ts`) and hides a tool
+ * that a rule for every resource denies; 2.x asks
+ * `opencode_list_mcp_resources` for the server and `opencode_read_mcp_resource`
+ * for `<server>:<uri>` (2.1.2 `core/src/tool/plugin/mcp-resource.ts`).
+ */
+function reaches(rig: OpencodeTestRig, server: FakeServer, session: FakeSession, name: string): { tool: boolean; list: boolean; read: boolean } {
+  const tool = `${sanitizeMcpName(name)}_echo`;
+  if (rig.world.generation === 1) {
+    return {
+      tool: !server.v1Hidden(session, tool) && server.decide(session, tool, ["*"]) !== "deny",
+      list: server.decide(session, "read", [`mcp:${name}:*`]) !== "deny",
+      read: server.decide(session, "read", [`mcp:${name}:file:///notes.md`]) !== "deny",
+    };
+  }
+  return {
+    tool: server.decide(session, tool, ["*"]) !== "deny",
+    list: server.decide(session, "opencode_list_mcp_resources", [name]) !== "deny",
+    read: server.decide(session, "opencode_read_mcp_resource", [`${name}:file:///notes.md`]) !== "deny",
+  };
 }
 
 async function runTurn(rig: OpencodeTestRig, opened: { session: Session; events: AriEvent[] }, threadId: string, text: string): Promise<string> {
@@ -118,7 +151,7 @@ describe("MCP isolation on a shared server", () => {
     [2, true],
     [1, true],
   ] as const) {
-    test(`${generation}.x${external ? " external" : ""}: each thread gets its own host-named entry and denies every other thread's`, async () => {
+    test(`${generation}.x${external ? " external" : ""}: each thread gets its own host-named entry and is denied every action that reaches another thread's, in OpenCode's own rule order`, async () => {
       const rig = await rigFor(generation, external);
       const one = await rig.open();
       const two = await rig.open();
@@ -128,38 +161,106 @@ describe("MCP isolation on a shared server", () => {
       // The fake host names each thread's tool server host-tools-<thread id>; the driver must use exactly that name.
       const named = rig.host.calls.filter((call) => call.operation === "hostTools.mcpServerFor").map((call) => (call.args as [string])[0]);
       assert.deepEqual(new Set(named), new Set([a.id, b.id, c.id]));
-      const server = [...rig.world.servers].find((candidate) => candidate.alive)!;
+      const server = liveServer(rig);
       const entries = server.mcp.get(rig.cwd)!;
-      const nameOf = (threadId: string) => `host-tools-${threadId}`;
       assert.deepEqual(new Set(entries.keys()), new Set([a, b, c].map((thread) => nameOf(thread.id))), "the server holds one entry per thread, under the host's names");
       for (const thread of [a, b, c]) {
         const session = rig.world.sessions.get(thread.native.id!)!;
         for (const other of [a, b, c]) {
-          const tool = `${sanitizeMcpName(nameOf(other.id))}_echo`;
-          const effect = evaluate(tool, "*", session.rules);
-          if (other.id === thread.id) assert.notEqual(effect, "deny", `thread ${thread.id} is denied its own tools`);
-          else assert.equal(effect, "deny", `thread ${thread.id} can reach thread ${other.id}'s entry`);
+          const reach = reaches(rig, server, session, nameOf(other.id));
+          if (other.id === thread.id) assert.deepEqual(reach, { tool: true, list: true, read: true }, `thread ${thread.id} is denied its own entry`);
+          else assert.deepEqual(reach, { tool: false, list: false, read: false }, `thread ${thread.id} can reach thread ${other.id}'s entry`);
         }
         // The deny rules come last, so neither the mode nor the host's rules can open another thread's entry.
-        const denies = session.rules.filter((rule) => rule.effect === "deny" && rule.action.startsWith("host-tools-"));
+        const denies = session.rules.filter((rule) => rule.effect === "deny" && (rule.action.startsWith("host-tools-") || rule.resource.includes("host-tools-")));
+        assert.ok(denies.length >= 2 * (generation === 2 ? 3 : 2));
         assert.deepEqual(session.rules.slice(-denies.length), denies);
       }
       // The first thread was told about the later ones: its rules were rewritten when they arrived.
       const updates = rig.world.frames.filter((frame) => frame.direction === "request" && frame.operation === "session.update");
       assert.ok(updates.length >= 2);
-      // A saved "always" grant for another thread's tool does not reopen it (2.x checks the session's denies first).
       if (generation === 2) {
-        rig.world.saved.set(rig.cwd, [{ action: `${sanitizeMcpName(nameOf(c.id))}_*`, resource: "*", effect: "allow" }]);
-        const session = rig.world.sessions.get(a.native.id!)!;
-        assert.equal(evaluate(`${sanitizeMcpName(nameOf(c.id))}_echo`, "*", session.rules), "deny");
+        // A saved "always" grant for another thread's entry does not reopen it: 2.x checks the session's denies before saved grants.
+        const sessionA = rig.world.sessions.get(a.native.id!)!;
+        assert.equal(server.decide(sessionA, "webfetch", ["https://example.com"]), "ask", "before the grant, an ordinary request asks");
+        rig.world.saved.set(rig.cwd, [
+          { action: `${sanitizeMcpName(nameOf(c.id))}_*`, resource: "*", effect: "allow" },
+          { action: "opencode_list_mcp_resources", resource: nameOf(c.id), effect: "allow" },
+          { action: "opencode_read_mcp_resource", resource: `${nameOf(c.id)}:*`, effect: "allow" },
+          { action: "webfetch", resource: "*", effect: "allow" },
+        ]);
+        assert.equal(server.decide(sessionA, "webfetch", ["https://example.com"]), "allow", "the saved grants are in effect");
+        assert.deepEqual(reaches(rig, server, sessionA, nameOf(c.id)), { tool: false, list: false, read: false }, "the saved grants do not reopen another thread's entry");
+        rig.world.saved.delete(rig.cwd);
       }
-      // A closed session takes its entries off the shared server, and the others stop denying them.
+      // A closed session takes its entries off the shared server before the others stop denying them.
+      const before = rig.world.frames.length;
       await two.session.close();
       assert.equal(entries.has(nameOf(c.id)), false);
-      const left = rig.world.sessions.get(a.native.id!)!;
-      assert.notEqual(evaluate(`${sanitizeMcpName(nameOf(c.id))}_echo`, "*", left.rules), "deny");
+      const after = rig.world.frames.slice(before).filter((frame) => frame.direction === "request");
+      const removal = after.findIndex((frame) => frame.operation === (generation === 1 ? "mcp.disconnect" : "experimental.mcp.remove"));
+      const relaxed = after.findIndex((frame) => frame.operation === "session.update");
+      assert.ok(removal !== -1 && relaxed !== -1 && removal < relaxed, "the entry was removed before any other thread's deny was dropped");
+      assert.deepEqual(reaches(rig, server, rig.world.sessions.get(a.native.id!)!, nameOf(c.id)), { tool: true, list: true, read: true }, "the remaining threads no longer deny the removed entry");
     });
   }
+
+  test("2.x: a removal OpenCode does not confirm keeps the other threads' denies, and close() reports it", async () => {
+    const rig = await rigFor(2);
+    const one = await rig.open();
+    const two = await rig.open();
+    const a = await one.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const c = await two.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const server = liveServer(rig);
+    server.dropRequests.add("experimental.mcp.remove");
+    await assert.rejects(two.session.close(), "close() reports the removal that failed");
+    server.dropRequests.delete("experimental.mcp.remove");
+    assert.ok(server.mcp.get(rig.cwd)!.has(nameOf(c.id)), "the entry is still on the server");
+    assert.deepEqual(reaches(rig, server, rig.world.sessions.get(a.native.id!)!, nameOf(c.id)), { tool: false, list: false, read: false }, "so the other thread still denies it");
+  });
+
+  test("2.x: two threads that ask for different MCP servers under one name are refused; the first keeps its entry", async () => {
+    const rig = await openOpencodeTestRig({ generation: 2, host: { mcpServerName: () => "workspace-tools" } });
+    rigs.push(rig);
+    const one = await rig.open();
+    const two = await rig.open();
+    const a = await one.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const server = liveServer(rig);
+    const first = JSON.stringify(server.mcp.get(rig.cwd)!.get("workspace-tools"));
+    const sessions = rig.world.sessions.size;
+    await assert.rejects(two.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) }), (error: unknown) => {
+      assert.ok(isAriError(error, "invalid_state"), String(error));
+      assert.equal((toCallError(error) as { reason?: string }).reason, "mcp_name_conflict");
+      return true;
+    });
+    assert.equal(JSON.stringify(server.mcp.get(rig.cwd)!.get("workspace-tools")), first, "the first thread's entry was not replaced");
+    assert.ok(first.includes(encodeURIComponent(a.id)), "and it is still the first thread's server");
+    // OpenCode made the second thread's session before the driver learnt its host name; nothing else of it remains.
+    assert.ok(rig.world.sessions.size <= sessions + 1);
+    const adds = rig.world.frames.filter((frame) => frame.direction === "request" && frame.operation === "experimental.mcp.add" && (frame.body as { path: string }).path.endsWith("/workspace-tools"));
+    assert.equal(adds.length, 1, "no second entry was added under the name");
+  });
+
+  test("2.x: threads that ask for the same MCP server under one name share its entry until the last one leaves", async () => {
+    const launch = { mcpServers: [{ name: "shared-tools", transport: "http" as const, url: "http://127.0.0.1:1/shared" }] };
+    const rig = await rigFor(2);
+    const one = await rig.open({ launch });
+    const two = await rig.open({ launch });
+    const three = await rig.open();
+    const a = await one.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const b = await two.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const c = await three.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const server = liveServer(rig);
+    const entries = server.mcp.get(rig.cwd)!;
+    assert.ok(entries.has("shared-tools"));
+    for (const holder of [a, b]) assert.equal(reaches(rig, server, rig.world.sessions.get(holder.native.id!)!, "shared-tools").tool, true);
+    assert.equal(reaches(rig, server, rig.world.sessions.get(c.native.id!)!, "shared-tools").tool, false, "a thread that did not ask for it is denied it");
+    await one.session.close();
+    assert.ok(entries.has("shared-tools"), "the entry stays while another thread holds it");
+    assert.equal(reaches(rig, server, rig.world.sessions.get(c.native.id!)!, "shared-tools").tool, false);
+    await two.session.close();
+    assert.equal(entries.has("shared-tools"), false, "the last holder took it off");
+  });
 
   test("host names that OpenCode's tool names cannot keep apart are refused", async () => {
     const rig = await openOpencodeTestRig({ generation: 2, host: { mcpServerName: (threadId) => (threadId.endsWith("0") || threadId.endsWith("2") || threadId.endsWith("4") || threadId.endsWith("6") || threadId.endsWith("8") || threadId.endsWith("a") || threadId.endsWith("c") || threadId.endsWith("e") ? "tools" : "tools_more") } });
@@ -176,6 +277,52 @@ describe("MCP isolation on a shared server", () => {
     }
     assert.ok(refused !== undefined, "a thread whose host name is another's prefix was refused");
     assert.match(String((refused as Error).message), /cannot be kept apart/);
+  });
+
+  for (const [generation, external] of [
+    [2, false],
+    [1, true],
+  ] as const) {
+    test(`${generation}.x${external ? " external" : ""}: a running subagent is denied an entry that arrived after OpenCode copied its parent's rules`, async () => {
+      const rig = await rigFor(generation, external);
+      const one = await rig.open();
+      const two = await rig.open();
+      const a = await one.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const started = await one.session.startTurn({ threadId: a.id, clientTurnKey: "delegate", intent: "start", content: [{ type: "text", text: "Delegate." }] });
+      assert.equal(started.status, "accepted");
+      const native = await rig.nextTurn();
+      const child = await native.runSubagent("helper");
+      await rig.until(one.events, (event) => (event.body.type === "subagent.upsert" && event.body.subagent.native?.id === child.childId ? true : undefined), "the subagent");
+      // A thread that arrives now: OpenCode gave the child its rules before this entry existed.
+      const c = await two.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const server = liveServer(rig);
+      const childSession = rig.world.sessions.get(child.childId)!;
+      await rig.until(one.events, () => (reaches(rig, server, childSession, nameOf(c.id)).tool ? undefined : true), "the subagent's rules to deny the new entry");
+      assert.deepEqual(reaches(rig, server, childSession, nameOf(c.id)), { tool: false, list: false, read: false });
+      assert.equal(reaches(rig, server, childSession, nameOf(a.id)).tool, true, "the subagent keeps its parent's own entry");
+      await child.finish();
+      await native.complete();
+      await rig.terminal(one.events, (started as { turnId: string }).turnId);
+    });
+  }
+
+  test("1.x external: a shared 1.x server keeps an always grant for every session of the directory, after their own rules, so an MCP resource read offers no always", async () => {
+    const rig = await rigFor(1, true);
+    const opened = await rig.open();
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "resource", intent: "start", content: [{ type: "text", text: "Read the resource." }] });
+    assert.equal(started.status, "accepted");
+    const native = await rig.nextTurn();
+    const pattern = `mcp:${nameOf(thread.id)}:file:///notes.md`;
+    const handle = await native.requestPermission("read", pattern, { server: nameOf(thread.id) });
+    const request = await rig.until(opened.events, () => pendingRequest(opened.events), "the resource read request");
+    assert.deepEqual(
+      request.options?.map((option) => option.optionId),
+      ["once", "reject"],
+    );
+    await opened.session.respond({ requestId: request.id, responseKey: "read", optionId: "once" });
+    assert.equal(await handle.nextReply(), "once");
+    await native.complete();
   });
 });
 
@@ -232,6 +379,53 @@ describe("approvals never widen", () => {
       await fullNative.finishCancelled();
     });
   }
+
+  test("1.x: under full_access a subagent still asks (OpenCode gives it its own agent's rules), and the host's auto-reply reaches OpenCode as once", async () => {
+    const rig = await rigFor(1);
+    const opened = await rig.open();
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd, "full_access") });
+    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "full-sub", intent: "start", content: [{ type: "text", text: "Delegate." }] });
+    assert.equal(started.status, "accepted");
+    const native = await rig.nextTurn();
+    const child = await native.runSubagent("helper");
+    // The general subagent asks before reading a .env file (1.19.6 `agent/agent.ts`); the thread's * allow never reached it.
+    const file = `${rig.cwd}/secrets.env`;
+    const handle = await native.requestPermissionFrom(child.childId, "read", file, { filePath: file });
+    const request = await rig.until(opened.events, () => pendingRequest(opened.events), "the subagent's request");
+    assert.equal(request.fullAccessOverride, undefined, "no rule of the host's asked: the auto-reply may answer");
+    const reply = fullAccessAutoReply(request, "auto");
+    assert.equal(reply?.optionId, "once", "the narrowest accepting option");
+    await opened.session.respond(reply!);
+    assert.equal(await handle.nextReply(), "once");
+    const sent = rig.world.frames.filter((frame) => frame.direction === "request" && frame.operation === "permission.reply").at(-1);
+    assert.deepEqual((sent?.body as { body: unknown }).body, { reply: "once" }, "OpenCode got once");
+    await child.finish();
+    await native.complete();
+  });
+
+  test("2.x: under full_access a subagent copies the thread's * allow, so it asks nothing; a plugin that asks anyway marks the request provider_check", async () => {
+    const rig = await rigFor(2);
+    const opened = await rig.open();
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd, "full_access") });
+    const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "full-sub", intent: "start", content: [{ type: "text", text: "Delegate." }] });
+    assert.equal(started.status, "accepted");
+    const native = await rig.nextTurn();
+    const child = await native.runSubagent("helper");
+    const server = liveServer(rig);
+    const childSession = rig.world.sessions.get(child.childId)!;
+    for (const action of ["shell", "edit", "read", "webfetch"]) assert.equal(server.decide(childSession, action, [`${rig.cwd}/secrets.env`]), "allow", action);
+    await child.finish();
+    // A plugin's permission.evaluate hook (2.1.2 `core/src/permission.ts`) may still ask; that is OpenCode's own check, so it reaches the user.
+    rig.world.permissionHook = (input) => (input.action === "webfetch" ? "ask" : undefined);
+    const handle = await native.requestPermission("webfetch", "https://example.com", { url: "https://example.com" });
+    const request = await rig.until(opened.events, () => pendingRequest(opened.events), "the plugin's request");
+    assert.equal(request.fullAccessOverride, "provider_check");
+    assert.equal(fullAccessAutoReply(request, "auto"), undefined);
+    await opened.session.respond({ requestId: request.id, responseKey: "user", optionId: "once" });
+    assert.equal(await handle.nextReply(), "once");
+    rig.world.permissionHook = undefined;
+    await native.complete();
+  });
 });
 
 describe("the opencode.permissionRules extension", () => {
@@ -269,12 +463,14 @@ describe("subagents, questions, todo lists and steering", () => {
       assert.equal(subagent.parentTurnId, started.turnId);
       assert.equal(subagent.native.id, child.childId);
       assert.ok(subagent.threadId !== undefined && subagent.threadId !== thread.id);
-      const handle = await native.requestApprovalFrom(child.childId, { kind: "command", command: ["ls"], options: [{ optionId: "ok", label: "OK", decision: "accept" }] });
+      // A request OpenCode's subagent makes in either generation: reading a .env file asks (1.19.6 `agent/agent.ts`; under approval_required 2.x copies rules that do not decide it).
+      const file = `${rig.cwd}/secrets.env`;
+      const handle = await native.requestPermissionFrom(child.childId, "read", file, { filePath: file });
       const request = await rig.until(opened.events, () => pendingRequest(opened.events), "the subagent's request");
       assert.equal(request.origin.subagentId, subagent.id);
       assert.equal(request.origin.threadId, thread.id);
       await opened.session.respond({ requestId: request.id, responseKey: "sub", optionId: "once" });
-      assert.equal(await handle.nextReply(), "ok");
+      assert.equal(await handle.nextReply(), "once");
       await child.finish();
       await rig.until(opened.events, (event) => (event.body.type === "subagent.upsert" && event.body.subagent.id === subagent.id && event.body.subagent.status === "completed" ? true : undefined), "the subagent to complete");
       await native.complete();

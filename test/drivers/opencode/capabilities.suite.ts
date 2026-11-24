@@ -196,6 +196,74 @@ for (const generation of [1, 2] as const) {
   });
 }
 
+for (const generation of [1, 2] as const) {
+  // 30 turns are 60 messages: more than one 2.x page (50, newest first), so only a driver that pages through the history and orders it gets this right.
+  test(`${generation}.x: snapshots, forks from a turn and rollbacks read the whole history in order, past OpenCode's first page`, async () => {
+    const rig = await openOpencodeTestRig({ generation });
+    rigs.push(rig);
+    const opened = await rig.open();
+    const session = opened.session;
+    const thread = await session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const turnIds: string[] = [];
+    const prompts: string[] = [];
+    for (let index = 1; index <= 30; index += 1) {
+      const text = `Prompt ${index}.`;
+      const started = await session.startTurn({ threadId: thread.id, clientTurnKey: text, intent: "start", content: [{ type: "text", text }] });
+      assert.equal(started.status, "accepted");
+      if (started.status !== "accepted") return;
+      turnIds.push(started.turnId);
+      prompts.push(text);
+      const native = await rig.nextTurn();
+      await native.say(`Reply ${index}.`);
+      await native.complete();
+      await rig.terminal(opened.events, started.turnId);
+    }
+    assert.equal(rig.world.sessions.get(thread.native.id!)!.messages.length, 60);
+
+    const snapshot = await session.readSnapshot!(thread.id);
+    assert.deepEqual(
+      snapshot.turns.map((turn) => turn.id),
+      turnIds,
+      "every turn, oldest first",
+    );
+    for (const [index, turnId] of turnIds.entries()) {
+      const items = snapshot.items.filter((item) => item.turnId === turnId);
+      assert.deepEqual(
+        items.map((item) => [item.kind, item.kind === "user_message" || item.kind === "assistant_message" ? item.text : undefined]),
+        [
+          ["user_message", `Prompt ${index + 1}.`],
+          ["assistant_message", `Reply ${index + 1}.`],
+        ],
+        `turn ${index + 1} holds its own prompt and reply`,
+      );
+    }
+
+    const fromTurn = await session.forkThread!({ threadId: thread.id, at: { type: "turn", turnId: turnIds[29]! } });
+    assert.deepEqual(rig.inspect(fromTurn)?.prompts, prompts.slice(0, 29), "a fork from the last turn holds the 29 turns before it");
+
+    const rolledBack = await session.rollbackThread!({ threadId: thread.id, to: { type: "turn", turnId: turnIds[26]! } });
+    assert.deepEqual(
+      rolledBack.turns.map((turn) => turn.id),
+      turnIds.slice(0, 27),
+    );
+    assert.deepEqual(rig.inspect(thread)?.prompts, prompts.slice(0, 27), "rolling back to turn 27 keeps turns 1 to 27");
+  });
+}
+
+test("2.x: a fork of a thread with no turns is refused as OpenCode refuses it, and leaves no thread behind", async () => {
+  const rig = await openOpencodeTestRig({ generation: 2 });
+  rigs.push(rig);
+  const opened = await rig.open();
+  const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+  const sessions = rig.world.sessions.size;
+  await assert.rejects(opened.session.forkThread!({ threadId: thread.id, at: { type: "latest" } }), (error: unknown) => {
+    assert.ok(isAriError(error, "invalid_state"), `the fork was refused with ${String(error)}`);
+    assert.equal((toCallError(error) as { reason?: string }).reason, "empty_thread");
+    return true;
+  });
+  assert.equal(rig.world.sessions.size, sessions, "OpenCode made no session");
+});
+
 /** Every leaf of the capabilities object, as `path` and its JSON value. */
 function leaves(value: unknown, prefix = ""): Array<[string, string]> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return [[prefix, JSON.stringify(value)]];

@@ -5,6 +5,7 @@
 
 import "./opencode/meta.suite.ts";
 import "./opencode/sdk-types.suite.ts";
+import "./opencode/fidelity.suite.ts";
 import "./opencode/availability.suite.ts";
 import "./opencode/capabilities.suite.ts";
 import "./opencode/instructions.suite.ts";

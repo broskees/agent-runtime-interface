@@ -44,7 +44,18 @@ Source read at the tags (sparse clones of https://github.com/anomalyco/opencode)
   (1.x `permission/index.ts` `evaluate`, 2.x `core/src/permission.ts`
   `evaluate`), with `*` and `?` wildcards (`util/wildcard.ts` `match` in
   both). 2.x checks a session's own rules for a deny before it adds saved
-  grants (`evaluateInput`); 1.x adds its in-memory grants last.
+  grants, then lets a plugin's `permission.evaluate` hook change the effect
+  (`evaluateInput`); 1.x adds its in-memory grants last (`ask`). The fake's
+  `FakeServer.decide` is that order; it models agent rules only for a 1.x
+  child session (the `general` subagent's, 1.x `agent/agent.ts`).
+- 1.x leaves out of the model's tools any tool whose last matching agent or
+  session rule denies every resource (`permission/index.ts` `disabled`,
+  `session/llm/request.ts`, `tool/code-mode.ts`); in-memory grants play no
+  part (`FakeServer.v1Hidden`).
+- A child session takes its rules once, when OpenCode creates it: 2.x copies
+  the parent's (`core/src/session.ts` `create`: `permissions ?? parent.permissions`),
+  1.x keeps the parent's deny and `external_directory` rules and adds a
+  `task` deny (`tool/task.ts`, `agent/subagent-permissions.ts`).
 - "Always": 1.x keeps the grant in memory for the directory's instance
   (`permission/index.ts` `approved`); 2.x saves it for the project
   (`PermissionSaved.add` with `location.project.id`). Both reach every session
@@ -52,6 +63,12 @@ Source read at the tags (sparse clones of https://github.com/anomalyco/opencode)
 - MCP tools ask for the permission `<server>_<tool>`, both names sanitized to
   `[a-zA-Z0-9_-]` (1.x `mcp/catalog.ts` `toolName`, 2.x `core/src/tool/mcp.ts`
   `name`), with the pattern `*`.
+- MCP resources have tools of their own. 1.x: `list_mcp_resources`,
+  `list_mcp_resource_templates` and `read_mcp_resource` ask `read` for
+  `mcp:<server>:*` and `mcp:<server>:<uri>` (`session/tools.ts`). 2.x:
+  `list_mcp_resources` asks `opencode_list_mcp_resources` for each server
+  name, `read_mcp_resource` asks `opencode_read_mcp_resource` for
+  `<server>:<uri>` (`core/src/tool/plugin/mcp-resource.ts`).
 - Sessions live in OpenCode's database, read by id from any server
   (1.x `session/session.ts` `get` by id; 2.x `SessionStore`); nothing locks a
   session.
@@ -81,7 +98,15 @@ Source read at the tags (sparse clones of https://github.com/anomalyco/opencode)
   when it is done (`server/routes/instance/httpapi/handlers/session.ts`
   `summarize`).
 - `POST /mcp` adds a server to the instance's runtime config only
-  (`mcp/index.ts` `add`); nothing is written to a file.
+  (`mcp/index.ts` `add`); nothing is written to a file. `POST
+  /mcp/{name}/disconnect` closes its client and keeps the config; a name
+  never added is `McpServerNotFoundError` (`mcp/index.ts` `disconnect`,
+  `server/routes/instance/httpapi/handlers/mcp.ts`).
+- `GET /session/{id}/message` without `limit` pages through the whole history
+  and answers it oldest first (`session/session.ts` `messages`,
+  `session/message-v2.ts` `page`). The fake serves only that call.
+- A fork of an empty session, or before a message it does not have, copies
+  what there is (`session/session.ts` `fork`).
 - Questions: `question.asked` with `questions[{ question, header, options,
   multiple, custom }]`, answered by `POST /question/{id}/reply` with
   `answers: string[][]`.
@@ -109,7 +134,22 @@ Source read at the tags (sparse clones of https://github.com/anomalyco/opencode)
 - `PUT /api/experimental/session/{id}/instructions/entries/{key}` keeps
   instructions for a session.
 - `PUT|DELETE /api/experimental/mcp/{server}?location[directory]=` adds and
-  removes runtime overrides (`core/src/mcp/index.ts` `add`, `remove`).
+  removes runtime overrides of one location (`core/src/mcp/index.ts` `add`,
+  `remove`, a location node). `add` replaces an entry of that name; `remove`
+  of a name the location does not have is `McpServerNotFoundError`
+  (`server/src/handlers/mcp.ts`).
+- `GET /api/session/{id}/message` answers 50 messages newest first unless
+  `limit` (1 to 200) or `order` says otherwise, with `cursor.previous` and
+  `cursor.next` (base64url JSON of the anchor id, order and direction) for
+  every non-empty page; following `next` past the oldest message gives an
+  empty page without cursors; a cursor with `order` is `InvalidCursorError`
+  (`server/src/handlers/message.ts`, `core/src/session/store.ts` `messages`).
+- `POST /api/session/{id}/fork` refuses a session without messages
+  (`InvalidRequestError`, `kind: "empty_session"`) and an unknown `before`
+  (`MessageNotFoundError`); the fork takes the parent's rules and instruction
+  entries and is published as `session.forked` (`core/src/session.ts` `fork`,
+  `core/src/session/projector.ts`, `server/src/handlers/session.ts`,
+  `schema/src/session-event.ts` `Forked`).
 - `POST /api/session/{id}/revert/stage` then `.../revert/commit` drops
   messages; `POST /api/session/{id}/compact` admits a compaction that runs as
   an execution of its own.

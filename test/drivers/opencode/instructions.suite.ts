@@ -141,5 +141,85 @@ for (const generation of [1, 2] as Generation[]) {
       }
       fs.rmSync(home.root, { recursive: true, force: true });
     });
+
+    test("resuming a thread the session holds, with a new LaunchContext, uses it from the next turn and keeps the thread's own context", async () => {
+      const rig = await openOpencodeTestRig({ generation });
+      rigs.push(rig);
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch: { appendSystemPrompt: [LAUNCH_MARKER], mcpServers: [{ name: "workspace-tools", transport: "http", url: "http://127.0.0.1:1/workspace" }] }, context: { developer: DEVELOPER_MARKER } });
+      const first = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "one", intent: "start", content: [{ type: "text", text: "One." }] });
+      assert.equal(first.status, "accepted");
+      if (first.status !== "accepted") return;
+      await (await rig.nextTurn()).complete();
+      await rig.terminal(opened.events, first.turnId);
+
+      // The thread is loaded: the resume must still read the LaunchContext it carries.
+      const resumed = await opened.session.resumeThread({ native: { handle: thread.handle! }, launch: { appendSystemPrompt: [RESUME_MARKER], mcpServers: [{ name: "resume-tools", transport: "http", url: "http://127.0.0.1:1/resume" }] } });
+      assert.equal(resumed.id, thread.id);
+      const second = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "two", intent: "start", content: [{ type: "text", text: "Two." }] });
+      assert.equal(second.status, "accepted");
+      if (second.status !== "accepted") return;
+      await (await rig.nextTurn()).complete();
+      await rig.terminal(opened.events, second.turnId);
+      const latest = carried(requests(rig.world.frames, instructionOperations).at(-1)!);
+      assert.ok(latest.includes(RESUME_MARKER), "the new launch prompt reached OpenCode");
+      assert.ok(latest.includes(DEVELOPER_MARKER), "the thread's own context stayed");
+      assert.ok(!latest.includes(LAUNCH_MARKER), "the replaced launch prompt is gone");
+      const held = generation === 1 ? (rig.world.sessions.get(thread.native.id!)!.messages.filter((message) => message.role === "user").at(-1)?.system ?? "") : [...rig.world.sessions.get(thread.native.id!)!.instructions.values()].join("\n");
+      assert.ok(held.includes(RESUME_MARKER) && !held.includes(LAUNCH_MARKER), "OpenCode holds the new launch prompt, not the old one");
+      // The new launch's MCP server is on the server under its name; the one the old launch gave is gone.
+      const server = [...rig.world.servers].find((candidate) => candidate.alive && candidate.known.has(thread.native.id!))!;
+      const entries = [...(server.mcp.get(rig.cwd)?.keys() ?? [])];
+      assert.ok(entries.includes("resume-tools"), `the server holds ${entries.join(", ")}`);
+      assert.ok(!entries.includes("workspace-tools"), "the replaced launch's MCP server was taken off");
+      assert.ok(entries.some((name) => name.startsWith("host-tools-")), "the host's tool server stayed");
+    });
+
+    if (generation === 1) {
+      test("resuming an unloaded thread without a LaunchContext keeps the one it was created with: its prompts and its MCP servers reach the new server", async () => {
+        const rig = await openOpencodeTestRig({ generation });
+        rigs.push(rig);
+        const opened = await rig.open();
+        const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch: { appendSystemPrompt: [LAUNCH_MARKER], developerPrompt: [DEVELOPER_MARKER], mcpServers: [{ name: "workspace-tools", transport: "http", url: "http://127.0.0.1:1/workspace" }] }, context: { system: TURN_MARKER } });
+        await opened.session.unloadThread!(thread.id);
+        assert.equal(rig.inspect(thread)?.loaded, false);
+        const resumed = await opened.session.resumeThread({ native: { handle: thread.handle! } });
+        assert.equal(resumed.id, thread.id);
+        const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "after-resume", intent: "start", content: [{ type: "text", text: "Back." }] });
+        assert.equal(started.status, "accepted");
+        if (started.status !== "accepted") return;
+        await (await rig.nextTurn()).complete();
+        await rig.terminal(opened.events, started.turnId);
+        const prompt = requests(rig.world.frames, [promptOperation]).at(-1)!;
+        const system = String((prompt.body as { body: { system?: unknown } }).body.system ?? "");
+        for (const marker of [LAUNCH_MARKER, DEVELOPER_MARKER, TURN_MARKER]) assert.ok(system.includes(marker), `the first prompt after the resume carries ${marker}`);
+        const server = [...rig.world.servers].find((candidate) => candidate.alive && candidate.known.has(thread.native.id!))!;
+        const entries = [...(server.mcp.get(rig.cwd)?.keys() ?? [])];
+        assert.ok(entries.includes("workspace-tools"), `the restarted server holds ${entries.join(", ")}`);
+        assert.ok(entries.some((name) => name.startsWith("host-tools-")));
+      });
+    }
+
+    if (generation === 2) {
+      test("a fork takes OpenCode's copy of the instruction entry; a turn's own context does not stay in the fork", async () => {
+        const rig = await openOpencodeTestRig({ generation });
+        rigs.push(rig);
+        const opened = await rig.open();
+        const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+        const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "marked", intent: "start", content: [{ type: "text", text: "Hello." }], context: { system: TURN_MARKER } });
+        assert.equal(started.status, "accepted");
+        if (started.status !== "accepted") return;
+        await (await rig.nextTurn()).complete();
+        await rig.terminal(opened.events, started.turnId);
+        const fork = await opened.session.forkThread!({ threadId: thread.id, at: { type: "latest" } });
+        assert.ok([...rig.world.sessions.get(fork.native.id!)!.instructions.values()].join("\n").includes(TURN_MARKER), "OpenCode copied the entry to the fork");
+        const next = await opened.session.startTurn({ threadId: fork.id, clientTurnKey: "plain", intent: "start", content: [{ type: "text", text: "Plain." }] });
+        assert.equal(next.status, "accepted");
+        if (next.status !== "accepted") return;
+        await (await rig.nextTurn()).complete();
+        await rig.terminal(opened.events, next.turnId);
+        assert.ok(![...rig.world.sessions.get(fork.native.id!)!.instructions.values()].join("\n").includes(TURN_MARKER), "the earlier turn's context is not the fork's instructions");
+      });
+    }
   });
 }

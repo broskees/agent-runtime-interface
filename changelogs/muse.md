@@ -11,13 +11,19 @@ First version of the Muse Code driver.
   `untested_version` advisory.
 - Threads: create (`session/start` with the driver's session id), resume
   (`session/resume`, with `session.replaced` when the session is missing or
-  another host holds it), snapshot (`session/read`), compact
-  (`session/compact`), unload, release. Fork and rollback reject with
-  `unsupported`.
+  another host holds it; the running turn and the requests Muse re-issues
+  after the answer are adopted; a new `launch` on a loaded thread reloads it
+  with its MCP servers), snapshot (`session/read`; the last turn's status and
+  failure from Muse's `lastTurn`), compact (`session/compact`), unload,
+  release. Fork and rollback reject with `unsupported`.
 - Turns: start, queue (`ifBusy: "queue"`), steer (`turn/steer` with
-  `expectedTurnId`; a late steer is `prompt_required`), interrupt
-  (`turn/interrupt`, `turn/unqueue` for a queued turn). Turns settle only on
-  `turn/completed`, `turn/unqueued` or the host's exit.
+  `expectedTurnId`; a steer whose turn already ended, `already_terminal`, is
+  `prompt_required`; a steer the busy runtime refuses, `runtime_busy`, is sent
+  again under its `commandId` until Muse takes it or the turn ends; any other
+  refusal is `invalid_state` with Muse's reason), interrupt
+  (`turn/interrupt`, `turn/unqueue` for a queued turn, sent again while the
+  runtime is busy). Turns settle only on `turn/completed`, `turn/unqueued` or
+  the host's exit.
 - Requests: approvals answered with `approval/decide` and Muse's own choice
   ids, questions answered with `userInput/answer`; approvals from subagents.
 - Items, subagents, the todo list (`plan.upsert`), token and context usage

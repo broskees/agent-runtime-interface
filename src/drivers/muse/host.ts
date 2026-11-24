@@ -70,9 +70,11 @@ export function callErrorFromMuse(sdk: MuseSdk, error: unknown, what: string): E
       case "approvalChoiceInvalid":
       case "userInputAnswerInvalid":
         return callErrors.validation([{ message: msp.message, path: [] }], msp.message);
+      case "commandRejected":
+        // Muse's reason (`runtime_busy`, `already_terminal`, ...) says why; the kind alone does not.
+        return callErrors.invalidState(typeof msp.data["reason"] === "string" ? msp.data["reason"] : msp.kind, msp.message);
       case "sessionInUse":
       case "sessionNotLoaded":
-      case "commandRejected":
       case "approvalAlreadyResolved":
       case "userInputAlreadySettled":
       case "approvalRequirementStale":
@@ -201,6 +203,11 @@ export class MuseHost {
   /** The MSP error kind of a failed call. */
   errorKind(error: unknown): string | undefined {
     return mspErrorKind(this.#sdk, error);
+  }
+
+  /** The structured detail of a failed call's MSP error (`reason`, `retryable`, ...); empty for any other failure. */
+  errorData(error: unknown): Readonly<Record<string, unknown>> {
+    return error instanceof this.#sdk.MspError ? (error as MuseMspError).data : {};
   }
 
   /** Closes stdin so the host drains in order (cancelling a running turn, releasing its leases), then ends it if it does not exit. */

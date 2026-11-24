@@ -24,7 +24,7 @@ const VALID: RecordedFrame[] = [
   { direction: "server", shape: "notification", method: "item/delta", frame: { jsonrpc: "2.0", method: "item/delta", params: { sessionId: SESSION, viewCursor: `v10:${SESSION}:7`, itemId: "0198f0ac-4242-7000-8000-000000000042", field: "text", delta: "All 214 tests pass" } } },
   { direction: "server", shape: "request", method: "approval/request", frame: { jsonrpc: "2.0", id: 1, method: "approval/request", params: { sessionId: SESSION, viewCursor: `v10:${SESSION}:7`, sourceRange: RANGE, approvalId: "a1", turnId: TURN, taskId: "t1", itemId: "i1", toolCallId: "call_1", toolName: "write_file", rawArgs: "{}", subject: { kind: "fileAccess", path: "/w/Cargo.toml", access: "write" }, currentRequirementId: { approvalId: "a1", sourceIndex: 0 }, availableChoices: [{ choiceId: "allow_once", label: "Allow once", decision: "approved", scope: "once" }], protectedWrite: false, judgeEscalated: false } } },
   { direction: "client", shape: "result", method: "approval/request", frame: { jsonrpc: "2.0", id: 1, result: {} } },
-  { direction: "server", shape: "error", method: "turn/steer", frame: { jsonrpc: "2.0", id: 9, error: { code: -32030, message: "turn is not running", data: { kind: "commandRejected", commandId: TURN, reason: "turn_not_running" } } } },
+  { direction: "server", shape: "error", method: "turn/steer", frame: { jsonrpc: "2.0", id: 9, error: { code: -32030, message: "turn already finished", data: { kind: "commandRejected", commandId: TURN, reason: "already_terminal" } } } },
   { direction: "client", shape: "request", method: "usage/read", frame: { jsonrpc: "2.0", id: 5, method: "usage/read" } },
 ];
 

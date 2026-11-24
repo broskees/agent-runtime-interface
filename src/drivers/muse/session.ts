@@ -15,15 +15,26 @@
 //   as a per-session MCP server under the name the host chose. The driver
 //   writes no file.
 // - A steer names the turn it means (`expectedTurnId`). Muse refuses a steer
-//   whose turn is no longer running; the host then gets `prompt_required`.
+//   whose turn already ended (`commandRejected`, reason `already_terminal`);
+//   the host then gets `prompt_required`. A steer the busy session runtime
+//   refuses (`runtime_busy`) wrote nothing, so it goes out again under its
+//   first `commandId` until Muse takes it or the turn ends, as the SDK's own
+//   `Session.run` resends a busy unqueue. Any other refusal is an error.
 // - Approval choices carry Muse's own `choiceId`, which is the native option
 //   id; `approval/decide` sends it with the approval's current requirement.
 // - Approvals and questions arrive both as view notifications
 //   (`approval/requested`, `userInput/requested`) and, for a client that
 //   must answer, as server requests (`approval/request`, `userInput/request`);
-//   after a resume only the server request comes. The driver keeps one request
-//   per approval id or user-input id and answers each server request with the
-//   empty presentation receipt.
+//   after a resume only the server request comes, right after the
+//   `session/resume` answer, for the running turn the answer names. The driver
+//   keeps one request per approval id or user-input id and answers each server
+//   request with the empty presentation receipt.
+// - Muse records no terminal per stored turn; `session/read` and
+//   `session/resume` restate only the last one (`lastTurn`). A turn is
+//   reported failed from that, or from the `turn/completed` this session saw.
+// - A `LaunchContext` given to `resumeThread` replaces the thread's: its
+//   instructions go before the next turn's text, and new MCP servers reload
+//   the session on a new host (refused while a turn or request is open).
 // - Host instructions (`launch` and `context`) reach Muse through the
 //   `first_user_message` channel: a text part before the host's own text, with
 //   the host's own text as `displayText`.
@@ -83,6 +94,7 @@ import type {
   MuseApprovalUpdated,
   MuseInputPart,
   MuseItem,
+  MuseLastTurn,
   MuseMcpServerConfig,
   MuseModelEntry,
   MuseNotifications,
@@ -130,6 +142,8 @@ interface TurnState {
   /** `unseen`: not announced yet; `pending`: announced as queued; `running`: started. */
   phase: "unseen" | "pending" | "running";
   settled: boolean;
+  /** How the turn ended, once it settled. */
+  outcome: { readonly status: Turn["status"]; readonly failure?: Failure } | undefined;
   interruptRequested: boolean;
   usage: UsageSnapshot | undefined;
   readonly openItems: Set<string>;
@@ -151,10 +165,11 @@ interface ItemRecord {
 interface ThreadState {
   thread: Thread;
   readonly nativeId: string;
-  readonly cwd: string;
-  readonly policy: RuntimePolicy;
-  readonly muse: MusePolicy;
-  readonly launch: LaunchContext | undefined;
+  /** What the thread's host runs with; each resume replaces them, and an automatic resume reads them. */
+  cwd: string;
+  policy: RuntimePolicy;
+  muse: MusePolicy;
+  launch: LaunchContext | undefined;
   model: string | undefined;
   /** Host instructions not yet sent: they go before the host's text in the next turn. */
   instructions: string | undefined;
@@ -215,6 +230,29 @@ export function museMcpServers(servers: ReadonlyArray<{ name: string; transport:
 }
 
 const TODO_STATUSES: { readonly [status: string]: PlanEntry["status"] } = { pending: "pending", inProgress: "in_progress", completed: "completed", cancelled: "cancelled" };
+
+/**
+ * The SDK connection's backoff before it resends a command Muse admitted
+ * nothing of (`defaultRetryDelay` in the SDK's dist/src/connection/connection.js,
+ * which its package does not export): a random wait under a ceiling that
+ * starts at 50 ms and doubles up to 2 s.
+ */
+function busyDelay(attempt: number): Promise<void> {
+  const ceilingMs = Math.min(2_000, 50 * 2 ** Math.max(0, attempt - 1));
+  return new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * (ceilingMs + 1))));
+}
+
+/**
+ * How a stored turn that is not running ended: as this session saw it end;
+ * else from Muse's `lastTurn`, which restates only the last turn; else
+ * completed, because Muse stores no terminal for older turns.
+ */
+function storedOutcome(nativeTurn: string, lastTurn: MuseLastTurn | undefined, seen: TurnState | undefined): { status: Turn["status"]; failure?: Failure } {
+  if (seen?.outcome !== undefined) return seen.outcome;
+  if (lastTurn === undefined || lastTurn.turnId !== nativeTurn || lastTurn.terminal === "completed") return { status: "completed" };
+  if (lastTurn.terminal === "cancelled") return { status: "cancelled" };
+  return { status: "failed", failure: failureFromMuse(lastTurn) };
+}
 
 export class MuseSession implements Session {
   readonly id: string;
@@ -312,6 +350,7 @@ export class MuseSession implements Session {
     if (nativeId === null || nativeId === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const known = this.#threadsByNative.get(nativeId);
     if (known !== undefined && !known.unloaded) {
+      if (input.launch !== undefined) await this.#replaceLaunch(known, input.launch);
       await this.#ensureHost(known);
       return known.thread;
     }
@@ -355,6 +394,24 @@ export class MuseSession implements Session {
     }
   }
 
+  /**
+   * Gives a loaded thread a new LaunchContext. Its instructions go before the
+   * next turn's text. Muse takes per-session MCP servers only when it loads a
+   * session, so new servers park the host and the next load (`#ensureHost`)
+   * sends them; while a turn or request is open that would end it, so the
+   * change is refused and nothing is kept.
+   */
+  async #replaceLaunch(thread: ThreadState, launch: LaunchContext): Promise<void> {
+    const servers = (context: LaunchContext | undefined): string => JSON.stringify(museMcpServers(context?.mcpServers ?? []));
+    const newServers = servers(launch) !== servers(thread.launch);
+    if (newServers && (thread.active !== undefined || thread.queued.size > 0)) throw callErrors.invalidState("previous_turn_active", "Muse takes new MCP servers only when it loads the session, and a turn is still running on this thread");
+    if (newServers && this.#pendingFor(thread)) throw callErrors.invalidState("requests_pending", "Muse takes new MCP servers only when it loads the session, and a request on this thread is still pending");
+    const instructions = launchInstructions(launch, undefined);
+    if (instructions !== launchInstructions(thread.launch, undefined)) thread.instructions = instructions;
+    thread.launch = launch;
+    if (newServers) await this.#park(thread);
+  }
+
   /** Loads a stored Muse session on `host` (`session/resume`), registers its thread and replays its history unless quiet. */
   async #resumeNative(
     host: MuseHost,
@@ -381,7 +438,13 @@ export class MuseSession implements Session {
       });
       const cwd = resumed.session.workspaceRoot ?? spec.cwd;
       const state = this.#register(nativeId, host, { cwd, policy: { ...spec.policy, cwd }, muse, launch, model: resumed.session.modelId ?? model, instructions: spec.instructions });
-      if (!quiet) this.#replay(state, resumed.history.items ?? resumed.history.snapshot?.state.items ?? [], resumed.session.activeTurnId);
+      if (!quiet) this.#replay(state, resumed.history.items ?? resumed.history.snapshot?.state.items ?? [], resumed.session.activeTurnId, resumed.lastTurn);
+      // The turn Muse still runs, history or not: its open requests come again right after this answer (`pendingRequests`), and they belong to it.
+      const activeTurnId = resumed.session.activeTurnId;
+      if (activeTurnId !== null) {
+        const turn = this.#turnsByNative.get(activeTurnId) ?? this.#newTurn(state, activeTurnId, "user", undefined, undefined);
+        if (!turn.settled) this.#begin(turn);
+      }
       void this.#readModels(host, nativeId);
       const applied = state.model ?? model;
       return { ...state.thread, ...(applied === undefined ? {} : { appliedConfig: { model: applied } }) };
@@ -409,7 +472,16 @@ export class MuseSession implements Session {
         const turnId = nativeTurn === undefined ? undefined : turnIdFor(thread.thread.id, nativeTurn);
         if (nativeTurn !== undefined && turnId !== undefined && !seen.has(nativeTurn)) {
           seen.add(nativeTurn);
-          turns.push({ id: turnId, threadId: thread.thread.id, native: strongRef(nativeTurn), origin: "user", status: read.session.activeTurnId === nativeTurn ? "running" : "completed" });
+          const known = this.#turnsByNative.get(nativeTurn);
+          const ended = read.session.activeTurnId === nativeTurn ? undefined : storedOutcome(nativeTurn, read.lastTurn, known);
+          turns.push({
+            id: turnId,
+            threadId: thread.thread.id,
+            native: strongRef(nativeTurn),
+            origin: known?.origin ?? "user",
+            status: ended === undefined ? "running" : ended.status,
+            ...(ended?.failure === undefined ? {} : { failure: ended.failure }),
+          });
         }
         mapped.push(this.#mapItem(thread, item, turnId));
       }
@@ -500,15 +572,23 @@ export class MuseSession implements Session {
       const host = thread.host;
       if (host === undefined || host.exited) return { status: "prompt_required" };
       const parts = await this.#inputParts(input.content, turnInstructions);
-      try {
-        await host.command("turn/steer", { sessionId: thread.nativeId, expectedTurnId: active.nativeId, input: parts });
-      } catch (error) {
-        // Muse refuses a steer whose turn is no longer running: the host must start a new turn.
-        const kind = host.errorKind(error);
-        if (kind === "commandRejected" || kind === "notFound" || kind === "sessionNotLoaded") return { status: "prompt_required" };
-        throw callErrorFromMuse(this.#runtime.sdk, error, "turn");
+      // One commandId for every send: a busy refusal wrote nothing, so the resend is the same command.
+      const commandId = host.mintCommandId();
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await host.command("turn/steer", { sessionId: thread.nativeId, expectedTurnId: active.nativeId, input: parts }, commandId);
+          return { status: "accepted", turnId: active.id, accepted: "steered" };
+        } catch (error) {
+          const data = host.errorKind(error) === "commandRejected" ? host.errorData(error) : {};
+          // The turn already ended (Muse says so, or this session saw it end): the host must start a new turn.
+          if (data["reason"] === "already_terminal" || active.settled) return { status: "prompt_required" };
+          // Only the busy session runtime's refusal is resent; any other refusal is the host's to see.
+          if (data["reason"] !== "runtime_busy" || data["retryable"] === false || host.exited) throw callErrorFromMuse(this.#runtime.sdk, error, "turn");
+        }
+        await Promise.race([busyDelay(attempt), active.done]);
+        // The turn ended while Muse was busy: the steer was never taken.
+        if (active.settled || host.exited) return { status: "prompt_required" };
       }
-      return { status: "accepted", turnId: active.id, accepted: "steered" };
     }
 
     const busy = thread.active !== undefined || thread.queued.size > 0;
@@ -568,18 +648,31 @@ export class MuseSession implements Session {
       return;
     }
     turn.interruptRequested = true;
-    try {
-      if (turn.phase === "pending") await host.command("turn/unqueue", { sessionId: thread.nativeId, turnId: turn.nativeId });
-      else await host.command("turn/interrupt", { sessionId: thread.nativeId, turnId: turn.nativeId });
-    } catch (error) {
-      if (turn.settled) return;
-      const kind = host.errorKind(error);
-      // The turn already ended: nothing to stop.
-      if (kind === "commandRejected" || kind === "notFound") return;
-      // Stop must end the turn even when Muse cannot be asked: end the host.
-      await this.#park(thread);
-      this.#settle(turn, "interrupted");
-      return;
+    // One commandId for every send of the unqueue: a busy refusal wrote nothing, so the resend is the same command.
+    const unqueueId = host.mintCommandId();
+    for (let attempt = 1; ; attempt += 1) {
+      const queued = turn.phase === "pending";
+      try {
+        if (queued) await host.command("turn/unqueue", { sessionId: thread.nativeId, turnId: turn.nativeId }, unqueueId);
+        else await host.command("turn/interrupt", { sessionId: thread.nativeId, turnId: turn.nativeId });
+        break;
+      } catch (error) {
+        if (turn.settled) return;
+        const kind = host.errorKind(error);
+        const data = kind === "commandRejected" ? host.errorData(error) : {};
+        // The busy session runtime did not take the unqueue: send it again, as the SDK's `Session.run` does, until Muse takes it or starts the turn (then the next pass interrupts it).
+        if (queued && data["reason"] === "runtime_busy" && data["retryable"] !== false && !host.exited) {
+          await Promise.race([busyDelay(attempt), turn.done]);
+          if (turn.settled) return;
+          continue;
+        }
+        // The turn already ended: nothing to stop.
+        if (kind === "commandRejected" || kind === "notFound") return;
+        // Stop must end the turn even when Muse cannot be asked: end the host.
+        await this.#park(thread);
+        this.#settle(turn, "interrupted");
+        return;
+      }
     }
     if (input.restartRuntime === true) {
       await turn.done;
@@ -845,8 +938,13 @@ export class MuseSession implements Session {
     };
     const existing = this.#threads.get(id);
     if (existing !== undefined) {
+      // The resume's own settings replace the old ones, so an automatic resume later sends what this one did.
       existing.thread = thread;
       existing.host = host;
+      existing.cwd = spec.cwd;
+      existing.policy = spec.policy;
+      existing.muse = spec.muse;
+      existing.launch = spec.launch;
       existing.unloaded = false;
       existing.instructions = spec.instructions;
       existing.model = spec.model;
@@ -881,8 +979,8 @@ export class MuseSession implements Session {
     for (const notification of held) this.#onNotification(notification);
   }
 
-  /** Replays a resumed session's stored items as settled turns, so the host sees its history. */
-  #replay(thread: ThreadState, items: readonly MuseItem[], activeTurnId: string | null): void {
+  /** Replays a resumed session's stored items as settled turns, so the host sees its history; the last turn ends as Muse's `lastTurn` says. */
+  #replay(thread: ThreadState, items: readonly MuseItem[], activeTurnId: string | null, lastTurn: MuseLastTurn | undefined): void {
     for (const item of items) {
       const nativeTurn = item.turnId ?? undefined;
       let turnId: string | undefined;
@@ -893,8 +991,10 @@ export class MuseSession implements Session {
           const turn = this.#newTurn(thread, nativeTurn, "user", undefined, undefined);
           if (nativeTurn === activeTurnId) this.#begin(turn);
           else {
-            this.#announce(turn, "completed");
+            const outcome = storedOutcome(nativeTurn, lastTurn, undefined);
+            this.#announce(turn, outcome.status, outcome.failure);
             turn.settled = true;
+            turn.outcome = outcome;
             turn.finish();
           }
           turnId = turn.id;
@@ -918,6 +1018,7 @@ export class MuseSession implements Session {
       hostTag,
       phase: "unseen",
       settled: false,
+      outcome: undefined,
       interruptRequested: false,
       usage: undefined,
       openItems: new Set(),
@@ -938,8 +1039,8 @@ export class MuseSession implements Session {
     return { threadId: turn.threadId, turnId: turn.id, ...(turn.hostTag === undefined ? {} : { hostTag: turn.hostTag }) };
   }
 
-  /** Emits the upsert that starts `turn` in the event stream, with `status`. */
-  #announce(turn: TurnState, status: Turn["status"]): void {
+  /** Emits the upsert that starts `turn` in the event stream, with `status` (and the failure of a replayed failed turn). */
+  #announce(turn: TurnState, status: Turn["status"], failure?: Failure): void {
     const thread = this.#threads.get(turn.threadId);
     turn.phase = status === "pending" ? "pending" : "running";
     this.#emit(
@@ -955,6 +1056,7 @@ export class MuseSession implements Session {
           ...(turn.hostTag === undefined ? {} : { hostTag: turn.hostTag }),
           ...(status === "running" ? { startedAt: new Date().toISOString() } : {}),
           ...(thread?.model === undefined ? {} : { model: thread.model }),
+          ...(failure === undefined ? {} : { failure }),
         },
       },
       this.#envelope(turn),
@@ -986,6 +1088,7 @@ export class MuseSession implements Session {
     const thread = this.#threads.get(turn.threadId);
     if (turn.phase === "unseen") this.#announce(turn, "running");
     turn.settled = true;
+    turn.outcome = { status, ...(failure === undefined ? {} : { failure }) };
     const envelope = this.#envelope(turn);
     const itemStatus = status === "completed" ? "completed" : status;
     for (const itemId of turn.openItems) this.#emit({ type: "item.upsert", item: { id: itemId, status: itemStatus } }, envelope);

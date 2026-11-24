@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, test } from "node:test";
 import { MUSE_CAPABILITIES } from "../../../src/drivers/muse/index.ts";
+import { isAriError } from "../../../src/index.ts";
 import type { LaunchContext } from "../../../src/index.ts";
 import { museRig, policy, until } from "./rig.ts";
 
@@ -159,6 +160,57 @@ describe("muse driver: host instructions and host-chosen names", () => {
       const before = rig.requests("session/start").length;
       await assert.rejects(opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch: { mcpServers: [{ name: "old", transport: "sse", url: "http://127.0.0.1:9/sse" }] } }));
       assert.equal(rig.requests("session/start").length, before);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a LaunchContext given to resumeThread replaces the thread's on every path: a loaded thread reloads with its MCP servers, an unloaded one resumes with them, the automatic resume after release keeps them, and the next turn carries its instructions; new servers while a turn runs are refused", async () => {
+    const launch = (marker: string): LaunchContext => ({ appendSystemPrompt: [`Instructions-${marker}`], mcpServers: [{ name: marker, transport: "stdio", command: `${marker}-server` }] });
+    const serverNames = (request: { [key: string]: unknown }): string[] => Object.keys((request["config"] as { mcpServers: object }).mcpServers).sort();
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch: launch("before") });
+      const hostServer = `host-tools-${thread.id}`;
+      const turn = async (text: string): Promise<string> => {
+        const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: text, intent: "start", content: [{ type: "text", text }] });
+        assert.equal(started.status, "accepted");
+        const native = await rig.nextTurn();
+        const first = native.input[0];
+        await native.complete();
+        await until(() => opened.bodies("turn.terminal").find((body) => body.turnId === (started as { turnId: string }).turnId), `the end of ${text}`);
+        return first?.type === "text" ? (first.text ?? "") : "";
+      };
+
+      // While a turn runs, new servers cannot reach Muse: refused, and nothing is sent or kept.
+      const started = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "one", intent: "start", content: [{ type: "text", text: "One." }] });
+      const native = await rig.nextTurn();
+      assert.equal(native.input[0]?.type === "text" && native.input[0].text, "Instructions-before");
+      await assert.rejects(opened.session.resumeThread({ native: thread.native, launch: launch("busy") }), (error) => isAriError(error, "invalid_state"));
+      assert.equal(rig.requests("session/resume").length, 0);
+      await native.complete();
+      await until(() => opened.bodies("turn.terminal").find((body) => body.turnId === (started as { turnId: string }).turnId), "the end of One.");
+
+      // A loaded, idle thread: the launch it has changes nothing; a new one reloads the session with its servers, and the next turn carries its instructions.
+      await opened.session.resumeThread({ native: thread.native, launch: launch("before") });
+      assert.equal(rig.requests("session/resume").length, 0);
+      const hosts = rig.world.hosts.length;
+      await opened.session.resumeThread({ native: thread.native, launch: launch("warm") });
+      assert.deepEqual(serverNames(rig.requests("session/resume").at(-1)!), [hostServer, "warm"].sort());
+      assert.equal(rig.world.hosts.length, hosts + 1, "the session reloaded on a new host");
+      assert.equal(await turn("Two."), "Instructions-warm");
+
+      // An unloaded thread resumes with the new servers, and the automatic resume after release keeps them.
+      await opened.session.unloadThread!(thread.id);
+      await opened.session.resumeThread({ native: thread.native, policy: policy(rig.cwd), launch: launch("after-unload"), quiet: true });
+      assert.deepEqual(serverNames(rig.requests("session/resume").at(-1)!), ["after-unload", hostServer].sort());
+      await opened.session.release();
+      const resumes = rig.requests("session/resume").length;
+      assert.equal(await turn("Three."), "Instructions-after-unload");
+      assert.equal(rig.requests("session/resume").length, resumes + 1, "the turn after release resumed the session");
+      assert.deepEqual(serverNames(rig.requests("session/resume").at(-1)!), ["after-unload", hostServer].sort());
+      assert.deepEqual(rig.world.sessions.get(thread.native.id!)?.mcpServers["after-unload"], { transport: "stdio", command: "after-unload-server" });
     } finally {
       await rig.cleanup();
     }

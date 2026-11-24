@@ -32,6 +32,20 @@
 //   then the item settles (approval-round-trip, approval-deny-round-trip);
 // - questions: `userInput/requested` and `userInput/request`,
 //   `userInput/answer`, `userInput/settled` (userinput-answer-round-trip);
+// - `session/resume` lists the unsettled approvals and questions of the
+//   session's running turn in `pendingRequests` and re-issues each as its
+//   server request right after the answer (the SDK README: "An approval still
+//   pending when you resume a session arrives right after the resume reply";
+//   userinput-answer-round-trip lines 6-9, a resume of a running session that
+//   no live host holds). `parkedSession` stores that starting state;
+// - `session/read` and `session/resume` restate the last `turn/completed` as
+//   `lastTurn` (msp.d.ts `LastTurn`: "so a reopened session can report a
+//   failed last turn");
+// - a steer whose turn already ended is refused with -32030 `commandRejected`,
+//   reason `already_terminal` (the SDK's facade-control-verbs test "a durably
+//   rejected steer retires to the composer"); `refuseSteer` makes the session
+//   runtime refuse a steer of the running turn, for example with the
+//   retryable `runtime_busy` the SDK changelog documents for `turn/steer`;
 // - `turn/interrupt` and `turn/cancel` answer at admission and the turn ends
 //   with a `cancelled` terminal (cancel-mid-turn transcript);
 // - `session/compact` acks `accepted` and folds a `compaction` item, or acks
@@ -40,12 +54,9 @@
 //   with reason `hostShutdown`, leases are released and the process exits 0;
 //   a killed or crashed host writes nothing (sessions-and-turns).
 //
-// What the SDK documents but leaves open, and the fake decides: a steer whose
-// `expectedTurnId` is not the running turn is "refused" (turn/steer
-// reference); the fake refuses it with -32030 `commandRejected`, reason
-// `turn_not_running`. The fake asks for an approval whenever the kit's puppet
-// asks, whatever the approval mode: which calls Muse's policy settles without
-// asking is not public.
+// What the SDK leaves open, and the fake decides: the fake asks for an
+// approval whenever the kit's puppet asks, whatever the approval mode: which
+// calls Muse's policy settles without asking is not public.
 
 import type {
   ApprovalChoice,
@@ -56,6 +67,7 @@ import type {
   ErrorObject,
   InitializeResult,
   Item,
+  LastTurn,
   ModelCatalogEntry,
   MspMethodMap,
   MspNotificationMap,
@@ -223,6 +235,47 @@ export interface StoredSession {
   active: FakeRun | undefined;
   readonly queue: FakeRun[];
   lastRunId: string | undefined;
+  /** The last `turn/completed` the session folded, as `session/read` and `session/resume` restate it. */
+  lastTurn: LastTurn | undefined;
+}
+
+/** A session `parkedSession` stored: its turn waits on one request. */
+export interface ParkedSession {
+  readonly sessionId: string;
+  readonly turnId: string;
+  /** The approval id or user-input id the turn waits on. */
+  readonly requestId: string;
+  /** The answers Muse got to the question. */
+  answers(): Promise<UserInputAnswer[]>;
+  /** The choice Muse got for the approval. */
+  nextReply(): Promise<string>;
+}
+
+/** A fresh run: a turn from its `turn/start` (or a parked turn) to its terminal. */
+function newRun(commandId: string, input: TurnInputPart[], displayText: string | undefined, reasoningEffort: string | undefined): FakeRun {
+  return {
+    turnId: commandId,
+    commandId,
+    // Multiple text parts are joined in order into the turn's prompt.
+    prompt: input.flatMap((part) => (part.type === "text" && part.text !== undefined ? [part.text] : [])).join("\n"),
+    input,
+    displayText,
+    reasoningEffort,
+    ended: false,
+    steers: [],
+    steerWaiters: [],
+    stop: deferred<"cancel" | "exit">(),
+    openItems: new Map(),
+    approvals: new Map(),
+    questions: new Map(),
+    usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
+  };
+}
+
+/** The session's next view cursor. */
+function nextCursor(session: StoredSession): string {
+  session.cursor += 1;
+  return `v10:${session.sessionId}:${session.cursor}`;
 }
 
 export interface FakeMuseOptions {
@@ -247,6 +300,14 @@ export class FakeMuseWorld {
   readonly launches: Array<{ args: readonly string[]; cwd: string | undefined; environment: { readonly [name: string]: string } }> = [];
   readonly options: FakeMuseOptions;
   readonly log: FrameLog;
+  /**
+   * Asked for each `turn/steer` of a running turn: a refusal it returns is the
+   * session runtime refusing the steer (-32030 `commandRejected` with that
+   * reason and retryability), and nothing is written; undefined takes it.
+   */
+  refuseSteer: (() => { reason: string; retryable: boolean } | undefined) | undefined;
+  /** The same for each `turn/unqueue` of a queued turn (the SDK's `Session.run` documents a busy unqueue, `runtime_busy`). */
+  refuseUnqueue: (() => { reason: string; retryable: boolean } | undefined) | undefined;
   readonly #commands = new Map<string, { signature: string; answer: unknown }>();
   #ids = 0;
 
@@ -259,6 +320,117 @@ export class FakeMuseWorld {
   mint(): string {
     this.#ids += 1;
     return `0198f0ac-0000-7000-8000-${this.#ids.toString(16).padStart(12, "0")}`;
+  }
+
+  /** A one-record source range on `kind` stream `streamId`. */
+  sourceRange(kind: string, streamId: string): SourceRange {
+    const id = this.mint();
+    const sequence = Number.parseInt(id.slice(-12), 16);
+    return { stream: { kind, id: streamId }, first: { id, sequence }, last: { id, sequence } };
+  }
+
+  /**
+   * Stores a session that no host holds, whose turn waits on a question or an
+   * approval: the state the pinned userinput-answer-round-trip transcript
+   * resumes (a `running` session, its `activeTurnId`, the turn's user message
+   * and its open tool call, one pending request). The next host that resumes
+   * it lists the request in `pendingRequests`, re-issues it right after the
+   * answer, and hands the turn to the puppet.
+   */
+  parkedSession(spec: { workspaceRoot: string; prompt: string; waitsOn: "question" | "approval" }): ParkedSession {
+    const sessionId = this.mint();
+    const now = new Date().toISOString();
+    const session: StoredSession = {
+      sessionId,
+      workspaceRoot: spec.workspaceRoot,
+      createdAt: now,
+      updatedAt: now,
+      modelId: FAKE_MODELS[0]!.modelId,
+      providerId: "meta",
+      approvalMode: "promptUnmatched",
+      permissionProfile: ":ask-me",
+      mcpServers: {},
+      configs: [],
+      items: [],
+      turnPrompts: [spec.prompt],
+      turnCount: 0,
+      compactions: 0,
+      cursor: 0,
+      owner: undefined,
+      foreignLock: false,
+      active: undefined,
+      queue: [],
+      lastRunId: undefined,
+      lastTurn: undefined,
+    };
+    const run = newRun(this.mint(), [{ type: "text", text: spec.prompt }], undefined, undefined);
+    session.active = run;
+    session.items.push({ itemId: this.mint(), kind: "userMessage", turnId: run.turnId, revision: 1, status: "completed", recordedAt: now, text: spec.prompt, commandId: run.commandId });
+    const requestId = this.mint();
+    const parked: ParkedSession = {
+      sessionId,
+      turnId: run.turnId,
+      requestId,
+      answers: () => run.questions.get(requestId)!.answered.promise,
+      nextReply: () => run.approvals.get(requestId)!.firstReply.promise,
+    };
+    if (spec.waitsOn === "question") {
+      const item: Item = { itemId: this.mint(), kind: "toolCall", turnId: run.turnId, revision: 1, status: "inProgress", recordedAt: now, tool: "request_user_input", callId: `call_${requestId.slice(-6)}`, args: JSON.stringify({ questions: [{ id: "db_choice", question: "Which database?" }] }) };
+      session.items.push(item);
+      run.openItems.set(item.itemId, item);
+      const params: UserInputRequestParams = {
+        sessionId,
+        userInputId: requestId,
+        turnId: run.turnId,
+        itemId: item.itemId,
+        toolCallId: item.callId!,
+        toolName: "request_user_input",
+        questions: [
+          {
+            id: "db_choice",
+            header: "Database",
+            question: "Which database should the new service use?",
+            selection: { mode: "single" },
+            options: [
+              { label: "Postgres", description: "Matches the other services." },
+              { label: "SQLite", description: "Zero-ops, single node only." },
+            ],
+          },
+        ],
+        autoResolutionMs: 120000,
+        sourceRange: this.sourceRange("session", sessionId),
+        viewCursor: nextCursor(session),
+      };
+      run.questions.set(requestId, { params, item, settled: false, answered: deferred<UserInputAnswer[]>() });
+    } else {
+      const args = JSON.stringify({ command: "npm test" });
+      const item: Item = { itemId: this.mint(), kind: "toolCall", turnId: run.turnId, revision: 1, status: "inProgress", recordedAt: now, tool: "shell", callId: `call_${requestId.slice(-6)}`, args, approvalId: requestId };
+      session.items.push(item);
+      run.openItems.set(item.itemId, item);
+      const params: ApprovalRequestParams = {
+        sessionId,
+        approvalId: requestId,
+        turnId: run.turnId,
+        taskId: this.mint(),
+        itemId: item.itemId,
+        toolCallId: item.callId!,
+        toolName: "shell",
+        rawArgs: args,
+        subject: { kind: "shell", command: "npm test", stages: [], workspaceRoot: spec.workspaceRoot },
+        currentRequirementId: { approvalId: requestId, sourceIndex: 0 },
+        availableChoices: [
+          { choiceId: "allow_once", label: "Allow once", decision: "approved", scope: "once" },
+          { choiceId: "deny", label: "Deny", decision: "denied", scope: "once", acceptsFeedback: true },
+        ],
+        protectedWrite: false,
+        judgeEscalated: false,
+        sourceRange: this.sourceRange("approval.review", requestId),
+        viewCursor: nextCursor(session),
+      };
+      run.approvals.set(requestId, { params, item, resolved: false, replies: [], firstReply: deferred<string>() });
+    }
+    this.sessions.set(sessionId, session);
+    return parked;
   }
 
   /** What one invocation of the `muse` CLI does. */
@@ -541,14 +713,11 @@ export class FakeMuseHost {
   }
 
   cursor(session: StoredSession): string {
-    session.cursor += 1;
-    return `v10:${session.sessionId}:${session.cursor}`;
+    return nextCursor(session);
   }
 
   #sourceRange(kind: string, streamId: string): SourceRange {
-    const id = this.world.mint();
-    const sequence = Number.parseInt(id.slice(-12), 16);
-    return { stream: { kind, id: streamId }, first: { id, sequence }, last: { id, sequence } };
+    return this.world.sourceRange(kind, streamId);
   }
 
   #sessionObject(session: StoredSession): MspSession {
@@ -602,6 +771,7 @@ export class FakeMuseHost {
         active: undefined,
         queue: [],
         lastRunId: undefined,
+        lastTurn: undefined,
       };
       this.#config(params.config, session);
       this.world.sessions.set(sessionId, session);
@@ -618,17 +788,38 @@ export class FakeMuseHost {
       throw new MspFault(-32021, "sessionInUse", `session ${params.sessionId} is held by another host`, { sessionId: params.sessionId });
     }
     this.#config(params.config, session);
+    const adopting = session.owner !== this;
     session.owner = this;
     this.#owned.add(session);
     if (params.permissionProfile !== undefined) session.permissionProfile = params.permissionProfile;
     if (params.modelId !== undefined) session.modelId = params.modelId;
-    const pending: PendingRequestPointer[] = [];
+    const run = session.active;
+    // A running turn no live host held continues on this host, and the puppet gets it.
+    if (run !== undefined && adopting) this.world.turnQueue.push(new FakeMuseTurn(this, session, run));
+    const approvals = run === undefined ? [] : [...run.approvals.values()].filter((approval) => !approval.resolved);
+    const questions = run === undefined ? [] : [...run.questions.values()].filter((question) => !question.settled);
+    // The full payloads arrive again as server requests right after the answer (no view notification comes with them).
+    this.#then(() => {
+      for (const approval of approvals) this.serverRequest("approval/request", approval.params);
+      for (const question of questions) this.serverRequest("userInput/request", question.params);
+    });
     return {
       session: this.#sessionObject(session),
       viewCursor: this.cursor(session),
       history: params.excludeItems === true ? { mode: "none", items: null, snapshot: null, noneReason: "excluded" } : { mode: "inline", items: structuredClone(session.items), snapshot: null },
-      pendingRequests: pending,
+      pendingRequests: this.#pendingPointers(session),
+      ...(session.lastTurn === undefined ? {} : { lastTurn: structuredClone(session.lastTurn) }),
     };
+  }
+
+  /** The late-joiner pointers at the running turn's unsettled approvals and questions. */
+  #pendingPointers(session: StoredSession): PendingRequestPointer[] {
+    const run = session.active;
+    if (run === undefined) return [];
+    return [
+      ...[...run.approvals.values()].filter((approval) => !approval.resolved).map((approval): PendingRequestPointer => ({ kind: "approval", approvalId: approval.params.approvalId, viewCursor: approval.params.viewCursor })),
+      ...[...run.questions.values()].filter((question) => !question.settled).map((question): PendingRequestPointer => ({ kind: "userInput", userInputId: question.params.userInputId, viewCursor: question.params.viewCursor })),
+    ];
   }
 
   #sessionRead(params: Params<"session/read">): Result<"session/read"> {
@@ -639,7 +830,9 @@ export class FakeMuseHost {
       session: this.#sessionObject(session),
       viewCursor: `v10:${session.sessionId}:${session.cursor}`,
       history: excluded ? { mode: "none", items: null, snapshot: null, noneReason: "excluded" } : { mode: "inline", items: structuredClone(session.items), snapshot: null },
-      pendingRequests: [],
+      // A read re-issues nothing (msp.d.ts `PendingRequestPointer`).
+      pendingRequests: this.#pendingPointers(session),
+      ...(session.lastTurn === undefined ? {} : { lastTurn: structuredClone(session.lastTurn) }),
     };
   }
 
@@ -717,7 +910,7 @@ export class FakeMuseHost {
     const session = this.#session(params.sessionId);
     if (params.input.length === 0) throw new MspFault(-32602, "invalidParams", "input must not be empty");
     return this.world.dedupe(params.commandId, "turn/start", params, () => {
-      const run = this.#newRun(params.commandId, params.input, params.displayText, params.reasoningEffort);
+      const run = newRun(params.commandId, params.input, params.displayText, params.reasoningEffort);
       if (session.active !== undefined) {
         if (params.ifBusy === "steer") {
           this.#steer(session, session.active, params.input, params.commandId);
@@ -730,26 +923,6 @@ export class FakeMuseHost {
       this.#then(() => this.#launch(session, run));
       return { commandId: params.commandId, disposition: "started", startedNewTurn: true, status: "accepted", turnId: run.turnId };
     });
-  }
-
-  #newRun(commandId: string, input: TurnInputPart[], displayText: string | undefined, reasoningEffort: string | undefined): FakeRun {
-    return {
-      turnId: commandId,
-      commandId,
-      // Multiple text parts are joined in order into the turn's prompt.
-      prompt: input.flatMap((part) => (part.type === "text" && part.text !== undefined ? [part.text] : [])).join("\n"),
-      input,
-      displayText,
-      reasoningEffort,
-      ended: false,
-      steers: [],
-      steerWaiters: [],
-      stop: deferred<"cancel" | "exit">(),
-      openItems: new Map(),
-      approvals: new Map(),
-      questions: new Map(),
-      usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
-    };
   }
 
   /** The run begins: `turn/started`, then its user message; the puppet gets the turn. */
@@ -795,8 +968,10 @@ export class FakeMuseHost {
     return this.world.dedupe(params.commandId, "turn/steer", params, () => {
       const run = session.active;
       if (run === undefined || run.ended || run.turnId !== params.expectedTurnId) {
-        throw new MspFault(-32030, "commandRejected", `turn ${params.expectedTurnId} is not running`, { commandId: params.commandId, reason: "turn_not_running" });
+        throw new MspFault(-32030, "commandRejected", "turn already finished", { commandId: params.commandId, reason: "already_terminal" });
       }
+      const refusal = this.world.refuseSteer?.();
+      if (refusal !== undefined) throw new MspFault(-32030, "commandRejected", `the session runtime refused the steer (${refusal.reason})`, { commandId: params.commandId, reason: refusal.reason, retryable: refusal.retryable });
       this.#steer(session, run, params.input, params.commandId);
       return { commandId: params.commandId, status: "accepted", turnId: run.turnId };
     });
@@ -817,6 +992,8 @@ export class FakeMuseHost {
     const session = this.#session(params.sessionId);
     const index = session.queue.findIndex((run) => run.turnId === params.turnId);
     if (index < 0) throw new MspFault(-32030, "commandRejected", `turn ${params.turnId} is not queued`, { commandId: params.commandId, reason: "not_queued" });
+    const refusal = this.world.refuseUnqueue?.();
+    if (refusal !== undefined) throw new MspFault(-32030, "commandRejected", `the session runtime refused the unqueue (${refusal.reason})`, { commandId: params.commandId, reason: refusal.reason, retryable: refusal.retryable });
     const [run] = session.queue.splice(index, 1);
     this.#then(() =>
       this.notify("turn/unqueued", { sessionId: session.sessionId, turnId: run!.turnId, commandId: run!.commandId, sourceRange: this.#sourceRange("session", session.sessionId), viewCursor: this.cursor(session) }),
@@ -973,6 +1150,7 @@ export class FakeMuseHost {
     session.lastRunId = run.turnId;
     if (outcome.terminal === "completed") session.turnCount += 1;
     const finish = (): void => {
+      session.lastTurn = { turnId: run.turnId, terminal: outcome.terminal, ...(outcome.reason === undefined ? {} : { reason: outcome.reason }), ...(outcome.error === undefined ? {} : { error: outcome.error }) };
       for (const item of [...run.openItems.values()]) {
         const status = outcome.terminal === "completed" ? "completed" : outcome.terminal === "cancelled" ? "cancelled" : "failed";
         this.settleItem(session, run, { ...item, revision: item.revision + 1, status, ...(status === "completed" ? {} : { failureReason: outcome.reason ?? "turn ended" }) });

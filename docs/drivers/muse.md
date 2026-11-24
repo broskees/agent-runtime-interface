@@ -74,14 +74,14 @@ range, with no Node built-in.
 | ARI | MSP |
 |---|---|
 | `createThread` | `hostTools.mcpServerFor(threadId)`, then `session/start` with the driver's `sessionId`, `workspaceRoot`, `approvalMode`, `permissionProfile`, `modelId`, and `config.mcpServers` |
-| `resumeThread` | `session/resume` (`excludeItems` when `quiet`, else the stored items are replayed as settled turns), then `session/setApprovalMode`; a session that is missing (-32020 `sessionNotFound`) or leased by another host (-32021 `sessionInUse`) falls back to a fresh `session/start` with `session.replaced` and `contextLost: true` |
+| `resumeThread` | `session/resume` (`excludeItems` when `quiet`, else the stored items are replayed as settled turns, the last one as Muse's `lastTurn` says), then `session/setApprovalMode`. The turn the answer names as running (`activeTurnId`) runs in ARI too, and the approvals and questions Muse re-issues right after the answer (`pendingRequests`) are its requests. A session that is missing (-32020 `sessionNotFound`) or leased by another host (-32021 `sessionInUse`) falls back to a fresh `session/start` with `session.replaced` and `contextLost: true`. On a thread this session holds loaded, a new `launch` replaces the thread's: its instructions go before the next turn's text, and new MCP servers reload the session on a new host, which is refused with `invalid_state` while a turn or request is open |
 | `startTurn` start | `session/setModel` when the model changes, then `turn/start` (`commandId` = turn id, `reasoningEffort`) |
 | `startTurn` queue | `turn/start` with `ifBusy: "queue"`; the answer's `disposition: "queued"` names the queued turn, announced `pending` until Muse's `turn/started` |
-| `startTurn` steer | `turn/steer` with `expectedTurnId`; Muse refuses a steer whose turn is no longer running, and the host gets `prompt_required` |
-| `interruptTurn` | `turn/interrupt` on the running turn, `turn/unqueue` on a queued one |
+| `startTurn` steer | `turn/steer` with `expectedTurnId`; a steer whose turn already ended is `prompt_required`, a steer the busy session runtime refuses is sent again, and any other refusal is an error (see "Steer refusal") |
+| `interruptTurn` | `turn/interrupt` on the running turn, `turn/unqueue` on a queued one. An unqueue the busy session runtime refuses (`runtime_busy`) is sent again under its first `commandId`, as the SDK's `Session.run` does, until Muse takes it, or until Muse starts the turn, which is then interrupted |
 | `respond` (approval) | `approval/decide` with the chosen `choiceId` and the approval's `currentRequirementId` |
 | `respond` (question) | `userInput/answer`: one answer per question, `selectedLabel`, `selectedLabels` or `freeText` (`note` beside a selection) |
-| `readSnapshot` | `session/read` with `excludeItems: false`; an unloaded thread is read through a short-lived host, because `session/read` takes no lease |
+| `readSnapshot` | `session/read` with `excludeItems: false`; an unloaded thread is read through a short-lived host, because `session/read` takes no lease. A turn is `running` when it is the session's `activeTurnId`; otherwise it ended as this session saw it end, or, for the last turn, as Muse's `lastTurn` says (`failed` with its failure, or `cancelled`). Muse stores no terminal for older turns, so an older turn this session did not see end is `completed` |
 | `compactThread` | `session/compact`; a `noop` answer is `invalid_state` with Muse's reason |
 | `forkThread`, `rollbackThread` | reject with `unsupported` (`threads.fork`, `threads.rollback`) before sending anything |
 | `planConfigChange` | `model` and `reasoningEffort` apply on the next turn; anything else is refused |
@@ -157,7 +157,7 @@ where it has no row. Every difference names its source.
 | `sessions.multipleThreads` | `true` | not in §1.2 | One host per thread. |
 | `sessions.switchModel` | `true` | Y | `session/setModel`. |
 | `sessions.switchRuntimeMode` | `false` | – | The `--disable-sandbox` flag of a full-access thread is fixed when its host starts. |
-| `sessions.pendingRequestsSurviveRestart` | `false` | not in §1.2 | A pending approval belongs to the host that asked; after a restart Muse may resolve it `abort` and ask again under a new id (`ApprovalChange` `restartRecovered`, `msp.d.ts`). |
+| `sessions.pendingRequestsSurviveRestart` | `false` | not in §1.2 | A pending approval belongs to the host that asked; after a restart Muse may resolve it `abort` and ask again under a new id (`ApprovalChange` `restartRecovered`, `msp.d.ts`). What Muse re-issues after a `session/resume` the driver takes as a request of the running turn, under the id Muse gives it. |
 | `sessions.release` | `true` | not in §1.2 | Closes every host; the next turn resumes. |
 | `sessions.feedbackUpload` | `false` | not in §1.2 | Not built: `feedback/submit` exists in MSP 1.4.25. |
 | `sessions.contextUsageReuse` | `false` | not in §1.2 | |
@@ -267,12 +267,32 @@ supported member against the fake `muse serve`.
 
 ## Steer refusal
 
-The `turn/steer` reference says a steer whose `expectedTurnId` is not the
-running turn "is refused", but the published schema names no reason for it.
-The driver reads any `commandRejected` (-32030), `notFound` or
-`sessionNotLoaded` answer to a steer as "that turn is not running" and returns
-`prompt_required`. The fake refuses with -32030 and reason
-`turn_not_running`, an assumption `test/drivers/muse/SOURCES.md` records.
+Muse answers a refused `turn/steer` with -32030 `commandRejected` and a
+`reason`. The SDK's `Connection` keeps the reason and `retryable`, but it
+resends only `overloaded` and `backpressured`, never `commandRejected`. The
+driver reads the reason:
+
+- `already_terminal`: the turn already ended (the SDK's own test "a durably
+  rejected steer retires to the composer" answers a finished turn's steer
+  this way). The host gets `prompt_required`. So does any refusal that
+  arrives after this session saw the turn end.
+- `runtime_busy`: the session runtime was busy and wrote nothing (the SDK
+  changelog: "MSP clients get a retryable `commandRejected` (`runtime_busy`)
+  instead of an internal error when a session is busy and refuses
+  `turn/start` or `turn/steer`"). The turn still runs, so `prompt_required`
+  would be wrong: a fresh `turn/start` on the thread is refused while it runs.
+  The driver sends the steer again under its first `commandId`, after the
+  SDK connection's own backoff (a random wait under 50 ms, doubling to 2 s),
+  until Muse takes it (`accepted`, `steered`) or the turn ends. A turn that
+  ends first never got the steer, so the host then gets `prompt_required`.
+  There is no attempt cap: the SDK's own `Session.run` resends a busy
+  `turn/unqueue` the same way, "with no cap, until the host decides it", and
+  the turn's end bounds the wait. A `runtime_busy` refusal that says
+  `retryable: false` is not resent.
+- Any other refusal is an `invalid_state` error with Muse's reason, because
+  the turn may still run. `turn/start` refusals carry Muse's reason the same
+  way; the driver does not resend a busy `turn/start` (nothing bounds that
+  wait).
 
 ## CLI manifest
 

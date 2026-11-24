@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { isAriError } from "../../../src/index.ts";
 import type { Session, StartTurnResult, Thread } from "../../../src/index.ts";
-import { MUSE_CAPABILITIES, threadIdFor } from "../../../src/drivers/muse/index.ts";
+import { MUSE_CAPABILITIES, threadIdFor, turnIdFor } from "../../../src/drivers/muse/index.ts";
 import type { FakeMuseTurn } from "./fake-muse.ts";
 import { museRig, policy, until } from "./rig.ts";
 import type { MuseTestRig, OpenedMuseSession } from "./rig.ts";
@@ -96,7 +96,7 @@ describe("muse driver: Muse's protocol", () => {
       assert.deepEqual(late, { status: "prompt_required" });
       assert.equal(rig.requests("turn/steer").length, 1, "a steer the driver knows is late sends nothing");
 
-      // A steer Muse refuses because its turn already ended is prompt_required too.
+      // A steer Muse refuses because its turn already ended (`already_terminal`) is prompt_required too.
       const second = await start(rig, opened.session, thread, "Again.");
       const held = await second.native.completeHeld();
       const raced = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "steer-3", intent: "steer", expectedTurnId: turnIdOf(second.result), content: [{ type: "text", text: "Race." }] });
@@ -105,6 +105,50 @@ describe("muse driver: Muse's protocol", () => {
       await held.release();
       await terminal(opened, turnIdOf(second.result));
     } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a steer the busy session runtime refuses (runtime_busy, retryable) goes out again under its commandId until Muse takes it, or is prompt_required once the turn ends; any other refusal is an error, not prompt_required", async () => {
+    const busy = { reason: "runtime_busy", retryable: true };
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const { result, native } = await start(rig, opened.session, thread, "Build it.");
+      const turnId = turnIdOf(result);
+
+      // Busy twice, then taken: one steer, sent three times under one commandId, reaches the turn once.
+      let refusals = 0;
+      rig.world.refuseSteer = () => (++refusals <= 2 ? busy : undefined);
+      const steering = native.nextSteer();
+      const steered = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "busy-1", intent: "steer", expectedTurnId: turnId, content: [{ type: "text", text: "Also add tests." }] });
+      assert.deepEqual(steered, { status: "accepted", turnId, accepted: "steered" });
+      assert.equal(await steering, "Also add tests.");
+      const sent = rig.requests("turn/steer");
+      assert.equal(sent.length, 3);
+      assert.equal(new Set(sent.map((steer) => steer["commandId"])).size, 1, "every resend carries the first commandId");
+      assert.equal(opened.bodies("item.upsert").filter((body) => body.item.kind === "user_message" && body.item.text === "Also add tests.").length, 1);
+
+      // Another refusal is surfaced as Muse gave it; the turn still runs, so it is not prompt_required.
+      rig.world.refuseSteer = () => ({ reason: "input_rejected", retryable: false });
+      await assert.rejects(
+        opened.session.startTurn({ threadId: thread.id, clientTurnKey: "busy-2", intent: "steer", expectedTurnId: turnId, content: [{ type: "text", text: "Refused." }] }),
+        (error) => isAriError(error, "invalid_state") && error.callError.code === "invalid_state" && error.callError.reason === "input_rejected",
+      );
+      assert.equal(rig.requests("turn/steer").length, 4, "a refusal that is not runtime_busy is not resent");
+
+      // Busy until the turn ends: the steer was never taken, so the host must prompt again.
+      rig.world.refuseSteer = () => busy;
+      const before = rig.requests("turn/steer").length;
+      const waiting = opened.session.startTurn({ threadId: thread.id, clientTurnKey: "busy-3", intent: "steer", expectedTurnId: turnId, content: [{ type: "text", text: "Never taken." }] });
+      await until(() => (rig.requests("turn/steer").length >= before + 2 ? true : undefined), "two busy refusals of the steer");
+      await native.complete();
+      assert.deepEqual(await waiting, { status: "prompt_required" });
+      await terminal(opened, turnId);
+      assert.equal(opened.bodies("item.upsert").some((body) => body.item.kind === "user_message" && body.item.text === "Never taken."), false);
+    } finally {
+      rig.world.refuseSteer = undefined;
       await rig.cleanup();
     }
   });
@@ -350,6 +394,43 @@ describe("muse driver: Muse's protocol", () => {
     }
   });
 
+  test("Stop on a queued turn the busy session runtime will not unqueue (runtime_busy) sends turn/unqueue again under its commandId until Muse takes it, or turn/interrupt once Muse starts the turn", async () => {
+    const busy = { reason: "runtime_busy", retryable: true };
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const first = await start(rig, opened.session, thread, "First.");
+
+      // Busy twice, then taken back.
+      let refusals = 0;
+      rig.world.refuseUnqueue = () => (++refusals <= 2 ? busy : undefined);
+      const taken = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "q1", intent: "queue", content: [{ type: "text", text: "Never mind." }] });
+      await opened.session.interruptTurn({ turnId: turnIdOf(taken) });
+      const unqueues = rig.requests("turn/unqueue");
+      assert.equal(unqueues.length, 3);
+      assert.equal(new Set(unqueues.map((unqueue) => unqueue["commandId"])).size, 1, "every resend carries the first commandId");
+      assert.equal((await terminal(opened, turnIdOf(taken))).status, "interrupted");
+
+      // Busy until Muse starts the queued turn: then Stop is turn/interrupt on it.
+      rig.world.refuseUnqueue = () => busy;
+      const late = await opened.session.startTurn({ threadId: thread.id, clientTurnKey: "q2", intent: "queue", content: [{ type: "text", text: "Too late to take back." }] });
+      const stopping = opened.session.interruptTurn({ turnId: turnIdOf(late) });
+      await until(() => (rig.requests("turn/unqueue").length >= 5 ? true : undefined), "two busy refusals of the unqueue");
+      await first.native.complete();
+      const launched = await rig.nextTurn();
+      assert.equal(launched.prompt, "Too late to take back.");
+      assert.equal(await launched.stopRequested(), "cancel");
+      await launched.finishCancelled();
+      await stopping;
+      assert.equal(rig.requests("turn/interrupt").at(-1)?.["turnId"], launched.turnId);
+      assert.equal((await terminal(opened, turnIdOf(late))).status, "interrupted");
+    } finally {
+      rig.world.refuseUnqueue = undefined;
+      await rig.cleanup();
+    }
+  });
+
   test("subagents and their approvals, and the todo list: subagent.upsert with a subagent_spawn item, a subagent's approval with origin.subagentId and no turn, plan.upsert", async () => {
     const rig = await museRig();
     try {
@@ -459,6 +540,93 @@ describe("muse driver: Muse's protocol", () => {
       await after.native.complete();
       await terminal(fresh, turnIdOf(after.result));
       assert.deepEqual(rig.world.inspect(thread.native.id!)?.prompts, ["Remember 7.", "What was the number?"]);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a resumed session's outstanding question and approval come again as server requests right after session/resume; the driver adopts each on the running turn, answers it, and sees the turn end", async () => {
+    const rig = await museRig();
+    try {
+      // The question, resumed without history (excludeItems), as the pinned userinput-answer-round-trip transcript resumes it.
+      const asked = rig.world.parkedSession({ workspaceRoot: rig.cwd, prompt: "Choose the database for the new service", waitsOn: "question" });
+      const opened = await rig.open();
+      const thread = await opened.session.resumeThread({ native: { handle: asked.sessionId }, policy: policy(rig.cwd), quiet: true });
+      const turnId = turnIdFor(thread.id, asked.turnId);
+      const running = await until(() => opened.bodies("turn.upsert").find((body) => body.turn.id === turnId)?.turn, "the resumed running turn");
+      assert.equal(running.status, "running");
+      const question = await until(() => opened.bodies("request.upsert").find((body) => body.request.kind === "user_input")?.request, "the re-issued question");
+      assert.equal(question.origin?.turnId, turnId);
+      assert.deepEqual(question.questions?.map((entry) => entry.id), ["db_choice"]);
+      assert.equal(opened.session.canRelease(), false, "a resumed turn that waits on the host keeps the session");
+      const native = await rig.nextTurn();
+      assert.equal(native.turnId, asked.turnId);
+      await opened.session.respond({ requestId: question.id, responseKey: "db-1", answers: { db_choice: { optionIds: ["Postgres"] } } });
+      assert.deepEqual(await asked.answers(), [{ questionId: "db_choice", selectedLabel: "Postgres" }]);
+      await native.complete();
+      assert.equal((await terminal(opened, turnId)).status, "completed");
+      assert.equal(opened.bodies("request.upsert").filter((body) => body.request.id === question.id).at(-1)?.request.status, "resolved");
+
+      // The approval, resumed with its history replayed, as the SDK README describes.
+      const approval = rig.world.parkedSession({ workspaceRoot: rig.cwd, prompt: "Run the tests.", waitsOn: "approval" });
+      const other = await opened.session.resumeThread({ native: { handle: approval.sessionId }, policy: policy(rig.cwd) });
+      const approvalTurn = turnIdFor(other.id, approval.turnId);
+      const asking = await until(() => opened.bodies("request.upsert").find((body) => body.request.kind === "command")?.request, "the re-issued approval");
+      assert.equal(asking.origin?.turnId, approvalTurn);
+      assert.deepEqual(asking.options?.map((option) => option.optionId), ["allow_once", "deny"]);
+      const approvalNative = await rig.nextTurn();
+      await opened.session.respond({ requestId: asking.id, responseKey: "ok-1", optionId: "allow_once" });
+      assert.equal(await approval.nextReply(), "allow_once");
+      await approvalNative.complete();
+      assert.equal((await terminal(opened, approvalTurn)).status, "completed");
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a failed turn is failed, with its failure, in readSnapshot and in a resume's replay: from what the session saw, and in a fresh session from Muse's lastTurn", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const first = await start(rig, opened.session, thread, "Fail first.");
+      await first.native.say("Trying.");
+      await first.native.fail({ kind: "provider_error", message: "Upstream model unavailable" });
+      await terminal(opened, turnIdOf(first.result));
+      const second = await start(rig, opened.session, thread, "Then work.");
+      await second.native.say("Done.");
+      await second.native.complete();
+      await terminal(opened, turnIdOf(second.result));
+      const third = await start(rig, opened.session, thread, "Fail last.");
+      await third.native.say("Trying again.");
+      await third.native.fail({ kind: "provider_error", message: "Upstream model down" });
+      await terminal(opened, turnIdOf(third.result));
+      const lastId = turnIdOf(third.result);
+
+      const snapshot = await opened.session.readSnapshot!(thread.id);
+      assert.deepEqual(
+        snapshot.turns.map((turn) => [turn.id, turn.status]),
+        [
+          [turnIdOf(first.result), "failed"],
+          [turnIdOf(second.result), "completed"],
+          [lastId, "failed"],
+        ],
+      );
+      assert.equal(snapshot.turns[0]?.failure?.message, "Upstream model unavailable");
+      assert.equal(snapshot.turns[2]?.failure?.class, "provider_error");
+      assert.equal(snapshot.turns[2]?.failure?.message, "Upstream model down");
+
+      // A fresh session knows what Muse restates: the last turn's terminal.
+      await opened.session.unloadThread!(thread.id);
+      const fresh = await rig.open();
+      const again = await fresh.session.resumeThread({ native: thread.native, policy: policy(rig.cwd) });
+      const replayed = await until(() => fresh.bodies("turn.upsert").find((body) => body.turn.id === lastId)?.turn, "the replayed last turn");
+      assert.equal(replayed.status, "failed");
+      assert.equal(replayed.failure?.message, "Upstream model down");
+      const read = await fresh.session.readSnapshot!(again.id);
+      assert.deepEqual(read.turns.at(-1)?.status, "failed");
+      assert.equal(read.turns.at(-1)?.failure?.class, "provider_error");
+      assert.equal(read.turns.at(-1)?.failure?.message, "Upstream model down");
     } finally {
       await rig.cleanup();
     }

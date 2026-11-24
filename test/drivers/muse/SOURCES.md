@@ -12,16 +12,27 @@ devDependency.
 | Commands and idempotency: client-minted `commandId`, a fresh turn's id is its `turn/start` `commandId`, a queued submit's id is minted at admission, payload identity, `commandRejected` reasons | https://meta-models.github.io/muse-code-sdk/1.4/guides/msp-concepts/commands-and-idempotency/ | same docs |
 | `turn/steer`: "an id that is not the running turn is refused" | https://meta-models.github.io/muse-code-sdk/1.4/generated/msp/methods/turn-steer/ | same docs |
 | The error table (codes and kinds, for example -32020 `sessionNotFound`, -32021 `sessionInUse`, -32030 `commandRejected`, -32050 to -32057 for approvals and questions) | `schema/msp/stable/msp.schema.json` `errors` at the commit above | commit `e6ef4a64473d` |
+| Steer refusals: a finished turn's steer is -32030 `commandRejected` with reason `already_terminal` (the test "a durably rejected steer retires to the composer"); the busy session runtime refuses `turn/start` and `turn/steer` with a retryable `commandRejected`, reason `runtime_busy` | `clients/sdk-ts/test/facade-control-verbs.test.ts` lines 191-202 and `CHANGELOG.md` line 542 at the commit above; the installed SDK's `dist/src/facade/run.js` (a busy refusal "wrote nothing" and is resent under its first `commandId`) | commit `e6ef4a64473d`; `@muse-code/sdk` `1.4.25` |
+| Requests outstanding at a resume: listed in `pendingRequests` and re-issued as server requests right after the `session/resume` answer, never by `session/read`; `lastTurn` on both answers restates the last `turn/completed` | the installed SDK's `README.md` lines 112-128 ("An approval still pending when you resume a session arrives right after the resume reply") and `dist/src/msp.d.ts` (`PendingRequestPointer`, `LastTurn`, `SessionResumeResult`, `SessionReadResult`, `ApprovalChange` `restartRecovered`); the `userinput-answer-round-trip` transcript lines 6-9 | `@muse-code/sdk` `1.4.25`; commit `e6ef4a64473d` |
 | A public MIT-licensed host's Muse adapter (`provider-muse`), read for protocol knowledge only: `muse serve` flags (`--disable-sandbox` under full access), the approval mode and permission profile it selects per runtime mode (`allowAll` / `:unrestricted`, `promptUnmatched` / `:ask-me`), `META_API_KEY` as Muse's key variable, `MUSE_NO_AUTO_UPDATE`, and "MSP has no auth signal". No file or name of theirs is copied. The repository and URL are in docs/drivers/muse.md (this repository's rules keep host names out of `test/`) | `packages/provider-muse/src/server/{sdk,adapter,driver,status}.ts` of that repository | commit `be6ff17f5171c8a55969ec74af46ff1d86666c3a` |
 
 ## What the fake decides where the sources are silent
 
-- **Steer refusal.** The `turn/steer` reference says a steer whose
-  `expectedTurnId` is not the running turn "is refused", but names no error.
-  The fake answers -32030 `commandRejected` with reason `turn_not_running`.
-  The driver does not branch on the reason: it reads any `commandRejected`
-  (or `notFound`, `sessionNotLoaded`) answer to a steer as "that turn is not
-  running" and returns `prompt_required`.
+- **Steer refusal.** A steer whose `expectedTurnId` is not the running turn
+  gets -32030 `commandRejected` with reason `already_terminal`, as the SDK's
+  own test answers a finished turn's steer. That test is a fixture, not a
+  promise about every stale steer; the fake uses it for every one. When a
+  test sets `refuseSteer`, the session runtime refuses a steer of the running
+  turn with the reason and retryability it returns, for example
+  `runtime_busy`, and writes nothing. When the runtime is busy is not public,
+  so the fake is busy only when a test says so.
+- **Parked sessions.** `parkedSession` stores a session that no host holds
+  whose turn waits on one question or approval, the state the
+  `userinput-answer-round-trip` transcript resumes. A real host reaches it
+  when it recovers a pending request after a restart under the same id
+  (`ApprovalChange` `restartRecovered`); the fake does not model the other
+  recovery (resolve `abort`, ask again under a new id). The host that resumes
+  it takes the turn and re-issues the request after its answer.
 - **Approvals under `allowAll`.** Which calls Muse's policy settles without
   asking is not public. The fake asks whenever the conformance kit's puppet
   asks, in every approval mode.

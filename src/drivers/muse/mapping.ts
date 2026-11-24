@@ -297,7 +297,8 @@ function isoFromMillis(ms: number): string | undefined {
 }
 
 /** The ARI failure for a failed `turn/completed`. A quota error is a usage limit with the provider's reset time. */
-export function failureFromMuse(completed: MuseTurnCompleted): Failure {
+/** The failure of a turn Muse ended other than completed or cancelled: from its `turn/completed`, or from a `lastTurn`. */
+export function failureFromMuse(completed: Pick<MuseTurnCompleted, "reason" | "error">): Failure {
   const error = completed.error;
   const message = error?.message ?? completed.reason ?? "Muse failed the turn.";
   if (error?.quota !== undefined) {

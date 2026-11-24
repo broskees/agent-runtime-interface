@@ -222,17 +222,28 @@ export interface MuseSessionHistory {
   snapshot: { state: { items: MuseItem[] } } | null;
 }
 
+/** `LastTurn`: the last `turn/completed` the session folded, restated so a reopened session can report a failed last turn. */
+export interface MuseLastTurn {
+  turnId: string;
+  terminal: string;
+  reason?: string;
+  error?: MuseTurnError;
+}
+
 export interface MuseSessionResumeResult {
   session: MuseSessionView;
   viewCursor: string;
   history: MuseSessionHistory;
+  /** Pointers at the requests Muse re-issues as server requests right after this answer. */
   pendingRequests: MusePendingRequestPointer[];
+  lastTurn?: MuseLastTurn;
 }
 
 export interface MuseSessionReadResult {
   session: MuseSessionView;
   viewCursor: string;
   history: MuseSessionHistory;
+  lastTurn?: MuseLastTurn;
 }
 
 export interface MuseTurnStartResult {
@@ -416,12 +427,20 @@ export interface MuseTurnStarted {
   commandId: string;
 }
 
+/** `TurnError`: why a turn failed. */
+export interface MuseTurnError {
+  kind: string;
+  message: string;
+  retryable: boolean;
+  quota?: { limitKind: string; resetsAtMs: number };
+}
+
 export interface MuseTurnCompleted {
   sessionId: string;
   turnId: string;
   terminal: string;
   reason?: string;
-  error?: { kind: string; message: string; retryable: boolean; quota?: { limitKind: string; resetsAtMs: number } };
+  error?: MuseTurnError;
   usage?: MuseTokenUsage;
 }
 

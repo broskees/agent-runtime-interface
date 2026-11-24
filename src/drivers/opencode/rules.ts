@@ -25,9 +25,11 @@
 //      names them all, so it is denied while another thread's entry is there.
 //    A 2.x session's deny is checked before any saved "always" grant (2.x
 //    `evaluateInput`), so another thread's grant cannot reopen it. 1.x checks
-//    its in-memory grants after the session's rules (1.x `ask`); only a shared
-//    external 1.x server has that, and session.ts offers no "always" there for
-//    an MCP resource read.
+//    its in-memory grants after the session's rules (1.x `ask`). A deny of
+//    every resource still holds there, because 1.x leaves that tool out of the
+//    model's tools; the resource deny does not, so on a shared (external) 1.x
+//    server session.ts offers no "always" whose grant could match it
+//    (`grantCouldReachMcpResources`).
 // The deny rules come last so neither the mode nor the host can unlock
 // another thread's entry.
 
@@ -115,6 +117,28 @@ export function wildcardMatch(input: string, pattern: string): boolean {
 /** The effect of the last of `rules` that matches `action` and `resource`, as OpenCode evaluates them; undefined when none matches. */
 export function lastMatchingEffect(action: string, resource: string, rules: readonly NativeRule[]): NativeRule["effect"] | undefined {
   return rules.findLast((rule) => wildcardMatch(action, rule.action) && wildcardMatch(resource, rule.resource))?.effect;
+}
+
+/**
+ * Whether a 1.x "always" grant (`permission` for `patterns`, kept for every
+ * session of the directory and checked after their own rules) could override
+ * the denies of other threads' MCP resources, `read` of `mcp:<server>:*`.
+ * Only a grant whose permission matches `read` can. Of its patterns, one can
+ * match some `mcp:<server>:<uri>` unless its text before the first wildcard
+ * (`*` or `?`) neither starts with `mcp:` nor is the start of `mcp:` itself:
+ * `*`, `*.env` and `m*` can, `src/*` and `notes.md` cannot. Grants of other
+ * permissions cannot reach an entry: its tools are denied for every resource,
+ * so 1.x leaves them out of the model's tools whatever the grants say
+ * (1.19.6 `permission/index.ts` `disabled`).
+ */
+export function grantCouldReachMcpResources(permission: string, patterns: readonly string[]): boolean {
+  if (!wildcardMatch("read", permission)) return false;
+  return patterns.some((pattern) => {
+    const text = pattern.replaceAll("\\", "/");
+    const firstWildcard = text.search(/[*?]/);
+    const literal = firstWildcard === -1 ? text : text.slice(0, firstWildcard);
+    return literal.startsWith("mcp:") || (firstWildcard !== -1 && "mcp:".startsWith(literal));
+  });
 }
 
 /** Rules as 1.x's `PermissionRuleset` (`permission`, `pattern`, `action`). */

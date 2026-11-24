@@ -203,10 +203,20 @@ a config file), while the host's tool servers are per thread. So:
 - 1.x checks its in-memory "always" grants after a session's rules (1.19.6
   `permission/index.ts` `ask`), and a shared external 1.x server keeps them
   for every session of the directory. Tools stay closed, because 1.x leaves a
-  denied tool out of the model's tools whatever the grants say; a resource
-  read would not, so on a shared 1.x server the driver offers no `always` for
-  a `read` of `mcp:` patterns. A grant another client of that server makes is
-  outside the driver's reach.
+  tool denied for every resource out of the model's tools whatever the grants
+  say. The resource deny does not: a grant of `read` whose pattern can match
+  `mcp:<server>:*` overrides it for every thread, and 1.x grants `*` for an
+  ordinary file read (1.19.6 `tool/read.ts`). So on a shared 1.x server the
+  driver offers `always` only when the grant cannot match an MCP resource: a
+  permission other than `read`, or `read` patterns whose text before the
+  first wildcard neither starts with `mcp:` nor is the start of `mcp:` (an
+  external directory's glob, a literal path). A file read there offers
+  `once` and `reject`. Any other "always" still reaches every session of the
+  directory, as its `scope: "project"` and warning say. A grant another
+  client of that server makes is outside the driver's reach.
+- A thread whose resume drops an entry another thread in the directory still
+  holds is denied it from then on, and so are its subagents; the entry stays
+  for the other thread.
 - Threads in one directory that ask for the same MCP server under one name
   (the same config, such as a session's launch servers) share its entry. A
   thread that asks for a different server under a name another thread holds

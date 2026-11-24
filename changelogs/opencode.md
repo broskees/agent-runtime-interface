@@ -19,7 +19,11 @@
   entry of one name; a different server under a name another thread holds is
   refused (`mcp_name_conflict`). A closing session takes its entries off
   before the other threads stop denying them, and reports a removal OpenCode
-  did not confirm.
+  did not confirm. A thread that drops an entry another thread still holds is
+  denied it from then on, with its subagents.
+- On a shared 1.x server, "always" is offered only for a grant that cannot
+  match an MCP resource (a file read's `*` can), because 1.x checks its
+  in-memory grants after every session's own rules.
 - "Always" approvals report `scope: "project"`; a full_access auto-reply
   picks "once". Under full_access a request says why it still came
   (`ask_rule`, `provider_check`), except a 1.x subagent's, which the

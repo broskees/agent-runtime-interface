@@ -40,7 +40,7 @@ export type { OpencodeConfig } from "./config.ts";
 export { IDENTITY_VERSION, PERMISSION_RULES_EXTENSION, opencodeCapabilities } from "./capabilities.ts";
 export type { ServerShape } from "./capabilities.ts";
 export { testedRangeFor, versionAdvisory } from "./instance.ts";
-export { collidingName, isolationRules, modeRules, sanitizeMcpName, sessionRules, shellPermission } from "./rules.ts";
+export { collidingName, grantCouldReachMcpResources, isolationRules, modeRules, sanitizeMcpName, sessionRules, shellPermission } from "./rules.ts";
 export { generationOf, parseVersion, versionInRange } from "./server.ts";
 export type { OpencodeSdkLoaders, V1Client, V1Sdk, V2Client, V2Sdk } from "./sdk.ts";
 export type { NativeRule } from "./native.ts";

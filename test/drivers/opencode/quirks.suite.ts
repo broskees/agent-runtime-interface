@@ -9,11 +9,11 @@
 
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
-import { PERMISSION_RULES_EXTENSION, sanitizeMcpName } from "../../../src/drivers/opencode/index.ts";
+import { PERMISSION_RULES_EXTENSION, grantCouldReachMcpResources, sanitizeMcpName } from "../../../src/drivers/opencode/index.ts";
 import { fullAccessAutoReply } from "../../../src/host/approval-reviewer.ts";
 import { isAriError, toCallError } from "../../../src/index.ts";
 import type { AriEvent, Request, Session, Subagent } from "../../../src/index.ts";
-import { evaluate } from "./fake-opencode.ts";
+import { evaluate, wildcard } from "./fake-opencode.ts";
 import type { FakeServer, FakeSession, Generation } from "./fake-opencode.ts";
 import { openOpencodeTestRig, policy } from "./rig.ts";
 import type { OpencodeTestRig } from "./rig.ts";
@@ -362,6 +362,26 @@ describe("MCP isolation on a shared server", () => {
     ], "that grant reaches no MCP entry");
     await native.complete();
     await rig.terminal(one.events, started.turnId);
+  });
+
+  test("1.x: which always grants could override another thread's MCP resource deny (read of mcp:<server>:*)", () => {
+    for (const [permission, patterns, could] of [
+      ["read", ["*"], true],
+      ["read", ["*.env"], true],
+      ["read", ["?"], true],
+      ["read", ["m*"], true],
+      ["read", ["mcp:host-tools-a:*"], true],
+      ["read", ["src/*"], false],
+      ["read", ["notes.md"], false],
+      ["read", [], false],
+      ["external_directory", ["/elsewhere/*"], false],
+      ["webfetch", ["*"], false],
+      ["edit", ["*"], false],
+    ] as const) {
+      assert.equal(grantCouldReachMcpResources(permission, patterns), could, `${permission} ${JSON.stringify(patterns)}`);
+      // A grant the driver lets through matches no MCP resource by OpenCode's own wildcard match (the answer may err only the other way: `?` is withheld though it matches no such resource).
+      if (!could && permission === "read") for (const pattern of patterns) for (const resource of ["mcp:x:*", "mcp:x:file:///notes.md", "mcp:host-tools-a:src/notes.md"]) assert.equal(wildcard(resource, pattern), false, `${pattern} matches ${resource}`);
+    }
   });
 
   test("host names that OpenCode's tool names cannot keep apart are refused", async () => {

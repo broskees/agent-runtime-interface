@@ -58,7 +58,7 @@ import { failureOf, itemIdFor, permissionOptions, providerTurnIdFor, requestIdFo
 import type { McpEntry, NativeError, NativeEvent, NativeMessage, NativeQuestion, NativeRule, NativeToolState } from "./native.ts";
 import type { Detected, Link, ServerPool } from "./pool.ts";
 import { mcpConfigKey } from "./pool.ts";
-import { childRules, lastMatchingEffect, sessionRules } from "./rules.ts";
+import { childRules, grantCouldReachMcpResources, lastMatchingEffect, sessionRules } from "./rules.ts";
 
 /** What the instance gives each session. */
 export interface OpencodeSessionContext {
@@ -919,15 +919,16 @@ export class OpencodeSession implements Session {
       if (!this.#closed && thread.link === link) await this.#applyRules(thread, updated);
     };
     // Every other thread denies an entry before it is added, and keeps denying one this thread drops until OpenCode confirms it is gone.
+    // `register` rewrites the other threads' rules; this thread's are written here, after each registration, from the list it returns.
     const held = pool.entriesOf(link.endpoint, thread.thread.id);
     const dropped = [...held.keys()].filter((name) => !wanted.has(name));
-    const others = await pool.register(link.endpoint, thread.thread.id, thread.directory, new Map([...[...held].filter(([name]) => !wanted.has(name)), ...wanted]), onOthers);
-    await this.#applyRules(thread, others);
+    await this.#applyRules(thread, await pool.register(link.endpoint, thread.thread.id, thread.directory, new Map([...[...held].filter(([name]) => !wanted.has(name)), ...wanted]), onOthers));
     for (const entry of entries) await link.runtime.addMcp(entry);
     for (const name of dropped) {
       if (!pool.heldByOthers(link.endpoint, thread.thread.id, thread.directory, name)) await this.#removeEntry(link, name, thread.directory);
     }
-    if (dropped.length > 0) await pool.register(link.endpoint, thread.thread.id, thread.directory, wanted, onOthers);
+    // A dropped entry another thread still holds stays on the server as that thread's: from here on this thread and its subagents are denied it.
+    if (dropped.length > 0) await this.#applyRules(thread, await pool.register(link.endpoint, thread.thread.id, thread.directory, wanted, onOthers));
     thread.mcpNames = new Set(wanted.keys());
   }
 
@@ -1351,14 +1352,16 @@ export class OpencodeSession implements Session {
   /**
    * OpenCode's replies as options. A shared 1.x server keeps an "always"
    * grant in memory for every session of the directory and checks it after
-   * their own rules (1.19.6 `permission/index.ts` `ask`), so an "always" for
-   * an MCP resource read (`mcp:<server>:...`) would reopen that entry for the
-   * other threads that deny it: there the driver offers no "always".
+   * their own rules (1.19.6 `permission/index.ts` `ask`), so a grant that can
+   * match another thread's MCP resources (`read` of `mcp:<server>:*`, which
+   * an ordinary file read's `*` does) would reopen them for every thread.
+   * There the driver offers "always" only for a grant that cannot
+   * (`grantCouldReachMcpResources`).
    */
   #permissionOptions(event: Extract<NativeEvent, { type: "permission" }>) {
     const options = permissionOptions(event.action, event.always);
     const shared1x = this.#context.shape.generation === 1 && !this.#dedicated();
-    if (!shared1x || event.action !== "read" || !event.always.some((pattern) => pattern.startsWith("mcp:"))) return options;
+    if (!shared1x || !grantCouldReachMcpResources(event.action, event.always)) return options;
     return options.filter((option) => option.optionId !== "always");
   }
 

@@ -13,6 +13,7 @@
 
 import "./setup-env.ts";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { after, test } from "node:test";
@@ -44,6 +45,16 @@ async function runTurn(target: CursorTestRig, session: Session, events: AriEvent
   await run.endTurn();
   run.finish();
   assert.equal((await target.terminal(events, turnId)).status, "completed");
+}
+
+/** Polls `check` every 2 ms; false once `timeoutMs` passed without it holding. */
+async function eventually(check: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  return true;
 }
 
 function server(name: string, url = `http://127.0.0.1:9/${name}`): LaunchMcpServer {
@@ -99,7 +110,8 @@ test("an empty thread runs after release, after unload, in a later session and a
   await later.session.resumeThread({ native: { handle: closed.handle! }, policy: policy(target.cwd) });
   await runTurn(target, later.session, later.events, closed.id, "In a later session.");
 
-  // A restarted host: a new instance on the same state directory and the same Cursor.
+  // A restarted host: the old instance is gone, and a new one opens the same state directory and the same Cursor.
+  await target.instance.dispose();
   const again = await rig({ share: { root: target.root, world: target.world } });
   const afterRestart = await again.open();
   await afterRestart.session.resumeThread({ native: { handle: restarted.handle! }, policy: policy(target.cwd) });
@@ -123,6 +135,137 @@ test("a run another session of the instance is running is never expired: the oth
   run.finish();
   await target.terminal(first.events, turnId);
   await runTurn(target, second.session, second.events, thread.id, "Now me.");
+});
+
+test("a resumed handle's forced send never expires the run the creating handle takes meanwhile: one of the two turns is refused", async () => {
+  const target = await rig();
+  const creator = await target.open();
+  const thread = await creator.session.createThread({ cwd: target.cwd, policy: policy(target.cwd) });
+  const resumer = await target.open();
+  await resumer.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(target.cwd) });
+
+  // The resumed session's send pauses inside the SDK, before Cursor's store reserves its run
+  // (the SDK resolves the model first); every later send goes straight through.
+  const original = target.world.startRun.bind(target.world);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const reached: string[] = [];
+  let paused = false;
+  target.world.startRun = async (agent, message, options) => {
+    reached.push(typeof message === "string" ? message : message.text);
+    if (!paused) {
+      paused = true;
+      await gate;
+    }
+    return original(agent, message, options);
+  };
+  const start = (session: Session, key: string, text: string) => session.startTurn({ threadId: thread.id, clientTurnKey: key, intent: "start", content: [{ type: "text", text }] });
+  const resumedTurn = start(resumer.session, "resumed-1", "From the resumed handle.");
+  assert.ok(await eventually(() => reached.includes("From the resumed handle."), 10_000), "the resumed handle's send reached the SDK");
+  let creatorSettled = false;
+  const creatorTurn = start(creator.session, "creator-1", "From the creating handle.");
+  creatorTurn.then(
+    () => (creatorSettled = true),
+    () => (creatorSettled = true),
+  );
+  // Before the paused send goes on, the creating handle's turn gets every chance to reach Cursor:
+  // a driver that lets it through has sent it well within a second.
+  if (await eventually(() => reached.includes("From the creating handle."), 1000)) await eventually(() => creatorSettled, 10_000);
+  release();
+
+  const accepted = await resumedTurn;
+  assert.equal(accepted.status, "accepted");
+  await assert.rejects(creatorTurn, (error: unknown) => isAriError(error, "invalid_state"), "the creating handle's turn waits for the resumed one and is refused");
+  target.world.startRun = original;
+  assert.deepEqual(target.world.sends.map((send) => send.message), ["From the resumed handle."], "only one send reached Cursor");
+  // The forced send expired only the reservation nobody had taken; the run it started is live.
+  assert.deepEqual(await target.world.persistedRuns(thread.native.id!), [
+    { status: "expired", error: "force_send" },
+    { status: "running", error: null },
+  ]);
+  const run = await target.nextRun();
+  await run.endTurn();
+  run.finish();
+  assert.equal((await target.terminal(resumer.events, (accepted as { turnId: string }).turnId)).status, "completed");
+  assert.deepEqual((await target.world.persistedRuns(thread.native.id!)).map((row) => row.status), ["expired", "finished"]);
+  // Once the run ended, the creating handle's session runs the next turn.
+  await runTurn(target, creator.session, creator.events, thread.id, "Now the creating handle.");
+});
+
+test("two turns started at once on two threads get two run ids, as Cursor's store gives", async () => {
+  const target = await rig();
+  const { session, events } = await target.open();
+  const threads = [await session.createThread({ cwd: target.cwd, policy: policy(target.cwd) }), await session.createThread({ cwd: target.cwd, policy: policy(target.cwd) })];
+  const started = await Promise.all(threads.map((thread, index) => session.startTurn({ threadId: thread.id, clientTurnKey: `parallel-${index}`, intent: "start", content: [{ type: "text", text: `Turn ${index}.` }] })));
+  assert.deepEqual(started.map((result) => result.status), ["accepted", "accepted"]);
+  const runs = [await target.nextRun(), await target.nextRun()];
+  assert.notEqual(runs[0]!.id, runs[1]!.id);
+  const natives = events.flatMap((event) => (event.body.type === "turn.upsert" && event.body.turn.native !== undefined ? [event.body.turn.native.id] : []));
+  assert.equal(new Set(natives).size, 2, `each turn names its own native run: ${natives.join(", ")}`);
+  for (const run of runs) {
+    await run!.endTurn();
+    run!.finish();
+  }
+  for (const result of started) await target.terminal(events, (result as { turnId: string }).turnId);
+});
+
+test("a replacement for a lost thread gets every host instruction the thread was given, each once, at the top of its first prompt", async () => {
+  const target = await rig();
+  const sentTexts = () => target.world.sends.map((send) => (typeof send.message === "string" ? send.message : send.message.text));
+  const { session, events } = await target.open({ launch: { developerPrompt: ["SESSION-MARKER"] } });
+
+  // An empty thread: none of its instructions ever reached Cursor.
+  const empty = await session.createThread({ cwd: target.cwd, policy: policy(target.cwd), launch: { appendSystemPrompt: ["CREATE-APPEND-MARKER"] }, context: { developer: "CREATE-DEVELOPER-MARKER" } });
+  await session.release();
+  await target.world.forget(empty.native.id!);
+  const replacement = await session.resumeThread({ native: { handle: empty.handle! }, policy: policy(target.cwd), launch: { appendSystemPrompt: ["RESUME-MARKER"] } });
+  assert.notEqual(replacement.id, empty.id);
+  await target.until(events, (event) => (event.body.type === "session.replaced" && event.threadId === replacement.id ? event : undefined), "session.replaced");
+  await runTurn(target, session, events, replacement.id, "Work.");
+  assert.equal(sentTexts().at(-1), "SESSION-MARKER\n\nCREATE-APPEND-MARKER\n\nCREATE-DEVELOPER-MARKER\n\nRESUME-MARKER\n\nWork.");
+  await runTurn(target, session, events, replacement.id, "More.");
+  assert.equal(sentTexts().at(-1), "More.", "the next prompt carries none of them again");
+
+  // A thread whose conversation Cursor lost: the fresh agent never saw any of its instructions either.
+  const used = await session.createThread({ cwd: target.cwd, policy: policy(target.cwd), context: { developer: "USED-DEVELOPER-MARKER" } });
+  await runTurn(target, session, events, used.id, "First.");
+  assert.equal(sentTexts().at(-1), "SESSION-MARKER\n\nUSED-DEVELOPER-MARKER\n\nFirst.");
+  await session.unloadThread!(used.id);
+  await target.world.forget(used.native.id!);
+  const fresh = await session.resumeThread({ native: { handle: used.handle! }, policy: policy(target.cwd), launch: { developerPrompt: ["USED-RESUME-MARKER"] } });
+  await runTurn(target, session, events, fresh.id, "Again.");
+  assert.equal(sentTexts().at(-1), "SESSION-MARKER\n\nUSED-DEVELOPER-MARKER\n\nUSED-RESUME-MARKER\n\nAgain.");
+});
+
+test("a second instance on the same state directory is refused with invalid_state while the first holds it, and opens once the first is gone", async () => {
+  const target = await rig();
+  const first = await target.open();
+  const thread = await first.session.createThread({ cwd: target.cwd, policy: policy(target.cwd) });
+  const { turnId, run } = await target.turn(first.session, thread.id, "Long task.");
+  const second = await rig({ share: { root: target.root, world: target.world } });
+  await assert.rejects(second.instance.openSession({}), (error: unknown) => isAriError(error, "invalid_state"));
+  assert.deepEqual((await target.world.persistedRuns(thread.native.id!)).map((row) => row.status), ["running"], "the first instance's run is untouched");
+  await run.endTurn();
+  run.finish();
+  await target.terminal(first.events, turnId);
+  await target.instance.dispose();
+  const opened = await second.open();
+  await opened.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(target.cwd) });
+  await runTurn(second, opened.session, opened.events, thread.id, "After the first instance.");
+});
+
+test("a lock file a dead process left on the state directory does not stop the instance", async () => {
+  const target = await rig();
+  const stateDir = instanceDirectories(target.root, "cursor-test").stateDir;
+  const exited = spawnSync(process.execPath, ["-e", ""]);
+  assert.equal(exited.status, 0);
+  fs.writeFileSync(path.join(stateDir, "cursor-instance.lock"), `${JSON.stringify({ pid: exited.pid })}\n`);
+  const { session, events } = await target.open();
+  const thread = await session.createThread({ cwd: target.cwd, policy: policy(target.cwd) });
+  await runTurn(target, session, events, thread.id, "Works.");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(stateDir, "cursor-instance.lock"), "utf8")), { pid: process.pid });
+  await target.instance.dispose();
+  assert.equal(fs.existsSync(path.join(stateDir, "cursor-instance.lock")), false, "dispose removes the lock file");
 });
 
 test("resuming a loaded full_access thread as read_only reopens its agent with Cursor's reading tools, and the next turn has no shell", async () => {

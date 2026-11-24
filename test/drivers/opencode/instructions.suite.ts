@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, describe, test } from "node:test";
+import type { AriEvent } from "../../../src/index.ts";
 import type { Frame, Generation } from "./fake-opencode.ts";
 import { openOpencodeTestRig, policy } from "./rig.ts";
 import type { OpencodeTestRig } from "./rig.ts";
@@ -201,6 +202,40 @@ for (const generation of [1, 2] as Generation[]) {
     }
 
     if (generation === 2) {
+      test("a resume from a new instance without a LaunchContext clears the entry an earlier instance left, so OpenCode holds no host text", async () => {
+        const rig = await openOpencodeTestRig({ generation });
+        rigs.push(rig);
+        const first = await rig.open({ launch: { appendSystemPrompt: [LAUNCH_MARKER] } });
+        const thread = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+        const started = await first.session.startTurn({ threadId: thread.id, clientTurnKey: "marked", intent: "start", content: [{ type: "text", text: "Hello." }] });
+        assert.equal(started.status, "accepted");
+        if (started.status !== "accepted") return;
+        await (await rig.nextTurn()).complete();
+        await rig.terminal(first.events, started.turnId);
+        assert.ok([...rig.world.sessions.get(thread.native.id!)!.instructions.values()].join("\n").includes(LAUNCH_MARKER));
+        await first.session.close();
+        // As after a host restart: another instance, with a server and a runtime of its own, resumes the thread.
+        const instance = await rig.driver.create(rig.host, { instanceId: "opencode-test-restarted", config: rig.config, environment: {} });
+        try {
+          const session = await instance.openSession({});
+          const events: AriEvent[] = [];
+          void (async () => {
+            for await (const event of session.events()) events.push(event);
+          })();
+          const resumed = await session.resumeThread({ native: { handle: thread.handle! }, policy: policy(rig.cwd) });
+          const next = await session.startTurn({ threadId: resumed.id, clientTurnKey: "plain", intent: "start", content: [{ type: "text", text: "Plain." }] });
+          assert.equal(next.status, "accepted");
+          if (next.status !== "accepted") return;
+          await (await rig.nextTurn()).complete();
+          await rig.terminal(events, next.turnId);
+          await session.close();
+        } finally {
+          await instance.dispose();
+        }
+        assert.equal(rig.world.sessions.get(thread.native.id!)!.instructions.size, 0, "the earlier instance's launch prompt no longer reaches the model");
+        assert.equal(requests(rig.world.frames, ["experimental.session.instructions.entry.put"]).filter((frame) => carried(frame).includes(LAUNCH_MARKER)).length, 1, "only the first instance wrote host text");
+      });
+
       test("a fork takes OpenCode's copy of the instruction entry; a turn's own context does not stay in the fork", async () => {
         const rig = await openOpencodeTestRig({ generation });
         rigs.push(rig);

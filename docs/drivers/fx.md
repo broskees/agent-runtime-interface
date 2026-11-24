@@ -47,6 +47,14 @@ next unreleased patch, 0.0.18. The fake speaks ACP v1 with fx's provider and
 model options; `test/drivers/fx/rules.suite.ts` checks `fx 0.0.17` (no
 advisory) and `fx 0.0.12` (advisory).
 
+## Resuming conversations ARI did not create
+
+The fx driver is the ACP base driver with the `fx acp` launch, so it resumes
+the way [the `acp` driver](acp.md#resuming-conversations-ari-did-not-create)
+does: it asks the agent for any session id the host names, with only the
+host's LaunchContext, and replaces a session the agent cannot resume with a
+fresh one and `session.replaced`. It lists no native sessions.
+
 ## Capabilities
 
 The proposal's §1.2 has no column for this provider (its Grok column was

@@ -169,6 +169,18 @@ It never adds instruction text of its own. Its runtime mode arrives in the
   used. A steer Pi delivered right after a final answer cannot be told from a
   new prompt in a stored file, so after a restart it shows as its own turn.
 
+## Resuming conversations ARI did not create
+
+The driver refuses them. It resumes only session files under its instance's
+`<stateDir>/sessions`, where it creates its own, because Pi writes a thread's
+launch instructions into the session file it opens. A handle naming a file
+anywhere else, such as a session the user's own `pi` keeps, is refused with
+`validation` before Pi starts (symbolic links followed). A bare id is looked
+up only in that directory: when no file there holds it, the driver starts a
+fresh session with `session.replaced` if the host passed `policy`, and rejects
+with `not_found` otherwise. The driver lists no native sessions
+(`nativeSessions` is absent).
+
 ## Prompt content
 
 Text blocks become the prompt's text, and inline images go in Pi's `images`

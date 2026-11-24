@@ -245,6 +245,17 @@ works, `status()` is `unavailable` with a `driver_unavailable` error naming the
 package, and `openSession` rejects with it. The catalog is
 `Cursor.models.list()`.
 
+## Resuming conversations ARI did not create
+
+The driver refuses them. It resumes only agents its own instance created,
+which it records by id in `<stateDir>/cursor-created-agents.json`, because
+Cursor keeps the host's launch instructions in the conversation of the agent
+it runs. `resumeThread` of any other agent rejects with `validation` after
+`Agent.resume` has only read the agent's record, and runs nothing. An agent
+Cursor's store does not have is replaced by a fresh one with
+`session.replaced` (`contextLost: true`). The driver lists no native sessions
+(`nativeSessions` is absent).
+
 ## Capabilities
 
 The third column is the proposal's §1.2 Cursor column (Y or –), "not in §1.2"

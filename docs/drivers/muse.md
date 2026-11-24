@@ -265,6 +265,19 @@ supported member against the fake `muse serve`.
   rather than drop the servers.
 - The driver writes no file, and never touches Muse's own config.
 
+## Resuming conversations ARI did not create
+
+The driver resumes any stored Muse session the host names with
+`session/resume`, whoever started it. For a session this ARI session has not
+seen, `policy.cwd` is required (`validation` otherwise). The host's
+LaunchContext is all it adds: the instructions go before the next turn's text,
+as above, and the MCP servers go into `session/resume` as `config.mcpServers`
+under the names the host chose. A session Muse does not have, or one another
+Muse host holds the lease on, is replaced by a fresh session with
+`session.replaced` (`contextLost: true`) when the host passed `policy`;
+otherwise the error is returned. The driver lists no native sessions
+(`nativeSessions` is absent).
+
 ## Steer refusal
 
 Muse answers a refused `turn/steer` with -32030 `commandRejected` and a

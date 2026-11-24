@@ -296,4 +296,32 @@ describe("claude driver: capability honesty for the 44 optional members", () => 
       await rig.cleanup();
     }
   });
+
+  test("a session nativeSessions.list returns that ARI did not create resumes with only the host's LaunchContext, and runs a turn", async () => {
+    const rig = await openClaudeRig();
+    try {
+      // A conversation started straight through the SDK, as the user's own Claude Code would.
+      const nativeId = "a1234567-0000-4000-8000-123456789abc";
+      const conversation = rig.world.sdk.query({ prompt: "A conversation ARI never saw.", options: { cwd: rig.cwd, sessionId: nativeId } });
+      const drained = (async () => {
+        for await (const _message of conversation) void _message;
+      })();
+      const nativeTurn = await rig.world.nextTurn();
+      await nativeTurn.say("Native reply.");
+      await nativeTurn.complete();
+      await drained;
+
+      const listed = (await rig.instance.nativeSessions!.list({ cwd: rig.cwd })).items.find((item) => item.id === nativeId);
+      assert.ok(listed?.handle !== undefined, "nativeSessions.list returns the conversation");
+      const thread = await rig.session.resumeThread({ native: { handle: listed.handle }, policy: rig.policy(), launch: { appendSystemPrompt: ["HOST-LAUNCH-MARKER"] } });
+      assert.equal(thread.native.id, nativeId);
+      const options = rig.world.queries.at(-1)!.options;
+      assert.equal(options.resume, nativeId);
+      assert.deepEqual(options.systemPrompt, { type: "preset", preset: "claude_code", snapshot: false, append: "HOST-LAUNCH-MARKER" });
+      await rig.simpleTurn(thread.id, "Carry on.");
+      assert.equal(rig.log.find((event) => event.body.type === "session.replaced"), undefined, "the conversation itself was resumed, not replaced");
+    } finally {
+      await rig.cleanup();
+    }
+  });
 });

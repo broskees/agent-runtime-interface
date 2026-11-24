@@ -272,6 +272,19 @@ fields (the `CodexNativeSessionFilters` type): `x:codex.limit`,
 `x:codex.sortDirection`. An unknown `x:codex.` field is refused with
 `validation`. Each listed session carries `x:codex.modelProvider`.
 
+## Resuming conversations ARI did not create
+
+The driver resumes any Codex thread the host names, including one the user's
+own `codex` started and every thread `nativeSessions.list` returns.
+`resumeThread` sends `thread/resume` for that id with only what the host
+supplied: its launch instructions as `developerInstructions`, and its MCP
+servers, under the names `hostTools.mcpServerFor` and the host's launch gave,
+as the request's `mcp_servers.<name>` config overrides. The driver writes
+nothing to Codex's config files. A thread Codex has no rollout for, or one
+another process holds open for writing, is replaced by a fresh thread with
+`session.replaced` (`contextLost: true`) when the host passed `policy`;
+without `policy` the error is returned.
+
 ## Host instructions and tools
 
 With no launch context and no `context`, the driver sends no instruction

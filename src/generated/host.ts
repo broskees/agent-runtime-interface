@@ -45,9 +45,9 @@ export type SpawnRequest = {
   timeoutMs?: number;
 };
 
-/** Wire form of a spawned child. Output and exit arrive as `host/process.output` and `host/process.exit` notifications for `processId`. */
+/** What the host answers to `host/process.spawn`. The child is named by the `processId` the driver chose in the request; its output and exit arrive as `host/process.output` and `host/process.exit` for that id. */
 export type SpawnResult = {
-  processId: string;
+  /** The child's operating-system process id, when the host has one. */
   pid?: number;
 };
 
@@ -230,19 +230,14 @@ export const hostDocument: SchemaDocument = {
       ]
     },
     "SpawnResult": {
-      "description": "Wire form of a spawned child. Output and exit arrive as `host/process.output` and `host/process.exit` notifications for `processId`.",
+      "description": "What the host answers to `host/process.spawn`. The child is named by the `processId` the driver chose in the request; its output and exit arrive as `host/process.output` and `host/process.exit` for that id.",
       "type": "object",
       "properties": {
-        "processId": {
-          "type": "string"
-        },
         "pid": {
-          "type": "integer"
+          "type": "integer",
+          "description": "The child's operating-system process id, when the host has one."
         }
-      },
-      "required": [
-        "processId"
-      ]
+      }
     },
     "ProcessExit": {
       "type": "object",

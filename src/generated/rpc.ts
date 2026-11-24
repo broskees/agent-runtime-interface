@@ -91,10 +91,15 @@ export type ConfigChangedParams = {
   config: AnyValue;
 };
 
-/** `paths` carries the instance's `HostServices.paths`. */
+/** `paths` carries the instance's `HostServices.paths`. `hostMembers` lists the optional host-service members the host serves for this instance; the driver sees every optional member not listed as absent. */
 export type DriverCreateParams = CreateInstanceInput & {
   paths: HostPaths;
+  /** The optional `HostServices` members the host serves, by dotted path. Absent means none. */
+  hostMembers?: OptionalHostMember[];
 };
+
+/** An optional `HostServices` member, by dotted path. */
+export type OptionalHostMember = "attachments.extractText" | "hostTools.callDynamicTool" | "telemetry.track" | "ids.derive" | (string & {});
 
 /** The instance's non-method members. `members` lists the optional members (`?` in the TypeScript interface) this instance implements, as dotted paths such as `auth.start`. */
 export type InstanceDescriptor = {
@@ -253,14 +258,20 @@ export type SessionExtParams = {
 
 export type HostConfigGetParams = {
   instanceId: string;
-  /** Also start a change stream. */
+  /** Also start a change stream. The result is then a `HostConfigWatchResult`. */
   watch?: boolean;
 };
 
-/** `streamId` is set when `watch` was true; changes arrive as `host/config.changed`. */
+/** The instance's config. Without `watch` it carries no `streamId`. With `watch: true` it must match `HostConfigWatchResult`: a driver refuses a watch answer without `streamId` as a protocol error. */
 export type HostConfigGetResult = {
   config: AnyValue;
   streamId?: string;
+};
+
+/** The answer to `host/config.get` with `watch: true`: the config and the id of its change stream. Later values arrive as `host/config.changed` until `stream/end`. A host with nothing to watch still starts the stream and ends it at once. */
+export type HostConfigWatchResult = {
+  config: AnyValue;
+  streamId: string;
 };
 
 export type HostSecretParams = InstanceTarget & SecretKey;
@@ -271,7 +282,10 @@ export type HostSecretsSetParams = InstanceTarget & SecretKey & {
   value: SecretValue;
 };
 
-export type HostProcessSpawnParams = InstanceTarget & SpawnRequest;
+export type HostProcessSpawnParams = InstanceTarget & SpawnRequest & {
+  /** The id the driver gives this child: unique on the connection and never reused, even after the child exits. The host names the child by it in `host/process.output` and `host/process.exit`, and the driver in `host/process.write`, `host/process.closeStdin` and `host/process.kill`. A host refuses a spawn whose `processId` it has seen before on the connection with `invalid_state` (`duplicate_process_id`) and starts nothing. */
+  processId: string;
+};
 
 export type HostProcessResolveExecutableParams = InstanceTarget & ResolveExecutableInput;
 
@@ -517,7 +531,7 @@ export const rpcDocument: SchemaDocument = {
       ]
     },
     "DriverCreateParams": {
-      "description": "`paths` carries the instance's `HostServices.paths`.",
+      "description": "`paths` carries the instance's `HostServices.paths`. `hostMembers` lists the optional host-service members the host serves for this instance; the driver sees every optional member not listed as absent.",
       "allOf": [
         {
           "$ref": "driver.schema.json#/$defs/CreateInstanceInput"
@@ -527,11 +541,34 @@ export const rpcDocument: SchemaDocument = {
           "properties": {
             "paths": {
               "$ref": "host.schema.json#/$defs/HostPaths"
+            },
+            "hostMembers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OptionalHostMember"
+              },
+              "description": "The optional `HostServices` members the host serves, by dotted path. Absent means none."
             }
           },
           "required": [
             "paths"
           ]
+        }
+      ]
+    },
+    "OptionalHostMember": {
+      "description": "An optional `HostServices` member, by dotted path.",
+      "anyOf": [
+        {
+          "enum": [
+            "attachments.extractText",
+            "hostTools.callDynamicTool",
+            "telemetry.track",
+            "ids.derive"
+          ]
+        },
+        {
+          "type": "string"
         }
       ]
     },
@@ -1150,7 +1187,7 @@ export const rpcDocument: SchemaDocument = {
         },
         "watch": {
           "type": "boolean",
-          "description": "Also start a change stream."
+          "description": "Also start a change stream. The result is then a `HostConfigWatchResult`."
         }
       },
       "required": [
@@ -1158,7 +1195,7 @@ export const rpcDocument: SchemaDocument = {
       ]
     },
     "HostConfigGetResult": {
-      "description": "`streamId` is set when `watch` was true; changes arrive as `host/config.changed`.",
+      "description": "The instance's config. Without `watch` it carries no `streamId`. With `watch: true` it must match `HostConfigWatchResult`: a driver refuses a watch answer without `streamId` as a protocol error.",
       "type": "object",
       "properties": {
         "config": {
@@ -1170,6 +1207,22 @@ export const rpcDocument: SchemaDocument = {
       },
       "required": [
         "config"
+      ]
+    },
+    "HostConfigWatchResult": {
+      "description": "The answer to `host/config.get` with `watch: true`: the config and the id of its change stream. Later values arrive as `host/config.changed` until `stream/end`. A host with nothing to watch still starts the stream and ends it at once.",
+      "type": "object",
+      "properties": {
+        "config": {
+          "$ref": "common.schema.json#/$defs/AnyValue"
+        },
+        "streamId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "config",
+        "streamId"
       ]
     },
     "HostSecretParams": {
@@ -1220,6 +1273,18 @@ export const rpcDocument: SchemaDocument = {
         },
         {
           "$ref": "host.schema.json#/$defs/SpawnRequest"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "processId": {
+              "type": "string",
+              "description": "The id the driver gives this child: unique on the connection and never reused, even after the child exits. The host names the child by it in `host/process.output` and `host/process.exit`, and the driver in `host/process.write`, `host/process.closeStdin` and `host/process.kill`. A host refuses a spawn whose `processId` it has seen before on the connection with `invalid_state` (`duplicate_process_id`) and starts nothing."
+            }
+          },
+          "required": [
+            "processId"
+          ]
         }
       ]
     },
@@ -1512,6 +1577,7 @@ export const StatusChangedParamsSchema: Validator<StatusChangedParams> = /* @__P
 export const UsageRecordParamsSchema: Validator<UsageRecordParams> = /* @__PURE__ */ createValidator<UsageRecordParams>("UsageRecordParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const ConfigChangedParamsSchema: Validator<ConfigChangedParams> = /* @__PURE__ */ createValidator<ConfigChangedParams>("ConfigChangedParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const DriverCreateParamsSchema: Validator<DriverCreateParams> = /* @__PURE__ */ createValidator<DriverCreateParams>("DriverCreateParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
+export const OptionalHostMemberSchema: Validator<OptionalHostMember> = /* @__PURE__ */ createValidator<OptionalHostMember>("OptionalHostMember", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const InstanceDescriptorSchema: Validator<InstanceDescriptor> = /* @__PURE__ */ createValidator<InstanceDescriptor>("InstanceDescriptor", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const InstanceProbeParamsSchema: Validator<InstanceProbeParams> = /* @__PURE__ */ createValidator<InstanceProbeParams>("InstanceProbeParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const NullableUpdateAdvisorySchema: Validator<NullableUpdateAdvisory> = /* @__PURE__ */ createValidator<NullableUpdateAdvisory>("NullableUpdateAdvisory", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
@@ -1563,6 +1629,7 @@ export const SessionUploadFeedbackParamsSchema: Validator<SessionUploadFeedbackP
 export const SessionExtParamsSchema: Validator<SessionExtParams> = /* @__PURE__ */ createValidator<SessionExtParams>("SessionExtParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const HostConfigGetParamsSchema: Validator<HostConfigGetParams> = /* @__PURE__ */ createValidator<HostConfigGetParams>("HostConfigGetParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const HostConfigGetResultSchema: Validator<HostConfigGetResult> = /* @__PURE__ */ createValidator<HostConfigGetResult>("HostConfigGetResult", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
+export const HostConfigWatchResultSchema: Validator<HostConfigWatchResult> = /* @__PURE__ */ createValidator<HostConfigWatchResult>("HostConfigWatchResult", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const HostSecretParamsSchema: Validator<HostSecretParams> = /* @__PURE__ */ createValidator<HostSecretParams>("HostSecretParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const NullableSecretValueSchema: Validator<NullableSecretValue> = /* @__PURE__ */ createValidator<NullableSecretValue>("NullableSecretValue", "https://ari.invalid/spec/v1/rpc.schema.json", documents);
 export const HostSecretsSetParamsSchema: Validator<HostSecretsSetParams> = /* @__PURE__ */ createValidator<HostSecretsSetParams>("HostSecretsSetParams", "https://ari.invalid/spec/v1/rpc.schema.json", documents);

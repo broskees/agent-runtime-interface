@@ -20,8 +20,11 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
   thread without messages comes back as itself after unload or release: the
   bridge writes Pi's header before the process stops, and every restart
   checks Pi's session id.
-- Resumes only session files under the instance's state directory, so host
-  instructions are never written into a session the user's own pi keeps.
+- Resumes only session files really inside the instance's state directory
+  (symbolic links followed), so host instructions are never written into a
+  session the user's own pi keeps. A resume by session id finds the file
+  itself and gives Pi the path, so it works from any directory without Pi's
+  fork question.
 - Turns: start, steer (with `prompt_required` when Pi queued the steer after
   the run ended), interrupt; settlement only on `agent_settled` or process
   exit.

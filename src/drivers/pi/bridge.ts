@@ -22,11 +22,16 @@
 // 4. Its `before_agent_start` handler appends those held instructions to that
 //    one run's system prompt.
 // 5. `/ari-persist` writes the session's header, as Pi's session manager holds
-//    it, to the session file when Pi has not written that file yet. Pi writes
-//    a session file only once it holds a message, and `--session <file>` of a
-//    missing file starts a different session there (Pi's
-//    SessionManager._setSessionFile), so the driver sends this just before it
-//    stops an idle process: a thread without messages then reopens as itself.
+//    it, to the session file when Pi has not written that file yet, and then
+//    stops Pi with `ctx.shutdown()`. Pi writes a session file only once it
+//    holds a message, and `--session <file>` of a missing file starts a
+//    different session there (Pi's SessionManager._setSessionFile), so a
+//    thread without messages needs its header on disk to reopen as itself.
+//    The running session manager is not told about the file and could not
+//    append to it (its first write creates the file exclusively), so the
+//    process must not go on: in RPC mode Pi shuts down once the command has
+//    answered and the session is idle. The driver sends it only when it stops
+//    an idle process.
 //
 // The bridge never writes instructions of its own into the model's prompt.
 // Its one setting, the runtime mode, arrives in the environment variable
@@ -197,13 +202,14 @@ export default function ariBridge(pi /*: ExtensionAPI */) {
   });
 
   pi.registerCommand("ari-persist", {
-    description: "Write the session header if pi has not written the session file yet (used by ARI before it stops pi)",
+    description: "Write the session header if pi has not written the session file yet, then shut pi down (used by ARI to stop pi)",
     handler: async (_args, ctx) => {
       const file = ctx.sessionManager.getSessionFile();
       const header = ctx.sessionManager.getHeader();
-      if (file === undefined || header === null || existsSync(file)) return;
       // Exclusive create: a file pi wrote meanwhile is never overwritten.
-      writeFileSync(file, JSON.stringify(header) + "\n", { flag: "wx" });
+      if (file !== undefined && header !== null && !existsSync(file)) writeFileSync(file, JSON.stringify(header) + "\n", { flag: "wx" });
+      // This session manager cannot append to a file it did not create, so this pi must not go on.
+      ctx.shutdown();
     },
   });
 

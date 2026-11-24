@@ -3,6 +3,7 @@
 // `ari` status with Pi's working directory, the approval dialog's JSON title
 // and option ids, the runtime-mode gate, the four commands, and that the
 // bridge adds nothing to the prompt unless the host gave text for one run.
+// `/ari-persist` runs against Pi's own SessionManager from the pinned package.
 // pi-types.test.ts type-checks the same source against Pi's ExtensionAPI.
 
 import assert from "node:assert/strict";
@@ -12,6 +13,18 @@ import * as path from "node:path";
 import { after, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { BRIDGE_FILE_NAME, BRIDGE_SETTINGS_VARIABLE, PI_BRIDGE_SOURCE, parseApprovalTitle } from "../../../src/drivers/pi/index.ts";
+
+/** The parts of Pi's SessionManager these tests use. The pinned package's own declarations do not compile under this repository's settings, so the import is untyped. */
+interface PiSessionManager {
+  getSessionFile(): string | undefined;
+  getSessionId(): string;
+  getHeader(): { readonly [key: string]: unknown } | null;
+  appendMessage(message: { role: "user"; content: Array<{ type: "text"; text: string }>; timestamp: number }): string;
+}
+const PI_PACKAGE: string = "@earendil-works/pi-coding-agent";
+const { SessionManager } = (await import(PI_PACKAGE)) as {
+  SessionManager: { create(cwd: string, sessionDir: string): PiSessionManager; open(file: string, sessionDir: string): PiSessionManager; inMemory(cwd: string): PiSessionManager };
+};
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ari-pi-bridge-"));
 const file = path.join(directory, BRIDGE_FILE_NAME);
@@ -161,22 +174,46 @@ test("/ari-mcp registers the host's servers under their names, /ari-rewind moves
   assert.equal(await bridge.emit("before_agent_start", { type: "before_agent_start", systemPrompt: "BASE" }), undefined, "the text lasts one run");
 });
 
-test("/ari-persist writes Pi's own session header when Pi has not written the session file, and never touches a written one", async () => {
+test("/ari-persist with Pi's own SessionManager: the header reopens as the same session, and the bridge shuts down the pi that can no longer append", async () => {
   const bridge = await load("approval_required");
-  const sessionFile = path.join(directory, "sessions", "2026-11-23T00-00-00-000Z_00000000-0000-4000-8000-000000000abc.jsonl");
-  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
-  const header = { type: "session", version: 3, id: "00000000-0000-4000-8000-000000000abc", timestamp: "2026-11-23T00:00:00.000Z", cwd: "/work/real" };
-  const ctx = { sessionManager: { getSessionFile: () => sessionFile, getHeader: () => header } };
+  const sessions = fs.mkdtempSync(path.join(directory, "sessions-"));
+  const userMessage = (text: string) => ({ role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now() });
+  let shutdowns = 0;
+  const contextFor = (sessionManager: PiSessionManager) => ({ sessionManager, shutdown: () => (shutdowns += 1) });
 
-  await bridge.command("ari-persist", "", ctx);
-  assert.equal(fs.readFileSync(sessionFile, "utf8"), `${JSON.stringify(header)}\n`);
+  const live = SessionManager.create("/work/real", sessions);
+  const file = live.getSessionFile()!;
+  assert.equal(fs.existsSync(file), false, "Pi writes no file for a session without messages");
+  await bridge.command("ari-persist", "", contextFor(live));
+  assert.equal(fs.readFileSync(file, "utf8"), `${JSON.stringify(live.getHeader())}\n`, "the bridge wrote Pi's own header");
+  assert.equal(shutdowns, 1, "the bridge asked Pi to shut down");
 
-  fs.writeFileSync(sessionFile, "lines pi wrote\n");
-  await bridge.command("ari-persist", "", ctx);
-  assert.equal(fs.readFileSync(sessionFile, "utf8"), "lines pi wrote\n", "a file pi wrote is left alone");
+  // Why it must: the running manager does not know the file exists, and its first message creates the file exclusively.
+  assert.throws(() => live.appendMessage(userMessage("Never written.")), /EEXIST/);
+  // A pi started again opens the same session from the header and appends to it.
+  const reopened = SessionManager.open(file, sessions);
+  assert.equal(reopened.getSessionId(), live.getSessionId());
+  reopened.appendMessage(userMessage("First message."));
+  const lines = fs
+    .readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as { type: string; id?: string; message?: { role?: string } });
+  assert.deepEqual(
+    lines.map((line) => line.type),
+    ["session", "message"],
+  );
+  assert.equal(lines[0]!.id, live.getSessionId());
+  assert.equal(lines[1]!.message?.role, "user");
 
+  // A file Pi wrote is left alone, and that pi stops too.
+  const written = fs.readFileSync(file, "utf8");
+  await bridge.command("ari-persist", "", contextFor(reopened));
+  assert.equal(fs.readFileSync(file, "utf8"), written);
+  assert.equal(shutdowns, 2);
   // A session without a file (pi --no-session) has nothing to write.
-  await bridge.command("ari-persist", "", { sessionManager: { getSessionFile: () => undefined, getHeader: () => header } });
+  await bridge.command("ari-persist", "", contextFor(SessionManager.inMemory("/work/real")));
+  assert.equal(shutdowns, 3);
 });
 
 test("the bridge source holds no instruction text of its own", () => {

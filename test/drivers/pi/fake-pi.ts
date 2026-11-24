@@ -14,6 +14,16 @@
 //   `--fork <path|id>` (copies every entry into a new session file in the
 //   current directory), `--model`, `--thinking`, `--api-key`,
 //   `--append-system-prompt` and `--extension`.
+// - How Pi finds a session by id (dist/main.js resolveSessionPath, 227–253):
+//   an argument with a slash or ending in `.jsonl` is a path; otherwise an
+//   exact id, then an id prefix, among the sessions made in this directory
+//   (filtered by the header's cwd when `--session-dir` is not this
+//   directory's default) is a local match; otherwise a match anywhere in the
+//   session directory is a global one. `--session` of a global match prints
+//   "Session found in different project", asks "Fork this session into
+//   current directory? [y/N]" on stdin, and on any answer but y or yes
+//   prints "Aborted." and exits 0 without answering any RPC command
+//   (main.js 347–360). `--fork` of any match forks without asking.
 // - Session files in Pi's JSONL format (header, then entries forming a tree by
 //   `parentId`). A new session's file is written only once it holds a user or
 //   assistant message; `--session <path>` of a missing file starts a new
@@ -367,16 +377,33 @@ function readPrompts(file: string): Set<string> {
   }
 }
 
-function resolveSessionArgument(argument: string, dir: string): string | undefined {
-  if (argument.includes("/") || argument.includes("\\") || argument.endsWith(".jsonl")) return path.resolve(argument);
-  if (!fs.existsSync(dir)) return undefined;
-  for (const name of fs.readdirSync(dir)) {
-    if (!name.endsWith(".jsonl")) continue;
-    const header = readJsonl(path.join(dir, name)).find((line) => line["type"] === "session");
-    if (header !== undefined && String(header["id"]).startsWith(argument)) return path.join(dir, name);
-  }
-  return undefined;
+/** A session file's header, as Pi's session discovery reads it. */
+interface StoredSession {
+  readonly path: string;
+  readonly id: string;
+  readonly cwd: string;
 }
+
+/** The sessions in one directory, newest file name first; unreadable files and files without a header are not sessions. */
+function storedSessions(dir: string): StoredSession[] {
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((name) => name.endsWith(".jsonl"))
+    .sort((a, b) => b.localeCompare(a))
+    .flatMap((name) => {
+      const file = path.join(dir, name);
+      try {
+        const header = readJsonl(file)[0];
+        return header?.["type"] === "session" ? [{ path: file, id: String(header["id"]), cwd: typeof header["cwd"] === "string" ? header["cwd"] : "" }] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+/** Where a `--session` or `--fork` argument leads, as Pi's resolveSessionPath decides. */
+type ResolvedSession = { readonly type: "path" | "local"; readonly path: string } | { readonly type: "global"; readonly path: string; readonly cwd: string } | { readonly type: "not_found" };
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -389,7 +416,64 @@ if (flag("--session-dir") === undefined && (homeDirectory === undefined || homeD
   process.stderr.write("fake pi: give --session-dir or HOME\n");
   process.exit(2);
 }
-const sessionDir = path.resolve(flag("--session-dir") ?? path.join(homeDirectory ?? spawnCwd, ".pi", "agent", "sessions"));
+/** Pi's sessions root, `~/.pi/agent/sessions`. */
+const sessionsRoot = path.join(homeDirectory ?? spawnCwd, ".pi", "agent", "sessions");
+
+/** Pi's default session directory for a cwd (getDefaultSessionDirPath): the cwd with its separators as dashes. */
+function defaultSessionDirFor(cwd: string): string {
+  return path.join(sessionsRoot, `--${path.resolve(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
+}
+
+const sessionDirFlag = flag("--session-dir");
+const sessionDir = path.resolve(sessionDirFlag ?? defaultSessionDirFor(spawnCwd));
+
+function resolveSessionArgument(argument: string): ResolvedSession {
+  if (argument.includes("/") || argument.includes("\\") || argument.endsWith(".jsonl")) return { type: "path", path: path.resolve(spawnCwd, argument) };
+  // A --session-dir that is not this directory's default holds sessions of other directories too: a local match must have been made here.
+  const filterCwd = sessionDirFlag !== undefined && sessionDir !== defaultSessionDirFor(spawnCwd);
+  const local = storedSessions(sessionDir).filter((stored) => !filterCwd || (stored.cwd !== "" && path.resolve(stored.cwd) === spawnCwd));
+  const localMatch = local.find((stored) => stored.id === argument) ?? local.find((stored) => stored.id.startsWith(argument));
+  if (localMatch !== undefined) return { type: "local", path: localMatch.path };
+  // Pi's listAll: the given --session-dir, or every directory under the sessions root.
+  const everywhere =
+    sessionDirFlag !== undefined
+      ? storedSessions(sessionDir)
+      : fs.existsSync(sessionsRoot)
+        ? fs
+            .readdirSync(sessionsRoot, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .flatMap((entry) => storedSessions(path.join(sessionsRoot, entry.name)))
+        : [];
+  const globalMatch = everywhere.find((stored) => stored.id === argument) ?? everywhere.find((stored) => stored.id.startsWith(argument));
+  return globalMatch === undefined ? { type: "not_found" } : { type: "global", path: globalMatch.path, cwd: globalMatch.cwd };
+}
+
+/** Input that arrived on stdin before the RPC reader started (after Pi's startup question). */
+let earlyInput = "";
+
+/** Reads one line from stdin, as Pi's readline question does; what follows the line waits for the RPC reader. */
+function readLine(): Promise<string> {
+  return new Promise((resolve) => {
+    let text = "";
+    const finish = (line: string): void => {
+      process.stdin.off("data", onData);
+      process.stdin.off("end", onEnd);
+      process.stdin.pause();
+      resolve(line.endsWith("\r") ? line.slice(0, -1) : line);
+    };
+    const onData = (chunk: string): void => {
+      text += chunk;
+      const newline = text.indexOf("\n");
+      if (newline === -1) return;
+      earlyInput = text.slice(newline + 1);
+      finish(text.slice(0, newline));
+    };
+    const onEnd = (): void => finish(text);
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", onData);
+    process.stdin.once("end", onEnd);
+  });
+}
 const traceDirectory = process.env["FAKE_PI_TRACE_DIRECTORY"] ?? (args.switches.has("--no-session") ? undefined : path.join(sessionDir, "fake-pi-trace"));
 const traceFile = traceDirectory === undefined ? undefined : path.join(traceDirectory, `${process.pid}-${Date.now()}.fake-pi-trace.ndjson`);
 
@@ -412,19 +496,31 @@ try {
   if (args.switches.has("--no-session")) {
     session = SessionFile.inMemory(spawnCwd);
   } else if (flag("--fork") !== undefined) {
-    const source = resolveSessionArgument(flag("--fork")!, sessionDir);
-    if (source === undefined) {
+    const source = resolveSessionArgument(flag("--fork")!);
+    if (source.type === "not_found") {
       process.stderr.write(`No session found matching '${flag("--fork")}'\n`);
       process.exit(1);
     }
-    session = SessionFile.fork(source, sessionDir, spawnCwd);
+    session = SessionFile.fork(source.path, sessionDir, spawnCwd);
   } else if (flag("--session") !== undefined) {
-    const file = resolveSessionArgument(flag("--session")!, sessionDir);
-    if (file === undefined) {
+    const resolved = resolveSessionArgument(flag("--session")!);
+    if (resolved.type === "not_found") {
       process.stderr.write(`No session found matching '${flag("--session")}'\n`);
       process.exit(1);
     }
-    session = SessionFile.open(file, sessionDir, spawnCwd);
+    if (resolved.type === "global") {
+      // Pi asks on the terminal before it opens a session made in another directory, even in RPC mode.
+      process.stdout.write(`Session found in different project: ${resolved.cwd}\n`);
+      process.stdout.write("Fork this session into current directory? [y/N] ");
+      const answer = (await readLine()).toLowerCase();
+      if (answer !== "y" && answer !== "yes") {
+        process.stdout.write("Aborted.\n", () => process.exit(0));
+        await new Promise<never>(() => undefined);
+      }
+      session = SessionFile.fork(resolved.path, sessionDir, spawnCwd);
+    } else {
+      session = SessionFile.open(resolved.path, sessionDir, spawnCwd);
+    }
   } else {
     session = SessionFile.create(sessionDir, spawnCwd);
   }
@@ -838,14 +934,16 @@ function handleCommand(command: { [key: string]: unknown }): void {
         return;
       }
       if (bridge !== undefined && (message === "/ari-persist" || message.startsWith("/ari-persist "))) {
-        // The bridge writes Pi's own header when Pi has not written the file yet. Pi's session
-        // manager is not told, so the fake's session stays unwritten too: the driver stops the
-        // process next, and a later pi opens the file by its header.
+        // The bridge writes Pi's own header when Pi has not written the file yet, then asks Pi to
+        // shut down (ctx.shutdown()): Pi's session manager is not told about the file, so it could
+        // not append to it. RPC mode shuts down once the command has answered and the session is
+        // idle (dist/modes/rpc/rpc-mode.js 275–280 and 607–611); a later pi opens the file by its header.
         if (session.file !== "" && !fs.existsSync(session.file)) {
           fs.mkdirSync(path.dirname(session.file), { recursive: true });
           fs.writeFileSync(session.file, `${JSON.stringify(session.header)}\n`, { flag: "wx" });
         }
         respond(id, "prompt", { disposition: "handled" });
+        process.stdout.write("", () => shutdown(0, "exit"));
         return;
       }
       const input: UserInput = { text: message, images: imagesOf(command["images"]) };
@@ -982,10 +1080,17 @@ function handleCommand(command: { [key: string]: unknown }): void {
 // ---------------------------------------------------------------------------
 // Strict JSONL reader: split on LF only, drop a trailing CR.
 
-let buffered = "";
+let buffered = earlyInput;
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk: string) => {
   buffered += chunk;
+  readCommands();
+});
+// Startup's question paused stdin; a data listener alone does not restart a paused stream.
+process.stdin.resume();
+readCommands();
+
+function readCommands(): void {
   let newline = buffered.indexOf("\n");
   while (newline !== -1) {
     let line = buffered.slice(0, newline);
@@ -1009,7 +1114,7 @@ process.stdin.on("data", (chunk: string) => {
     }
     newline = buffered.indexOf("\n");
   }
-});
+}
 
 function shutdown(code: number, stop: "exit"): void {
   if (run !== undefined) for (const waiter of run.stopWaiters.splice(0)) waiter(stop);

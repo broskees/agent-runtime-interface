@@ -18,14 +18,19 @@
 //   made over RPC keeps the source's working directory.
 // - Pi writes a session file only once it holds a message, and
 //   `--session <file>` of a missing file starts a new session at that path.
-//   So before the driver stops an idle process, the bridge's `/ari-persist`
-//   writes Pi's header for a session Pi has not written, and every restart
-//   checks that Pi reopened the thread's own session id; a different one is
-//   an error, never a silent new thread.
-// - The driver opens only session files under its state directory's
-//   `sessions`. Pi records `--append-system-prompt` text in the session file
-//   it opens, so resuming a file the user's own pi keeps (under ~/.pi) would
-//   write host instructions there; such a resume is refused.
+//   So to stop an idle process the driver sends the bridge's `/ari-persist`,
+//   which writes Pi's header for a session Pi has not written and shuts Pi
+//   down, and every restart checks that Pi reopened the thread's own session
+//   id; a different one is an error, never a silent new thread.
+// - The driver opens only session files really inside its state directory's
+//   `sessions`, symbolic links followed. Pi records `--append-system-prompt`
+//   text in the session file it opens, so resuming a file the user's own pi
+//   keeps (under ~/.pi) would write host instructions there; such a resume
+//   is refused.
+// - Pi gets a session file, never a bare session id: Pi looks a bare id up
+//   among the sessions of the directory it starts in, and for a session made
+//   elsewhere asks "Fork this session into current directory?" on stdin
+//   before RPC starts. The driver finds the id's file itself.
 // - Extension UI dialogs (`select`, `confirm`, `input`, `editor`) become
 //   `Request`s; the bridge's approval dialogs become approvals with their
 //   native option ids.
@@ -194,25 +199,36 @@ function splitModel(slug: string): { provider: string; modelId: string } {
 /** How long a stopping process may take to answer `/ari-persist` before it is stopped anyway. */
 const PERSIST_TIMEOUT_MS = 10_000;
 
-/** The segments of an absolute path with `.` and `..` resolved, or undefined for a relative path. */
-function absoluteSegments(file: string): string[] | undefined {
-  const slashed = file.replace(/\\/g, "/");
-  if (!slashed.startsWith("/") && !/^[A-Za-z]:\//.test(slashed)) return undefined;
-  const segments: string[] = [];
-  for (const segment of slashed.split("/")) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") segments.pop();
-    else segments.push(segment);
+type NodeFs = typeof import("node:fs/promises");
+type NodePath = typeof import("node:path");
+
+/** Where a path really leads: symbolic links followed, and the part that does not exist yet kept as written. */
+async function realLocation(fs: NodeFs, path: NodePath, file: string): Promise<string> {
+  try {
+    return await fs.realpath(file);
+  } catch {
+    // Not there (yet): resolve the directory it would be in.
   }
-  return segments;
+  const parent = path.dirname(file);
+  return parent === file ? file : path.join(await realLocation(fs, path, parent), path.basename(file));
 }
 
-/** True when `file` is an absolute path inside `directory`. Pi resolves a relative path against its own directory, so that counts as outside. */
-function isInsideDirectory(file: string, directory: string): boolean {
-  const inner = absoluteSegments(file);
-  const outer = absoluteSegments(directory);
-  if (inner === undefined || outer === undefined || inner.length <= outer.length) return false;
-  return outer.every((segment, index) => inner[index] === segment);
+/** The session id in a file's first line when that line is Pi's session header (Pi docs session-format.md). */
+async function sessionHeaderId(fs: NodeFs, file: string): Promise<string | undefined> {
+  const handle = await fs.open(file, "r").catch(() => undefined);
+  if (handle === undefined) return undefined;
+  try {
+    const buffer = new Uint8Array(64 * 1024);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const text = new TextDecoder().decode(buffer.subarray(0, bytesRead));
+    const newline = text.indexOf("\n");
+    const header = JSON.parse(newline === -1 ? text : text.slice(0, newline)) as { type?: unknown; id?: unknown };
+    return header.type === "session" && typeof header.id === "string" ? header.id : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Pi reads a `--session` argument as a path when it has a slash or ends in `.jsonl`, and as a session id otherwise (Pi's main.js resolveSessionPath). */
@@ -289,35 +305,30 @@ export class PiSession implements Session {
     this.#open();
     const target = "handle" in input.native ? input.native.handle : input.native.id;
     if (target === null || target === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
-    // A bare id resolves inside --session-dir only; a path could name a file the user's own pi keeps.
-    const sessionsDirectory = `${this.#context.host.paths.stateDir}/sessions`;
-    if (isSessionPath(target) && !isInsideDirectory(target, sessionsDirectory)) {
-      throw callErrors.validation(
-        [{ message: `The Pi driver resumes only session files under ${sessionsDirectory}. Pi writes a thread's launch instructions into the session file it opens, so it will not open ${target}.`, path: ["native", "handle" in input.native ? "handle" : "id"] }],
-        "The Pi session file is outside the driver's state directory",
-      );
-    }
-    const known = [...this.#threads.values()].find((candidate) => candidate.thread.handle === target || candidate.thread.native.id === target);
+    const sessionFile = await this.#sessionFileFor(target, "handle" in input.native ? "handle" : "id");
+    const known = [...this.#threads.values()].find((candidate) => candidate.thread.handle === target || candidate.thread.handle === sessionFile || candidate.thread.native.id === target);
     if (known !== undefined && !known.unloaded && known.process !== undefined) return known.thread;
 
     const policy = input.policy ?? known?.policy ?? { mode: "approval_required", interaction: "default", cwd: known?.thread.cwd ?? "" };
     const cwd = policy.cwd !== "" ? policy.cwd : (known?.thread.cwd ?? "");
     if (cwd === "") throw callErrors.validation([{ message: "resuming a Pi session this session does not know needs policy.cwd", path: ["policy", "cwd"] }]);
     const launch = this.#launchFor(cwd, policy, input.config, input.launch, undefined);
-    // A handle names the file, whose name carries the session id; an id is looked up by Pi.
+    // A handle's file name carries its session id; a bare id was matched by its file's header.
     const expectedId = "handle" in input.native ? sessionIdInFileName(input.native.handle) : input.native.id;
-    let failure: unknown;
-    try {
-      const started = await this.#start(launch, ["--session", target]);
-      if (expectedId === undefined || started.sessionId === expectedId) {
-        const thread = await this.#register(started, policy, launch, {});
-        return { ...thread.thread, appliedConfig: started.applied };
+    let failure: unknown = sessionFile === undefined ? `no session file in ${this.#sessionsDirectory()} holds session ${target}` : undefined;
+    if (sessionFile !== undefined) {
+      try {
+        const started = await this.#start(launch, ["--session", sessionFile]);
+        if (expectedId === undefined || started.sessionId === expectedId) {
+          const thread = await this.#register(started, policy, launch, {});
+          return { ...thread.thread, appliedConfig: started.applied };
+        }
+        // Pi starts a new session at a missing path instead of failing: that is not the one asked for.
+        await started.process.close();
+        failure = `the session file ${sessionFile} does not exist`;
+      } catch (error) {
+        failure = error;
       }
-      // Pi starts a new session at a missing path instead of failing: that is not the one asked for.
-      await started.process.close();
-      failure = `the session file ${target} does not exist`;
-    } catch (error) {
-      failure = error;
     }
     if (input.policy === undefined) throw toCallError(failure) !== undefined ? (failure as Error) : callErrors.notFound({ resource: "Pi session", id: target });
 
@@ -336,6 +347,45 @@ export class PiSession implements Session {
     );
     const thread = await this.#register(fresh, policy, launch, {});
     return { ...thread.thread, appliedConfig: fresh.applied };
+  }
+
+  #sessionsDirectory(): string {
+    return `${this.#context.host.paths.stateDir}/sessions`;
+  }
+
+  /**
+   * The session file a resume names, which must really be inside `<stateDir>/sessions`, symbolic links
+   * followed: Pi records the launch prompts in the file it opens, and a file outside could be one the
+   * user's own pi keeps. A handle is that file. A bare id is looked up there, so Pi always gets a path
+   * and works in the directory the file records, whatever directory it starts in. Undefined when no
+   * file holds that id.
+   */
+  async #sessionFileFor(target: string, field: "handle" | "id"): Promise<string | undefined> {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const directory = this.#sessionsDirectory();
+    await fs.mkdir(directory, { recursive: true });
+    let file = target;
+    if (!isSessionPath(target)) {
+      // Pi names each session file `<timestamp>_<session id>.jsonl`; the header confirms the id.
+      const names = (await fs.readdir(directory)).filter((name) => name.endsWith(`_${target}.jsonl`)).sort();
+      let match: string | undefined;
+      for (const name of names) {
+        if ((await sessionHeaderId(fs, path.join(directory, name))) !== target) continue;
+        match = path.join(directory, name);
+        break;
+      }
+      if (match === undefined) return undefined;
+      file = match;
+    }
+    const inside = path.isAbsolute(file) ? path.relative(await fs.realpath(directory), await realLocation(fs, path, path.resolve(file))) : undefined;
+    if (inside === undefined || inside === "" || inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) {
+      throw callErrors.validation(
+        [{ message: `The Pi driver resumes only session files under ${directory}, symbolic links followed. Pi writes a thread's launch instructions into the session file it opens, so it will not open ${target}.`, path: ["native", field] }],
+        "The Pi session file is outside the driver's state directory",
+      );
+    }
+    return file;
   }
 
   async readSnapshot(threadId: string): Promise<ThreadSnapshot> {
@@ -740,7 +790,11 @@ export class PiSession implements Session {
     }
   }
 
-  /** Stops a thread's process. An idle one first has the bridge write the header of a session Pi has not written, so the thread reopens as itself. */
+  /**
+   * Stops a thread's process. An idle one is stopped with the bridge's `/ari-persist`, which first
+   * writes the header of a session Pi has not written, so the thread reopens as itself, and then shuts
+   * Pi down; the driver still stops the process after it.
+   */
   async #park(thread: PiThread): Promise<void> {
     const process = thread.process;
     thread.process = undefined;

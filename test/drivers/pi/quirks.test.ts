@@ -1,7 +1,8 @@
 // The Pi quirks the driver keeps (proposal §1.3 Pi row): the user's own `pi` in
 // RPC mode with strict JSONL framing; resume, rollback and forks through Pi's
 // session files, with a fork into another directory run by Pi's CLI there and
-// a resumed session in the directory its file records; a thread Pi has not
+// a resumed session in the directory its file records, also when the host
+// resumes by bare session id from another directory; a thread Pi has not
 // written yet that comes back as itself after its process stops, and a
 // missing session file that is never swapped silently for a new session;
 // prompts as Pi records them (a text block, then images); host tools only
@@ -302,6 +303,40 @@ test("a resumed session works in the directory its file records, wherever pi sta
   const fork = await second.session.forkThread!({ threadId: resumed.id, at: { type: "latest" } });
   assert.equal(fork.cwd, opened.cwd, "a fork without a destination works where its source works");
   assert.equal(opened.harness.invocations.at(-1)?.cwd, opened.cwd, "pi --fork ran in the source's own directory");
+});
+
+test("a resume by bare session id gives Pi the session's file, so it works from any requested directory", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, first, thread.id, "Made here.");
+  await first.session.close();
+
+  // Pi asks on stdin before it opens, by id, a session made in another directory; the driver must not let it.
+  const second = await opened.open();
+  const resumed = await second.session.resumeThread({ native: { id: thread.native.id!, strength: "strong" }, policy: policy(opened.otherCwd) });
+  assert.equal(resumed.id, thread.id);
+  assert.equal(resumed.native.id, thread.native.id);
+  assert.equal(resumed.cwd, opened.cwd, "the session works where it was made");
+  assert.equal(
+    second.events.some((event) => event.body.type === "session.replaced"),
+    false,
+  );
+  const resumeArgs = opened.host.spawns.at(-1)?.args ?? [];
+  assert.equal(resumeArgs[resumeArgs.indexOf("--session") + 1], thread.handle, "pi got the session's file, not its id");
+  assert.equal(opened.harness.invocations.at(-1)?.cwd, opened.otherCwd);
+  await simpleTurn(opened, second, resumed.id, "Back from elsewhere.");
+  assert.deepEqual((await opened.inspect(resumed))?.prompts, ["Made here.", "Back from elsewhere."]);
+
+  // An id no session file holds never reaches Pi: the driver starts a fresh session and says the old one is gone.
+  const unknownId = "00000000-0000-4000-8000-00000000eeee";
+  const spawnsBefore = opened.host.spawns.length;
+  const fresh = await second.session.resumeThread({ native: { id: unknownId, strength: "strong" }, policy: policy(opened.otherCwd) });
+  assert.notEqual(fresh.native.id, unknownId);
+  const replaced = second.events.find((event) => event.body.type === "session.replaced");
+  assert.equal((replaced?.body as { previousNativeId?: string } | undefined)?.previousNativeId, unknownId);
+  assert.equal((replaced?.body as { contextLost?: boolean } | undefined)?.contextLost, true);
+  for (const spawned of opened.host.spawns.slice(spawnsBefore)) assert.ok(!(spawned.args ?? []).includes(unknownId), `pi was started with ${JSON.stringify(spawned.args)}`);
 });
 
 test("a prompt reaches Pi as its text and images, and Pi records a text block followed by the images", async () => {

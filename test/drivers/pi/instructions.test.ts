@@ -6,7 +6,8 @@
 // are never written under the provider's own config directory: the driver's
 // session files live in its state directory, and it refuses to resume a
 // session file the user's own pi keeps, because Pi records launch prompts in
-// the file it opens.
+// the file it opens. That check follows symbolic links: a link inside the
+// state directory that leads to the user's file is outside too.
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -119,22 +120,38 @@ test("launch prompts and instructions reach Pi through the declared system chann
   for (const spawn of rig.host.spawns) assert.equal(spawn.environment["HOME"], home, "pi ran with the temporary home");
 });
 
-test("a session file the user's own pi keeps is never resumed, so launch prompts cannot be written into it", async () => {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-pi-home-")));
-  homes.push(home);
-  const rig = await openPiTestRig({ host: { ambientEnvironment: { HOME: home } } });
-  rigs.push(rig);
-  // A session standalone pi wrote under ~/.pi/agent/sessions, in Pi's own format.
+/** A session standalone pi wrote under `<home>/.pi/agent/sessions`, in Pi's own format, made in `cwd`. */
+function userPiSession(home: string, cwd: string): { nativeId: string; userSessions: string; userFile: string } {
   const nativeId = "11111111-2222-4333-8444-555555555555";
   const userSessions = path.join(home, ".pi", "agent", "sessions", "--work--");
   fs.mkdirSync(userSessions, { recursive: true });
   const userFile = path.join(userSessions, `2026-11-20T10-00-00-000Z_${nativeId}.jsonl`);
   const lines = [
-    { type: "session", version: 3, id: nativeId, timestamp: "2026-11-20T10:00:00.000Z", cwd: rig.cwd },
+    { type: "session", version: 3, id: nativeId, timestamp: "2026-11-20T10:00:00.000Z", cwd },
     { type: "message", id: "00000001", parentId: null, timestamp: "2026-11-20T10:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "My own question." }], timestamp: 1 } },
     { type: "message", id: "00000002", parentId: "00000001", timestamp: "2026-11-20T10:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "My own answer." }], api: "fake-messages", provider: "fake", model: "fake-small", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 2 } },
   ];
   fs.writeFileSync(userFile, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
+  return { nativeId, userSessions, userFile };
+}
+
+/** Asserts that resumeThread rejects each native reference as outside the state directory. */
+async function assertRefused(session: Awaited<ReturnType<PiTestRig["open"]>>, rig: PiTestRig, outside: ReadonlyArray<Parameters<Session["resumeThread"]>[0]["native"]>): Promise<void> {
+  for (const native of outside) {
+    await assert.rejects(session.session.resumeThread({ native, policy: policy(rig.cwd) }), (error: unknown) => {
+      assert.ok(isAriError(error, "validation"), `${JSON.stringify(native)} rejected with ${String(error)}`);
+      assert.match(JSON.stringify((toCallError(error) as { issues?: unknown }).issues), /resumes only session files under/);
+      return true;
+    });
+  }
+}
+
+test("a session file the user's own pi keeps is never resumed, so launch prompts cannot be written into it", async () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-pi-home-")));
+  homes.push(home);
+  const rig = await openPiTestRig({ host: { ambientEnvironment: { HOME: home } } });
+  rigs.push(rig);
+  const { userFile } = userPiSession(home, rig.cwd);
   const before = fs.readFileSync(userFile, "utf8");
 
   const session = await rig.open({ launch: { appendSystemPrompt: ["MARKER-RESUME-4b1e"] } });
@@ -149,16 +166,38 @@ test("a session file the user's own pi keeps is never resumed, so launch prompts
     // Pi reads an "id" with a slash as a path too.
     { id: userFile, strength: "strong" },
   ];
-  for (const native of outside) {
-    await assert.rejects(session.session.resumeThread({ native, policy: policy(rig.cwd) }), (error: unknown) => {
-      assert.ok(isAriError(error, "validation"), `${JSON.stringify(native)} rejected with ${String(error)}`);
-      assert.match(JSON.stringify((toCallError(error) as { issues?: unknown }).issues), /resumes only session files under/);
-      return true;
-    });
-  }
+  await assertRefused(session, rig, outside);
   assert.equal(rig.host.spawns.length, spawnsBefore, "pi was never started on the user's file");
   assert.equal(fs.readFileSync(userFile, "utf8"), before, "the user's session file is unchanged");
   assert.deepEqual(filesContaining(home, "MARKER-RESUME-4b1e"), []);
+});
+
+test("a symbolic link inside the state directory that leads to the user's own session file is refused too", async () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-pi-home-")));
+  homes.push(home);
+  const rig = await openPiTestRig({ host: { ambientEnvironment: { HOME: home } } });
+  rigs.push(rig);
+  const { nativeId, userSessions, userFile } = userPiSession(home, rig.cwd);
+  const before = fs.readFileSync(userFile, "utf8");
+  const sessionsDirectory = path.join(rig.host.paths.stateDir, "sessions");
+  fs.mkdirSync(sessionsDirectory, { recursive: true });
+  // A link to the file, named as Pi names its files, and a link to the user's session directory.
+  const linkedFile = path.join(sessionsDirectory, path.basename(userFile));
+  fs.symlinkSync(userFile, linkedFile);
+  const linkedDirectory = path.join(sessionsDirectory, "linked");
+  fs.symlinkSync(userSessions, linkedDirectory, "dir");
+
+  const session = await rig.open({ launch: { appendSystemPrompt: ["MARKER-LINK-9d2c"] } });
+  const spawnsBefore = rig.host.spawns.length;
+  await assertRefused(session, rig, [
+    { handle: linkedFile },
+    { handle: path.join(linkedDirectory, path.basename(userFile)) },
+    // The bare id finds the linked file by its name; where it leads decides.
+    { id: nativeId, strength: "strong" },
+  ]);
+  assert.equal(rig.host.spawns.length, spawnsBefore, "pi was never started on the linked file");
+  assert.equal(fs.readFileSync(userFile, "utf8"), before, "the user's session file is unchanged");
+  assert.deepEqual(filesContaining(home, "MARKER-LINK-9d2c"), []);
 });
 
 test("every frame and session file line of these tests matches Pi's published types", () => {

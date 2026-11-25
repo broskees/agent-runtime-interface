@@ -16,11 +16,12 @@ import { LIVE_RECORD_VARIABLE, parseRecordArguments } from "../../../scripts/rec
 import { DEFAULT_OPENCODE_RECORDINGS } from "../../../scripts/record-opencode.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
-import { opencodeDataDirectory, userDatabaseFile } from "../../recordings/opencode/credentials.ts";
+import { copyCredentials, opencodeDataDirectory, userDatabaseFile } from "../../recordings/opencode/credentials.ts";
 import { OpencodeModelChoiceError, describeOpencodeRun, failuresOf, recordOpencode } from "../../recordings/opencode/record.ts";
 import { RecordingNotWrittenError, recoveryFileFor } from "../../recordings/recovery.ts";
 import type { OpencodeRecordOutcome, RecordOpencodeOptions } from "../../recordings/opencode/record.ts";
 import { replayOpencode } from "../../recordings/opencode/replay.ts";
+import { createOpencodeLayout } from "../../recordings/opencode/run.ts";
 import { OPENCODE_SERVE_ARGS, opencodeServeEnvironment, startOpencodeServe } from "../../recordings/opencode/serve.ts";
 import { openSqlite } from "../../recordings/opencode/sqlite.ts";
 import { SCENARIO_NAMES } from "../../recordings/scenarios.ts";
@@ -574,6 +575,61 @@ for (const [label, blockRecovery] of [
     }
   });
 }
+
+test("the sign-in copy has every table and index of the user's database and rows only in credential and the migration journals; no row of another table reaches its file", async () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "copy-home-")));
+  const database = path.join(home, ".local", "share", "opencode", "opencode.db");
+  fs.mkdirSync(path.dirname(database), { recursive: true });
+  const marker = "marker-user-part-3c9e";
+  const seed = await openSqlite(database);
+  try {
+    seed.exec(
+      "PRAGMA journal_mode = WAL; PRAGMA user_version = 7; CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT NOT NULL, created_at NUMERIC); CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT, label TEXT NOT NULL, value TEXT NOT NULL, connector_id TEXT, method_id TEXT, active INTEGER, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL); CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL); CREATE TABLE session_v2 (id TEXT PRIMARY KEY, title TEXT); CREATE INDEX session_v2_title_idx ON session_v2 (title); CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, data TEXT) WITHOUT ROWID; CREATE INDEX part_session_idx ON part (session_id)",
+    );
+    seed.run("INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)", "0123abcd", 1_750_000_000_000);
+    seed.run("INSERT INTO credential VALUES (?, ?, ?, ?, NULL, NULL, 1, 1, 2)", "crd_0001", "fake", "default", SIGN_IN);
+    seed.run("INSERT INTO credential VALUES (?, ?, ?, ?, NULL, NULL, 0, 3, 4)", "crd_0002", "other", "work", JSON.stringify({ type: "oauth", refresh: "fake-refresh-0102" }));
+    seed.run("INSERT INTO migration VALUES (?, ?)", "20260805200742_import_legacy_credentials", 1);
+    seed.run("INSERT INTO session_v2 VALUES (?, ?)", "ses_user0001", `A session of the user's: ${marker}`);
+    // Some megabytes of the user's history, which the copy must not hold.
+    for (let index = 0; index < 400; index += 1) seed.run("INSERT INTO part VALUES (?, ?, ?)", `prt_${index}`, "ses_user0001", `${marker} ${"x".repeat(16_384)}`);
+  } finally {
+    seed.close();
+  }
+  const before = fs.readFileSync(database);
+  const layout = createOpencodeLayout("ari-opencode-copy-");
+  try {
+    const copied = await copyCredentials({ HOME: home }, layout);
+    assert.ok(copied !== undefined);
+    assert.equal(copied.real, database);
+    assert.deepEqual([...copied.original], [["crd_0001", SIGN_IN], ["crd_0002", JSON.stringify({ type: "oauth", refresh: "fake-refresh-0102" })]]);
+    assert.equal(fs.statSync(copied.copy).mode & 0o777, 0o600);
+    const read = async (file: string): Promise<{ schema: string[]; rows: { [table: string]: string }; userVersion: number }> => {
+      const db = await openSqlite(file, { readOnly: true });
+      try {
+        const schema = db.all("SELECT type, name, tbl_name, sql FROM sqlite_master").map((row) => JSON.stringify(row)).sort();
+        const tables = db.all("SELECT name FROM sqlite_master WHERE type = 'table'").map((row) => String(row["name"]));
+        const rows = Object.fromEntries(tables.map((table) => [table, JSON.stringify(db.all(`SELECT * FROM "${table}"`))]));
+        return { schema, rows, userVersion: Number(db.all("PRAGMA user_version")[0]!["user_version"]) };
+      } finally {
+        db.close();
+      }
+    };
+    const user = await read(database);
+    const copy = await read(copied.copy);
+    assert.deepEqual(copy.schema, user.schema, "the same tables and indexes, with the same SQL");
+    assert.equal(copy.userVersion, 7);
+    for (const table of ["credential", "migration", "__drizzle_migrations", "sqlite_sequence"]) assert.equal(copy.rows[table], user.rows[table], `${table} is copied whole`);
+    for (const table of ["session_v2", "part"]) assert.equal(copy.rows[table], "[]", `${table} is empty`);
+    const bytes = fs.readFileSync(copied.copy);
+    assert.ok(!bytes.includes(marker), "no byte of the user's sessions is in the copy's file");
+    assert.ok(bytes.length < 256 * 1024, `the copy is ${bytes.length} bytes, the user's ${before.length}`);
+    assert.ok(fs.readFileSync(database).equals(before), "the user's database is unchanged");
+  } finally {
+    fs.rmSync(layout.root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("without a database of the user's the recorder copies nothing and creates nothing in the user's data directory", async () => {
   const home = fs.mkdtempSync(path.join(DIRECTORY, "no-database-"));

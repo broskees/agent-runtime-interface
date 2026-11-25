@@ -575,13 +575,17 @@ new database with every migration marked done. Copying it would sign nothing
 in.
 
 - The same file holds the user's sessions, saved permission grants and the
-  rest of OpenCode's state. So the recorder copies it with all of that left
-  out: a consistent copy (`VACUUM INTO`, from a read-only connection) into
-  `<workspace>/xdg-data/opencode/opencode.db`, mode 0600, then every table but
-  `credential` and the migration journals (`migration`,
-  `__drizzle_migrations`) emptied. A read-only connection to a database in
-  WAL mode leaves an empty `opencode.db-wal` and `opencode.db-shm` beside the
-  user's file, as any reader does; the file itself is unchanged.
+  rest of OpenCode's state, and it grows with every session: a long-used one
+  can be tens of gigabytes. So the recorder copies only what OpenCode needs
+  to open it and sign in. In one read transaction on a read-only connection
+  it reads the schema (every table and index, from `sqlite_master`), the
+  `user_version`, and the rows of `credential` and the migration journals
+  (`migration`, `__drizzle_migrations`), and no row of any other table. It
+  writes them into a new database,
+  `<workspace>/xdg-data/opencode/opencode.db`, mode 0600, whose other tables
+  are empty. A read-only connection to a database in WAL mode leaves an
+  empty `opencode.db-wal` and `opencode.db-shm` beside the user's file, as
+  any reader does; the file itself is unchanged.
 - OpenCode may refresh an OAuth token during a run and write the new value to
   the copy (`packages/core/src/integration.ts:739`,
   `credentials.update(credential.id, { value })`). After each scenario, also

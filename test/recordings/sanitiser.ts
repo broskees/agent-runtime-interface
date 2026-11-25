@@ -17,6 +17,12 @@
 //     more, with <NAME> (the recorded server and Claude Code can see the
 //     user's environment, and a tool can print it);
 //   - email addresses with <EMAIL>;
+//   - the string value under a key that names an account or organisation id
+//     (`chatgpt-account-id`, `x-opencode-org-id`, `organizationUuid`, ...,
+//     ACCOUNT_ID_KEY and ORG_ID_KEY) with <ACCOUNT_ID> or <ORG_ID>, in both
+//     directions: OpenCode 2.1.2's model list carries the user's ChatGPT
+//     account id and OpenCode organisation id as request headers of their
+//     models;
 //   - the OS user name (os.userInfo().username, and the values of USER and
 //     LOGNAME where they differ) with <USER>. How depends on what the string
 //     is:
@@ -69,7 +75,23 @@ export const PLACEHOLDERS = {
   email: "<EMAIL>",
   otherHome: "<OTHER_HOME>",
   token: "<TOKEN>",
+  accountId: "<ACCOUNT_ID>",
+  orgId: "<ORG_ID>",
 } as const;
+
+/** A key whose value identifies an account, compared without case, `-` or `_`: `chatgpt-account-id`, `account_id`, `accountUuid`. */
+export const ACCOUNT_ID_KEY = /accountid$|accountuuid$/;
+/** A key whose value identifies an organisation, compared the same way: `x-opencode-org-id`, `organization_id`, `organizationUuid`. */
+export const ORG_ID_KEY = /(?:org|organization|organisation)(?:id|uuid)$/;
+
+/** The placeholder for the value under `key` when the key names an account or organisation id. */
+function idPlaceholder(key: string | undefined): string | undefined {
+  if (key === undefined) return undefined;
+  const plain = key.toLowerCase().replace(/[-_]/g, "");
+  if (ACCOUNT_ID_KEY.test(plain)) return PLACEHOLDERS.accountId;
+  if (ORG_ID_KEY.test(plain)) return PLACEHOLDERS.orgId;
+  return undefined;
+}
 
 export interface SanitiserInput {
   /** The recording's temp workspace. */
@@ -205,6 +227,8 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
   /** `key` is the object key the value sits under (array elements take their array's key). */
   const walk = (value: unknown, side: FrameSide, key: string | undefined): unknown => {
     if (typeof value === "string") {
+      const id = idPlaceholder(key);
+      if (id !== undefined && value !== "") return id;
       const protocolWord = key !== undefined && protocolWords.get(key)?.has(value) === true;
       return text(value, side === "in" && !protocolWord ? "word" : "path");
     }

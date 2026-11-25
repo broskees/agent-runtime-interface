@@ -11,9 +11,10 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { recordingFiles, scanRecordingText, scanRecordings } from "../../scripts/check-recordings.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
-import { encodeRecording, parseRecording } from "./format.ts";
+import { encodeRecording, parseRecording, readRecording } from "./format.ts";
 import type { Frame, RecordingMetadata } from "./format.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "./claude/protocol-words.ts";
+import { resanitiseRecording } from "./resanitise.ts";
 import { PLACEHOLDERS, createSanitiser, secretVariablesOf, userNames } from "./sanitiser.ts";
 
 const METADATA: RecordingMetadata = {
@@ -303,4 +304,66 @@ test("check:recordings is a step of both gate chains, in the same position", () 
   assert.ok(gate.includes("pnpm run check:recordings"));
   assert.ok(gateBun.includes("pnpm run check:recordings"));
   assert.equal(gate.length - gate.indexOf("pnpm run check:recordings"), gateBun.length - gateBun.indexOf("pnpm run check:recordings"));
+});
+
+test("the value under a key that names an account or organisation id becomes <ACCOUNT_ID> or <ORG_ID>, in both directions; other ids stay", () => {
+  const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" });
+  // As OpenCode 2.1.2's GET /api/model gives them: request headers of the models of the user's providers.
+  const ids = {
+    "chatgpt-account-id": "0b6f1d1e-6a4e-4c39-9d4c-6a4f3b9e2c11",
+    "x-opencode-org-id": "org_01ARISYNTHETICORG000000000",
+    accountUuid: "5f2b9c3a-0000-4000-8000-00000000a11c",
+    account_id: "acct_0123",
+    organizationUuid: "7d1c2b3a-0000-4000-8000-0000000000e9",
+    organization_id: "org-0123",
+    orgId: "o-42",
+  };
+  const kept = { sessionID: "ses_0001", projectID: "a762c972", aggregateID: "ses_0001", parent_agent_id: "agent-1", providerID: "openai", modelID: "gpt", id: "x", api_message_id: "msg_1", empty_account_id: "" };
+  for (const dir of ["in", "out"] as const) {
+    const out = sanitise({ dir, kind: "response", id: 3, body: { data: [{ headers: ids, ...kept }] } });
+    assert.deepEqual(
+      out,
+      {
+        dir,
+        kind: "response",
+        id: 3,
+        body: { data: [{ headers: { "chatgpt-account-id": "<ACCOUNT_ID>", "x-opencode-org-id": "<ORG_ID>", accountUuid: "<ACCOUNT_ID>", account_id: "<ACCOUNT_ID>", organizationUuid: "<ORG_ID>", organization_id: "<ORG_ID>", orgId: "<ORG_ID>" }, ...kept }] },
+      },
+      `a frame going ${dir}`,
+    );
+  }
+});
+
+test("resanitiseRecording runs a recording through the sanitiser again with a new checksum, keeps its header, and leaves one with nothing new to replace byte-identical", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ari-resanitise-"));
+  try {
+    const opencode: RecordingMetadata = { ...METADATA, driver: "opencode", vendor: "opencode", vendorVersion: "2.1.2", sdk: "@opencode/client", sdkVersion: "2.1.2", model: "anthropic/claude-haiku-5-5", source: "live" };
+    const holding = path.join(directory, "simple.ndjson");
+    const frames: Frame[] = [
+      { dir: "out", kind: "request", id: 3, method: "GET", path: "/api/model", query: { "location[directory]": "" } },
+      { dir: "in", kind: "response", id: 3, status: 200, contentType: "application/json", body: { data: [{ providerID: "openai", modelID: "gpt", headers: { "chatgpt-account-id": "0b6f1d1e-6a4e-4c39-9d4c-6a4f3b9e2c11", originator: "opencode" } }, { providerID: "opencode", modelID: "m", headers: { "x-opencode-org-id": "org_01ARISYNTHETICORG000000000" } }] } },
+      { dir: "in", kind: "event", id: 4, event: { type: "session.text.delta", data: { delta: "ok, <WORKSPACE>/cwd for <USER>" } } },
+    ];
+    fs.writeFileSync(holding, encodeRecording(opencode, frames));
+    assert.equal(await resanitiseRecording(holding, { env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" }), true);
+    const again = await readRecording(holding);
+    const { type: _type, format: _format, sha256: _sha256, ...header } = again.header;
+    assert.deepEqual(header, opencode, "the header stays as the recorder wrote it");
+    const text = fs.readFileSync(holding, "utf8");
+    assert.ok(!text.includes("0b6f1d1e") && !text.includes("org_01ARI"), text);
+    assert.deepEqual(
+      again.frames.map((entry) => entry.frame),
+      [frames[0], { ...frames[1], body: { data: [{ providerID: "openai", modelID: "gpt", headers: { "chatgpt-account-id": "<ACCOUNT_ID>", originator: "opencode" } }, { providerID: "opencode", modelID: "m", headers: { "x-opencode-org-id": "<ORG_ID>" } }] } }, frames[2]],
+    );
+    // A second pass, and a recording with only placeholders, change nothing.
+    assert.equal(await resanitiseRecording(holding, { env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" }), false);
+    assert.equal(fs.readFileSync(holding, "utf8"), text);
+    const clean = path.join(directory, "clean.ndjson");
+    fs.writeFileSync(clean, encodeRecording(METADATA, CLEAN));
+    const before = fs.readFileSync(clean, "utf8");
+    assert.equal(await resanitiseRecording(clean, { env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" }), false);
+    assert.equal(fs.readFileSync(clean, "utf8"), before);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

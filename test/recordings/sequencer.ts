@@ -159,13 +159,20 @@ export class ReplaySequencer {
       if (this.#failure !== undefined) return;
       const next = this.#frameAt(this.#position);
       if (next === undefined || next.frame.dir !== "in") break;
+      const before = this.#last();
       this.#position += 1;
       this.#lastLine = next.line;
       this.#untaken.set(next.line, next.frame);
       try {
         this.#deliver(next.frame, next.line);
       } catch (error) {
-        this.#fail(new ReplayDriftError(this.recording.file, next.line, `replay could not deliver the recorded frame: ${error instanceof Error ? error.message : String(error)}\n  recorded (line ${next.line}): ${showFrame(next.frame)}`));
+        this.#fail(
+          new ReplayDriftError(
+            this.recording.file,
+            next.line,
+            `replay could not deliver the recorded frame: ${error instanceof Error ? error.message : String(error)}\n  recorded (line ${next.line}): ${showFrame(next.frame)}\n  last replayed (line ${before?.line ?? "none"}): ${showFrame(before?.frame)}`,
+          ),
+        );
         return;
       }
     }
@@ -258,6 +265,12 @@ export class ReplaySequencer {
       arm();
       check();
     });
+  }
+
+  /** True when replay can go no further without the driver: it took every frame delivered, and the next recorded frame, if any, is one it must send. */
+  waitingForDriver(): boolean {
+    const next = this.#frameAt(this.#position);
+    return this.#failure === undefined && this.#untaken.size === 0 && (next === undefined || next.frame.dir === "out");
   }
 
   /** True when every recorded frame has been matched, or delivered and taken. */

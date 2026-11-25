@@ -19,9 +19,11 @@ The kit lives in `test/recordings/`:
 | `sanitiser.ts` | the one sanitiser every recorder uses |
 | `sequencer.ts` | the replay sequencer, which knows no transport |
 | `claude/` | the Claude tap, the replay SDK, and the recording and replay functions |
+| `opencode/` | the OpenCode recording proxy, the replay server, the sign-in copy, `opencode serve`, and the recording and replay functions |
 
-`scripts/record-claude.ts` is the Claude recorder. `scripts/check-recordings.ts`
-is the scan the gate runs. Nothing here ships in the npm tarball.
+`scripts/record-claude.ts` is the Claude recorder and `scripts/record-opencode.ts`
+the OpenCode recorder. `scripts/check-recordings.ts` is the scan the gate runs.
+Nothing here ships in the npm tarball.
 
 ## The format
 
@@ -53,12 +55,12 @@ or `kind`, or empty), naming the file and the line number.
 |---|---|
 | `type` | always `header` |
 | `format` | the format version, `major.minor` |
-| `driver` | the ARI driver kind, for example `claude` |
-| `vendor` | the agent, for example `claude-code` |
-| `vendorVersion` | the agent's version: for Claude, the `claude_code_version` of Claude Code's `system`/`init` message, else the version the SDK package bundles |
-| `sdk` | the package the driver talks through, for example `@anthropic-ai/claude-agent-sdk` |
+| `driver` | the ARI driver kind, for example `claude` or `opencode` |
+| `vendor` | the agent, for example `claude-code` or `opencode` |
+| `vendorVersion` | the agent's version: for Claude, the `claude_code_version` of Claude Code's `system`/`init` message, else the version the SDK package bundles; for OpenCode, the version the server's `GET /api/info` names |
+| `sdk` | the package the driver talks through, for example `@anthropic-ai/claude-agent-sdk` or `@opencode/client` |
 | `sdkVersion` | that package's version |
-| `model` | the model the recorder asked for, for example `haiku` |
+| `model` | the model the recorder asked for: for Claude, for example `haiku`; for OpenCode, a `provider/model` id the server offers |
 | `scenario` | the scenario's name |
 | `recorded` | the day of the recording, `YYYY-MM-DD` |
 | `source` | `live` for a real agent, `fake` for a test fake |
@@ -96,6 +98,37 @@ recorded when the driver writes it: the tap and the replay SDK both read the
 driver's prompt stream as fast as the driver writes it. An inbound frame is
 recorded when the driver receives it.
 
+### OpenCode frames
+
+The OpenCode recording proxy (`test/recordings/opencode/proxy.ts`) records the
+HTTP traffic between the ARI OpenCode driver, in external-server mode, and an
+OpenCode 2.x server. Every frame names its exchange by `id`: 1, 2, ... in the
+order the driver's requests reached the proxy. Request headers are never
+recorded: the server password travels in one.
+
+| Dir | Kind | Fields | What |
+|---|---|---|---|
+| out | `request` | `id`, `method`, `path`, `query`, `body` or `text` | the driver sent a request. `query` is the URL's query parameters as an object (a repeated name holds the list of its values). `body` is the request body when it is JSON, `text` when it is not; neither for an empty body. |
+| in | `response` | `id`, `status`, `contentType`, `body` or `text`, `stream` | the server answered the request: its status, its Content-Type header and its body. For an event stream (`GET /api/event`, Content-Type `text/event-stream`) `stream` is `true` and the events follow as frames of their own. |
+| in | `event` | `id`, `event` or `data` | the server sent one server-sent event on that stream: `event` is its data as JSON, `data` the raw text when it is not JSON. A comment or keepalive with no data is passed on but not recorded. |
+| in | `end` | `id` | the server ended that stream |
+| out | `close` | `id` | the driver closed the connection before its answer ended. The driver stops reading its event stream when its session closes, so every recording ends with one. |
+| in | `dropped` | `id` | the server closed the connection without an answer |
+
+A request is recorded once its body has arrived. A response or an event is
+recorded just before the proxy passes it to the driver, and an event that
+arrives after the driver closed its stream is not recorded, because it never
+reached the driver. The proxy splits the event stream into events the way
+`@opencode/client` 2.1.2 reads it (`promise/generated/client.ts` `sse`).
+
+The proxy and the replay server build a request's frame with the same
+function (`requestFrame` in `test/recordings/opencode/frames.ts`). Before it
+opens a second session (the `resume` scenario), the host waits until the
+server has seen the first session's event stream close. The driver closes
+that stream as the session closes and opens the next session at once, on
+another connection, so without the wait the server could see the next
+request before the close, and a replay could see them the other way round.
+
 ## The scenarios
 
 `test/recordings/scenarios.ts` defines six scenarios for every driver. Each
@@ -126,6 +159,16 @@ pinned SDK for the parts the driver loads and imports no driver code and no
 fake. The workspace is laid out as the recorder lays it out, and the driver
 gets the same fixed id sequence.
 
+For OpenCode it is the replay server (`test/recordings/opencode/replay-server.ts`),
+an HTTP server on a loopback port that the driver gets as its `serverUrl`. It
+imports no driver code and no fake. Each request the driver makes becomes a
+`request` frame, and a connection the driver closes before its answer ended
+becomes a `close` frame. The server writes the recorded responses, events,
+stream ends and dropped connections one at a time, each after the one before
+it was flushed to the driver's connection, so the driver receives them in the
+recorded order. A request that drifts gets a 500 answer whose text is the
+drift.
+
 The sequencer walks the recording in order:
 
 - each outbound frame the driver sends must equal the next recorded frame,
@@ -142,7 +185,8 @@ Replay fails, naming the recording file, the line and both frames, when:
   driver (see below);
 - the scenario waits too long for something (a recorded inbound frame is
   missing, for example). The message names the next recorded frame and the
-  last frame replayed.
+  last frame replayed. Every wait counts: an event, a call into the driver,
+  and the host's answers and interrupt settling.
 
 An inbound frame counts as replayed only once the driver has taken it, not
 when the sequencer hands it to the replay SDK. For Claude: a message, the end
@@ -154,14 +198,60 @@ starts a query and never reads it, fails. After the scenario, replay waits
 until the driver has taken every delivered frame, or has taken none for half
 a second.
 
+For OpenCode: a response, an event, the end of a stream or a dropped
+connection when the replay server has written it to a connection the driver
+still holds open. Nothing reaches a connection the driver closed, so an event
+or an end recorded after the driver's `close` of its stream, or a response
+to a request the driver gave up, fails. After the scenario, replay first waits
+until the driver's event streams have closed, or 5 seconds.
+
 Before it compares, replay runs the driver's frame through the sanitiser with
 its own workspace, `$HOME` and `PATH`. Before it delivers, it puts its own
 workspace where the recording says `<WORKSPACE>`.
 
+### What replay detects, and what it does not
+
+Replay checks the driver against the recording. It is not a tamper detector.
+The header's `sha256` guards a recording against edits: the loader refuses a
+file whose frames do not match it, so an edit fails unless the checksum is
+computed again.
+
+Replay detects:
+
+- an outbound frame that is changed, skipped, extra or out of order: the
+  sequencer compares each one with the next recorded frame;
+- an extra recorded inbound frame the driver cannot take: an event or an end
+  after the driver closed its stream, or a response to a request the driver
+  gave up;
+- a removed inbound frame the scenario's outcome depends on. The run then
+  waits for something that never comes and stalls, or the driver sends a
+  frame the recording does not expect, or a scenario assertion fails. For
+  example, without the event that ends the turn the turn never ends; without
+  the result of the approved command, `approval_allowed` finds no marker in
+  the command's output; without Claude Code's result of the declined command,
+  `approval_denied` sees that command complete.
+
+Replay does not detect:
+
+- a removed, duplicated or reordered inbound frame the driver reads and
+  ignores, or that changes nothing the scenario checks. In the fake
+  recordings, OpenCode's `session.inbox.enqueued`, `session.step.started` or
+  one `session.text.delta` can go (`session.text.ended` carries the whole
+  text), and so can one of Claude Code's `content_block_delta` stream events;
+- a change to inbound content the scenario's assertions do not look at, such
+  as the text of a `session.text.delta`;
+- whether the driver read an HTTP frame. A response, an event or an end counts
+  as taken once the replay server has written and flushed it to a connection
+  the driver still holds open, the same standard as a Claude stream item that
+  the driver's `next()` returned.
+
 ## Fields replay ignores
 
 Frame comparison leaves out only these fields. `test/recordings/docs.test.ts`
-checks this table against the code's list.
+checks this table against the code's list. OpenCode replay leaves out no
+field: the driver builds every request from the scenario, its config and what
+the server answered, so a replay sends the same requests byte for byte, and a
+recording holds no request headers.
 
 | Driver | Frame kind | Field | Reason |
 |---|---|---|---|
@@ -173,7 +263,10 @@ checks this table against the code's list.
 The repository is public, so every recorder sanitises each frame before it
 writes. All recorders use one sanitiser, `test/recordings/sanitiser.ts`. It
 replaces, in every string and object key (a frame's own format fields, `dir`,
-`kind`, `query`, `id`, `method` and `toolName`, stay as the tap wrote them):
+`kind`, `query`, `id`, `method`, `toolName` and `contentType`, stay as the
+recorder wrote them when they hold a string, a number, a boolean or null; an
+OpenCode request's `query` is an object of the request's query parameters,
+and is sanitised like any other value):
 
 | What | Placeholder |
 |---|---|
@@ -181,6 +274,7 @@ replaces, in every string and object key (a frame's own format fields, `dir`,
 | a string that is exactly the value of `PATH` | `<PATH>` |
 | `$HOME`, and its real path | `<HOME>` |
 | the values of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` | `<ANTHROPIC_API_KEY>`, `<ANTHROPIC_AUTH_TOKEN>`, `<CLAUDE_CODE_OAUTH_TOKEN>` |
+| the value of every other variable of the recorder's environment whose name ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, when it is 8 characters or more | `<NAME>`, for example `<GEMINI_API_KEY>` |
 | the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ): in an inbound frame wherever it is a whole word, except in a protocol word; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
 | email addresses | `<EMAIL>` |
 | another home directory: `/home/<name>`, `/Users/<name>`, `/root` | `<OTHER_HOME>` |
@@ -188,6 +282,14 @@ replaces, in every string and object key (a frame's own format fields, `dir`,
 
 Exact values go first, longest first, so a path inside the workspace is
 replaced whole.
+
+The recorded OpenCode server inherits the recorder's environment, and a tool
+it runs can print it; Claude Code gets only `PATH`, but a tool can still print
+a value it finds elsewhere. So the sanitiser replaces the value of every
+variable whose name ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, in
+inbound and outbound frames alike. A shorter value stays, because it would
+match ordinary text. The scan cannot see these values: it runs without the
+recorder's environment.
 
 How the user name goes depends on what the string is:
 
@@ -198,7 +300,8 @@ How the user name goes depends on what the string is:
   one not next to a letter, a digit or an underscore. The one exception is a
   value that is one of the protocol words of its key (below): an account
   named `user` keeps Claude Code's `type: "user"`, `role: "user"` and
-  `apiKeySource: "user"`, which the driver reads and replay needs.
+  `apiKeySource: "user"`, which the driver reads and replay needs, and an
+  account named `text` keeps OpenCode's `type: "session.text.delta"`.
 - **Outbound frames** hold what the driver sent, built from the scenario
   module and the host's config. There, and in every object key, the name is
   replaced only where it is a whole segment of a path: a string part that
@@ -206,7 +309,9 @@ How the user name goes depends on what the string is:
   `C:\Users\<name>` or `~<name>/x`. A prompt or option the driver sends is
   then the same on every account, so a recording made on one account replays
   byte-for-byte on another. `test/drivers/claude/replay.test.ts` records on
-  accounts named `user` and `root` and replays on the other.
+  accounts named `user` and `root` and replays on the other;
+  `test/drivers/opencode/recordings.suite.ts` does the same on accounts named
+  `user` and `text`.
 
 Known limit: an outbound frame that carries inbound text back, such as a
 `permission` answer with `updatedInput` or `updatedPermissions` copied from
@@ -231,6 +336,26 @@ A value is kept only when it is one of its key's words: `type: "user"` stays,
 but `error: "permission denied for <name>"` loses the name, because `error`'s
 words are its enum values (`authentication_failed`, `rate_limit`, ...). The
 52 keys are `allowed_callers`, `apiKeySource`, `apiProvider`, `behavior`, `category`, `compact_result`, `costBasis`, `destination`, `direction`, `effort`, `error`, `errorCode`, `error_code`, `fast_mode_disabled_reason`, `fast_mode_state`, `file_type`, `first_stream_post_queued_behind`, `first_text_post_queued_behind`, `fromMode`, `kind`, `level`, `limitScope`, `lost`, `media_type`, `mode`, `model`, `name`, `outcome`, `overageDisabledReason`, `overageStatus`, `oversized_image`, `permissionMode`, `priority`, `rateLimitType`, `reason`, `response_inclusion`, `role`, `scope`, `service_tier`, `speed`, `startup_failure_reason`, `state`, `status`, `stop_reason`, `subkind`, `subtype`, `supportedEffortLevels`, `terminal_reason`, `trigger`, `ttl`, `type`, `view_mode`.
+
+### OpenCode protocol words
+
+`test/recordings/opencode/protocol-words.ts` lists, for each object key an
+OpenCode 2.x server can put in an inbound OpenCode frame, the string literals
+the types allow as that key's value. `test/recordings/opencode/derive-protocol-words.ts`
+derives them with the TypeScript checker from
+`node_modules/@opencode/client/dist/promise/index.d.ts` (2.1.2) and the
+generated types it exports. It starts from `OpenCodeEvent` (every event of
+`GET /api/event`), `ServerInfo` (the driver reads `GET /api/info` itself), the
+awaited return type of every client call the driver makes (each method of
+`V2Client` in `src/drivers/opencode/sdk.ts`, looked up by the same path in the
+client), and every error body the client declares (each exported type with a
+`_tag`), and follows every property, union member, array element and index
+signature. `test/recordings/protocol-words.test.ts` fails when the committed
+list and the derivation differ; after a client bump, or when the driver calls
+another client method, run `node test/recordings/opencode/derive-protocol-words.ts`
+and paste the result.
+
+The 20 keys are `_tag`, `cacheFormat`, `command`, `delivery`, `effect`, `encoding`, `event`, `exit`, `finish`, `format`, `maxTokensField`, `name`, `op`, `outcome`, `reason`, `reasoningField`, `reply`, `status`, `type`, `variant`.
 
 `pnpm run check:recordings` (`scripts/check-recordings.ts`) is a step of both
 `gate` and `gate:bun`. It scans every file under `test/drivers/*/recordings/`,
@@ -303,13 +428,23 @@ The sources for these choices (Claude Code and Agent SDK docs, read
   regardless ("What settingSources does not control").
 - `CLAUDE_CONFIG_DIR`: "All settings, session history, and plugins are stored
   under this path" (Environment variables reference).
-- Managed policy settings (for example `/etc/claude-code/managed-settings.json`)
-  load from the machine in all cases. The recorder cannot turn them off; a
-  machine with such a file records under it.
-- Server-managed settings that Anthropic serves to an eligible organization
-  credential, and endpoint-managed policy on the machine, can still reach a
-  recorded session: the SDK cannot turn either off ("What settingSources does
-  not control").
+- Managed settings load in all cases, and neither the temp HOME nor
+  `CLAUDE_CONFIG_DIR` keeps them out. The recorder does not isolate them; a
+  machine with any of them records under them. The sources, from
+  "Deploy managed settings" (read 2026-11-24), "Where each mechanism stores
+  the policy":
+  - server-managed settings, which Claude Code fetches for an organization
+    account from the claude.ai admin console or a Claude apps gateway;
+  - the macOS configuration profile in the `com.anthropic.claudecode`
+    managed preferences domain;
+  - the Windows registry value `Settings` under
+    `HKLM\SOFTWARE\Policies\ClaudeCode`, and under
+    `HKCU\SOFTWARE\Policies\ClaudeCode`;
+  - `managed-settings.json`, a `managed-settings.d/` directory and
+    `managed-mcp.json` in the system directory:
+    `/Library/Application Support/ClaudeCode/` on macOS,
+    `/etc/claude-code/` on Linux and WSL, `C:\Program Files\ClaudeCode\` on
+    Windows.
 
 ### How Claude Code finds the sign-in
 
@@ -353,6 +488,116 @@ through `createClaudeDriver({ newUuid })`. The recorder and the replay both
 use the same fixed sequence (`a11ce000-0000-4000-8000-000000000001`, ...), so
 the ids the driver sends match.
 
+## How the OpenCode recorder keeps the user's setup out
+
+The recorded server must not load the user's OpenCode config, plugins,
+agents, MCP servers, instructions or skills, and must not change those
+files. The recorder starts its own `opencode serve --hostname 127.0.0.1
+--port 0` for each scenario, in its own temp workspace: `cwd/` (the thread's
+directory, and the server's), `opencode-home/`, `xdg-config/`, `xdg-data/`,
+`xdg-state/`, `xdg-cache/` and `instances/` (the host's directories). The
+server runs with the recorder's environment, less `HOME`, the XDG base
+directories and every `OPENCODE_*` variable, plus:
+
+| Variable | Value | Why |
+|---|---|---|
+| `HOME` | `<workspace>/opencode-home`, empty | OpenCode reads `~/.claude` and `~/.agents` from HOME (`packages/core/src/config/discovery.ts:69-70`), and finds its global directories under it when no XDG directory is set |
+| `XDG_CONFIG_HOME` | `<workspace>/xdg-config` | its global config directory, `$XDG_CONFIG_HOME/opencode`, with `opencode.json`, plugins, agents and the rest (`packages/util/src/global-roots.ts:7`) |
+| `XDG_DATA_HOME` | `<workspace>/xdg-data` | its data directory, `$XDG_DATA_HOME/opencode`: the database with sessions, saved permission grants and sign-ins (`packages/util/src/global-roots.ts:5`) |
+| `XDG_STATE_HOME` | `<workspace>/xdg-state` | its state directory |
+| `XDG_CACHE_HOME` | `<workspace>/xdg-cache` | its cache directory, with plugins it installs |
+| `OPENCODE_PASSWORD` | a random password per scenario | the server's password (`packages/cli/src/env.ts:10`); the driver gets it as the instance secret `opencode/server-password`, and the proxy passes the header on without recording it |
+| `OPENCODE_DISABLE_PROJECT_CONFIG` | `1` | no project config: without it OpenCode reads `opencode.json`, `.opencode/`, `.claude/` and `.agents/` in the session's directory and every directory above it (`packages/core/src/config/discovery.ts:80-85`, `packages/cli/src/server-process.ts:124`) |
+| `OPENCODE_DISABLE_CLAUDE_CODE` | `1` | no `.claude` directories (`packages/cli/src/server-process.ts:128`) |
+
+Leaving out every `OPENCODE_*` variable of the user's drops `OPENCODE_CONFIG`,
+`OPENCODE_CONFIG_DIR` and `OPENCODE_CONFIG_CONTENT` (more config,
+`packages/cli/src/server-process.ts`, `packages/util/src/global.ts:79`),
+`OPENCODE_DB` (another database, `packages/cli/src/database-path.ts:6`) and
+`OPENCODE_TEST_HOME` (another home, `packages/util/src/global.ts:17`). `PATH` and
+the provider keys OpenCode reads from the environment (such as
+`ANTHROPIC_API_KEY`) pass through. A provider that reads its sign-in from a
+file in the user's home (such as `~/.aws`) does not find it; set its key in
+the environment instead. The host gives the thread no tool server, so the
+session has no MCP server at all.
+
+The sources are OpenCode's own code at tag `v2.1.2` (commit
+`a517687fde98a7329ada3ae644a01a9fc6c4e99e` of
+https://github.com/anomalyco/opencode), read 2026-11-24.
+
+Two system sources load in all cases, and neither the temp HOME nor the XDG
+directories keep them out. The recorder does not isolate them; a machine with
+either records under them:
+
+- the system config directory, with its `opencode.json` or `opencode.jsonc`
+  and the rest of a config directory: `/etc/opencode` on Linux,
+  `/Library/Application Support/opencode` on macOS,
+  `%ProgramData%\opencode` on Windows (`packages/core/src/config/discovery.ts:27-32`).
+  The server sets no option that skips it (`packages/cli/src/server-process.ts:121-133`);
+- on macOS, the managed preferences that MDM deploys:
+  `/Library/Managed Preferences/<user>/ai.opencode.managed.plist`, else
+  `/Library/Managed Preferences/ai.opencode.managed.plist`
+  (`packages/core/src/config/discovery.ts:34-40,110-117`).
+
+### How OpenCode finds the sign-in
+
+OpenCode 2.1.2 has no credential file of its own. It keeps every provider
+sign-in (API keys and OAuth tokens) as a row of the `credential` table in its
+database, the file `opencode.db` in its data directory
+(`$XDG_DATA_HOME/opencode/opencode.db`, else
+`~/.local/share/opencode/opencode.db`; `OPENCODE_DB` names another file). That
+is the credential file the recorder copies into the temp data directory. The
+server opens it at `packages/cli/src/server-process.ts:114`,
+`path: databasePath(global.data),`; `packages/cli/src/database-path.ts:4-13`
+names the file, and `packages/core/src/credential.ts:89-104` reads its rows
+(`db.select().from(CredentialTable)`). The
+legacy `auth.json` in the same directory is read only by a migration of an
+existing database (`packages/core/src/database/migration/20260805200742_import_legacy_credentials.ts:39`),
+never by a new one: `packages/core/src/database/migration.ts:29-46` creates a
+new database with every migration marked done. Copying it would sign nothing
+in.
+
+- The same file holds the user's sessions, saved permission grants and the
+  rest of OpenCode's state. So the recorder copies it with all of that left
+  out: a consistent copy (`VACUUM INTO`, from a read-only connection) into
+  `<workspace>/xdg-data/opencode/opencode.db`, mode 0600, then every table but
+  `credential` and the migration journals (`migration`,
+  `__drizzle_migrations`) emptied. A read-only connection to a database in
+  WAL mode leaves an empty `opencode.db-wal` and `opencode.db-shm` beside the
+  user's file, as any reader does; the file itself is unchanged.
+- OpenCode may refresh an OAuth token during a run and write the new value to
+  the copy (`packages/core/src/integration.ts:739`,
+  `credentials.update(credential.id, { value })`). After each scenario, also
+  one that fails, the recorder writes each credential whose value changed in
+  the copy back to the user's database, so a rotated token is never lost.
+  When the user's row also changed meanwhile, the recorder leaves it as it is
+  and reports the scenario failed.
+- Whenever a refreshed value cannot go back (that case, or a database the
+  recorder cannot write), the recorder adds it to the run's recovery file
+  beside the user's database, `opencode.db.ari-recorder-refreshed-<pid>.json`,
+  mode 0600. The file holds one record per credential row, `{ "id", "value" }`,
+  with `olderValues` when a later scenario kept a newer value for the same row.
+  The recorder reads the file and adds to it, never truncates it, and replaces
+  it only by renaming a complete new file over it. Each scenario's error names
+  the file, and so do the run's last lines.
+- When the recovery file cannot take the value either, the workspace's copy of
+  the database holds the only copy. The recorder then keeps that workspace,
+  stops the run, and names the workspace and the copy in the error and in the
+  run's last lines.
+- Without a database of the user's, the recorder copies nothing; provider keys
+  in the environment still work.
+
+The workspace, with the copied database, is removed after each scenario, also
+after one that fails, unless it holds the only copy of a refreshed sign-in.
+
+### The model
+
+OpenCode's models depend on the user's providers, so there is no default. The
+recorder needs `ARI_RECORD_OPENCODE_MODEL`, a `provider/model` id. Before the
+first prompt it asks the server (`GET /api/model`, straight to the server and
+not recorded) which models it offers; when the variable is missing or names a
+model the server does not offer, it stops, lists them, and records nothing.
+
 ## How to record
 
 You need Claude Code signed in on this machine (`claude auth status`), or an
@@ -374,13 +619,39 @@ file per scenario, also for a scenario whose checks failed (it says which,
 and exits 1). Without `ARI_LIVE_RECORD=1` it exits 2 before it loads the SDK
 or starts anything. No gate step and no CI workflow sets `ARI_LIVE_RECORD`.
 
+### Recording OpenCode
+
+You need OpenCode 2.x installed (`opencode --version` prints `opencode v2.1.2`
+for the pinned version) and signed in to a provider (`opencode auth login`),
+or a provider key in the environment. Recording spends that provider's quota:
+eight short turns.
+
+1. Run `pnpm install --frozen-lockfile`.
+2. Run `ARI_LIVE_RECORD=1 pnpm run record:opencode` once without a model. It
+   stops before the first prompt and lists the models the server offers.
+3. Run `ARI_LIVE_RECORD=1 ARI_RECORD_OPENCODE_MODEL=<provider/model> pnpm run record:opencode`
+   with one of them, the cheapest you have.
+4. To record some scenarios only, or to write somewhere else, use the
+   arguments of `record:claude`: `-- simple resume`, `--out <dir>`.
+5. Run `pnpm run check:recordings`, then the replay tests.
+6. Read the diff of `test/drivers/opencode/recordings/` before you commit it.
+
+The recorder writes `test/drivers/opencode/recordings/<scenario>.ndjson`, one
+file per scenario, also for a scenario whose checks failed (it says which,
+and exits 1). When it cannot write a recording (an output directory it cannot
+use, for example), it stops after that scenario. Its last lines name every
+recovery file and every kept workspace, whatever else failed; see "How
+OpenCode finds the sign-in". Without `ARI_LIVE_RECORD=1` it exits 2 before it loads anything
+or starts any process; without a model the server offers it exits 2 before
+the first prompt.
+
 ## How to refresh
 
 Record again when the vendor's version changes: a new pinned
-`@anthropic-ai/claude-agent-sdk` (which bundles a new Claude Code), or a
-change to the scenarios.
+`@anthropic-ai/claude-agent-sdk` (which bundles a new Claude Code), a new
+`opencode` or pinned `@opencode/client`, or a change to the scenarios.
 
-1. Bump the pinned SDK and run `pnpm install`.
+1. Bump the pinned SDK (or install the new `opencode`) and run `pnpm install`.
 2. Record all six again, as above.
 3. Check that each header's `vendorVersion` and `sdkVersion` are the new
    versions.

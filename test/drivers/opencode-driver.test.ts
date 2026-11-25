@@ -11,3 +11,5 @@ import "./opencode/capabilities.suite.ts";
 import "./opencode/instructions.suite.ts";
 import "./opencode/quirks.suite.ts";
 import "./opencode/conformance.suite.ts";
+import "./opencode/recordings.suite.ts";
+import "./opencode/recorder.suite.ts";

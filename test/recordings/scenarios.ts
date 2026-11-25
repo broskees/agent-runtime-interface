@@ -233,15 +233,30 @@ export async function runScenario(scenario: Scenario, host: ScenarioHost): Promi
       }
       pending.push(current.respond({ requestId: request.id, responseKey: `${scenario.name}-host-${requests.size}`, optionId: option.optionId }).catch(fail));
     }
-    if (scenario.host.interruptAfterFirstText && interrupted === undefined && event.turnId !== undefined && event.turnId === turnIds[turnIds.length - 1]) {
-      const text =
-        (body.type === "item.delta" && body.field === "text" && TEXT_ITEM_KINDS.has(itemKinds.get(body.itemId) ?? "error") && body.chunk !== "") ||
-        (body.type === "item.upsert" && TEXT_ITEM_KINDS.has(body.item.kind ?? itemKinds.get(body.item.id) ?? "error") && typeof body.item.text === "string" && body.item.text !== "");
-      if (text) {
-        interrupted = { turnId: event.turnId, afterSeq: event.seq };
-        pending.push(current.interruptTurn({ turnId: event.turnId }).catch(fail));
-      }
-    }
+    interruptOnText(current, event);
+  };
+
+  /** True for an event that carries assistant text. */
+  const isAssistantText = (event: AriEvent): boolean => {
+    const body = event.body;
+    return (
+      (body.type === "item.delta" && body.field === "text" && TEXT_ITEM_KINDS.has(itemKinds.get(body.itemId) ?? "error") && body.chunk !== "") ||
+      (body.type === "item.upsert" && TEXT_ITEM_KINDS.has(body.item.kind ?? itemKinds.get(body.item.id) ?? "error") && typeof body.item.text === "string" && body.item.text !== "")
+    );
+  };
+
+  /**
+   * Interrupts the host's latest turn once, at its first assistant text. The
+   * driver may admit a turn and stream its text before startTurn resolves, so
+   * this runs for each event as it comes and again, over the session's events
+   * so far, as soon as startTurn names the turn.
+   */
+  const interruptOnText = (current: Session, event: AriEvent): void => {
+    if (!scenario.host.interruptAfterFirstText || interrupted !== undefined) return;
+    const turnId = turnIds[turnIds.length - 1];
+    if (turnId === undefined || event.turnId !== turnId || event.sessionId !== current.id || !isAssistantText(event)) return;
+    interrupted = { turnId, afterSeq: event.seq };
+    pending.push(current.interruptTurn({ turnId }).catch(fail));
   };
 
   const watchSession = (current: Session): Promise<void> => {
@@ -343,10 +358,13 @@ export async function runScenario(scenario: Scenario, host: ScenarioHost): Promi
       if (started.status !== "accepted") throw new Error(`startTurn of turn ${index + 1} answered ${JSON.stringify(started)}`);
       turnIds.push(started.turnId);
       turnSessions.push(session.id);
+      // Text of this turn that came before startTurn resolved counts too.
+      for (const event of [...events]) interruptOnText(session, event);
       watch.notify();
       await terminalOf(started.turnId, session.id);
     }
-    await Promise.all(pending);
+    // The host's answers and interrupt race the waiters too: a call the native side never answers is a stall, not a hang.
+    await call(Promise.all(pending), "the host's answers and interrupt to settle");
     await call(session.close(), "the session to close");
     await watching;
     if (failure !== undefined) throw failure;
@@ -497,14 +515,18 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
       const tools = turnItems(run, 0).filter((item) => TOOL_ITEM_KINDS.has(item.kind));
       assert.equal(ends.length, 1, `${where}: the turn reached a terminal`);
       if (allowed) {
+        // The command ran: what it printed, the marker, reached the host.
         assert.ok(
-          tools.some((item) => item.status === "completed"),
-          `${where}: a command or tool item completed (items: ${JSON.stringify(tools.map((item) => [item.kind, item.status]))})`,
+          tools.some((item) => item.status === "completed" && toolOutput(item).includes(scenario.marker!)),
+          `${where}: a command or tool item completed with the marker in its output (items: ${JSON.stringify(tools.map((item) => [item.kind, item.status, toolOutput(item)]))})`,
         );
         assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`);
       } else {
         const leaked = tools.filter((item) => item.status === "completed" && toolOutput(item).includes(scenario.marker!));
         assert.deepEqual(leaked, [], `${where}: no completed command or tool item's output holds the marker`);
+        // The host declined every command, so none ran.
+        const ran = tools.filter((item) => item.kind === "command_execution" && item.status === "completed");
+        assert.deepEqual(ran, [], `${where}: no command item completed`);
       }
       return;
     }

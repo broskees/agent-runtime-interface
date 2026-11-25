@@ -25,7 +25,7 @@ import { createFakeHost } from "../../../src/conformance/fake-host.ts";
 import type { DiagnosticEntry } from "../../../src/generated/host.ts";
 import { createClaudeDriver } from "../../../src/drivers/claude/index.ts";
 import type { ClaudeDriverConfig } from "../../../src/drivers/claude/index.ts";
-import type { HostServices } from "../../../src/runtime.ts";
+import type { HostServices, Session } from "../../../src/runtime.ts";
 import { runScenario } from "../scenarios.ts";
 import type { NativeProgress, Scenario, ScenarioRun } from "../scenarios.ts";
 import { fixedUuids } from "./frames.ts";
@@ -79,6 +79,8 @@ export interface ClaudeScenarioInput {
   readonly apiKey?: string;
   readonly timeoutMs: number;
   readonly native?: NativeProgress;
+  /** Wraps each session the host opens; tests use it to play a host that behaves differently. */
+  readonly wrapSession?: (session: Session) => Session;
 }
 
 export interface ClaudeScenarioResult {
@@ -119,7 +121,10 @@ export async function runClaudeScenario(input: ClaudeScenarioInput): Promise<Cla
   });
   try {
     const run = await runScenario(input.scenario, {
-      openSession: () => instance.openSession({}),
+      openSession: async () => {
+        const session = await instance.openSession({});
+        return input.wrapSession === undefined ? session : input.wrapSession(session);
+      },
       cwd: input.layout.cwd,
       timeoutMs: input.timeoutMs,
       ...(input.native === undefined ? {} : { native: input.native }),

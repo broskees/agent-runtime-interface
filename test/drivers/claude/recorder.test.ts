@@ -500,3 +500,21 @@ test("the recorder sanitises what it writes: no workspace path, no HOME and no A
     fs.rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test("a GEMINI_API_KEY of the recorder's environment that a tool prints is replaced in the Claude recording, and the recording replays", async () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-gemini-key-")));
+  // A synthetic key in the shape of a Google API key; the scan's token patterns do not know it.
+  const key = "AIzaSyAriSyntheticGeminiKeyForTests000";
+  const marker = SCENARIOS.find((scenario) => scenario.name === "approval_allowed")!.marker!;
+  const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin", GEMINI_API_KEY: key }, ["approval_allowed"], { bashOutput: () => `GEMINI_API_KEY=${key}\n${marker}\n` });
+  try {
+    assert.equal(outcomes[0]!.error, undefined, outcomes[0]!.error?.message);
+    const text = fs.readFileSync(outcomes[0]!.file!, "utf8");
+    assert.ok(!text.includes(key), "the key's value is nowhere in the recording");
+    assert.ok(text.includes("GEMINI_API_KEY=<GEMINI_API_KEY>"), "the command's output holds the placeholder");
+    await replayClaude(outcomes[0]!.file!);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});

@@ -13,3 +13,4 @@ import "./opencode/quirks.suite.ts";
 import "./opencode/conformance.suite.ts";
 import "./opencode/recordings.suite.ts";
 import "./opencode/recorder.suite.ts";
+import "./opencode/live-recordings.suite.ts";

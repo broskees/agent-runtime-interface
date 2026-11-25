@@ -19,12 +19,22 @@ The kit lives in `test/recordings/`:
 | `sanitiser.ts` | the one sanitiser every recorder uses |
 | `sequencer.ts` | the replay sequencer, which knows no transport |
 | `recovery.ts` | the recovery file where both recorders keep a refreshed sign-in that cannot go back |
+| `resanitise.ts` | runs a committed recording through the sanitiser again, after a fix to the sanitiser |
 | `claude/` | the Claude tap, the replay SDK, and the recording and replay functions |
 | `opencode/` | the OpenCode recording proxy, the replay server, the sign-in copy, `opencode serve`, and the recording and replay functions |
 
 `scripts/record-claude.ts` is the Claude recorder and `scripts/record-opencode.ts`
 the OpenCode recorder. `scripts/check-recordings.ts` is the scan the gate runs.
+`scripts/resanitise-recordings.ts` sanitises committed recordings again.
 Nothing here ships in the npm tarball.
+
+The live recordings are in `test/drivers/claude/recordings/` and
+`test/drivers/opencode/recordings/`, one file per scenario. The gate replays
+them: `test/drivers/claude/live-recordings.test.ts` and
+`test/drivers/opencode/live-recordings.suite.ts` take the list of files from
+the scenario module, check each header (`source: live`, the vendor version
+the pinned SDK runs or OpenCode 2.1.2, the model) and replay each through a
+fresh driver with every scenario assertion. A missing recording fails them.
 
 ## The format
 
@@ -284,6 +294,7 @@ and is sanitised like any other value):
 | the value of every other variable of the recorder's environment whose name ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, when it is 8 characters or more | `<NAME>`, for example `<GEMINI_API_KEY>` |
 | the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ): in an inbound frame wherever it is a whole word, except in a protocol word; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
 | email addresses | `<EMAIL>` |
+| the string value under a key that names an account or organisation id (compared without case, `-` or `_`: a key ending in `accountid` or `accountuuid`, or in `orgid`, `organizationid`, `organisationid` or their `uuid` forms), in both directions. OpenCode 2.1.2's model list carries the user's ChatGPT account id (`chatgpt-account-id`) and OpenCode organisation id (`x-opencode-org-id`) as request headers of their models | `<ACCOUNT_ID>`, `<ORG_ID>` |
 | another home directory: `/home/<name>`, `/Users/<name>`, `/root` | `<OTHER_HOME>` |
 | a token the scan looks for | `<TOKEN>` |
 
@@ -392,6 +403,14 @@ recordings that hold no personal data. The recorder replaces the recording
 machine's own names before it writes, and
 `test/drivers/claude/recorder.test.ts` shows a real `ls -ld .` listing, free
 assistant text and a `stderr` line lose the name.
+
+When a recording holds something personal the sanitiser missed, fix the
+sanitiser, then run `node scripts/resanitise-recordings.ts <file> ...` on the
+machine and account that recorded it. It reads each recording with the loader,
+runs every frame through the sanitiser again, and writes it with the
+recorder's writer, which computes the checksum again; the header stays as it
+was. The frames already hold placeholders, so a recording with nothing new to
+replace comes out byte-identical. Never edit a recording by hand.
 
 Known limit: Claude Code streams text in chunks, and each chunk is its own
 `message` frame. A value split across two chunks matches neither the

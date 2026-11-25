@@ -18,6 +18,7 @@ The kit lives in `test/recordings/`:
 | `scenarios.ts` | the six scenarios, the scenario runner and the scenario checks |
 | `sanitiser.ts` | the one sanitiser every recorder uses |
 | `sequencer.ts` | the replay sequencer, which knows no transport |
+| `recovery.ts` | the recovery file where both recorders keep a refreshed sign-in that cannot go back |
 | `claude/` | the Claude tap, the replay SDK, and the recording and replay functions |
 | `opencode/` | the OpenCode recording proxy, the replay server, the sign-in copy, `opencode serve`, and the recording and replay functions |
 
@@ -459,6 +460,21 @@ The sources for these choices (Claude Code and Agent SDK docs, read
   to the user's file, so a rotated token is never lost. When the user's file
   also changed meanwhile, the recorder leaves it as it is and reports the
   scenario failed.
+- Whenever a refreshed copy cannot go back (that case, or a file the
+  recorder cannot read or replace), the recorder adds it to the run's
+  recovery file beside the user's file,
+  `.credentials.json.ari-recorder-refreshed-<pid>.json`, mode 0600. The file
+  holds one record, `{ "id": ".credentials.json", "value" }`, whose `value`
+  is the refreshed file's whole text, with `olderValues` when a later
+  scenario kept a newer one. The recorder reads the file and adds to it,
+  never truncates it, never overwrites a file it cannot read as one, and
+  replaces it only by renaming a complete new file over it. Each scenario's
+  error names the file, and so do the run's last lines. The OpenCode recorder
+  keeps its recovery file the same way (`test/recordings/recovery.ts`).
+- When the recovery file cannot take the value either, the workspace's copy
+  holds the only copy. The recorder then keeps that workspace, stops the run,
+  and names the workspace and the copy in the error and in the run's last
+  lines.
 - With `ANTHROPIC_API_KEY` set, the recorder gives the key to the driver
   instance as its own key (a managed profile), and the driver passes it to
   Claude Code. The sanitiser replaces its value.
@@ -479,7 +495,8 @@ recorder points its own `CLAUDE_CONFIG_DIR` at the isolated directory while a
 scenario runs, and puts it back afterwards.
 
 The workspace, with the copied credential, is removed after each scenario,
-also after one that fails.
+also after one that fails, unless it holds the only copy of a refreshed
+sign-in.
 
 ### Ids
 
@@ -616,8 +633,12 @@ turns, with the `haiku` model unless you choose another.
 
 The recorder writes `test/drivers/claude/recordings/<scenario>.ndjson`, one
 file per scenario, also for a scenario whose checks failed (it says which,
-and exits 1). Without `ARI_LIVE_RECORD=1` it exits 2 before it loads the SDK
-or starts anything. No gate step and no CI workflow sets `ARI_LIVE_RECORD`.
+and exits 1). When it cannot write a recording (an output directory it cannot
+use, for example), it stops after that scenario. Its last lines name every
+recovery file and every kept workspace, whatever else failed; see "How Claude
+Code finds the sign-in". Without `ARI_LIVE_RECORD=1` it exits 2 before it
+loads the SDK or starts anything. No gate step and no CI workflow sets
+`ARI_LIVE_RECORD`.
 
 ### Recording OpenCode
 

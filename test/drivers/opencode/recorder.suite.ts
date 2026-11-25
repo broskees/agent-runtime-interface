@@ -16,8 +16,9 @@ import { LIVE_RECORD_VARIABLE, parseRecordArguments } from "../../../scripts/rec
 import { DEFAULT_OPENCODE_RECORDINGS } from "../../../scripts/record-opencode.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
-import { opencodeDataDirectory, recoveryFileFor, userDatabaseFile } from "../../recordings/opencode/credentials.ts";
-import { OpencodeModelChoiceError, RecordingNotWrittenError, describeOpencodeRun, failuresOf, recordOpencode } from "../../recordings/opencode/record.ts";
+import { opencodeDataDirectory, userDatabaseFile } from "../../recordings/opencode/credentials.ts";
+import { OpencodeModelChoiceError, describeOpencodeRun, failuresOf, recordOpencode } from "../../recordings/opencode/record.ts";
+import { RecordingNotWrittenError, recoveryFileFor } from "../../recordings/recovery.ts";
 import type { OpencodeRecordOutcome, RecordOpencodeOptions } from "../../recordings/opencode/record.ts";
 import { replayOpencode } from "../../recordings/opencode/replay.ts";
 import { OPENCODE_SERVE_ARGS, opencodeServeEnvironment, startOpencodeServe } from "../../recordings/opencode/serve.ts";

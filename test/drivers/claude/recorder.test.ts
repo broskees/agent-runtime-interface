@@ -14,12 +14,13 @@ import { scanRecordingText } from "../../../scripts/check-recordings.ts";
 import { DEFAULT_CLAUDE_RECORDINGS, LIVE_RECORD_VARIABLE, parseRecordArguments } from "../../../scripts/record-claude.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
-import { recordClaude, recordModel, userCredentialFile } from "../../recordings/claude/record.ts";
+import { describeClaudeRun, failuresOf, recordClaude, recordModel, userCredentialFile } from "../../recordings/claude/record.ts";
 import type { RecordClaudeOptions } from "../../recordings/claude/record.ts";
 import { replayClaude } from "../../recordings/claude/replay.ts";
 import { readRecording } from "../../recordings/format.ts";
 import type { Frame } from "../../recordings/format.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "../../recordings/claude/protocol-words.ts";
+import { RecordingNotWrittenError, recoveryFileFor } from "../../recordings/recovery.ts";
 import { SCENARIOS, SCENARIO_NAMES } from "../../recordings/scenarios.ts";
 import type { Scenario } from "../../recordings/scenarios.ts";
 import type { FakeClaudeWorld } from "./fake-sdk.ts";
@@ -171,8 +172,7 @@ interface FakeRecording {
 }
 
 /** Records `scenarios` from fresh puppets through the recording function, with the recorder's environment `env`. */
-async function recordFake(env: RecordClaudeOptions["env"], scenarios: Array<Scenario["name"]>, puppet: PuppetOptions = {}): Promise<FakeRecording> {
-  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-out-"));
+async function recordFake(env: RecordClaudeOptions["env"], scenarios: Array<Scenario["name"]>, puppet: PuppetOptions = {}, outDir: string = fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-out-"))): Promise<FakeRecording> {
   const worlds: FakeClaudeWorld[] = [];
   const outcomes = await recordClaude({
     scenarios,
@@ -352,7 +352,7 @@ test("the credential comes from the user's own CLAUDE_CONFIG_DIR when set, and g
   }
 });
 
-test("when the user's credential file also changed during the run, the recorder leaves it as it is and reports the scenario failed", async () => {
+test("when the user's credential file also changed during the run, the recorder leaves it as it is, keeps the refreshed sign-in in a 0600 file beside it, and reports the scenario failed", async () => {
   const { home } = seedHome();
   const real = path.join(home, ".claude", ".credentials.json");
   const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, ["simple"], {
@@ -362,14 +362,240 @@ test("when the user's credential file also changed during the run, the recorder 
     },
   });
   try {
+    const kept = recoveryFileFor(real);
+    assert.equal(kept, `${real}.ari-recorder-refreshed-${process.pid}.json`);
     assert.match(outcomes[0]!.error?.message ?? "", /changed while the recorder ran, and Claude Code also refreshed the recorder's copy/);
+    assert.ok(outcomes[0]!.error!.message.includes(`it kept the refreshed sign-in in ${kept}`), outcomes[0]!.error!.message);
     assert.equal(fs.readFileSync(real, "utf8"), "refreshed-by-another-claude-code");
+    assert.equal(outcomes[0]!.recoveryFile, kept);
+    assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ".credentials.json", value: "refreshed-by-the-recorded-session" }], "the recorded session's refreshed sign-in is not lost");
+    assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
+    assert.equal(outcomes[0]!.workspaceKept, false);
+    assert.ok(!fs.existsSync(outcomes[0]!.workspace), "the workspace can go: the recovery file holds the sign-in");
+    assert.equal(describeClaudeRun(outcomes, outDir).filter((line) => line.includes(kept)).length, 1, "the run's last lines name the recovery file");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test("refreshed sign-ins that cannot go back in two scenarios all survive in the run's recovery file, merged with what it already held", async () => {
+  const { home } = seedHome();
+  const real = path.join(home, ".claude", ".credentials.json");
+  const kept = recoveryFileFor(real);
+  // What an earlier recorder run of this process kept is never truncated.
+  fs.writeFileSync(kept, `${JSON.stringify([{ id: ".credentials.json", value: "kept-by-an-earlier-run" }])}\n`, { mode: 0o600 });
+  let scenario = 0;
+  // Each scenario: Claude Code refreshes the copy, and another Claude Code changes the user's file.
+  const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, ["simple", "approval_denied"], {
+    onTurn: (_turn, index, world) => {
+      if (index !== 0) return;
+      scenario += 1;
+      refreshCredential(world, `refreshed-${scenario}-by-the-recorded-session`);
+      fs.writeFileSync(real, `changed-${scenario}-by-another-claude-code`);
+    },
+  });
+  try {
+    assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ".credentials.json", value: "refreshed-2-by-the-recorded-session", olderValues: ["kept-by-an-earlier-run", "refreshed-1-by-the-recorded-session"] }]);
+    assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
+    assert.deepEqual(
+      outcomes.map((outcome) => [outcome.scenario, outcome.recoveryFile, outcome.workspaceKept, fs.existsSync(outcome.workspace)]),
+      [
+        ["simple", kept, false, false],
+        ["approval_denied", kept, false, false],
+      ],
+    );
+    assert.equal(fs.readFileSync(real, "utf8"), "changed-2-by-another-claude-code");
+    assert.equal(describeClaudeRun(outcomes, outDir).filter((line) => line.includes(kept)).length, 1, "the run's last lines name the recovery file once");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test("when the recorder cannot write a refreshed sign-in back, it keeps it in the recovery file beside the user's file and says where", async () => {
+  const { home } = seedHome();
+  const real = path.join(home, ".claude", ".credentials.json");
+  const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, ["simple"], {
+    onTurn: (_turn, _index, world) => {
+      refreshCredential(world, "refreshed-by-the-recorded-session");
+      // The user's credential file is no longer a file the recorder can read or replace.
+      fs.rmSync(real);
+      fs.mkdirSync(real);
+      fs.writeFileSync(path.join(real, "occupied"), "");
+    },
+  });
+  try {
+    const kept = recoveryFileFor(real);
+    assert.ok(outcomes[0]!.error!.message.includes(`could not write the sign-in Claude Code refreshed back to ${real}`), outcomes[0]!.error!.message);
+    assert.ok(outcomes[0]!.error!.message.includes(`it kept the refreshed sign-in in ${kept}`), outcomes[0]!.error!.message);
+    assert.equal(outcomes[0]!.recoveryFile, kept);
+    assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ".credentials.json", value: "refreshed-by-the-recorded-session" }]);
+    assert.equal(fs.statSync(kept).mode & 0o777, 0o600);
+    assert.deepEqual(fs.readdirSync(path.dirname(real)).filter((name) => name.includes(".ari-recorder-") && name !== path.basename(kept)), [], "no staged file is left beside it");
     assert.ok(!fs.existsSync(outcomes[0]!.workspace));
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test("when the recovery file cannot take a refreshed sign-in either, the recorder keeps the workspace with its credential copy, stops the run and names both", async () => {
+  const { home } = seedHome();
+  const real = path.join(home, ".claude", ".credentials.json");
+  const kept = recoveryFileFor(real);
+  // Nothing can be written where the recovery file goes.
+  fs.mkdirSync(kept);
+  fs.writeFileSync(path.join(kept, "occupied"), "");
+  const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, ["simple", "multi_turn"], {
+    onTurn: (_turn, _index, world) => {
+      refreshCredential(world, "refreshed-by-the-recorded-session");
+      fs.writeFileSync(real, "refreshed-by-another-claude-code");
+    },
+  });
+  assert.equal(outcomes.length, 1, "the run stopped: no other scenario ran");
+  const [outcome] = outcomes;
+  const copy = path.join(outcome!.workspace, "claude-config", ".credentials.json");
+  try {
+    assert.equal(outcome!.workspaceKept, true);
+    assert.equal(outcome!.recoveryFile, undefined);
+    assert.equal(fs.readFileSync(copy, "utf8"), "refreshed-by-the-recorded-session", "the kept workspace's copy holds the refreshed sign-in");
+    assert.equal(fs.readFileSync(real, "utf8"), "refreshed-by-another-claude-code", "the user's file is left as it is");
+    const message = outcome!.error?.message ?? "";
+    assert.ok(message.includes(`could not keep the refreshed sign-in in ${kept} either`), message);
+    assert.ok(message.includes(`only in the recorder's copy, ${copy}`), message);
+    assert.ok(message.includes(`the recorder kept the workspace ${outcome!.workspace}`), message);
+    assert.ok(describeClaudeRun(outcomes, outDir).some((line) => line.includes(outcome!.workspace)), "the run's last lines name the kept workspace");
+  } finally {
+    fs.rmSync(outcome!.workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test("a recovery file the recorder cannot read as one is never overwritten: the workspace is kept instead", async () => {
+  const { home } = seedHome();
+  const real = path.join(home, ".claude", ".credentials.json");
+  const kept = recoveryFileFor(real);
+  fs.writeFileSync(kept, "someone else's notes", { mode: 0o600 });
+  const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, ["simple"], {
+    onTurn: (_turn, _index, world) => {
+      refreshCredential(world, "refreshed-by-the-recorded-session");
+      fs.writeFileSync(real, "refreshed-by-another-claude-code");
+    },
+  });
+  const [outcome] = outcomes;
+  try {
+    assert.equal(fs.readFileSync(kept, "utf8"), "someone else's notes");
+    assert.equal(outcome!.workspaceKept, true);
+    assert.equal(fs.readFileSync(path.join(outcome!.workspace, "claude-config", ".credentials.json"), "utf8"), "refreshed-by-the-recorded-session");
+  } finally {
+    fs.rmSync(outcome!.workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+for (const [label, blockRecovery] of [
+  ["kept in the recovery file", false],
+  ["kept only in the workspace", true],
+] as const) {
+  test(`a scenario that fails and a refreshed sign-in ${label} are both reported`, async () => {
+    const { home } = seedHome();
+    const real = path.join(home, ".claude", ".credentials.json");
+    const kept = recoveryFileFor(real);
+    if (blockRecovery) {
+      fs.mkdirSync(kept);
+      fs.writeFileSync(path.join(kept, "occupied"), "");
+    }
+    // Claude Code dies in the scenario's first turn, after it refreshed the copy and another Claude Code changed the user's file.
+    const { outDir, outcomes } = await recordFake({ HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" }, ["simple"], {
+      crash: true,
+      onTurn: (_turn, _index, world) => {
+        refreshCredential(world, "refreshed-by-the-recorded-session");
+        fs.writeFileSync(real, "refreshed-by-another-claude-code");
+      },
+    });
+    const [outcome] = outcomes;
+    try {
+      const failures = failuresOf(outcome!);
+      assert.ok(failures.length >= 2, `more than one failure: ${outcome!.error?.message}`);
+      assert.doesNotMatch(failures[0]!.message, /credential|sign-in/, "the scenario's own failure comes first");
+      assert.ok(outcome!.error!.message.includes(failures[0]!.message), "the error names the scenario's failure");
+      const ending = describeClaudeRun(outcomes, outDir).join("\n");
+      if (blockRecovery) {
+        assert.equal(outcome!.workspaceKept, true);
+        assert.ok(outcome!.error!.message.includes(`the recorder kept the workspace ${outcome!.workspace}`), outcome!.error!.message);
+        assert.ok(ending.includes(outcome!.workspace), ending);
+      } else {
+        assert.equal(outcome!.recoveryFile, kept);
+        assert.ok(outcome!.error!.message.includes(`it kept the refreshed sign-in in ${kept}`), outcome!.error!.message);
+        assert.ok(ending.includes(kept), ending);
+        assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ".credentials.json", value: "refreshed-by-the-recorded-session" }]);
+      }
+    } finally {
+      if (outcome?.workspaceKept === true) fs.rmSync(outcome.workspace, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const [label, blockRecovery] of [
+  ["kept in the recovery file", false],
+  ["kept only in the workspace", true],
+] as const) {
+  test(`when the recording cannot be written either, the recorder stops and still names a refreshed sign-in ${label}`, async () => {
+    const { home } = seedHome();
+    const real = path.join(home, ".claude", ".credentials.json");
+    const kept = recoveryFileFor(real);
+    if (blockRecovery) {
+      fs.mkdirSync(kept);
+      fs.writeFileSync(path.join(kept, "occupied"), "");
+    }
+    // The output directory is a file: no recording can be written there.
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-out-file-"));
+    const outDir = path.join(parent, "not-a-directory");
+    fs.writeFileSync(outDir, "");
+    const { outcomes } = await recordFake(
+      { HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
+      ["simple", "multi_turn"],
+      {
+        onTurn: (_turn, index, world) => {
+          if (index !== 0) return;
+          refreshCredential(world, "refreshed-by-the-recorded-session");
+          fs.writeFileSync(real, "refreshed-by-another-claude-code");
+        },
+      },
+      outDir,
+    );
+    assert.equal(outcomes.length, 1, "the run stopped: no other scenario ran");
+    const [outcome] = outcomes;
+    try {
+      assert.equal(outcome!.file, undefined, "no recording was written");
+      assert.ok(
+        failuresOf(outcome!).some((failure) => failure instanceof RecordingNotWrittenError && failure.file === path.join(outDir, "simple.ndjson")),
+        `the write's failure is reported: ${outcome!.error?.message}`,
+      );
+      const message = outcome!.error!.message;
+      const ending = describeClaudeRun(outcomes, outDir).join("\n");
+      if (blockRecovery) {
+        assert.equal(outcome!.workspaceKept, true);
+        assert.ok(message.includes(`the recorder kept the workspace ${outcome!.workspace}`), message);
+        assert.ok(ending.includes(outcome!.workspace), ending);
+      } else {
+        assert.equal(outcome!.recoveryFile, kept);
+        assert.ok(message.includes(`it kept the refreshed sign-in in ${kept}`), message);
+        assert.ok(ending.includes(kept), ending);
+        assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ".credentials.json", value: "refreshed-by-the-recorded-session" }]);
+      }
+    } finally {
+      if (outcome?.workspaceKept === true) fs.rmSync(outcome.workspace, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+}
 
 test("a live recording with neither a sign-in nor ANTHROPIC_API_KEY stops before it loads the SDK", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-no-sign-in-"));

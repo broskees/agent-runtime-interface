@@ -26,7 +26,8 @@ import { writeRecording } from "../format.ts";
 import { createSanitiser } from "../sanitiser.ts";
 import { SCENARIOS, checkScenario } from "../scenarios.ts";
 import type { Scenario, ScenarioName } from "../scenarios.ts";
-import { CredentialsKeptError, copyCredentials, returnCredentials } from "./credentials.ts";
+import { CredentialsKeptError, RecordingNotWrittenError } from "../recovery.ts";
+import { copyCredentials, returnCredentials } from "./credentials.ts";
 import type { CopiedCredentials } from "./credentials.ts";
 import { opencodeNativeAnswers } from "./frames.ts";
 import { OPENCODE_PROTOCOL_WORDS } from "./protocol-words.ts";
@@ -89,16 +90,6 @@ export interface OpencodeRecordOutcome {
   readonly workspaceKept: boolean;
   /** The recovery file this scenario added refreshed sign-ins to, when one could not go back to the user's database. */
   readonly recoveryFile?: string;
-}
-
-/** The recorder could not write a scenario's recording (an output directory it cannot use, a full disk): the recorder stops, since the next scenario would fail the same way. */
-export class RecordingNotWrittenError extends Error {
-  readonly file: string;
-  constructor(file: string, cause: unknown) {
-    super(`the recorder could not write the recording ${file}: ${cause instanceof Error ? cause.message : String(cause)}`);
-    this.name = "RecordingNotWrittenError";
-    this.file = file;
-  }
 }
 
 /** Each failure of a scenario, in order. */

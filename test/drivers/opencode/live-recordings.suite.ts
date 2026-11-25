@@ -13,6 +13,8 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { readRecording } from "../../recordings/format.ts";
+import { OPENCODE_PROTOCOL_WORDS } from "../../recordings/opencode/protocol-words.ts";
+import { NEUTRAL_PID, NEUTRAL_SHELL, NEUTRAL_TMP_PATH, PLACEHOLDERS, createSanitiser } from "../../recordings/sanitiser.ts";
 import { OPENCODE_SDK_NAME, OPENCODE_VENDOR_NAME, opencodeClientVersion } from "../../recordings/opencode/record.ts";
 import { replayOpencode } from "../../recordings/opencode/replay.ts";
 import { SCENARIO_NAMES } from "../../recordings/scenarios.ts";
@@ -45,3 +47,39 @@ for (const name of SCENARIO_NAMES) {
     assert.equal(run.scenario.name, name);
   });
 }
+
+/** Every value in `value` under one of `keys`, by key. */
+function valuesUnder(value: unknown, keys: readonly string[], found: { [key: string]: unknown[] } = {}): { [key: string]: unknown[] } {
+  if (Array.isArray(value)) for (const each of value) valuesUnder(each, keys, found);
+  else if (typeof value === "object" && value !== null) {
+    for (const [key, entry] of Object.entries(value)) {
+      if (keys.includes(key)) (found[key] ??= []).push(entry);
+      valuesUnder(entry, keys, found);
+    }
+  }
+  return found;
+}
+
+test("the live OpenCode recordings carry no account details: the model list holds only the recorded model, the process id, temp path and shell are neutral, and the sanitiser has nothing left to replace", async () => {
+  const found: { [key: string]: unknown[] } = {};
+  for (const name of SCENARIO_NAMES) {
+    const recording = await readRecording(path.join(RECORDINGS, `${name}.ndjson`));
+    // Only the rules that need no machine: no HOME, PATH or user name of this one.
+    const sanitise = createSanitiser({ workspace: PLACEHOLDERS.workspace, env: {}, user: "ari-no-such-user", protocolWords: OPENCODE_PROTOCOL_WORDS, recordedModel: recording.header.model });
+    for (const { line, frame } of recording.frames) {
+      assert.deepEqual(sanitise(frame), frame, `${name}.ndjson:${line} still holds something the sanitiser replaces`);
+      valuesUnder(frame, ["pid", "tmp", "shell", "providerID"], found);
+      // GET /api/model: the recorded model alone, with only the fields the driver reads.
+      const data = (frame["body"] as { data?: unknown } | undefined)?.data;
+      if (frame.kind === "response" && Array.isArray(data) && data.some((entry) => typeof (entry as { modelID?: unknown }).modelID === "string")) {
+        assert.deepEqual(data, [{ providerID: "anthropic", modelID: "claude-haiku-5-5", name: "Claude Haiku 5.5", enabled: true, limit: { context: 1000000 } }], `${name}.ndjson:${line}`);
+        found["model lists"] = [...(found["model lists"] ?? []), data];
+      }
+    }
+  }
+  assert.equal(found["model lists"]?.length, SCENARIO_NAMES.length, "one GET /api/model answer in each recording");
+  assert.ok(found["pid"]!.length > 0 && found["pid"]!.every((value) => value === NEUTRAL_PID), JSON.stringify(found["pid"]));
+  assert.ok(found["tmp"]!.length > 0 && found["tmp"]!.every((value) => value === NEUTRAL_TMP_PATH), JSON.stringify(found["tmp"]));
+  assert.ok(found["shell"]!.length > 0 && found["shell"]!.every((value) => value === NEUTRAL_SHELL), JSON.stringify(found["shell"]));
+  assert.deepEqual([...new Set(found["providerID"])], ["anthropic"], "no provider but the recorded one");
+});

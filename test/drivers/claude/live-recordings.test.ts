@@ -12,9 +12,11 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { CLAUDE_TESTED_CLAUDE_CODE_VERSION } from "../../../src/meta/claude.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
+import { CLAUDE_PROTOCOL_WORDS } from "../../recordings/claude/protocol-words.ts";
 import { CLAUDE_SDK_NAME, CLAUDE_VENDOR_NAME } from "../../recordings/claude/record.ts";
 import { replayClaude } from "../../recordings/claude/replay.ts";
 import { readRecording } from "../../recordings/format.ts";
+import { NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_SOCKET_PATH, NEUTRAL_TIME, PLACEHOLDERS, createSanitiser } from "../../recordings/sanitiser.ts";
 import { SCENARIO_NAMES } from "../../recordings/scenarios.ts";
 
 const RECORDINGS = path.join(REPO_ROOT, "test", "drivers", "claude", "recordings");
@@ -49,3 +51,38 @@ for (const name of SCENARIO_NAMES) {
     assert.equal(run.scenario.name, name);
   });
 }
+
+/** Every value in `value` under one of `keys`, by key. */
+function valuesUnder(value: unknown, keys: readonly string[], found: { [key: string]: unknown[] } = {}): { [key: string]: unknown[] } {
+  if (Array.isArray(value)) for (const each of value) valuesUnder(each, keys, found);
+  else if (typeof value === "object" && value !== null) {
+    for (const [key, entry] of Object.entries(value)) {
+      if (keys.includes(key)) (found[key] ??= []).push(entry);
+      valuesUnder(entry, keys, found);
+    }
+  }
+  return found;
+}
+
+test("the live Claude recordings carry no account details: the plan, rate-limit figures, credential expiry, process id, socket path and the plan's models hold only neutral values, and the sanitiser has nothing left to replace", async () => {
+  const keys = ["subscriptionType", "rate_limit_info", "credential_expires_at", "pid", "messaging_socket_path", "models"];
+  const found: { [key: string]: unknown[] } = {};
+  for (const name of SCENARIO_NAMES) {
+    const recording = await readRecording(path.join(RECORDINGS, `${name}.ndjson`));
+    // Only the rules that need no machine: no HOME, PATH or user name of this one.
+    const sanitise = createSanitiser({ workspace: PLACEHOLDERS.workspace, env: {}, user: "ari-no-such-user", protocolWords: CLAUDE_PROTOCOL_WORDS, recordedModel: recording.header.model });
+    for (const { line, frame } of recording.frames) {
+      assert.deepEqual(sanitise(frame), frame, `${name}.ndjson:${line} still holds something the sanitiser replaces`);
+      valuesUnder(frame, keys, found);
+    }
+  }
+  assert.ok(found["subscriptionType"]!.length > 0 && found["subscriptionType"]!.every((value) => value === "<PLAN>"), JSON.stringify(found["subscriptionType"]));
+  assert.ok(found["rate_limit_info"]!.length > 0);
+  for (const value of found["rate_limit_info"]!) assert.deepEqual(value, NEUTRAL_RATE_LIMIT_INFO);
+  assert.ok(found["credential_expires_at"]!.length > 0 && found["credential_expires_at"]!.every((value) => value === NEUTRAL_TIME.iso), JSON.stringify(found["credential_expires_at"]));
+  assert.ok(found["pid"]!.length > 0 && found["pid"]!.every((value) => value === NEUTRAL_PID), JSON.stringify(found["pid"]));
+  assert.ok(found["messaging_socket_path"]!.length > 0 && found["messaging_socket_path"]!.every((value) => value === NEUTRAL_SOCKET_PATH));
+  // initializationResult().models keeps only the recorded model.
+  assert.ok(found["models"]!.length > 0);
+  for (const models of found["models"]!) assert.deepEqual((models as Array<{ value: string }>).map((model) => model.value), ["haiku"]);
+});

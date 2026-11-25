@@ -26,7 +26,7 @@ import type { OpencodeRecordOutcome } from "../../recordings/opencode/record.ts"
 import { startRecordingProxy } from "../../recordings/opencode/proxy.ts";
 import { replayOpencode } from "../../recordings/opencode/replay.ts";
 import { startTurnAfterItsText } from "../../recordings/late-start-turn.ts";
-import { FRAME_FORMAT_FIELDS } from "../../recordings/sanitiser.ts";
+import { FRAME_FORMAT_FIELDS, PLACEHOLDERS, createSanitiser } from "../../recordings/sanitiser.ts";
 import { SCENARIOS, SCENARIO_NAMES, checkScenario } from "../../recordings/scenarios.ts";
 import type { ScenarioName } from "../../recordings/scenarios.ts";
 import { ReplayDriftError, showFrame } from "../../recordings/sequencer.ts";
@@ -158,9 +158,11 @@ test("each OpenCode recording holds every HTTP request (method, path, query, bod
     for (const frame of requests) assert.ok(typeof frame["method"] === "string" && typeof frame["path"] === "string" && typeof frame["query"] === "object", `${name}: ${JSON.stringify(frame)}`);
     const answers = framesOf(recording, "response").filter((frame) => frame["stream"] !== true);
     const sent = world.frames.filter((frame) => frame.direction === "response").slice(2);
+    // As the recorder's sanitiser writes them: /api/info's pid and tmp path are neutral, and the model list holds only the recorded model.
+    const sanitised = createSanitiser({ workspace: PLACEHOLDERS.workspace, env: {}, user: "ari-test-user", protocolWords: OPENCODE_PROTOCOL_WORDS, recordedModel: MODEL });
     assert.deepEqual(
       answers.map((frame) => asRecorded({ status: frame["status"], body: frame["body"] })),
-      sent.map((frame) => asRecorded({ status: frame.status, body: frame.body })),
+      sent.map((frame) => sanitised(asRecorded({ status: frame.status, body: frame.body }), "in")),
       `${name}: every response the fake sent, in order`,
     );
     const events = framesOf(recording, "event").map((frame) => frame["event"] as { id: string; type: string });

@@ -33,7 +33,7 @@ export async function resanitiseRecording(file: string, options: ResanitiseOptio
   const protocolWords = PROTOCOL_WORDS[recording.header.driver];
   if (protocolWords === undefined) throw new Error(`${file}: no sanitiser protocol words for driver ${recording.header.driver}`);
   // The recorder's workspace is long gone, and the frames say <WORKSPACE> where it was.
-  const sanitise = createSanitiser({ workspace: PLACEHOLDERS.workspace, env: options.env, protocolWords, ...(options.user === undefined ? {} : { user: options.user }) });
+  const sanitise = createSanitiser({ workspace: PLACEHOLDERS.workspace, env: options.env, protocolWords, recordedModel: recording.header.model, ...(options.user === undefined ? {} : { user: options.user }) });
   const frames = recording.frames.map((entry) => sanitise(entry.frame));
   const { type: _type, format: _format, sha256: before, ...metadata } = recording.header;
   await writeRecording(file, metadata, frames);

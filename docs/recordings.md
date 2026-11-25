@@ -35,6 +35,11 @@ them: `test/drivers/claude/live-recordings.test.ts` and
 the scenario module, check each header (`source: live`, the vendor version
 the pinned SDK runs or OpenCode 2.1.2, the model) and replay each through a
 fresh driver with every scenario assertion. A missing recording fails them.
+They also check that the sanitiser, run again with no machine's HOME, PATH
+or user name, has nothing left to replace in any frame, and that every field
+the account-detail rules cover holds its neutral value (see "Account
+details"). So a sanitiser rule added later fails them until the recordings
+are sanitised again.
 
 ## The format
 
@@ -300,6 +305,45 @@ and is sanitised like any other value):
 
 Exact values go first, longest first, so a path inside the workspace is
 replaced whole.
+
+### Account details
+
+The repository is public, and a recording must not describe the user's
+accounts or machine, even where a value is no id or secret. So the
+sanitiser also replaces these, in both directions, with fixed neutral
+values of the same type, so a driver still parses them. Each rule is keyed
+on the field: the key is compared without case, `-` or `_`, and a value of
+another type than the rule's stays as it is. The code is
+`NEUTRAL_FIELD_RULES` in `test/recordings/sanitiser.ts`.
+
+| What | Key | Neutral value |
+|---|---|---|
+| the plan name: Claude Code's `subscriptionType` in `initializationResult().account` ("Claude Max") | `subscriptionType`, `subscriptionPlan`, `subscriptionTier`, `planName`, `planType`, `planTier`, `rateLimitTier` (a string) | `<PLAN>` |
+| a rate-limit report: Claude Code's `rate_limit_event` with its status, window, utilization, reset times, threshold and overage state | `rate_limit_info` (an object), replaced whole | `{"status":"allowed","rateLimitType":"five_hour","utilization":0,"resetsAt":4102444800}` |
+| a credential's expiry time: Claude Code's `credential_expires_at` in result messages | a key ending in `expires`, `expiresAt`, `expiry`, `expiration` or `expirationTime` after `credential`, `token`, `oauth`, `auth` or `login` | `2100-01-01T00:00:00.000Z` for a string; `4102444800000` for a number of milliseconds, `4102444800` for seconds |
+| a native process id: Claude Code's `initializationResult().pid`, OpenCode's `GET /api/info` `pid` | `pid`, `ppid`, `processId` (a number) | `1000` (the OpenCode driver checks only that it is a number) |
+| a temp directory that shows the machine's session layout: OpenCode's `GET /api/info` `paths.tmp` | `tmp`, `tmpDir`, `temp`, `tempDir`, `tmpPath`, `tempPath` (a string) | `/tmp/ari-recording` |
+| a socket path: Claude Code's `messaging_socket_path`, `/tmp/cc-socks/<pid>.sock` | a key ending in `socketPath` or `socketFile` (a string) | `/tmp/ari-recording/agent.sock` |
+| the machine's shell: OpenCode's `shell.created` event | `shell`, when the string is a path | `/bin/sh` |
+
+With the recording's model (`recordedModel`, the header's `model`), a model
+list keeps only that model, so which providers and models the user's
+accounts offer stays out:
+
+- OpenCode 2.x's `GET /api/model` answer (an array of objects with a string
+  `providerID` and `modelID`) keeps the recorded `provider/model` alone, and
+  of it only the fields the OpenCode driver reads: `providerID`, `modelID`,
+  `name`, `enabled` and `limit.context`. The answer listed every model of
+  every provider the user is signed in to, with each provider's setup
+  (base URLs, request headers, service tiers).
+- Claude Code's `initializationResult().models` (objects with a string
+  `value` and `resolvedModel`) keeps the entry of the recorded alias whole.
+  The list showed which models the user's plan offers and which is its
+  default. The Claude driver does not read it.
+
+The OpenCode driver keeps the context windows of the models it read, so with
+the recorded model in the list it asks for the list once per run, as it did
+live. Without `recordedModel` a model list stays whole.
 
 The recorded OpenCode server inherits the recorder's environment, and a tool
 it runs can print it; Claude Code gets only `PATH`, but a tool can still print

@@ -227,7 +227,7 @@ async function recordOne(scenario: Scenario, options: RecordOpencodeOptions): Pr
     const target = path.join(options.outDir, `${scenario.name}.ndjson`);
     // A failed write joins the scenario's other failures, so none of them, nor where a refreshed sign-in went, is lost with it.
     try {
-      const sanitise = createSanitiser({ workspace: layout.root, env: options.env, protocolWords: OPENCODE_PROTOCOL_WORDS, ...(options.user === undefined ? {} : { user: options.user }) });
+      const sanitise = createSanitiser({ workspace: layout.root, env: options.env, protocolWords: OPENCODE_PROTOCOL_WORDS, recordedModel: model, ...(options.user === undefined ? {} : { user: options.user }) });
       await writeRecording(
         target,
         {

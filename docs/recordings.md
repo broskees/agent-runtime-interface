@@ -18,12 +18,28 @@ The kit lives in `test/recordings/`:
 | `scenarios.ts` | the six scenarios, the scenario runner and the scenario checks |
 | `sanitiser.ts` | the one sanitiser every recorder uses |
 | `sequencer.ts` | the replay sequencer, which knows no transport |
+| `recovery.ts` | the recovery file where both recorders keep a refreshed sign-in that cannot go back |
+| `resanitise.ts` | runs a committed recording through the sanitiser again, after a fix to the sanitiser |
 | `claude/` | the Claude tap, the replay SDK, and the recording and replay functions |
 | `opencode/` | the OpenCode recording proxy, the replay server, the sign-in copy, `opencode serve`, and the recording and replay functions |
 
 `scripts/record-claude.ts` is the Claude recorder and `scripts/record-opencode.ts`
 the OpenCode recorder. `scripts/check-recordings.ts` is the scan the gate runs.
+`scripts/resanitise-recordings.ts` sanitises committed recordings again.
 Nothing here ships in the npm tarball.
+
+The live recordings are in `test/drivers/claude/recordings/` and
+`test/drivers/opencode/recordings/`, one file per scenario. The gate replays
+them: `test/drivers/claude/live-recordings.test.ts` and
+`test/drivers/opencode/live-recordings.suite.ts` take the list of files from
+the scenario module, check each header (`source: live`, the vendor version
+the pinned SDK runs or OpenCode 2.1.2, the model) and replay each through a
+fresh driver with every scenario assertion. A missing recording fails them.
+They also check that the sanitiser, run again with no machine's HOME, PATH
+or user name, has nothing left to replace in any frame, and that every field
+the account-detail rules cover holds its neutral value (see "Account
+details"). So a sanitiser rule added later fails them until the recordings
+are sanitised again.
 
 ## The format
 
@@ -114,6 +130,12 @@ recorded: the server password travels in one.
 | in | `end` | `id` | the server ended that stream |
 | out | `close` | `id` | the driver closed the connection before its answer ended. The driver stops reading its event stream when its session closes, so every recording ends with one. |
 | in | `dropped` | `id` | the server closed the connection without an answer |
+
+OpenCode 2.1.2 compresses a large answer, such as the model list of
+`GET /api/model`, when the client accepts it (`Content-Encoding: gzip`). The
+proxy decompresses a gzip, deflate or br body, records the body the driver's
+client would read, and passes that body on without the encoding. A body in
+another encoding is passed on as a `dropped` connection.
 
 A request is recorded once its body has arrived. A response or an event is
 recorded just before the proxy passes it to the driver, and an event that
@@ -277,11 +299,51 @@ and is sanitised like any other value):
 | the value of every other variable of the recorder's environment whose name ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, when it is 8 characters or more | `<NAME>`, for example `<GEMINI_API_KEY>` |
 | the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ): in an inbound frame wherever it is a whole word, except in a protocol word; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
 | email addresses | `<EMAIL>` |
+| the string value under a key that names an account or organisation id (compared without case, `-` or `_`: a key ending in `accountid` or `accountuuid`, or in `orgid`, `organizationid`, `organisationid` or their `uuid` forms), in both directions. OpenCode 2.1.2's model list carries the user's ChatGPT account id (`chatgpt-account-id`) and OpenCode organisation id (`x-opencode-org-id`) as request headers of their models | `<ACCOUNT_ID>`, `<ORG_ID>` |
 | another home directory: `/home/<name>`, `/Users/<name>`, `/root` | `<OTHER_HOME>` |
 | a token the scan looks for | `<TOKEN>` |
 
 Exact values go first, longest first, so a path inside the workspace is
 replaced whole.
+
+### Account details
+
+The repository is public, and a recording must not describe the user's
+accounts or machine, even where a value is no id or secret. So the
+sanitiser also replaces these, in both directions, with fixed neutral
+values of the same type, so a driver still parses them. Each rule is keyed
+on the field: the key is compared without case, `-` or `_`, and a value of
+another type than the rule's stays as it is. The code is
+`NEUTRAL_FIELD_RULES` in `test/recordings/sanitiser.ts`.
+
+| What | Key | Neutral value |
+|---|---|---|
+| the plan name: Claude Code's `subscriptionType` in `initializationResult().account` ("Claude Max") | `subscriptionType`, `subscriptionPlan`, `subscriptionTier`, `planName`, `planType`, `planTier`, `rateLimitTier` (a string) | `<PLAN>` |
+| a rate-limit report: Claude Code's `rate_limit_event` with its status, window, utilization, reset times, threshold and overage state | `rate_limit_info` (an object), replaced whole | `{"status":"allowed","rateLimitType":"five_hour","utilization":0,"resetsAt":4102444800}` |
+| a credential's expiry time: Claude Code's `credential_expires_at` in result messages | a key ending in `expires`, `expiresAt`, `expiry`, `expiration` or `expirationTime` after `credential`, `token`, `oauth`, `auth` or `login` | `2100-01-01T00:00:00.000Z` for a string; `4102444800000` for a number of milliseconds, `4102444800` for seconds |
+| a native process id: Claude Code's `initializationResult().pid`, OpenCode's `GET /api/info` `pid` | `pid`, `ppid`, `processId` (a number) | `1000` (the OpenCode driver checks only that it is a number) |
+| a temp directory that shows the machine's session layout: OpenCode's `GET /api/info` `paths.tmp` | `tmp`, `tmpDir`, `temp`, `tempDir`, `tmpPath`, `tempPath` (a string) | `/tmp/ari-recording` |
+| a socket path: Claude Code's `messaging_socket_path`, `/tmp/cc-socks/<pid>.sock` | a key ending in `socketPath` or `socketFile` (a string) | `/tmp/ari-recording/agent.sock` |
+| the machine's shell: OpenCode's `shell.created` event | `shell`, when the string is a path | `/bin/sh` |
+
+With the recording's model (`recordedModel`, the header's `model`), a model
+list keeps only that model, so which providers and models the user's
+accounts offer stays out:
+
+- OpenCode 2.x's `GET /api/model` answer (an array of objects with a string
+  `providerID` and `modelID`) keeps the recorded `provider/model` alone, and
+  of it only the fields the OpenCode driver reads: `providerID`, `modelID`,
+  `name`, `enabled` and `limit.context`. The answer listed every model of
+  every provider the user is signed in to, with each provider's setup
+  (base URLs, request headers, service tiers).
+- Claude Code's `initializationResult().models` (objects with a string
+  `value` and `resolvedModel`) keeps the entry of the recorded alias whole.
+  The list showed which models the user's plan offers and which is its
+  default. The Claude driver does not read it.
+
+The OpenCode driver keeps the context windows of the models it read, so with
+the recorded model in the list it asks for the list once per run, as it did
+live. Without `recordedModel` a model list stays whole.
 
 The recorded OpenCode server inherits the recorder's environment, and a tool
 it runs can print it; Claude Code gets only `PATH`, but a tool can still print
@@ -386,6 +448,14 @@ machine's own names before it writes, and
 `test/drivers/claude/recorder.test.ts` shows a real `ls -ld .` listing, free
 assistant text and a `stderr` line lose the name.
 
+When a recording holds something personal the sanitiser missed, fix the
+sanitiser, then run `node scripts/resanitise-recordings.ts <file> ...` on the
+machine and account that recorded it. It reads each recording with the loader,
+runs every frame through the sanitiser again, and writes it with the
+recorder's writer, which computes the checksum again; the header stays as it
+was. The frames already hold placeholders, so a recording with nothing new to
+replace comes out byte-identical. Never edit a recording by hand.
+
 Known limit: Claude Code streams text in chunks, and each chunk is its own
 `message` frame. A value split across two chunks matches neither the
 sanitiser nor the scan. The whole text also arrives in the `assistant`
@@ -459,6 +529,21 @@ The sources for these choices (Claude Code and Agent SDK docs, read
   to the user's file, so a rotated token is never lost. When the user's file
   also changed meanwhile, the recorder leaves it as it is and reports the
   scenario failed.
+- Whenever a refreshed copy cannot go back (that case, or a file the
+  recorder cannot read or replace), the recorder adds it to the run's
+  recovery file beside the user's file,
+  `.credentials.json.ari-recorder-refreshed-<pid>.json`, mode 0600. The file
+  holds one record, `{ "id": ".credentials.json", "value" }`, whose `value`
+  is the refreshed file's whole text, with `olderValues` when a later
+  scenario kept a newer one. The recorder reads the file and adds to it,
+  never truncates it, never overwrites a file it cannot read as one, and
+  replaces it only by renaming a complete new file over it. Each scenario's
+  error names the file, and so do the run's last lines. The OpenCode recorder
+  keeps its recovery file the same way (`test/recordings/recovery.ts`).
+- When the recovery file cannot take the value either, the workspace's copy
+  holds the only copy. The recorder then keeps that workspace, stops the run,
+  and names the workspace and the copy in the error and in the run's last
+  lines.
 - With `ANTHROPIC_API_KEY` set, the recorder gives the key to the driver
   instance as its own key (a managed profile), and the driver passes it to
   Claude Code. The sanitiser replaces its value.
@@ -479,7 +564,8 @@ recorder points its own `CLAUDE_CONFIG_DIR` at the isolated directory while a
 scenario runs, and puts it back afterwards.
 
 The workspace, with the copied credential, is removed after each scenario,
-also after one that fails.
+also after one that fails, unless it holds the only copy of a refreshed
+sign-in.
 
 ### Ids
 
@@ -558,13 +644,17 @@ new database with every migration marked done. Copying it would sign nothing
 in.
 
 - The same file holds the user's sessions, saved permission grants and the
-  rest of OpenCode's state. So the recorder copies it with all of that left
-  out: a consistent copy (`VACUUM INTO`, from a read-only connection) into
-  `<workspace>/xdg-data/opencode/opencode.db`, mode 0600, then every table but
-  `credential` and the migration journals (`migration`,
-  `__drizzle_migrations`) emptied. A read-only connection to a database in
-  WAL mode leaves an empty `opencode.db-wal` and `opencode.db-shm` beside the
-  user's file, as any reader does; the file itself is unchanged.
+  rest of OpenCode's state, and it grows with every session: a long-used one
+  can be tens of gigabytes. So the recorder copies only what OpenCode needs
+  to open it and sign in. In one read transaction on a read-only connection
+  it reads the schema (every table and index, from `sqlite_master`), the
+  `user_version`, and the rows of `credential` and the migration journals
+  (`migration`, `__drizzle_migrations`), and no row of any other table. It
+  writes them into a new database,
+  `<workspace>/xdg-data/opencode/opencode.db`, mode 0600, whose other tables
+  are empty. A read-only connection to a database in WAL mode leaves an
+  empty `opencode.db-wal` and `opencode.db-shm` beside the user's file, as
+  any reader does; the file itself is unchanged.
 - OpenCode may refresh an OAuth token during a run and write the new value to
   the copy (`packages/core/src/integration.ts:739`,
   `credentials.update(credential.id, { value })`). After each scenario, also
@@ -616,8 +706,12 @@ turns, with the `haiku` model unless you choose another.
 
 The recorder writes `test/drivers/claude/recordings/<scenario>.ndjson`, one
 file per scenario, also for a scenario whose checks failed (it says which,
-and exits 1). Without `ARI_LIVE_RECORD=1` it exits 2 before it loads the SDK
-or starts anything. No gate step and no CI workflow sets `ARI_LIVE_RECORD`.
+and exits 1). When it cannot write a recording (an output directory it cannot
+use, for example), it stops after that scenario. Its last lines name every
+recovery file and every kept workspace, whatever else failed; see "How Claude
+Code finds the sign-in". Without `ARI_LIVE_RECORD=1` it exits 2 before it
+loads the SDK or starts anything. No gate step and no CI workflow sets
+`ARI_LIVE_RECORD`.
 
 ### Recording OpenCode
 

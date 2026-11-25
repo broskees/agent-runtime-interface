@@ -11,10 +11,11 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { recordingFiles, scanRecordingText, scanRecordings } from "../../scripts/check-recordings.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
-import { encodeRecording, parseRecording } from "./format.ts";
+import { encodeRecording, parseRecording, readRecording } from "./format.ts";
 import type { Frame, RecordingMetadata } from "./format.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "./claude/protocol-words.ts";
-import { PLACEHOLDERS, createSanitiser, secretVariablesOf, userNames } from "./sanitiser.ts";
+import { resanitiseRecording } from "./resanitise.ts";
+import { NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_SHELL, NEUTRAL_SOCKET_PATH, NEUTRAL_TIME, NEUTRAL_TMP_PATH, PLACEHOLDERS, createSanitiser, secretVariablesOf, userNames } from "./sanitiser.ts";
 
 const METADATA: RecordingMetadata = {
   driver: "claude",
@@ -303,4 +304,164 @@ test("check:recordings is a step of both gate chains, in the same position", () 
   assert.ok(gate.includes("pnpm run check:recordings"));
   assert.ok(gateBun.includes("pnpm run check:recordings"));
   assert.equal(gate.length - gate.indexOf("pnpm run check:recordings"), gateBun.length - gateBun.indexOf("pnpm run check:recordings"));
+});
+
+test("the value under a key that names an account or organisation id becomes <ACCOUNT_ID> or <ORG_ID>, in both directions; other ids stay", () => {
+  const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" });
+  // As OpenCode 2.1.2's GET /api/model gives them: request headers of the models of the user's providers.
+  const ids = {
+    "chatgpt-account-id": "0b6f1d1e-6a4e-4c39-9d4c-6a4f3b9e2c11",
+    "x-opencode-org-id": "org_01ARISYNTHETICORG000000000",
+    accountUuid: "5f2b9c3a-0000-4000-8000-00000000a11c",
+    account_id: "acct_0123",
+    organizationUuid: "7d1c2b3a-0000-4000-8000-0000000000e9",
+    organization_id: "org-0123",
+    orgId: "o-42",
+  };
+  const kept = { sessionID: "ses_0001", projectID: "a762c972", aggregateID: "ses_0001", parent_agent_id: "agent-1", providerID: "openai", modelID: "gpt", id: "x", api_message_id: "msg_1", empty_account_id: "" };
+  for (const dir of ["in", "out"] as const) {
+    const out = sanitise({ dir, kind: "response", id: 3, body: { data: [{ headers: ids, ...kept }] } });
+    assert.deepEqual(
+      out,
+      {
+        dir,
+        kind: "response",
+        id: 3,
+        body: { data: [{ headers: { "chatgpt-account-id": "<ACCOUNT_ID>", "x-opencode-org-id": "<ORG_ID>", accountUuid: "<ACCOUNT_ID>", account_id: "<ACCOUNT_ID>", organizationUuid: "<ORG_ID>", organization_id: "<ORG_ID>", orgId: "<ORG_ID>" }, ...kept }] },
+      },
+      `a frame going ${dir}`,
+    );
+  }
+});
+
+test("resanitiseRecording runs a recording through the sanitiser again with a new checksum, keeps its header, and leaves one with nothing new to replace byte-identical", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ari-resanitise-"));
+  try {
+    const opencode: RecordingMetadata = { ...METADATA, driver: "opencode", vendor: "opencode", vendorVersion: "2.1.2", sdk: "@opencode/client", sdkVersion: "2.1.2", model: "anthropic/claude-haiku-5-5", source: "live" };
+    const holding = path.join(directory, "simple.ndjson");
+    const frames: Frame[] = [
+      { dir: "out", kind: "request", id: 3, method: "GET", path: "/api/model", query: { "location[directory]": "" } },
+      { dir: "in", kind: "response", id: 3, status: 200, contentType: "application/json", body: { data: [{ providerID: "anthropic", modelID: "claude-haiku-5-5", name: "Claude Haiku 5.5", headers: { "x-opencode-org-id": "org_01ARISYNTHETICORG000000000" }, enabled: true, limit: { context: 1000000, output: 128000 } }, { providerID: "openai", modelID: "gpt", headers: { "chatgpt-account-id": "0b6f1d1e-6a4e-4c39-9d4c-6a4f3b9e2c11", originator: "opencode" } }] } },
+      { dir: "in", kind: "event", id: 4, event: { type: "account.updated", data: { "chatgpt-account-id": "0b6f1d1e-6a4e-4c39-9d4c-6a4f3b9e2c11", "x-opencode-org-id": "org_01ARISYNTHETICORG000000000" } } },
+      { dir: "in", kind: "event", id: 4, event: { type: "session.text.delta", data: { delta: "ok, <WORKSPACE>/cwd for <USER>" } } },
+    ];
+    fs.writeFileSync(holding, encodeRecording(opencode, frames));
+    assert.equal(await resanitiseRecording(holding, { env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" }), true);
+    const again = await readRecording(holding);
+    const { type: _type, format: _format, sha256: _sha256, ...header } = again.header;
+    assert.deepEqual(header, opencode, "the header stays as the recorder wrote it");
+    const text = fs.readFileSync(holding, "utf8");
+    assert.ok(!text.includes("0b6f1d1e") && !text.includes("org_01ARI"), text);
+    assert.deepEqual(
+      again.frames.map((entry) => entry.frame),
+      [
+        frames[0],
+        // The header's model is the recorded one: the model list keeps only it, with only the fields the driver reads.
+        { ...frames[1], body: { data: [{ providerID: "anthropic", modelID: "claude-haiku-5-5", name: "Claude Haiku 5.5", enabled: true, limit: { context: 1000000 } }] } },
+        { ...frames[2], event: { type: "account.updated", data: { "chatgpt-account-id": "<ACCOUNT_ID>", "x-opencode-org-id": "<ORG_ID>" } } },
+        frames[3],
+      ],
+    );
+    // A second pass, and a recording with only placeholders, change nothing.
+    assert.equal(await resanitiseRecording(holding, { env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" }), false);
+    assert.equal(fs.readFileSync(holding, "utf8"), text);
+    const clean = path.join(directory, "clean.ndjson");
+    fs.writeFileSync(clean, encodeRecording(METADATA, CLEAN));
+    const before = fs.readFileSync(clean, "utf8");
+    assert.equal(await resanitiseRecording(clean, { env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" }), false);
+    assert.equal(fs.readFileSync(clean, "utf8"), before);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// The host's ruling "account details stay out": each kind, as the real Claude Code 2.1.330 and OpenCode 2.1.2 sent it.
+const ACCOUNT_DETAIL_FRAMES: Frame[] = [
+  // Claude Code's initializationResult(): the plan, the native process id, and the models the plan offers.
+  {
+    dir: "in",
+    kind: "result",
+    id: 1,
+    value: {
+      account: { email: "someone@example.org", subscriptionType: "Claude Max", apiProvider: "firstParty" },
+      pid: 2294915,
+      models: [
+        { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)" },
+        { value: "fable", resolvedModel: "claude-fable-5-2", displayName: "Fable" },
+        { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku" },
+      ],
+    },
+  },
+  // A rate-limit report, with usage figures, reset times and the overage state.
+  {
+    dir: "in",
+    kind: "message",
+    query: "q1",
+    message: {
+      type: "rate_limit_event",
+      rate_limit_info: { status: "allowed_warning", resetsAt: 1796072400, rateLimitType: "seven_day", utilization: 0.78, overageStatus: "rejected", overageDisabledReason: "out_of_credits", isUsingOverage: false, surpassedThreshold: 0.75, unifiedWindows: { seven_day: { utilization: 0.78, resetsAt: 1796072400, status: "allowed_warning", surpassedThreshold: 0.75 } }, overageEnabled: true },
+      uuid: "dacce09b-8780-4565-b346-ff68f7bdfea6",
+      session_id: "a11ce000-0000-4000-8000-000000000001",
+    },
+  },
+  // Credential expiry times: Claude Code's result message, and the number forms.
+  { dir: "in", kind: "message", query: "q1", message: { type: "result", subtype: "success", credential_expires_at: "2026-12-16T12:44:44.039Z", tokenExpiresAt: 1796000000000, oauth_expires_at: 1796000000 } },
+  // Temp paths: Claude Code's messaging socket, OpenCode's GET /api/info tmp path and process id.
+  { dir: "in", kind: "message", query: "q1", message: { type: "system", subtype: "init", messaging_socket_path: "/tmp/cc-socks/2294915.sock" } },
+  { dir: "in", kind: "response", id: 1, status: 200, contentType: "application/json", body: { version: "2.1.2", pid: 2309969, urls: ["http://127.0.0.1:41117"], paths: { tmp: "/var/tmp/opencode/session.1YX2c84S/opencode" }, capabilities: { persistentPty: true } } },
+  // OpenCode's GET /api/model: every provider the user is signed in to, and how.
+  {
+    dir: "in",
+    kind: "response",
+    id: 3,
+    status: 200,
+    contentType: "application/json",
+    body: {
+      location: { directory: "<WORKSPACE>/cwd" },
+      data: [
+        { id: "claude-haiku-5-5", modelID: "claude-haiku-5-5", providerID: "anthropic", name: "Claude Haiku 5.5", package: "@opencode/ai/providers/anthropic", headers: { "anthropic-beta": "fast-mode-2026-02-01" }, cost: [{ input: 0.1, output: 0.5 }], status: "active", enabled: true, limit: { context: 1000000, output: 128000 } },
+        { id: "claude-opus-5-5", modelID: "claude-opus-5-5", providerID: "anthropic", name: "Claude Opus 5.5", enabled: true, limit: { context: 1000000 } },
+        { id: "gpt-6-sol", modelID: "gpt-6-sol", providerID: "openai", name: "GPT-6 Sol", settings: { baseURL: "https://chatgpt.com/backend-api/codex", body: { service_tier: "priority" } }, headers: { "chatgpt-account-id": "0b6f1d1e-6a4e-4c39-9d4c-6a4f3b9e2c11" }, enabled: true },
+        { id: "m", modelID: "m", providerID: "github-copilot", name: "M", settings: { baseURL: "https://api.githubcopilot.com" }, enabled: true },
+      ],
+    },
+  },
+  // OpenCode's shell.created event names the machine's login shell.
+  { dir: "in", kind: "event", id: 4, event: { type: "shell.created", data: { info: { id: "sh_1", status: "running", command: "printf x", cwd: "<WORKSPACE>/cwd", shell: "/usr/bin/zsh" } } } },
+];
+
+test("each account detail of the host's ruling becomes a fixed neutral value of the same type: plan name, rate-limit figures, credential expiry, process id, temp and socket paths, shell, and every model but the recorded one", () => {
+  const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody", recordedModel: "anthropic/claude-haiku-5-5" });
+  const out = ACCOUNT_DETAIL_FRAMES.map((frame) => sanitise(frame));
+  const claude = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody", recordedModel: "haiku" });
+  assert.deepEqual((claude(ACCOUNT_DETAIL_FRAMES[0]!)["value"] as { [key: string]: unknown }), {
+    account: { email: "<EMAIL>", subscriptionType: "<PLAN>", apiProvider: "firstParty" },
+    pid: NEUTRAL_PID,
+    models: [{ value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku" }],
+  }, "the plan, the process id and every model but the recorded one");
+  assert.deepEqual((out[1]!["message"] as { rate_limit_info: unknown }).rate_limit_info, NEUTRAL_RATE_LIMIT_INFO, "the rate-limit report");
+  assert.deepEqual(out[2]!["message"], { type: "result", subtype: "success", credential_expires_at: NEUTRAL_TIME.iso, tokenExpiresAt: NEUTRAL_TIME.milliseconds, oauth_expires_at: NEUTRAL_TIME.seconds }, "credential expiry, as a string, in milliseconds and in seconds");
+  assert.deepEqual(out[3]!["message"], { type: "system", subtype: "init", messaging_socket_path: NEUTRAL_SOCKET_PATH });
+  assert.deepEqual(out[4]!["body"], { version: "2.1.2", pid: NEUTRAL_PID, urls: ["http://127.0.0.1:41117"], paths: { tmp: NEUTRAL_TMP_PATH }, capabilities: { persistentPty: true } });
+  assert.deepEqual(out[5]!["body"], { location: { directory: "<WORKSPACE>/cwd" }, data: [{ providerID: "anthropic", modelID: "claude-haiku-5-5", name: "Claude Haiku 5.5", enabled: true, limit: { context: 1000000 } }] }, "only the recorded model, with only the fields the driver reads");
+  assert.equal(((out[6]!["event"] as { data: { info: { shell: unknown } } }).data.info.shell), NEUTRAL_SHELL);
+  // Of the same type, so a driver still parses them: OpenCode's driver takes /api/info as OpenCode's only when pid is a number.
+  assert.equal(typeof (out[4]!["body"] as { pid: unknown }).pid, "number");
+  assert.equal(typeof NEUTRAL_RATE_LIMIT_INFO.resetsAt, "number");
+  // A second pass changes nothing, and nothing the scan refuses is left.
+  assert.deepEqual(out.map((frame) => sanitise(frame)), out);
+  const text = encodeRecording({ ...METADATA, driver: "opencode", model: "anthropic/claude-haiku-5-5" }, out);
+  for (const leaked of ["Claude Max", "0.78", "out_of_credits", "1796072400", "2026-12-16", "2294915", "2309969", "cc-socks", "session.1YX2c84S", "openai", "github-copilot", "chatgpt", "claude-opus-5-5", "zsh"]) assert.ok(!text.includes(leaked), `${leaked} is gone`);
+  assert.ok(!encodeRecording(METADATA, [claude(ACCOUNT_DETAIL_FRAMES[0]!)]).includes("claude-fable-5-2"), "the Claude models the plan offers are gone");
+  assert.deepEqual(scanRecordingText(text, "account-details.ndjson", { home: SCANNING_HOME }), []);
+});
+
+test("the account-detail rules apply in both directions, and without a recorded model a model list stays whole", () => {
+  const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" });
+  assert.deepEqual(sanitise({ dir: "out", kind: "request", id: 9, body: { pid: 42, subscriptionType: "Claude Max", paths: { tmp: "/var/tmp/x" } } }), { dir: "out", kind: "request", id: 9, body: { pid: NEUTRAL_PID, subscriptionType: "<PLAN>", paths: { tmp: NEUTRAL_TMP_PATH } } });
+  const list = (ACCOUNT_DETAIL_FRAMES[5]!["body"] as { data: Array<{ providerID: string }> }).data;
+  const kept = (sanitise(ACCOUNT_DETAIL_FRAMES[5]!)["body"] as { data: Array<{ providerID: string }> }).data;
+  assert.deepEqual(kept.map((entry) => entry.providerID), list.map((entry) => entry.providerID));
+  // Fields of other types, and other keys, stay: a status, a model's own shell tool, a path-less shell name.
+  assert.deepEqual(sanitise({ dir: "in", kind: "event", id: 1, event: { status: "allowed_warning", name: "shell", shell: "bash", pid: "not-a-number" } }), { dir: "in", kind: "event", id: 1, event: { status: "allowed_warning", name: "shell", shell: "bash", pid: "not-a-number" } });
 });

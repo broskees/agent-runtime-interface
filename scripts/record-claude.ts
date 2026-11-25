@@ -62,7 +62,7 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   // Only now: these load the driver, and the recording function loads the SDK.
   const { SCENARIO_NAMES } = await import("../test/recordings/scenarios.ts");
-  const { recordClaude } = await import("../test/recordings/claude/record.ts");
+  const { describeClaudeRun, recordClaude } = await import("../test/recordings/claude/record.ts");
   const { loadClaudeSdk } = await import("../src/drivers/claude/sdk.ts");
   let parsed: RecordArguments;
   try {
@@ -83,8 +83,10 @@ async function main(argv: readonly string[]): Promise<number> {
     },
     log: (line) => process.stdout.write(`record-claude: ${line}\n`),
   });
+  // Every recovery file and every kept workspace, whatever else failed.
   const failed = outcomes.filter((outcome) => outcome.error !== undefined);
-  process.stdout.write(`record-claude: ${outcomes.length - failed.length} of ${outcomes.length} scenario(s) passed; recordings in ${parsed.outDir}\n`);
+  const stream = failed.length === 0 ? process.stdout : process.stderr;
+  for (const line of describeClaudeRun(outcomes, parsed.outDir)) stream.write(`record-claude: ${line}\n`);
   return failed.length === 0 ? 0 : 1;
 }
 

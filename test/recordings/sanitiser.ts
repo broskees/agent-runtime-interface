@@ -17,6 +17,24 @@
 //     more, with <NAME> (the recorded server and Claude Code can see the
 //     user's environment, and a tool can print it);
 //   - email addresses with <EMAIL>;
+//   - the string value under a key that names an account or organisation id
+//     (`chatgpt-account-id`, `x-opencode-org-id`, `organizationUuid`, ...,
+//     ACCOUNT_ID_KEY and ORG_ID_KEY) with <ACCOUNT_ID> or <ORG_ID>, in both
+//     directions: OpenCode 2.1.2's model list carries the user's ChatGPT
+//     account id and OpenCode organisation id as request headers of their
+//     models;
+//   - account details, in both directions, with fixed neutral values of the
+//     same type, so a driver still parses them (NEUTRAL_FIELD_RULES): the
+//     plan name (<PLAN>), a rate-limit report (NEUTRAL_RATE_LIMIT_INFO), a
+//     credential's expiry time (NEUTRAL_TIME), the process id (NEUTRAL_PID),
+//     a temp directory (NEUTRAL_TMP_PATH), a socket path
+//     (NEUTRAL_SOCKET_PATH) and the machine's shell (NEUTRAL_SHELL);
+//   - with `recordedModel`, a model list keeps only the recorded model: in
+//     OpenCode 2.x's `GET /api/model` answer (an array of objects with a
+//     string providerID and modelID) with only the fields a driver reads, so
+//     which providers the user is signed in to, and how, stays out; in Claude
+//     Code's `initializationResult().models` (objects with a string value and
+//     resolvedModel) whole, so the models the user's plan offers stay out;
 //   - the OS user name (os.userInfo().username, and the values of USER and
 //     LOGNAME where they differ) with <USER>. How depends on what the string
 //     is:
@@ -69,7 +87,82 @@ export const PLACEHOLDERS = {
   email: "<EMAIL>",
   otherHome: "<OTHER_HOME>",
   token: "<TOKEN>",
+  accountId: "<ACCOUNT_ID>",
+  orgId: "<ORG_ID>",
+  plan: "<PLAN>",
 } as const;
+
+/** 2100-01-01T00:00:00Z: the neutral reset time of a rate limit and expiry time of a credential, far in the future. */
+export const NEUTRAL_TIME = { seconds: 4_102_444_800, milliseconds: 4_102_444_800_000, iso: "2100-01-01T00:00:00.000Z" } as const;
+/** The neutral process id of a native process (Claude Code's `initializationResult().pid`, OpenCode's `GET /api/info` pid). */
+export const NEUTRAL_PID = 1000;
+/** The neutral temp directory (OpenCode's `GET /api/info` paths.tmp). */
+export const NEUTRAL_TMP_PATH = "/tmp/ari-recording";
+/** The neutral socket path (Claude Code's `messaging_socket_path`). */
+export const NEUTRAL_SOCKET_PATH = "/tmp/ari-recording/agent.sock";
+/** The neutral shell (OpenCode's `shell.created` event names the machine's login shell). */
+export const NEUTRAL_SHELL = "/bin/sh";
+/** The neutral rate-limit report (Claude Code's `rate_limit_event` rate_limit_info, `SDKRateLimitInfo`): allowed, nothing used, resetting at NEUTRAL_TIME. */
+export const NEUTRAL_RATE_LIMIT_INFO = { status: "allowed", rateLimitType: "five_hour", utilization: 0, resetsAt: NEUTRAL_TIME.seconds } as const;
+
+/**
+ * Account details replaced whole by a fixed neutral value of the same type,
+ * keyed on the field. A key is compared without case, `-` or `_`; a value of
+ * another type than the rule's stays as it is.
+ */
+export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonly key: RegExp; readonly neutral: (value: unknown) => unknown }> = [
+  // Claude Code's `subscriptionType` ("Claude Max") in initializationResult().account, and other names of a plan.
+  { what: "plan name", key: /^(?:subscriptiontype|subscriptionplan|subscriptiontier|planname|plantype|plantier|ratelimittier)$/, neutral: (value) => (typeof value === "string" ? PLACEHOLDERS.plan : value) },
+  // Claude Code's rate_limit_event: status, window, utilization, reset time, threshold and overage state.
+  { what: "rate-limit report", key: /^ratelimitinfo$/, neutral: (value) => (typeof value === "object" && value !== null && !Array.isArray(value) ? { ...NEUTRAL_RATE_LIMIT_INFO } : value) },
+  // Claude Code's `credential_expires_at` in result messages, and other credential expiry times.
+  {
+    what: "credential expiry",
+    key: /(?:credential|token|oauth|auth|login)expir(?:es|y|ation)(?:at|time)?$/,
+    neutral: (value) => (typeof value === "string" ? NEUTRAL_TIME.iso : typeof value === "number" ? (value > 100_000_000_000 ? NEUTRAL_TIME.milliseconds : NEUTRAL_TIME.seconds) : value),
+  },
+  { what: "process id", key: /^(?:pid|ppid|processid)$/, neutral: (value) => (typeof value === "number" ? NEUTRAL_PID : value) },
+  // OpenCode's `GET /api/info` paths.tmp, which names the temp directory of the machine's session.
+  { what: "temp directory", key: /^(?:tmp|tmpdir|temp|tempdir|tmppath|temppath)$/, neutral: (value) => (typeof value === "string" ? NEUTRAL_TMP_PATH : value) },
+  // Claude Code's `messaging_socket_path`, /tmp/cc-socks/<pid>.sock.
+  { what: "socket path", key: /socket(?:path|file)$/, neutral: (value) => (typeof value === "string" ? NEUTRAL_SOCKET_PATH : value) },
+  // OpenCode's `shell.created` event: the path of the shell the command ran in, the user's login shell.
+  { what: "shell", key: /^shell$/, neutral: (value) => (typeof value === "string" && /^(?:[/\\]|[A-Za-z]:[/\\])/.test(value) ? NEUTRAL_SHELL : value) },
+];
+
+/** The fields of a model list entry a driver reads (the OpenCode driver's `models()`: enabled, providerID, modelID, name, limit.context). */
+function readModelFields(entry: { readonly [key: string]: unknown }): { [key: string]: unknown } {
+  const limit = entry["limit"];
+  const context = typeof limit === "object" && limit !== null && !Array.isArray(limit) ? (limit as { [key: string]: unknown })["context"] : undefined;
+  return {
+    providerID: entry["providerID"],
+    modelID: entry["modelID"],
+    ...(entry["name"] === undefined ? {} : { name: entry["name"] }),
+    ...(entry["enabled"] === undefined ? {} : { enabled: entry["enabled"] }),
+    ...(context === undefined ? {} : { limit: { context } }),
+  };
+}
+
+type Entry = { readonly [key: string]: unknown };
+
+/** Every element is an object whose `fields` are all strings. */
+function entriesWith(value: readonly unknown[], fields: readonly string[]): boolean {
+  return value.length > 0 && value.every((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry) && fields.every((field) => typeof (entry as Entry)[field] === "string"));
+}
+
+/** A key whose value identifies an account, compared without case, `-` or `_`: `chatgpt-account-id`, `account_id`, `accountUuid`. */
+export const ACCOUNT_ID_KEY = /accountid$|accountuuid$/;
+/** A key whose value identifies an organisation, compared the same way: `x-opencode-org-id`, `organization_id`, `organizationUuid`. */
+export const ORG_ID_KEY = /(?:org|organization|organisation)(?:id|uuid)$/;
+
+/** The placeholder for the value under `key` when the key names an account or organisation id. */
+function idPlaceholder(key: string | undefined): string | undefined {
+  if (key === undefined) return undefined;
+  const plain = key.toLowerCase().replace(/[-_]/g, "");
+  if (ACCOUNT_ID_KEY.test(plain)) return PLACEHOLDERS.accountId;
+  if (ORG_ID_KEY.test(plain)) return PLACEHOLDERS.orgId;
+  return undefined;
+}
 
 export interface SanitiserInput {
   /** The recording's temp workspace. */
@@ -80,6 +173,8 @@ export interface SanitiserInput {
   readonly user?: string;
   /** For each object key, the values that are protocol words there; an inbound value that is one keeps the user name. */
   readonly protocolWords?: { readonly [key: string]: readonly string[] };
+  /** The `provider/model` the recording used: a model list keeps only that model. Without it, a model list stays whole. */
+  readonly recordedModel?: string;
 }
 
 /** Which way a frame went: `in` from the native side, `out` from the driver. */
@@ -202,9 +297,29 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
     return result;
   };
 
+  const neutralRules = (key: string | undefined): ReadonlyArray<(typeof NEUTRAL_FIELD_RULES)[number]> => {
+    if (key === undefined) return [];
+    const plain = key.toLowerCase().replace(/[-_]/g, "");
+    return NEUTRAL_FIELD_RULES.filter((rule) => rule.key.test(plain));
+  };
+
   /** `key` is the object key the value sits under (array elements take their array's key). */
   const walk = (value: unknown, side: FrameSide, key: string | undefined): unknown => {
+    for (const rule of neutralRules(key)) {
+      const neutral = rule.neutral(value);
+      if (neutral !== value) return neutral;
+    }
+    if (Array.isArray(value) && input.recordedModel !== undefined) {
+      const model = input.recordedModel;
+      const entries = value as readonly Entry[];
+      // OpenCode 2.x GET /api/model: every model of every provider the user is signed in to.
+      if (entriesWith(value, ["providerID", "modelID"])) return entries.filter((entry) => `${String(entry["providerID"])}/${String(entry["modelID"])}` === model).map((entry) => walk(readModelFields(entry), side, key));
+      // Claude Code's initializationResult().models: the models the user's plan offers, and which is the default.
+      if (entriesWith(value, ["value", "resolvedModel"])) return entries.filter((entry) => entry["value"] === model || entry["resolvedModel"] === model).map((entry) => walk(entry, side, key));
+    }
     if (typeof value === "string") {
+      const id = idPlaceholder(key);
+      if (id !== undefined && value !== "") return id;
       const protocolWord = key !== undefined && protocolWords.get(key)?.has(value) === true;
       return text(value, side === "in" && !protocolWord ? "word" : "path");
     }

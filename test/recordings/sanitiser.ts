@@ -34,7 +34,9 @@
 //     string providerID and modelID) with only the fields a driver reads, so
 //     which providers the user is signed in to, and how, stays out; in Claude
 //     Code's `initializationResult().models` (objects with a string value and
-//     resolvedModel) whole, so the models the user's plan offers stay out;
+//     resolvedModel) whole, so the models the user's plan offers stay out; in
+//     an ACP agent's model picker (a session config option of category
+//     `model`) with the option's current value too, which the driver reads;
 //   - the OS user name (os.userInfo().username, and the values of USER and
 //     LOGNAME where they differ) with <USER>. How depends on what the string
 //     is:
@@ -112,7 +114,8 @@ export const NEUTRAL_RATE_LIMIT_INFO = { status: "allowed", rateLimitType: "five
  */
 export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonly key: RegExp; readonly neutral: (value: unknown) => unknown }> = [
   // Claude Code's `subscriptionType` ("Claude Max") in initializationResult().account, and other names of a plan.
-  { what: "plan name", key: /^(?:subscriptiontype|subscriptionplan|subscriptiontier|planname|plantype|plantier|ratelimittier)$/, neutral: (value) => (typeof value === "string" ? PLACEHOLDERS.plan : value) },
+  // `userTier` is the name the Antigravity CLI 1.5.17 binary gives the account's plan tier (`entitlement.userTier`).
+  { what: "plan name", key: /^(?:subscriptiontype|subscriptionplan|subscriptiontier|planname|plantype|plantier|ratelimittier|usertier)$/, neutral: (value) => (typeof value === "string" ? PLACEHOLDERS.plan : value) },
   // Claude Code's rate_limit_event: status, window, utilization, reset time, threshold and overage state.
   { what: "rate-limit report", key: /^ratelimitinfo$/, neutral: (value) => (typeof value === "object" && value !== null && !Array.isArray(value) ? { ...NEUTRAL_RATE_LIMIT_INFO } : value) },
   // Claude Code's `credential_expires_at` in result messages, and other credential expiry times.
@@ -148,6 +151,28 @@ type Entry = { readonly [key: string]: unknown };
 /** Every element is an object whose `fields` are all strings. */
 function entriesWith(value: readonly unknown[], fields: readonly string[]): boolean {
   return value.length > 0 && value.every((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry) && fields.every((field) => typeof (entry as Entry)[field] === "string"));
+}
+
+/**
+ * An ACP session config option of category `model` (an ACP agent's model
+ * picker, such as `agy acp`'s) with only the values a replay needs: the
+ * recorded model and the value the option currently holds, which the driver
+ * compares before it changes the model. The other values are the models the
+ * user's account offers. Grouped values keep the same members; a group left
+ * empty goes.
+ */
+function acpModelOptionWith(option: Entry, model: string): Entry {
+  const kept = new Set([model, option["currentValue"]]);
+  const values = (option["options"] as readonly unknown[]).flatMap((entry): unknown[] => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const members = (entry as Entry)["options"];
+    if (Array.isArray(members)) {
+      const inGroup = members.filter((member) => typeof member === "object" && member !== null && kept.has((member as Entry)["value"]));
+      return inGroup.length === 0 ? [] : [{ ...(entry as Entry), options: inGroup }];
+    }
+    return kept.has((entry as Entry)["value"]) ? [entry] : [];
+  });
+  return { ...option, options: values };
 }
 
 /** A key whose value identifies an account, compared without case, `-` or `_`: `chatgpt-account-id`, `account_id`, `accountUuid`. */
@@ -325,8 +350,10 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
     }
     if (Array.isArray(value)) return value.map((each) => walk(each, side, key));
     if (typeof value === "object" && value !== null) {
+      // An ACP agent's model picker: only the recorded model and the current one stay.
+      const source = input.recordedModel !== undefined && (value as Entry)["category"] === "model" && Array.isArray((value as Entry)["options"]) ? acpModelOptionWith(value as Entry, input.recordedModel) : (value as Entry);
       const out: { [key: string]: unknown } = {};
-      for (const [field, entry] of Object.entries(value)) out[text(field, "path")] = walk(entry, side, field);
+      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field);
       return out;
     }
     return value;

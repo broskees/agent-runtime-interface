@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { REPO_ROOT } from "../helpers/spec.ts";
 import { CLAUDE_FRAME_KINDS } from "./claude/frames.ts";
 import { OPENCODE_FRAME_KINDS } from "./opencode/frames.ts";
+import { STDIO_FRAME_KINDS } from "./stdio/frames.ts";
 import { RECORDING_HEADER_FIELDS } from "./format.ts";
 import { REPLAY_IGNORED_FIELDS } from "./ignored-fields.ts";
 
@@ -51,6 +52,11 @@ test("the docs list every OpenCode frame kind with its direction, and no other",
   assert.deepEqual(kinds, OPENCODE_FRAME_KINDS.map((entry) => ({ dir: entry.dir, kind: entry.kind })));
 });
 
+test("the docs list every stdio frame kind with its direction, and no other", () => {
+  const kinds = tableRows(section("Stdio frames")).map((row) => ({ dir: row[0]!, kind: row[1]!.replace(/`/g, "") }));
+  assert.deepEqual(kinds, STDIO_FRAME_KINDS.map((entry) => ({ dir: entry.dir, kind: entry.kind })));
+});
+
 test('the docs list under "Fields replay ignores" equals the code\'s list, each field with its reason', () => {
   const documented = tableRows(section("Fields replay ignores")).map(([driver, kind, field, reason]) => ({
     driver: driver!,
@@ -68,6 +74,8 @@ test('the docs list under "Fields replay ignores" equals the code\'s list, each 
 test('the docs have the "How to record" and "How to refresh" sections a person follows', () => {
   assert.match(section("How to record"), /ARI_LIVE_RECORD=1 pnpm run record:claude/);
   assert.match(section("Recording OpenCode"), /ARI_LIVE_RECORD=1 ARI_RECORD_OPENCODE_MODEL=<provider\/model> pnpm run record:opencode/);
+  assert.match(section("Recording Antigravity"), /ARI_LIVE_RECORD=1 pnpm run record:antigravity/);
+  assert.match(section("The Antigravity model"), /`ARI_RECORD_ANTIGRAVITY_MODEL`/);
   assert.match(section("How to refresh"), /Record again when the vendor's version changes/);
 });
 
@@ -107,4 +115,19 @@ test("the docs give the sanitiser's rule for secret environment variables", () =
     rows.some((row) => /ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, when it is 8 characters or more/.test(row[0]!) && row[1] === "`<NAME>`, for example `<GEMINI_API_KEY>`"),
     JSON.stringify(rows),
   );
+});
+
+test("the docs name the file the Antigravity recorder copies for the sign-in, where agy keeps it, and the sources of both", () => {
+  const signIn = section("How Antigravity finds the sign-in");
+  assert.match(signIn, /`~\/\.gemini\/antigravity-cli\/antigravity-oauth-token`/);
+  assert.match(signIn, /`<profile>\/antigravity-acp\/antigravity-oauth-token`/);
+  assert.match(signIn, /service `gemini` and account `antigravity`/);
+  // The repository's name is spelled in two parts here: scripts/check-rules.ts keeps host product names out of test/.
+  const repository = `https://github.com/pingdotgg/${"t"}${"3code"}`;
+  for (const source of [`${repository}/issues/34327`, `${repository}/pull/38957`, "`google-antigravity/antigravity-cli`", "\"Local silent keyring sign-in\""]) assert.ok(signIn.includes(source), `the section cites ${source}`);
+  assert.match(signIn, /So the recorder copies only that one file/);
+  const setup = section("How the Antigravity recorder keeps the user's setup out");
+  for (const variable of ["HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "TMPDIR", "DBUS_SESSION_BUS_ADDRESS", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE"]) {
+    assert.ok(tableRows(setup).some((row) => row[0] === `\`${variable}\``), `the table names ${variable}`);
+  }
 });

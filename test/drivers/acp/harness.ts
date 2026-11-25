@@ -38,18 +38,18 @@ export interface RecordedFrame {
 }
 
 /** Calls the puppet of one agent child over its IPC channel. */
-class PuppetChannel {
+export class PuppetChannel {
   readonly #child: childProcess.ChildProcess;
   readonly #pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   #nextId = 1;
   #alive = true;
   readonly exited: Promise<void>;
 
-  constructor(child: childProcess.ChildProcess, onTurn: (turn: { turnId: string; prompt: string }) => void) {
+  constructor(child: childProcess.ChildProcess, onTurn: (turn: { turnId: string; sessionId: string; prompt: string }) => void) {
     this.#child = child;
-    child.on("message", (message: { id?: number; result?: unknown; error?: string; event?: string; turnId?: string; prompt?: string }) => {
+    child.on("message", (message: { id?: number; result?: unknown; error?: string; event?: string; turnId?: string; sessionId?: string; prompt?: string }) => {
       if (message.event === "turn") {
-        onTurn({ turnId: message.turnId!, prompt: message.prompt! });
+        onTurn({ turnId: message.turnId!, sessionId: message.sessionId!, prompt: message.prompt! });
         return;
       }
       const pending = message.id === undefined ? undefined : this.#pending.get(message.id);

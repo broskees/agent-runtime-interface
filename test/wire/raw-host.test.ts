@@ -221,8 +221,12 @@ describe("a raw NDJSON host driving ari-driver", () => {
       paths: { stateDir: "/raw/state", cacheDir: "/raw/cache", tmpDir: "/raw/tmp" },
       envPolicy: { stripAmbient: [] },
     });
-    assert.match(host.stderr, new RegExp(`dropped host/process.output for process ${echo}, which is not running`));
-    assert.match(host.stderr, /dropped host\/process.exit for process p-unknown, which is not running/);
+    // ari-driver reports the drops on stderr, a pipe of its own: a report can reach this host after the answer above (up to 10 s).
+    const droppedOutput = new RegExp(`dropped host/process.output for process ${echo}, which is not running`);
+    const droppedExit = /dropped host\/process.exit for process p-unknown, which is not running/;
+    await host.waitFor(() => droppedOutput.test(host.stderr) && droppedExit.test(host.stderr), "both drop reports on stderr");
+    assert.match(host.stderr, droppedOutput);
+    assert.match(host.stderr, droppedExit);
   });
 
   test("an error answer to diagnostics.log or telemetry.track reaches ari-driver, which reports it and goes on", async () => {

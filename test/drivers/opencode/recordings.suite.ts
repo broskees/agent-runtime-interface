@@ -10,9 +10,11 @@
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
+import * as zlib from "node:zlib";
 import { scanRecordingText } from "../../../scripts/check-recordings.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { encodeRecording, readRecording } from "../../recordings/format.ts";
@@ -21,6 +23,7 @@ import { OPENCODE_IGNORED_FIELDS, opencodeNativeAnswers } from "../../recordings
 import { OPENCODE_PROTOCOL_WORDS } from "../../recordings/opencode/protocol-words.ts";
 import { recordOpencode } from "../../recordings/opencode/record.ts";
 import type { OpencodeRecordOutcome } from "../../recordings/opencode/record.ts";
+import { startRecordingProxy } from "../../recordings/opencode/proxy.ts";
 import { replayOpencode } from "../../recordings/opencode/replay.ts";
 import { startTurnAfterItsText } from "../../recordings/late-start-turn.ts";
 import { FRAME_FORMAT_FIELDS } from "../../recordings/sanitiser.ts";
@@ -495,4 +498,60 @@ test("a GEMINI_API_KEY of the recorder's environment that a tool prints is repla
   assert.ok(!text.includes(key), "the key's value is nowhere in the recording");
   assert.ok(text.includes("GEMINI_API_KEY=<GEMINI_API_KEY>"), "the command's output holds the placeholder");
   await replayOpencode(outcome.file!);
+});
+
+test("the recording proxy records and passes on the body the client reads when the server compresses its answer (the real OpenCode 2.1.2 gzips GET /api/model)", async () => {
+  const catalog = { data: [{ providerID: "anthropic", modelID: "claude-haiku-5-5", name: "Claude Haiku 5.5", limit: { context: 200_000 } }] };
+  const json = JSON.stringify(catalog);
+  const encoders: { [path: string]: [string, (bytes: Buffer) => Buffer] } = {
+    "/api/model": ["gzip", zlib.gzipSync],
+    "/api/deflated": ["deflate", zlib.deflateSync],
+    "/api/brotli": ["br", zlib.brotliCompressSync],
+  };
+  // The upstream compresses whatever the client accepts, as a server may.
+  const upstream = http.createServer((request, response) => {
+    const url = request.url ?? "/";
+    if (url === "/api/event") {
+      response.writeHead(200, { "content-type": "text/event-stream", "content-encoding": "gzip" });
+      response.end(zlib.gzipSync(`data: ${JSON.stringify({ type: "server.connected", data: {} })}\n\ndata: ${json}\n\n`));
+      return;
+    }
+    const [encoding, encode] = encoders[url.split("?")[0]!] ?? ["identity", (bytes: Buffer) => bytes];
+    response.writeHead(200, { "content-type": "application/json", "content-encoding": encoding });
+    response.end(encode(Buffer.from(json, "utf8")));
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const frames: Frame[] = [];
+  const proxy = await startRecordingProxy({ upstream: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, record: (frame) => frames.push(frame) });
+  /** One GET through the proxy, as a client that accepts every encoding: the raw bytes and headers the driver's connection carries. */
+  const get = (route: string): Promise<{ headers: http.IncomingHttpHeaders; raw: string }> =>
+    new Promise((resolve, reject) => {
+      http.get(`${proxy.url}${route}`, { headers: { "accept-encoding": "gzip, deflate, br" } }, (answer) => {
+        const chunks: Buffer[] = [];
+        answer.on("data", (chunk: Buffer) => chunks.push(chunk));
+        answer.on("end", () => resolve({ headers: answer.headers, raw: Buffer.concat(chunks).toString("utf8") }));
+        answer.on("error", reject);
+      }).on("error", reject);
+    });
+  try {
+    for (const route of ["/api/model?location%5Bdirectory%5D=", "/api/deflated", "/api/brotli", "/api/plain"]) {
+      const { headers, raw } = await get(route);
+      assert.equal(headers["content-encoding"], undefined, `${route}: the driver gets no encoded body`);
+      assert.deepEqual(JSON.parse(raw), catalog, `${route}: the driver reads the catalog`);
+    }
+    const events = await get("/api/event");
+    assert.equal(events.headers["content-encoding"], undefined);
+    assert.ok(events.raw.includes(`data: ${json}`), events.raw);
+    const responses = frames.filter((frame) => frame.kind === "response" && frame["stream"] !== true);
+    assert.equal(responses.length, 4);
+    for (const frame of responses) assert.deepEqual(frame["body"], catalog, `the frame holds the decompressed body: ${JSON.stringify(frame).slice(0, 200)}`);
+    assert.deepEqual(
+      frames.filter((frame) => frame.kind === "event").map((frame) => frame["event"]),
+      [{ type: "server.connected", data: {} }, catalog],
+    );
+  } finally {
+    await proxy.close();
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
 });

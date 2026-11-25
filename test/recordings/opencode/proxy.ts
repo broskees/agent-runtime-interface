@@ -10,8 +10,16 @@
 // the proxy writes it to the driver. An event arriving after the driver closed
 // its stream never reaches the driver and is not recorded. Request headers are
 // passed on but never recorded: the server password travels in one.
+//
+// OpenCode compresses a large answer (the model list is about 40 KB of gzip)
+// when the driver's client accepts it, and the client decompresses it. The
+// proxy records and passes on the decompressed body, so a frame holds what
+// the driver's client reads, and the driver gets the same JSON a direct
+// connection would give it.
 
 import * as http from "node:http";
+import type { Readable } from "node:stream";
+import * as zlib from "node:zlib";
 import type { Frame } from "../format.ts";
 import { EVENT_STREAM, EventStreamSplitter, blockData, bodyFields, eventFrame, mediaType, onExchangeClosed, requestBody, requestFrame } from "./frames.ts";
 
@@ -27,6 +35,16 @@ const HOP_HEADERS = new Set(["connection", "keep-alive", "proxy-authenticate", "
 
 function passedHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
   return Object.fromEntries(Object.entries(headers).filter(([name, value]) => value !== undefined && !HOP_HEADERS.has(name.toLowerCase())));
+}
+
+/** The answer's body as the client reads it: decompressed when the server sent it gzip, deflate or br encoded. Undefined for an encoding the proxy cannot decode. */
+function decodedBody(answer: http.IncomingMessage): Readable | undefined {
+  const encoding = String(answer.headers["content-encoding"] ?? "identity").trim().toLowerCase();
+  if (encoding === "identity" || encoding === "") return answer;
+  if (encoding === "gzip" || encoding === "x-gzip") return answer.pipe(zlib.createGunzip());
+  if (encoding === "deflate") return answer.pipe(zlib.createInflate());
+  if (encoding === "br") return answer.pipe(zlib.createBrotliDecompress());
+  return undefined;
 }
 
 async function readBody(stream: AsyncIterable<unknown>): Promise<Buffer> {
@@ -86,6 +104,16 @@ export async function startRecordingProxy(options: { readonly upstream: string; 
           answer.destroy();
           return;
         }
+        const decoded = decodedBody(answer);
+        if (decoded === undefined) {
+          answer.destroy();
+          dropped();
+          return;
+        }
+        if (decoded !== answer) {
+          answer.on("error", dropped);
+          decoded.on("error", dropped);
+        }
         if (mediaType(contentType) === EVENT_STREAM) {
           stream = true;
           openStreams.add(exchange);
@@ -99,11 +127,11 @@ export async function startRecordingProxy(options: { readonly upstream: string; 
             if (data !== "") options.record(eventFrame(exchange, data));
             response.write(`${block}\n\n`);
           };
-          answer.setEncoding("utf8");
-          answer.on("data", (chunk: string) => {
+          decoded.setEncoding("utf8");
+          decoded.on("data", (chunk: string) => {
             for (const block of splitter.push(chunk)) relay(block);
           });
-          answer.on("end", () => {
+          decoded.on("end", () => {
             const rest = splitter.end();
             if (rest !== undefined) relay(rest);
             if (answered) return;
@@ -111,10 +139,10 @@ export async function startRecordingProxy(options: { readonly upstream: string; 
             options.record({ dir: "in", kind: "end", id: exchange });
             response.end();
           });
-          answer.on("error", dropped);
+          decoded.on("error", dropped);
           return;
         }
-        void readBody(answer).then((bytes) => {
+        void readBody(decoded).then((bytes) => {
           if (answered) return;
           answered = true;
           const text = bytes.toString("utf8");

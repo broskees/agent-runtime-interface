@@ -116,6 +116,12 @@ recorded: the server password travels in one.
 | out | `close` | `id` | the driver closed the connection before its answer ended. The driver stops reading its event stream when its session closes, so every recording ends with one. |
 | in | `dropped` | `id` | the server closed the connection without an answer |
 
+OpenCode 2.1.2 compresses a large answer, such as the model list of
+`GET /api/model`, when the client accepts it (`Content-Encoding: gzip`). The
+proxy decompresses a gzip, deflate or br body, records the body the driver's
+client would read, and passes that body on without the encoding. A body in
+another encoding is passed on as a `dropped` connection.
+
 A request is recorded once its body has arrived. A response or an event is
 recorded just before the proxy passes it to the driver, and an event that
 arrives after the driver closed its stream is not recorded, because it never

@@ -324,11 +324,28 @@ Replay detects:
   reaches the host; without the one that fails the declined command, the
   command shows as completed when the turn ends. When every recorded frame
   was replayed and a scenario assertion still fails, the Antigravity replay's
-  error names the recording file, the frame replayed last, and the recorded
-  frame the outcome depended on where one can be named: the last recorded
-  inbound frame that holds the native id of an item the assertion looked at
-  (for the commands above, their last `tool_call_update` or permission
-  request). Its line leads the error (`ReplaySequencer.checkFailed`).
+  error names the recording file, the recorded frame the outcome depended on,
+  whose line leads the error, and the frame replayed last
+  (`ReplaySequencer.checkFailed`). Every assertion of the six scenarios
+  carries the turns it looks at, and the items of them where it looks at
+  items (`ScenarioCheckError`). The frame it depended on is the last recorded
+  inbound frame holding the native id of such an item (for the commands
+  above, their last `tool_call_update` or permission request). Else it is, for
+  each turn the assertion looks at, the ACP response that ended the turn,
+  labelled with the line of the turn's `session/prompt` request
+  (`acpTurnsDependedOn`): for a reply removed from `simple`, `depended on
+  (line 13, the response that ended turn 1, requested at line 11)`. A failure
+  the checks did not attribute counts as one about every turn.
+
+  One case names no recorded frame: a turn the assertion looks at whose
+  `session/prompt` request the recording does not hold. No assertion of the
+  six scenarios reaches it. Each looks at turns of the scenario's prompts;
+  the scenario runner starts a turn for every prompt or fails before any
+  assertion runs; a started turn's prompt request is an outbound frame
+  replay matched; and a replay that did not match every recorded frame fails
+  before any assertion runs too.
+  If it happened, the error would say `depended on: no recorded frame of what
+  the check looked at` and name the frame replayed last.
 
 Replay does not detect:
 

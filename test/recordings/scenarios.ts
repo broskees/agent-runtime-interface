@@ -462,22 +462,34 @@ function toolOutput(item: Item): string {
   return item.output ?? "";
 }
 
-/** A scenario check that failed, with the items it looked at: their native ids lead a replay to the recorded frames the outcome depended on. */
+/** What a scenario check looks at: the host's turns, by their index in the scenario's prompts, and any items of them. */
+export interface CheckSubject {
+  readonly turns: readonly number[];
+  readonly items?: readonly Item[];
+}
+
+/**
+ * A scenario check that failed, with what it looked at: a replay names the
+ * recorded frames the outcome depended on from it (an item's native id, a
+ * turn's own frames).
+ */
 export class ScenarioCheckError extends Error {
+  readonly turns: readonly number[];
   readonly items: readonly Item[];
-  constructor(failed: Error, items: readonly Item[]) {
+  constructor(failed: Error, subject: CheckSubject) {
     super(failed.message, { cause: failed });
     this.name = "ScenarioCheckError";
-    this.items = items;
+    this.turns = subject.turns;
+    this.items = subject.items ?? [];
   }
 }
 
-/** Runs `check`, which looks at `items`; a failure carries them. */
-function about(items: readonly Item[], check: () => void): void {
+/** Runs `check`, which looks at `subject`; a failure carries it. */
+function about(subject: CheckSubject, check: () => void): void {
   try {
     check();
   } catch (error) {
-    throw error instanceof Error ? new ScenarioCheckError(error, items) : error;
+    throw error instanceof Error ? new ScenarioCheckError(error, subject) : error;
   }
 }
 
@@ -488,47 +500,59 @@ function assistantMessages(run: ScenarioRun, index: number): Item[] {
 
 /**
  * Asserts what the scenario promises. `native` is what reached the native
- * side, from the driver's kit. A failed check of items throws a
- * ScenarioCheckError holding the items it looked at.
+ * side, from the driver's kit. Every failed check throws a
+ * ScenarioCheckError holding what it looked at: the turns, by their index in
+ * the scenario's prompts, and the items of them it looked at.
  */
 export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[]): void {
   const scenario = run.scenario;
   const where = `scenario ${scenario.name}`;
   const ends = terminals(run);
   const [firstTurn] = run.turnIds;
-  assert.equal(run.turnIds.length, scenario.prompts.length, `${where}: the host started one turn per prompt`);
+  const everyTurn = { turns: scenario.prompts.map((_prompt, index) => index) };
+  const firstOnly = { turns: [0] };
+  about(everyTurn, () => assert.equal(run.turnIds.length, scenario.prompts.length, `${where}: the host started one turn per prompt`));
   switch (scenario.name) {
     case "simple": {
-      assert.equal(ends.length, 1, `${where}: exactly one turn.terminal`);
-      assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`);
-      about(assistantMessages(run, 0), () => assert.ok(assistantTexts(run, 0).some((text) => text.trim() !== ""), `${where}: a settled assistant message with non-empty text`));
+      about(firstOnly, () => {
+        assert.equal(ends.length, 1, `${where}: exactly one turn.terminal`);
+        assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`);
+      });
+      about({ turns: [0], items: assistantMessages(run, 0) }, () => assert.ok(assistantTexts(run, 0).some((text) => text.trim() !== ""), `${where}: a settled assistant message with non-empty text`));
       return;
     }
     case "multi_turn":
     case "resume": {
       const own = hostTerminals(run);
-      if (scenario.name === "multi_turn") assert.equal(ends.length, 2, `${where}: two turn.terminal events`);
-      assert.deepEqual(
-        own.map((event) => (event.body as Body<"turn.terminal">).turnId),
-        run.turnIds,
-        `${where}: each turn ended once, in the order they started`,
-      );
-      assert.deepEqual(
-        own.map((event) => (event.body as Body<"turn.terminal">).status),
-        ["completed", "completed"],
-        `${where}: both turns completed`,
-      );
-      assert.deepEqual([...new Set(own.map((event) => event.threadId))], [run.threadId], `${where}: both turns ran on one thread`);
+      about(everyTurn, () => {
+        if (scenario.name === "multi_turn") assert.equal(ends.length, 2, `${where}: two turn.terminal events`);
+        assert.deepEqual(
+          own.map((event) => (event.body as Body<"turn.terminal">).turnId),
+          run.turnIds,
+          `${where}: each turn ended once, in the order they started`,
+        );
+        assert.deepEqual(
+          own.map((event) => (event.body as Body<"turn.terminal">).status),
+          ["completed", "completed"],
+          `${where}: both turns completed`,
+        );
+        assert.deepEqual([...new Set(own.map((event) => event.threadId))], [run.threadId], `${where}: both turns ran on one thread`);
+      });
       const second = assistantTexts(run, 1).join("\n");
-      about(assistantMessages(run, 1), () => assert.ok(second.toLowerCase().includes(scenario.word!), `${where}: the second turn's text ${JSON.stringify(second)} contains ${JSON.stringify(scenario.word)}`));
+      about({ turns: [1], items: assistantMessages(run, 1) }, () => assert.ok(second.toLowerCase().includes(scenario.word!), `${where}: the second turn's text ${JSON.stringify(second)} contains ${JSON.stringify(scenario.word)}`));
       if (scenario.name === "resume") {
-        assert.equal(run.sessionIds.length, 2, `${where}: the thread was resumed in a second session`);
-        assert.equal(run.turnSessions[1], run.sessionIds[1], `${where}: the second turn ran in the second session`);
-        assert.ok(run.resumedHandle !== undefined && run.resumedHandle !== "", `${where}: the second session resumed the thread by its native handle`);
-        const firstEnd = run.events.indexOf(own[0]!);
-        const secondSession = run.events.findIndex((event) => event.sessionId === run.sessionIds[1]);
-        assert.ok(firstEnd !== -1 && secondSession > firstEnd, `${where}: the first turn completed before the second session opened`);
-        assert.equal(run.events.filter((event) => event.body.type === "session.replaced").length, 0, `${where}: no session.replaced`);
+        // The second session, the handle it resumed by, and the second turn in it: the second turn's frames, which follow the resume.
+        about({ turns: [1] }, () => {
+          assert.equal(run.sessionIds.length, 2, `${where}: the thread was resumed in a second session`);
+          assert.equal(run.turnSessions[1], run.sessionIds[1], `${where}: the second turn ran in the second session`);
+          assert.ok(run.resumedHandle !== undefined && run.resumedHandle !== "", `${where}: the second session resumed the thread by its native handle`);
+        });
+        about(everyTurn, () => {
+          const firstEnd = run.events.indexOf(own[0]!);
+          const secondSession = run.events.findIndex((event) => event.sessionId === run.sessionIds[1]);
+          assert.ok(firstEnd !== -1 && secondSession > firstEnd, `${where}: the first turn completed before the second session opened`);
+          assert.equal(run.events.filter((event) => event.body.type === "session.replaced").length, 0, `${where}: no session.replaced`);
+        });
       }
       return;
     }
@@ -536,37 +560,41 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
     case "approval_denied": {
       const allowed = scenario.name === "approval_allowed";
       const commands = requestsOfKind(run, "command");
-      assert.ok(commands.length > 0, `${where}: a request of kind command reached the host (requests: ${JSON.stringify(run.requests.map((entry) => entry.request.kind))})`);
-      assert.ok(commands.every((entry) => entry.optionId !== undefined), `${where}: the host answered every command request`);
-      const answer = allowed ? native.find((entry) => entry.decision === "accept" && entry.scope === "once") : native.find((entry) => entry.decision === "decline");
-      assert.ok(answer !== undefined, `${where}: the host's ${allowed ? "allow-once" : "decline"} answer reached the native side as a recorded outbound frame (native answers: ${JSON.stringify(native)})`);
       const tools = turnItems(run, 0).filter((item) => TOOL_ITEM_KINDS.has(item.kind));
-      assert.equal(ends.length, 1, `${where}: the turn reached a terminal`);
+      about({ turns: [0], items: tools }, () => {
+        assert.ok(commands.length > 0, `${where}: a request of kind command reached the host (requests: ${JSON.stringify(run.requests.map((entry) => entry.request.kind))})`);
+        assert.ok(commands.every((entry) => entry.optionId !== undefined), `${where}: the host answered every command request`);
+        const answer = allowed ? native.find((entry) => entry.decision === "accept" && entry.scope === "once") : native.find((entry) => entry.decision === "decline");
+        assert.ok(answer !== undefined, `${where}: the host's ${allowed ? "allow-once" : "decline"} answer reached the native side as a recorded outbound frame (native answers: ${JSON.stringify(native)})`);
+      });
+      about(firstOnly, () => assert.equal(ends.length, 1, `${where}: the turn reached a terminal`));
       if (allowed) {
         // The command ran: what it printed, the marker, reached the host.
-        about(tools, () =>
+        about({ turns: [0], items: tools }, () =>
           assert.ok(
             tools.some((item) => item.status === "completed" && toolOutput(item).includes(scenario.marker!)),
             `${where}: a command or tool item completed with the marker in its output (items: ${JSON.stringify(tools.map((item) => [item.kind, item.status, toolOutput(item)]))})`,
           ),
         );
-        assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`);
+        about(firstOnly, () => assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`));
       } else {
         const shown = (items: readonly Item[]): string => JSON.stringify(items.map((item) => [item.kind, item.status, toolOutput(item)]));
         const leaked = tools.filter((item) => item.status === "completed" && toolOutput(item).includes(scenario.marker!));
-        about(leaked, () => assert.ok(leaked.length === 0, `${where}: no completed command or tool item's output holds the marker (items: ${shown(leaked)})`));
+        about({ turns: [0], items: leaked }, () => assert.ok(leaked.length === 0, `${where}: no completed command or tool item's output holds the marker (items: ${shown(leaked)})`));
         // The host declined every command, so none ran.
         const ran = tools.filter((item) => item.kind === "command_execution" && item.status === "completed");
-        about(ran, () => assert.ok(ran.length === 0, `${where}: no command item completed (items: ${shown(ran)})`));
+        about({ turns: [0], items: ran }, () => assert.ok(ran.length === 0, `${where}: no command item completed (items: ${shown(ran)})`));
       }
       return;
     }
     case "interrupt": {
-      assert.ok(run.interrupted !== undefined && run.interrupted.turnId === firstTurn, `${where}: the host interrupted the turn after its first assistant text`);
-      assert.equal(ends.length, 1, `${where}: exactly one turn.terminal`);
-      assert.equal(ends[0]!.status, "interrupted", `${where}: the turn ended interrupted`);
-      const end = run.events.find((event) => event.body.type === "turn.terminal")!;
-      assert.ok(end.seq > run.interrupted!.afterSeq, `${where}: the turn ended after the text the host waited for`);
+      about(firstOnly, () => {
+        assert.ok(run.interrupted !== undefined && run.interrupted.turnId === firstTurn, `${where}: the host interrupted the turn after its first assistant text`);
+        assert.equal(ends.length, 1, `${where}: exactly one turn.terminal`);
+        assert.equal(ends[0]!.status, "interrupted", `${where}: the turn ended interrupted`);
+        const end = run.events.find((event) => event.body.type === "turn.terminal")!;
+        assert.ok(end.seq > run.interrupted!.afterSeq, `${where}: the turn ended after the text the host waited for`);
+      });
       return;
     }
   }

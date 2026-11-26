@@ -5,8 +5,9 @@
 // header names. When the scenario ends, the sequencer must have matched every
 // recorded outbound frame, the driver must have taken every recorded inbound
 // frame, and the scenario's assertions must hold. A failed assertion names the
-// recording file, the frame replayed last, and the recorded frame the outcome
-// depended on where one can be named (ReplaySequencer.checkFailed).
+// recording file, the recorded frame the outcome depended on, and the frame
+// replayed last (ReplaySequencer.checkFailed): the last frame naming an item
+// the check looked at, else the response that ended each turn it looked at.
 
 import * as fs from "node:fs";
 import type { DiagnosticEntry } from "../../../src/generated/host.ts";
@@ -20,7 +21,7 @@ import type { ScenarioRun } from "../scenarios.ts";
 import type { ReplaySequencer } from "../sequencer.ts";
 import { startStdioReplay } from "../stdio/replay-process.ts";
 import type { StdioReplay } from "../stdio/replay-process.ts";
-import { acpNativeAnswers } from "../acp/frames.ts";
+import { acpNativeAnswers, acpTurnsDependedOn } from "../acp/frames.ts";
 import { ACP_PROTOCOL_WORDS } from "../acp/protocol-words.ts";
 import { ANTIGRAVITY_RECORDER_ENV_POLICY, createAntigravityLayout, fixedModelChooser, runAntigravityScenario } from "./run.ts";
 
@@ -91,9 +92,13 @@ export async function replayAntigravity(source: Recording | string, options: Ant
     try {
       checkScenario(result.run, replayedNativeAnswers(recording, replay.sequencer));
     } catch (error) {
-      // Every recorded frame was replayed, yet the outcome is wrong: the error names the recorded frame the outcome depended on.
-      const nativeIds = error instanceof ScenarioCheckError ? error.items.flatMap((item) => (typeof item.native?.id === "string" ? [item.native.id] : [])) : [];
-      throw replay.sequencer.checkFailed(error, nativeIds);
+      // Every recorded frame was replayed, yet the outcome is wrong: the error names the recorded frames the outcome depended on.
+      // An item's last frame when the check looked at an item the recording names; else the frames of the turns it looked at.
+      // A failure the checks did not attribute is about every turn.
+      const subject = error instanceof ScenarioCheckError ? error : { turns: scenario.prompts.map((_prompt, index) => index), items: [] };
+      const nativeIds = subject.items.flatMap((item) => (typeof item.native?.id === "string" ? [item.native.id] : []));
+      const named = replay.sequencer.lastFrameNaming(nativeIds);
+      throw replay.sequencer.checkFailed(error, named === undefined ? acpTurnsDependedOn(recording, subject.turns) : [named]);
     }
     return { run: result.run, replay, diagnostics: result.diagnostics };
   } finally {

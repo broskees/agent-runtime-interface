@@ -37,6 +37,13 @@ export class ReplayDriftError extends Error {
   }
 }
 
+/** A recorded frame a failed scenario check depended on, with why: "the last recorded frame naming call-1". */
+export interface DependedOnFrame {
+  readonly line: number;
+  readonly frame: Frame;
+  readonly why: string;
+}
+
 /** A scenario check that failed once replay was over, with the recording's context. */
 export class ReplayCheckError extends Error {
   readonly file: string;
@@ -343,27 +350,34 @@ export class ReplaySequencer {
     );
   }
 
-  /**
-   * A scenario check that failed once replay was over (`error`), with the
-   * recording's context: the frame replayed last, and the recorded frame the
-   * outcome depended on, where one can be named: the last recorded inbound
-   * frame holding one of `nativeIds`, the native ids of the items the check
-   * looked at. The error names the file and the line of that frame, else of
-   * the frame replayed last.
-   */
-  checkFailed(error: unknown, nativeIds: readonly string[]): ReplayCheckError {
-    const message = error instanceof Error ? error.message : String(error);
-    const last = this.#last();
+  /** The last recorded inbound frame holding one of `nativeIds` (the native ids of items) as a string, anywhere inside it. */
+  lastFrameNaming(nativeIds: readonly string[]): DependedOnFrame | undefined {
     const ids = new Set(nativeIds);
-    const lastReplayed = `\n  last replayed (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}`;
     for (let index = this.recording.frames.length - 1; index >= 0; index -= 1) {
       const entry = this.recording.frames[index]!;
       const id = entry.frame.dir === "in" ? idIn(entry.frame, ids) : undefined;
-      if (id === undefined) continue;
-      return new ReplayCheckError(this.recording.file, entry.line, `${message}\n  depended on (line ${entry.line}, the last recorded frame naming ${id}): ${showFrame(entry.frame)}${lastReplayed}`, error);
+      if (id !== undefined) return { line: entry.line, frame: entry.frame, why: `the last recorded frame naming ${id}` };
     }
-    const why = ids.size === 0 ? "the check looked at no item with a native id" : `no recorded frame names ${[...ids].join(", ")}`;
-    return new ReplayCheckError(this.recording.file, last?.line ?? 1, `${message}\n  depended on: ${why}${lastReplayed}`, error);
+    return undefined;
+  }
+
+  /**
+   * A scenario check that failed once replay was over (`error`), with the
+   * recording's context: each recorded frame the outcome depended on, which
+   * the driver's kit names from what the check looked at, then the frame
+   * replayed last. The error names the file and the line of the first frame
+   * depended on. With none, which no check of the six scenarios reaches (see
+   * docs/recordings.md), it says so and names the line of the frame replayed
+   * last.
+   */
+  checkFailed(error: unknown, dependedOn: readonly DependedOnFrame[]): ReplayCheckError {
+    const message = error instanceof Error ? error.message : String(error);
+    const last = this.#last();
+    const lastReplayed = `\n  last replayed (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}`;
+    const [first] = dependedOn;
+    if (first === undefined) return new ReplayCheckError(this.recording.file, last?.line ?? 1, `${message}\n  depended on: no recorded frame of what the check looked at${lastReplayed}`, error);
+    const shown = dependedOn.map((entry) => `\n  depended on (line ${entry.line}, ${entry.why}): ${showFrame(entry.frame)}`).join("");
+    return new ReplayCheckError(this.recording.file, first.line, `${message}${shown}${lastReplayed}`, error);
   }
 
   /** The line of the frame replayed last. */

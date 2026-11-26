@@ -20,7 +20,7 @@ import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { encodeRecording, readRecording } from "../../recordings/format.ts";
 import type { Frame, Recording } from "../../recordings/format.ts";
-import { acpNativeAnswers } from "../../recordings/acp/frames.ts";
+import { acpNativeAnswers, acpTurnsDependedOn } from "../../recordings/acp/frames.ts";
 import { ANTIGRAVITY_IGNORED_FIELDS } from "../../recordings/antigravity/frames.ts";
 import { recordAntigravity } from "../../recordings/antigravity/record.ts";
 import type { AntigravityRecordOutcome } from "../../recordings/antigravity/record.ts";
@@ -28,8 +28,8 @@ import { replayAntigravity } from "../../recordings/antigravity/replay.ts";
 import { ACP_PROTOCOL_WORDS } from "../../recordings/acp/protocol-words.ts";
 import { startTurnAfterItsText } from "../../recordings/late-start-turn.ts";
 import { FRAME_FORMAT_FIELDS, NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_SHELL, NEUTRAL_SOCKET_PATH, NEUTRAL_TIME, NEUTRAL_TMP_PATH, PLACEHOLDERS, createSanitiser } from "../../recordings/sanitiser.ts";
-import { SCENARIOS, SCENARIO_NAMES, checkScenario } from "../../recordings/scenarios.ts";
-import type { ScenarioName } from "../../recordings/scenarios.ts";
+import { SCENARIOS, SCENARIO_NAMES, ScenarioCheckError, checkScenario } from "../../recordings/scenarios.ts";
+import type { ScenarioName, ScenarioRun } from "../../recordings/scenarios.ts";
 import { ReplayCheckError, ReplayDriftError, showFrame } from "../../recordings/sequencer.ts";
 import { resanitiseRecording } from "../../recordings/resanitise.ts";
 import { FAKE_AGY_VERSION, fakeAgyOnPath } from "./fake-agy.ts";
@@ -362,20 +362,133 @@ test("approval_denied: Antigravity replay fails when the stdout frame that fails
   });
 });
 
-test("simple: when every frame of the reply is removed, Antigravity replay fails naming the file and the frame replayed last, and says no recorded frame can be named", async () => {
+/** Each turn's frames in `recording`: its session/prompt request and the response that ended it. */
+function turnsOf(recording: Recording): Array<{ request: { index: number; line: number; frame: Frame }; response: { index: number; line: number; frame: Frame } }> {
+  const turns: Array<{ request: { index: number; line: number; frame: Frame }; response: { index: number; line: number; frame: Frame } }> = [];
+  recording.frames.forEach((entry, index) => {
+    if (entry.frame.kind !== "stdin" || messageOf(entry.frame)["method"] !== "session/prompt") return;
+    const id = messageOf(entry.frame)["id"];
+    const answer = recording.frames.findIndex((later, position) => position > index && later.frame.kind === "stdout" && later.frame["proc"] === entry.frame["proc"] && messageOf(later.frame)["id"] === id && messageOf(later.frame)["result"] !== undefined);
+    turns.push({ request: { index, line: entry.line, frame: entry.frame }, response: { index: answer, line: recording.frames[answer]!.line, frame: recording.frames[answer]!.frame } });
+  });
+  return turns;
+}
+
+/** The scenario check's error once replay is over, for a check about one turn: the file and the line of the response that ended it, the check, that response, and the frame replayed last. */
+function turnCheckError(file: string, check: string, turn: number, frames: ReturnType<typeof turnsOf>[number], last: { line: number; frame: Frame }): string {
+  return `${file}:${frames.response.line}: ${check}\n  depended on (line ${frames.response.line}, the response that ended turn ${turn}, requested at line ${frames.request.line}): ${showFrame(frames.response.frame)}\n  last replayed (line ${last.line}): ${showFrame(last.frame)}`;
+}
+
+const isReplyChunk = (frame: Frame): boolean => frame.kind === "stdout" && (messageOf(frame)["params"] as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === "agent_message_chunk";
+
+test("simple: when every frame of the reply is removed, Antigravity replay fails naming the file, the response that ended the turn and the frame replayed last", async () => {
   const recording = await recordingOf("simple");
   const { file } = editedCopy(recording, "removed-reply", (frames) => {
-    for (let index = frames.length - 1; index >= 0; index -= 1) {
-      if ((messageOf(frames[index]!)?.["params"] as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === "agent_message_chunk") frames.splice(index, 1);
-    }
+    for (let index = frames.length - 1; index >= 0; index -= 1) if (isReplyChunk(frames[index]!)) frames.splice(index, 1);
   });
   const copy = await readRecording(file);
-  const last = copy.frames.at(-1)!;
+  const [turn] = turnsOf(copy);
   await assert.rejects(replayAntigravity(file, { timeoutMs: 10_000 }), (error: unknown) => {
     assert.ok(error instanceof ReplayCheckError, String(error));
-    assert.equal(error.message, `${file}:${last.line}: scenario simple: a settled assistant message with non-empty text\n  depended on: the check looked at no item with a native id\n  last replayed (line ${last.line}): ${showFrame(last.frame)}`);
+    assert.equal(error.message, turnCheckError(file, "scenario simple: a settled assistant message with non-empty text", 1, turn!, copy.frames.at(-1)!));
     return true;
   });
+});
+
+/**
+ * A signed copy of `recording` whose reply in turn `turn` (1 for the first)
+ * is one agent_message_chunk holding the whole text, as an agent may send
+ * it; the fake agent sends each reply in two. Returns the copy and the
+ * index of that sole chunk.
+ */
+function soleReplyChunk(recording: Recording, turn: number, label: string): { file: string; chunk: number; text: string } {
+  const { request, response } = turnsOf(recording)[turn - 1]!;
+  const chunks = recording.frames.flatMap((entry, index) => (index > request.index && index < response.index && isReplyChunk(entry.frame) ? [index] : []));
+  assert.ok(chunks.length >= 2, `turn ${turn} of ${recording.header.scenario} replies in ${chunks.length} chunk(s)`);
+  const text = chunks.map((index) => ((messageOf(recording.frames[index]!.frame)["params"] as { update: { content: { text: string } } }).update.content.text)).join("");
+  const { file } = editedCopy(recording, label, (frames) => {
+    ((messageOf(frames[chunks[0]!]!)["params"] as { update: { content: { text: string } } }).update.content).text = text;
+    for (const index of chunks.slice(1).reverse()) frames.splice(index, 1);
+  });
+  return { file, chunk: chunks[0]!, text };
+}
+
+for (const [name, turn, check] of [
+  ["simple", 1, () => "scenario simple: a settled assistant message with non-empty text"],
+  ["multi_turn", 2, () => `scenario multi_turn: the second turn's text "" contains ${JSON.stringify(SCENARIOS.find((each) => each.name === "multi_turn")!.word)}`],
+] as const) {
+  test(`${name}: when the sole chunk of turn ${turn}'s reply is removed, Antigravity replay fails naming the file, the line, the response that ended the turn and the frame replayed last`, async () => {
+    const recording = await recordingOf(name);
+    // The reply as one chunk replays: the tape is sound before the chunk goes.
+    const sole = soleReplyChunk(recording, turn, `sole-reply-chunk-${turn}`);
+    assert.ok(sole.text.trim() !== "", "the reply holds text");
+    await replayAntigravity(sole.file);
+    const { file } = editedCopy(await readRecording(sole.file), `removed-sole-reply-chunk-${turn}`, (frames) => frames.splice(sole.chunk, 1));
+    const copy = await readRecording(file);
+    assert.equal(copy.frames.filter((entry, index) => index > turnsOf(copy)[turn - 1]!.request.index && index < turnsOf(copy)[turn - 1]!.response.index && isReplyChunk(entry.frame)).length, 0, "the turn holds no reply chunk");
+    await assert.rejects(replayAntigravity(file, { timeoutMs: 10_000 }), (error: unknown) => {
+      assert.ok(error instanceof ReplayCheckError, String(error));
+      assert.equal(error.message, turnCheckError(file, check(), turn, turnsOf(copy)[turn - 1]!, copy.frames.at(-1)!));
+      return true;
+    });
+  });
+}
+
+test("interrupt: when the response that ends the turn says end_turn instead of cancelled, Antigravity replay fails naming the file, that response and the frame replayed last", async () => {
+  const recording = await recordingOf("interrupt");
+  const [turn] = turnsOf(recording);
+  assert.equal((messageOf(turn!.response.frame)["result"] as { stopReason: string }).stopReason, "cancelled");
+  const { file } = editedCopy(recording, "turn-end-not-cancelled", (frames) => {
+    (messageOf(frames[turn!.response.index]!)["result"] as { stopReason: string }).stopReason = "end_turn";
+  });
+  const copy = await readRecording(file);
+  await assert.rejects(replayAntigravity(file, { timeoutMs: 10_000 }), (error: unknown) => {
+    assert.ok(error instanceof ReplayCheckError, String(error));
+    const check = (error.cause as Error).message;
+    assert.ok(check.startsWith("scenario interrupt: the turn ended interrupted\n"), check);
+    assert.equal(error.message, turnCheckError(file, check, 1, turnsOf(copy)[0]!, copy.frames.at(-1)!));
+    return true;
+  });
+});
+
+test("every scenario check that fails names the turns it looked at, and each of those turns has recorded frames to name: none falls back to naming nothing", async () => {
+  const withTerminal = (run: ScenarioRun, status: string): ScenarioRun => ({ ...run, events: run.events.map((event) => (event.body.type === "turn.terminal" ? { ...event, body: { ...event.body, status } } : event)) as ScenarioRun["events"] });
+  const withoutTerminals = (run: ScenarioRun): ScenarioRun => ({ ...run, events: run.events.filter((event) => event.body.type !== "turn.terminal") });
+  const withoutItemsOf = (run: ScenarioRun, kinds: readonly string[]): ScenarioRun => ({ ...run, events: run.events.filter((event) => !(event.body.type === "item.upsert" && kinds.includes(event.body.item.kind ?? ""))) });
+  const withoutLastTurn = (run: ScenarioRun): ScenarioRun => ({ ...run, turnIds: run.turnIds.slice(0, -1), turnSessions: run.turnSessions.slice(0, -1) });
+  const withoutInterrupt = (run: ScenarioRun): ScenarioRun => {
+    const { interrupted: _interrupted, ...rest } = run;
+    return rest;
+  };
+  for (const name of SCENARIO_NAMES) {
+    const recording = await recordingOf(name);
+    const { run } = await replayAntigravity(recording);
+    const native = acpNativeAnswers(recording.frames.map((entry) => entry.frame));
+    let failed = 0;
+    for (const [label, broken] of [
+      ["every turn failed", withTerminal(run, "failed")],
+      ["every turn interrupted", withTerminal(run, "interrupted")],
+      ["no turn.terminal", withoutTerminals(run)],
+      ["no assistant message", withoutItemsOf(run, ["assistant_message"])],
+      ["no command or tool item", withoutItemsOf(run, ["command_execution", "tool_call", "mcp_tool_call", "dynamic_tool_call"])],
+      ["one turn fewer", withoutLastTurn(run)],
+      ["no interrupt", withoutInterrupt(run)],
+      ["no answer reached the agent", run],
+    ] as const) {
+      let thrown: unknown;
+      try {
+        checkScenario(broken, label === "no answer reached the agent" ? [] : native);
+      } catch (error) {
+        thrown = error;
+      }
+      if (thrown === undefined) continue;
+      failed += 1;
+      assert.ok(thrown instanceof ScenarioCheckError, `${name}, ${label}: ${String(thrown)}`);
+      assert.ok(thrown.turns.length > 0, `${name}, ${label}: ${thrown.message}`);
+      assert.ok(acpTurnsDependedOn(recording, thrown.turns).length === thrown.turns.length, `${name}, ${label}: each turn the check looked at has a recorded response`);
+    }
+    assert.ok(failed >= 3, `${name}: ${failed} of the broken runs failed a check`);
+  }
 });
 
 test("replay ends a process's pipes once its exit came and the lines recorded right after it were handed over: a line recorded after the exit still reaches the driver", async () => {

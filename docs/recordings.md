@@ -1401,9 +1401,8 @@ header names.
 
 ### What the live Codex tapes add to the fake
 
-The six Codex 0.172.0 recordings use `gpt-6-luna`. Replay covers the
-differences below without substituting synthetic frames or changing the
-existing fake tests. References are relative to `test/drivers/codex/recordings/`.
+The six Codex 0.172.0 recordings use `gpt-6-luna`. Replay keeps the observed
+frames. References are relative to `test/drivers/codex/recordings/`.
 
 - The live handshake announces remote-control status even when disabled.
   It also announces account state, built-in MCP startup, moderation,
@@ -1429,6 +1428,19 @@ existing fake tests. References are relative to `test/drivers/codex/recordings/`
 The live recorder allows only one approval for the exact marker command in
 the isolated working directory. It refuses a different command, a different
 working directory, any other kind of approval, or a second request.
+
+#### Replaying the pre-admission captures
+
+The six original live tapes predate the driver's `codex --version` session
+admission probe. Only the live replay test opts in to compatibility. The
+adapter checks each file's body checksum and pins that checksum and the
+original header metadata. It supplies a test-only successful version probe
+using the observed version from the header, just before the recorded login
+at line 2, and again at line 36 of `resume.ndjson`. It runs no executable.
+The probe response is not captured traffic. Wrong or extra spawns still fail,
+and the existing sequencer matches every original frame in order at its
+original file line. Default replay has no adapter: new tapes must record
+their own admission probes, and a changed or missing probe fails replay.
 
 ## How to record
 

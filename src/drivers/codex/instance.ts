@@ -241,12 +241,15 @@ export class CodexInstance implements Instance {
   async probe(options?: { deep?: boolean }): Promise<ProbeResult> {
     const checkedAt = new Date().toISOString();
     const binary = this.#config.binaryPath;
-    const path = await this.#host.process.resolveExecutable(binary);
+    const env = this.#forwardedEnvironment();
+    // Use the same PATH for lookup and spawn, on the host that owns the process.
+    const searchPath = env["PATH"];
+    const path = await this.#host.process.resolveExecutable(binary, searchPath === undefined ? undefined : { path: searchPath });
     if (path === null) return { ok: false, installed: false, error: this.#unavailable().callError, checkedAt };
     let version: string | undefined;
     let ok = false;
     try {
-      const run = await this.#run(["--version"]);
+      const run = await this.#run(["--version"], env);
       version = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(run.stdout)?.[1];
       ok = run.code === 0 && version !== undefined;
     } catch (error) {
@@ -266,8 +269,8 @@ export class CodexInstance implements Instance {
   }
 
   /** Runs `codex <args>` to completion, for probes and the sign-in check. */
-  async #run(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
-    const child = await this.#host.process.spawn({ command: this.#config.binaryPath, args, purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: this.#forwardedEnvironment() });
+  async #run(args: string[], env = this.#forwardedEnvironment()): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    const child = await this.#host.process.spawn({ command: this.#config.binaryPath, args, purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env });
     const [stdout, stderr] = await Promise.all([readAll(child.stdout), readAll(child.stderr)]);
     const exit = await child.exited;
     return { code: exit.code, stdout, stderr };

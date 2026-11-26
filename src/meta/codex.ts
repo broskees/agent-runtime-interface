@@ -41,8 +41,9 @@ export const CODEX_MINIMUM_VERSION = "0.172.0";
  */
 export const CODEX_TESTED_VERSIONS = `>=${CODEX_MINIMUM_VERSION} <0.173.0`;
 
-/** The Codex CLI's own update step (https://learn.chatgpt.com/docs/developer-commands#cli-codex-update), named when `codex` is older than the minimum. */
-export const CODEX_UPDATE_STEP = "Update the Codex CLI with `codex update`.";
+/** OpenAI's CLI setup and release downloads, usable even on versions without self-update. */
+export const CODEX_UPDATE_STEP =
+  "Update Codex using your installation method (npm: `npm install -g @openai/codex`; Homebrew: `brew upgrade --cask codex`). For the standalone installer, rerun the installer from https://learn.chatgpt.com/docs/codex/cli. For a manually downloaded release binary, replace it with the appropriate binary from https://github.com/openai/codex/releases/latest. For other package managers, update with the manager that installed it.";
 
 export const CODEX_ICON: Icon = {
   type: "svg",

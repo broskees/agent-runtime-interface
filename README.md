@@ -336,7 +336,7 @@ same error before any agent starts. The error names the version found, the
 path, the minimum and the vendor's own update step, for example:
 
 ```text
-Codex CLI 0.171.0 (/usr/local/bin/codex) is older than 0.172.0, the oldest version this driver supports. Update the Codex CLI with `codex update`.
+Codex CLI 0.100.0 (/usr/local/bin/codex) is older than 0.172.0, the oldest version this driver supports. Update Codex using your installation method (npm: `npm install -g @openai/codex`; Homebrew: `brew upgrade --cask codex`). For the standalone installer, rerun the installer from https://learn.chatgpt.com/docs/codex/cli. For a manually downloaded release binary, replace it with the appropriate binary from https://github.com/openai/codex/releases/latest. For other package managers, update with the manager that installed it.
 ```
 
 A CLI above the tested range still runs, with an `untested_version` advisory.
@@ -344,7 +344,7 @@ A CLI above the tested range still runs, with an `untested_version` advisory.
 | Driver | CLI | Minimum | Update step |
 |---|---|---|---|
 | `antigravity` | `agy` | 1.5.0 | `agy update` |
-| `codex` | `codex` | 0.172.0 | `codex update` |
+| `codex` | `codex` | 0.172.0 | [Update using your installation method](docs/drivers/codex.md#the-users-own-codex-and-its-minimum) |
 | `fx` | `fx` | 0.0.13 | `fx upgrade` |
 | `grok` | `grok` | 1.0.70 | `grok update` |
 | `kiro` | `kiro-cli` | 3.0.0 | `kiro-cli update` |

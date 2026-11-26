@@ -42,7 +42,8 @@ built-in.
 ## The user's own `muse`, and its minimum
 
 ARI runs the `muse` the user installed, found on `PATH` or at the path the
-config names, and never downloads, installs or updates one. The minimum is
+config names, and never downloads, installs or updates one. If the instance
+supplies `environment.PATH`, both lookup and `muse --version` use it. The minimum is
 Muse Code 1.4.25, the lower bound of the tested range `>=1.4.25 <1.4.26`. With
 an older `muse`, `status()` is `unavailable` with `driver_unavailable` (with
 `installed: true` and the version found), and `openSession` rejects with the

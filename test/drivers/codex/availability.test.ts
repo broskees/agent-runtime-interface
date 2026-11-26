@@ -3,7 +3,7 @@
 // `status()` names the binary to install and `openSession` rejects with
 // `driver_unavailable`. With the CLI present, `status()` reports its version:
 // at the minimum with no advisory, above the tested range with an advisory,
-// and below the minimum as `driver_unavailable` naming `codex update`, which
+// and below the minimum as `driver_unavailable` naming the update options, which
 // `openSession` rejects with too. ARI never installs or updates `codex`.
 
 import assert from "node:assert/strict";
@@ -98,10 +98,10 @@ describe("a missing Codex CLI fails loudly only when used", () => {
     }
   });
 
-  test("a codex older than the minimum is refused: status() is driver_unavailable naming the version, the path, the minimum and `codex update`; openSession rejects the same way and no app-server starts", async () => {
+  test("a codex older than the minimum is refused: status() names the version, path, minimum and installer-specific update steps; openSession rejects the same way and no app-server starts", async () => {
     await checkRealVersionOutput();
     // A prerelease of the minimum comes before it, as semver orders them.
-    for (const version of ["0.171.9", "0.172.0-alpha.3", "0.100.0"]) {
+    for (const version of ["0.100.0", "0.171.9", "0.172.0-alpha.3"]) {
       rig = await codexRig({ version });
       const status = await rig.instance.status();
       assert.equal(status.state, "unavailable");

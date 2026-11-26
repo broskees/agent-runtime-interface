@@ -202,12 +202,15 @@ export class MuseInstance implements Instance {
     } catch (error) {
       return { ok: false, installed: false, error: toCallError(error) ?? callErrors.transport(String(error)).callError, checkedAt };
     }
-    const path = await this.#host.process.resolveExecutable(this.#config.binaryPath);
+    const env = this.#forwardedEnvironment();
+    // Use the same PATH for lookup and spawn, on the host that owns the process.
+    const searchPath = env["PATH"];
+    const path = await this.#host.process.resolveExecutable(this.#config.binaryPath, searchPath === undefined ? undefined : { path: searchPath });
     if (path === null) return { ok: false, installed: false, error: this.#cliMissing().callError, checkedAt };
     let version: string | undefined;
     let ok = false;
     try {
-      const child = await this.#host.process.spawn({ command: this.#config.binaryPath, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: this.#forwardedEnvironment() });
+      const child = await this.#host.process.spawn({ command: this.#config.binaryPath, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env });
       const [stdout, stderr] = await Promise.all([readAll(child.stdout), readAll(child.stderr)]);
       const exit = await child.exited;
       version = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(`${stdout}\n${stderr}`)?.[1];

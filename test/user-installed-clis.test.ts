@@ -55,9 +55,9 @@ const CLI_DRIVERS: readonly CliDriver[] = [
     minimums: [{ minimum: CODEX_MINIMUM_VERSION, range: CODEX_TESTED_VERSIONS }],
     readmeMinimum: "0.172.0",
     updateStep: CODEX_UPDATE_STEP,
-    updateCommand: "`codex update`",
-    vendorDocs: "https://learn.chatgpt.com/docs/developer-commands#cli-codex-update",
-    example: { name: "Codex CLI", version: "0.171.0", path: "/usr/local/bin/codex", minimum: CODEX_MINIMUM_VERSION },
+    updateCommand: "Update using your installation method",
+    vendorDocs: "https://learn.chatgpt.com/docs/codex/cli",
+    example: { name: "Codex CLI", version: "0.100.0", path: "/usr/local/bin/codex", minimum: CODEX_MINIMUM_VERSION },
   },
   {
     kind: "fx",

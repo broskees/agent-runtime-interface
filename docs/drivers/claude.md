@@ -42,7 +42,7 @@ executable provides the SDK in one of two ways:
   <cacheDir>/adapters/@anthropic-ai/claude-agent-sdk/0.3.330/
     package.json, sdk.mjs, ...                                the SDK
     node_modules/@anthropic-ai/claude-agent-sdk-<os>-<arch>/  its native binary
-    .ari-install.json                                         each file's size and sha256
+    .ari-install.json                                         each file's size, mode and sha256
   ```
 
   So the SDK finds its native binary by itself, exactly as in an npm install,
@@ -64,13 +64,16 @@ executable provides the SDK in one of two ways:
   against the digest taken while it was verified, just before unpacking and
   once more as its bytes stream into the extractor.
 - **Repair.** `.ari-install.json`, written before the directory is
-  published, lists every file with its size and sha256. Loading the SDK
-  checks that every listed file is there with its size, and the sha256 of
-  the SDK's own files, the JavaScript the driver imports; the 381 MB native
-  binary is checked by size only. An install that fails the check (a missing
-  `sdk.mjs`, a missing or truncated binary, a changed `sdk.mjs`, no record)
-  is reported unavailable with `Run maintenance.install on this instance to
-  repair it, or set sdkDirectory in the driver config ...`.
+  published, lists every file with its size, permission bits and sha256.
+  Loading the SDK checks that every listed file is there with its size and
+  every execute bit it was installed with, and the sha256 of the SDK's own
+  files, the JavaScript the driver imports; the 381 MB native binary is
+  checked by size and mode only. An install that fails the check (a missing
+  `sdk.mjs`, a missing or truncated binary, a binary that lost its execute
+  permission, a changed `sdk.mjs`, no record, or a record without modes,
+  which installs before modes were recorded have) is reported unavailable
+  with `Run maintenance.install on this instance to repair it, or set
+  sdkDirectory in the driver config ...`.
   `maintenance.install` checks every file's sha256, so it also finds a
   same-size change to the binary, and reinstalls a directory that is not
   whole. A whole install is not downloaded again; `update` installs the
@@ -425,14 +428,14 @@ plain JavaScript like the real `sdk.mjs`, and a shell-script native
 `claude`, laid out by `sdk-fixture.ts`) and a local npm registry: the
 install and its layout, a tampered tarball that installs nothing, which
 digests a manifest must offer, a download changed on disk after it was
-checked, two installs at once, the default registry, the repair of six kinds
-of damage, and that the pinned SDK needs nothing else at run time.
+checked, two installs at once, the default registry, the repair of eight
+kinds of damage, and that the pinned SDK needs nothing else at run time.
 `sdk-install-node.test.ts` (Node only) changes a download while it is being
 unpacked. `test/standalone/claude-sdk.e2e.ts` runs the same fixture through
 the standalone `ari-driver` with no `node` or `bun` on `PATH`, and through
-`ari-driver` under Node: both routes, the repair of a missing `sdk.mjs` and
-of a truncated binary, the message with no SDK, and that the executable holds
-no SDK code.
+`ari-driver` under Node: both routes, the repair of a missing `sdk.mjs`, of
+a truncated binary and of a binary that lost its execute permission, the
+message with no SDK, and that the executable holds no SDK code.
 
 `replay.test.ts` and `recorder.test.ts` cover the native recorder
 (`pnpm run record:claude`): they record the six recording scenarios from the

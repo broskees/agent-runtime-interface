@@ -572,9 +572,11 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
       about({ turns: [0], items: tools }, () => {
         assert.ok(commands.length > 0, `${where}: a request of kind command reached the host (requests: ${JSON.stringify(run.requests.map((entry) => entry.request.kind))})`);
         assert.ok(commands.every((entry) => entry.optionId !== undefined), `${where}: the host answered every command request`);
-        // A cancel is a decline that also stops the turn: the host's decline where the agent offered no plain one.
-        const answer = allowed ? native.find((entry) => entry.decision === "accept" && entry.scope === "once") : native.find((entry) => entry.decision === "decline" || entry.decision === "cancel");
-        assert.ok(answer !== undefined, `${where}: the host's ${allowed ? "allow-once" : "decline"} answer reached the native side as a recorded outbound frame (native answers: ${JSON.stringify(native)})`);
+        // A cancel is a decline that also stops the turn: the host's decline only where the agent offered no plain one. Where it offered one, the host chose it, and a cancel on the native side is a driver that turned it into something else.
+        const declineOffered = commands.some((entry) => (entry.request.options ?? []).some((option) => option.decision === "decline"));
+        const answer = allowed ? native.find((entry) => entry.decision === "accept" && entry.scope === "once") : native.find((entry) => entry.decision === "decline" || (!declineOffered && entry.decision === "cancel"));
+        const counts = allowed ? "" : declineOffered ? "; the agent offered a decline, so a native cancel does not count" : "; the agent offered no decline, so a native cancel counts";
+        assert.ok(answer !== undefined, `${where}: the host's ${allowed ? "allow-once" : "decline"} answer reached the native side as a recorded outbound frame (native answers: ${JSON.stringify(native)}${counts})`);
       });
       about(firstOnly, () => assert.equal(ends.length, 1, `${where}: the turn reached a terminal`));
       if (allowed) {

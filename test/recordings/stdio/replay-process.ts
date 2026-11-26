@@ -9,11 +9,12 @@
 //   - each recorded stdout and stderr line goes to the child's pipe once every
 //     frame before it has happened, and counts as taken when the driver's
 //     reader takes it off the pipe; the exit settles `exited` and counts as
-//     taken then. A pipe ends once the exit came and the lines recorded for
-//     it right after the exit, before the next frame the driver must send,
-//     were handed over: a process may exit before the driver read its last
-//     output, so those lines still reach the driver. A line recorded for it
-//     after that has no pipe to go to, and replay fails on it.
+//     taken then. A pipe ends once the exit came and the last line recorded
+//     for that pipe was handed over, wherever the recording holds it: a
+//     process may exit before the driver read its last output, and a driver
+//     that drains a pipe apart from waiting for the exit (an ACP driver's
+//     stderr) may start the next process before it reads the first one's last
+//     line. So each pipe stays open until its own recorded end.
 // Once replay has failed, every process ends at once (exit by SIGKILL, pipes
 // closed after what they hold), so the driver's cleanup does not wait for
 // frames that will never come; the failure is what the replay reports.
@@ -26,7 +27,7 @@ import type { Frame, Recording } from "../format.ts";
 import type { NativeProgress } from "../scenarios.ts";
 import { restoreWorkspace } from "../sanitiser.ts";
 import type { Sanitiser } from "../sanitiser.ts";
-import { ReplaySequencer } from "../sequencer.ts";
+import { ReplaySequencer, showFrame } from "../sequencer.ts";
 import type { IgnoredField } from "../sequencer.ts";
 import { LineSplitter, lineFrame, lineText, procOf } from "./frames.ts";
 import { spawnFrame } from "./tap.ts";
@@ -119,7 +120,7 @@ class ReplayChild {
     return this.#hasExited;
   }
 
-  /** The process exited; each pipe ends once it has handed over `lines` lines in all. */
+  /** The process exited; each pipe ends once it has handed over `lines` lines in all, every line the recording holds for it. */
   exit(exit: ProcessExit, lines: { readonly stdout: number; readonly stderr: number }): void {
     this.#hasExited = true;
     this.#lines = lines;
@@ -137,7 +138,7 @@ class ReplayChild {
     if (!this.stderr.ended) this.stderr.end();
   }
 
-  /** Ends each pipe once the process exited and the lines it gets after the exit were handed over. */
+  /** Ends each pipe once the process exited and the last line recorded for the pipe was handed over. */
   endPipes(): void {
     if (this.#lines === undefined) return;
     if (!this.stdout.ended && this.stdout.delivered >= this.#lines.stdout) this.stdout.end();
@@ -147,25 +148,14 @@ class ReplayChild {
 
 export function startStdioReplay(recording: Recording, options: StdioReplayOptions): StdioReplay {
   const children = new Map<number, ReplayChild>();
-  // For each recorded exit, by its line: how many lines each pipe of its process gets in all, counting those recorded
-  // after the exit up to the next frame the driver must send.
-  const linesAtEnd = new Map<number, { stdout: number; stderr: number }>();
-  const counted = new Map<number, { stdout: number; stderr: number }>();
-  const frames = recording.frames;
-  frames.forEach(({ frame, line }, index) => {
-    if (frame.kind === "stdout" || frame.kind === "stderr") {
-      const counts = counted.get(procOf(frame)) ?? { stdout: 0, stderr: 0 };
-      counts[frame.kind] += 1;
-      counted.set(procOf(frame), counts);
-    }
-    if (frame.kind !== "exit") return;
-    const total = { ...(counted.get(procOf(frame)) ?? { stdout: 0, stderr: 0 }) };
-    for (let after = index + 1; after < frames.length && frames[after]!.frame.dir === "in"; after += 1) {
-      const later = frames[after]!.frame;
-      if ((later.kind === "stdout" || later.kind === "stderr") && procOf(later) === procOf(frame)) total[later.kind] += 1;
-    }
-    linesAtEnd.set(line, total);
-  });
+  // For each process: how many lines the recording holds for each of its pipes, wherever they are.
+  const linesOf = new Map<number, { stdout: number; stderr: number }>();
+  for (const { frame } of recording.frames) {
+    if (frame.kind !== "stdout" && frame.kind !== "stderr") continue;
+    const counts = linesOf.get(procOf(frame)) ?? { stdout: 0, stderr: 0 };
+    counts[frame.kind] += 1;
+    linesOf.set(procOf(frame), counts);
+  }
 
   const sequencer: ReplaySequencer = new ReplaySequencer({
     recording,
@@ -182,7 +172,7 @@ export function startStdioReplay(recording: Recording, options: StdioReplayOptio
           child.endPipes();
           return;
         case "exit":
-          child.exit({ code: (frame["code"] ?? null) as number | null, signal: (frame["signal"] ?? null) as string | null }, linesAtEnd.get(line)!);
+          child.exit({ code: (frame["code"] ?? null) as number | null, signal: (frame["signal"] ?? null) as string | null }, linesOf.get(child.proc) ?? { stdout: 0, stderr: 0 });
           // `exited` settles now: the driver has it.
           queueMicrotask(() => sequencer.taken(line));
           return;
@@ -235,6 +225,19 @@ export function startStdioReplay(recording: Recording, options: StdioReplayOptio
     };
   };
 
+  /** Each pipe of an exited process that stays open for a line recorded later, with that line: a driver waiting for the pipe's end waits for it. */
+  const heldOpen = (): string =>
+    [...children.values()]
+      .filter((child) => child.hasExited)
+      .flatMap((child) =>
+        (["stdout", "stderr"] as const).flatMap((kind) => {
+          if (child[kind].ended) return [];
+          const next = recording.frames.filter((entry) => entry.frame.kind === kind && procOf(entry.frame) === child.proc)[child[kind].delivered];
+          return next === undefined ? [] : [`\n  held open: the ${kind} of process ${child.proc}, which exited, ends after its line ${next.line}: ${showFrame(next.frame)}`];
+        }),
+      )
+      .join("");
+
   sequencer.start();
   return {
     process: {
@@ -246,7 +249,7 @@ export function startStdioReplay(recording: Recording, options: StdioReplayOptio
     sequencer,
     progress: {
       failure: () => sequencer.failure,
-      describe: (what) => sequencer.describe(what),
+      describe: (what) => `${sequencer.describe(what)}${heldOpen()}`,
       onChange: (listener) => sequencer.onChange(listener),
     },
   };

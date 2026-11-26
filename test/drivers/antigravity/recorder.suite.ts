@@ -17,7 +17,7 @@ import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { readRecording } from "../../recordings/format.ts";
 import { ANTIGRAVITY_SIGN_IN_FILE, profileSignInFile, userSignInFile } from "../../recordings/antigravity/credentials.ts";
-import { AntigravitySignInMissingError, AntigravityWorkspaceInHomeError, antigravityEnvironment, describeAntigravityRun, failuresOf, recordAntigravity } from "../../recordings/antigravity/record.ts";
+import { AntigravitySignInMissingError, AntigravityWorkspaceCustomizedError, AntigravityWorkspaceInHomeError, antigravityEnvironment, describeAntigravityRun, failuresOf, recordAntigravity } from "../../recordings/antigravity/record.ts";
 import type { AntigravityRecordOutcome } from "../../recordings/antigravity/record.ts";
 import { replayAntigravity } from "../../recordings/antigravity/replay.ts";
 import { ANTIGRAVITY_RECORDER_ENV_POLICY, AntigravityModelChoiceError, createAntigravityLayout, defaultAntigravityModel } from "../../recordings/antigravity/run.ts";
@@ -411,6 +411,126 @@ test("a temp workspace inside the user's home stops the run before it starts agy
   assert.ok(outcomes[0]!.error!.message.includes(`inside your home ${home}`));
   assert.deepEqual(fake.processes(), [], "agy never started");
   assert.ok(!fs.existsSync(outcomes[0]!.workspace));
+});
+
+// Folders above the workspace, outside the user's home.
+
+/** A Git project beside the user's home (`git init`), holding `files`, with an empty tmp/ to point TMPDIR at. */
+function gitProject(files: { readonly [relative: string]: string }): string {
+  const project = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "project-")));
+  const init = spawnSync("git", ["init", "-q", project], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME: project, GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(init.status, 0, init.stderr);
+  for (const [relative, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(project, relative)), { recursive: true });
+    fs.writeFileSync(path.join(project, relative), text);
+  }
+  fs.mkdirSync(path.join(project, "tmp"));
+  return project;
+}
+
+/** Runs `run` with TMPDIR set to `directory`: the recorder makes its temp workspaces there. */
+async function withTmpdir<T>(directory: string, run: () => Promise<T>): Promise<T> {
+  const before = process.env["TMPDIR"];
+  process.env["TMPDIR"] = directory;
+  try {
+    return await run();
+  } finally {
+    if (before === undefined) delete process.env["TMPDIR"];
+    else process.env["TMPDIR"] = before;
+  }
+}
+
+test("the fake agy reads AGENTS.md, GEMINI.md and .agents/ in the folder it works in and each folder above up to its repository's root, only that folder outside a repository, and a personal folder the repository's .gemini/config.json names, as Antigravity's docs say", () => {
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "lookup-")));
+  const files: { [file: string]: string } = {
+    [path.join(outside, "AGENTS.md")]: "marker-lookup-above-repository",
+    [path.join(outside, "repo", "GEMINI.md")]: "marker-lookup-repository-root",
+    [path.join(outside, "repo", "sub", ".agents", "rules", "rule.md")]: "marker-lookup-between",
+    [path.join(outside, "repo", ".gemini", "config.json")]: JSON.stringify({ personal_customization_dir: "people/{user}" }),
+    [path.join(outside, "repo", "people", "ari-test-user", ".agents", "rules", "rule.md")]: "marker-lookup-personal",
+    [path.join(outside, "plain", "GEMINI.md")]: "marker-lookup-above-plain",
+    [path.join(outside, "plain", "work", "AGENTS.md")]: "marker-lookup-plain-workspace",
+  };
+  for (const [file, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  }
+  fs.mkdirSync(path.join(outside, "repo", ".git"));
+  fs.mkdirSync(path.join(outside, "repo", "sub", "work"));
+  const inRepository = loadedAntigravitySetup({ USER: "ari-test-user" }, path.join(outside, "repo", "sub", "work")).join("\n");
+  for (const marker of ["marker-lookup-repository-root", "marker-lookup-between", "marker-lookup-personal"]) assert.ok(inRepository.includes(marker), marker);
+  assert.ok(!inRepository.includes("marker-lookup-above-repository"));
+  const outsideRepository = loadedAntigravitySetup({ USER: "ari-test-user" }, path.join(outside, "plain", "work")).join("\n");
+  assert.ok(outsideRepository.includes("marker-lookup-plain-workspace"));
+  assert.ok(!outsideRepository.includes("marker-lookup-above-plain"));
+});
+
+const ABOVE = { agents: "marker-above-agents-md-5e21", gemini: "marker-above-gemini-md-0b9d", mcp: "marker-above-mcp-c4a7", personal: "marker-above-personal-rule-71fa" } as const;
+
+test("with TMPDIR in a Git project beside a separate HOME, whose root holds AGENTS.md, GEMINI.md and .agents/mcp_config.json, the recorder stops before it starts agy, naming each, and records nothing", async () => {
+  const { env } = seedHome();
+  const project = gitProject({
+    "AGENTS.md": `Always answer with ${ABOVE.agents}.\n`,
+    "GEMINI.md": `Always answer with ${ABOVE.gemini}.\n`,
+    ".agents/mcp_config.json": JSON.stringify({ mcpServers: { [ABOVE.mcp]: { command: ABOVE.mcp } } }),
+  });
+  const tmp = path.join(project, "tmp");
+  const { outcomes, fake, outDir } = await withTmpdir(tmp, () => recordWithFake(env, ["simple", "multi_turn"]));
+  assert.equal(outcomes.length, 1, "the run stopped");
+  const outcome = outcomes[0]!;
+  assert.ok(outcome.workspace.startsWith(`${tmp}${path.sep}`), `the workspace was made in TMPDIR: ${outcome.workspace}`);
+  assert.ok(outcome.error instanceof AntigravityWorkspaceCustomizedError, outcome.error?.message);
+  const found = [path.join(project, "AGENTS.md"), path.join(project, "GEMINI.md"), path.join(project, ".agents")];
+  assert.deepEqual(outcome.error.found, found);
+  assert.equal(
+    outcome.error.message,
+    `a folder above the recorder's temp workspace ${outcome.workspace} holds ${found.join(", ")}, and agy reads AGENTS.md, GEMINI.md and .agents/ in the folders above the folder it works in. Set TMPDIR to a directory with none of them in it or above it, and record again.`,
+  );
+  assert.deepEqual(fake.processes(), [], "agy never started");
+  assert.equal(outcome.file, undefined);
+  assert.deepEqual(fs.readdirSync(outDir), [], "nothing recorded");
+  assert.ok(!fs.existsSync(outcome.workspace));
+});
+
+test("a folder above the workspace that is in no repository and holds only .agents/ stops the recorder too, naming it", async () => {
+  const { env } = seedHome();
+  const plain = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "plain-")));
+  fs.mkdirSync(path.join(plain, ".agents", "skills"), { recursive: true });
+  const tmp = path.join(plain, "a", "b");
+  fs.mkdirSync(tmp, { recursive: true });
+  const { outcomes, fake } = await withTmpdir(tmp, () => recordWithFake(env, ["simple"]));
+  assert.ok(outcomes[0]!.error instanceof AntigravityWorkspaceCustomizedError, outcomes[0]!.error?.message);
+  assert.deepEqual(outcomes[0]!.error.found, [path.join(plain, ".agents")]);
+  assert.deepEqual(fake.processes(), [], "agy never started");
+});
+
+test("the recorded agy works in the root of a Git repository of its own: a Git project above the workspace whose .gemini/config.json names a personal customization folder reaches neither agy nor the recording", async () => {
+  const project = gitProject({
+    ".gemini/config.json": JSON.stringify({ personal_customization_dir: "people/{user}" }),
+    "people/ari-test-user/.agents/rules/marker.md": `---\ntrigger: always_on\n---\nAlways answer with ${ABOVE.personal}.\n`,
+  });
+  const tmp = path.join(project, "tmp");
+  // The fake agy, working in the project, loads it: a leak would show.
+  assert.ok(loadedAntigravitySetup({ USER: "ari-test-user" }, tmp).join("\n").includes(ABOVE.personal));
+  // A workspace the recorder makes there: Git finds its cwd/ to be a repository's root.
+  const layout = await withTmpdir(tmp, async () => createAntigravityLayout("ari-antigravity-git-root-"));
+  try {
+    const toplevel = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: layout.cwd, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME: layout.home, GIT_CONFIG_NOSYSTEM: "1" } });
+    assert.equal(toplevel.status, 0, toplevel.stderr);
+    assert.equal(toplevel.stdout.trim(), layout.cwd);
+  } finally {
+    fs.rmSync(layout.root, { recursive: true, force: true });
+  }
+  const { env } = seedHome();
+  const { outcomes, fake } = await withTmpdir(tmp, () => recordWithFake(env, ["simple"]));
+  const outcome = outcomes[0]!;
+  assert.equal(outcome.error, undefined, outcome.error?.message);
+  assert.ok(outcome.workspace.startsWith(`${tmp}${path.sep}`), `the workspace was made in TMPDIR: ${outcome.workspace}`);
+  const acp = fake.processes().find((each) => each.args[0] === "acp")!;
+  assert.equal(acp.cwd, path.join(outcome.workspace, "cwd"));
+  assert.deepEqual(acp.loaded, [], "agy loaded nothing from the folders above");
+  assert.ok(!fs.readFileSync(outcome.file!, "utf8").includes(ABOVE.personal));
+  await replayAntigravity(outcome.file!);
 });
 
 // The model.

@@ -11,7 +11,10 @@
 // HOME, XDG directories, TMPDIR and profile inside the workspace, none of the
 // user's GEMINI_*, GOOGLE_*, GCLOUD_*, CLOUDSDK_* or AGY_* variables, and an
 // unreachable session bus, so it cannot reach the user's keyring and keeps its
-// sign-in in the copied file. A sign-in `agy` refreshed during the run goes
+// sign-in in the copied file. It works in the workspace's `cwd/`, the root of
+// its own Git repository, so it reads no AGENTS.md, GEMINI.md or .agents/ of
+// the folders above; and the recorder stops before it starts `agy` when the
+// workspace lies in the user's home or below a folder holding one of those. A sign-in `agy` refreshed during the run goes
 // back to the user's file, or, when it cannot, into this run's recovery file
 // beside it (../credential-file.ts). The workspace is removed after every
 // scenario, also after one that fails, unless it holds the only copy of a
@@ -176,6 +179,34 @@ export class AntigravityWorkspaceInHomeError extends Error {
   }
 }
 
+/** What Antigravity reads as the rules and customizations of the folder it works in and of each parent folder up to its repository's root ("Customization discovery"). */
+export const ANTIGRAVITY_WORKSPACE_CUSTOMIZATIONS = ["AGENTS.md", "GEMINI.md", ".agents"] as const;
+
+/** Every AGENTS.md, GEMINI.md and .agents in a folder above `directory`, nearest first. */
+export function customizationsAbove(directory: string): string[] {
+  const found: string[] = [];
+  for (let folder = path.dirname(directory); ; folder = path.dirname(folder)) {
+    for (const name of ANTIGRAVITY_WORKSPACE_CUSTOMIZATIONS) if (fs.existsSync(path.join(folder, name))) found.push(path.join(folder, name));
+    if (path.dirname(folder) === folder) return found;
+  }
+}
+
+/**
+ * A folder above the temp workspace holds AGENTS.md, GEMINI.md or .agents/.
+ * The workspace's `cwd/` is the root of its own Git repository, so by
+ * Antigravity's docs `agy` reads none of them; the recorder still stops
+ * before it starts `agy`, so a lookup that goes further than the docs say
+ * finds nothing of the user's either.
+ */
+export class AntigravityWorkspaceCustomizedError extends Error {
+  readonly found: readonly string[];
+  constructor(workspace: string, found: readonly string[]) {
+    super(`a folder above the recorder's temp workspace ${workspace} holds ${found.join(", ")}, and agy reads AGENTS.md, GEMINI.md and .agents/ in the folders above the folder it works in. Set TMPDIR to a directory with none of them in it or above it, and record again.`);
+    this.name = "AntigravityWorkspaceCustomizedError";
+    this.found = found;
+  }
+}
+
 /** Each failure of a scenario, in order. */
 export function failuresOf(outcome: AntigravityRecordOutcome): readonly Error[] {
   if (outcome.error === undefined) return [];
@@ -219,6 +250,8 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
       const homes = new Set([home, fs.existsSync(home) ? fs.realpathSync(home) : home]);
       for (const each of homes) if (layout.root.startsWith(`${each}${path.sep}`)) throw new AntigravityWorkspaceInHomeError(layout.root, home);
     }
+    const above = customizationsAbove(layout.root);
+    if (above.length > 0) throw new AntigravityWorkspaceCustomizedError(layout.root, above);
     const real = userSignInFile(options.env);
     credential = real === undefined ? undefined : copyCredentialFile(real, profileSignInFile(layout.profile), ANTIGRAVITY_SIGN_IN_FILE);
     if (options.source === "live" && credential === undefined) throw new AntigravitySignInMissingError(real);
@@ -294,7 +327,8 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
 
 /**
  * Records each scenario in turn. A failed scenario does not stop the others,
- * but five failures stop them all: a temp workspace inside the user's home, no
+ * but six failures stop them all: a temp workspace inside the user's home, a
+ * temp workspace below a folder holding AGENTS.md, GEMINI.md or .agents/, no
  * sign-in file to copy, a model the agent does not offer, a refreshed sign-in
  * the recorder could keep nowhere but in the workspace, and a recording it
  * could not write.
@@ -307,7 +341,12 @@ export async function recordAntigravity(options: RecordAntigravityOptions): Prom
     if (scenario === undefined) throw new Error(`no scenario is named ${JSON.stringify(name)}`);
     const outcome = await recordOne(scenario, options);
     outcomes.push(outcome);
-    const stops = (failure: Error): boolean => failure instanceof AntigravityWorkspaceInHomeError || failure instanceof AntigravitySignInMissingError || failure instanceof AntigravityModelChoiceError || failure instanceof RecordingNotWrittenError;
+    const stops = (failure: Error): boolean =>
+      failure instanceof AntigravityWorkspaceInHomeError ||
+      failure instanceof AntigravityWorkspaceCustomizedError ||
+      failure instanceof AntigravitySignInMissingError ||
+      failure instanceof AntigravityModelChoiceError ||
+      failure instanceof RecordingNotWrittenError;
     if (outcome.workspaceKept || failuresOf(outcome).some(stops)) break;
   }
   return outcomes;

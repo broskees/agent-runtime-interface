@@ -462,7 +462,35 @@ function toolOutput(item: Item): string {
   return item.output ?? "";
 }
 
-/** Asserts what the scenario promises. `native` is what reached the native side, from the driver's kit. */
+/** A scenario check that failed, with the items it looked at: their native ids lead a replay to the recorded frames the outcome depended on. */
+export class ScenarioCheckError extends Error {
+  readonly items: readonly Item[];
+  constructor(failed: Error, items: readonly Item[]) {
+    super(failed.message, { cause: failed });
+    this.name = "ScenarioCheckError";
+    this.items = items;
+  }
+}
+
+/** Runs `check`, which looks at `items`; a failure carries them. */
+function about(items: readonly Item[], check: () => void): void {
+  try {
+    check();
+  } catch (error) {
+    throw error instanceof Error ? new ScenarioCheckError(error, items) : error;
+  }
+}
+
+/** The assistant messages of one host turn, settled or not. */
+function assistantMessages(run: ScenarioRun, index: number): Item[] {
+  return turnItems(run, index).filter((item) => item.kind === "assistant_message");
+}
+
+/**
+ * Asserts what the scenario promises. `native` is what reached the native
+ * side, from the driver's kit. A failed check of items throws a
+ * ScenarioCheckError holding the items it looked at.
+ */
 export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[]): void {
   const scenario = run.scenario;
   const where = `scenario ${scenario.name}`;
@@ -473,7 +501,7 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
     case "simple": {
       assert.equal(ends.length, 1, `${where}: exactly one turn.terminal`);
       assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`);
-      assert.ok(assistantTexts(run, 0).some((text) => text.trim() !== ""), `${where}: a settled assistant message with non-empty text`);
+      about(assistantMessages(run, 0), () => assert.ok(assistantTexts(run, 0).some((text) => text.trim() !== ""), `${where}: a settled assistant message with non-empty text`));
       return;
     }
     case "multi_turn":
@@ -492,7 +520,7 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
       );
       assert.deepEqual([...new Set(own.map((event) => event.threadId))], [run.threadId], `${where}: both turns ran on one thread`);
       const second = assistantTexts(run, 1).join("\n");
-      assert.ok(second.toLowerCase().includes(scenario.word!), `${where}: the second turn's text ${JSON.stringify(second)} contains ${JSON.stringify(scenario.word)}`);
+      about(assistantMessages(run, 1), () => assert.ok(second.toLowerCase().includes(scenario.word!), `${where}: the second turn's text ${JSON.stringify(second)} contains ${JSON.stringify(scenario.word)}`));
       if (scenario.name === "resume") {
         assert.equal(run.sessionIds.length, 2, `${where}: the thread was resumed in a second session`);
         assert.equal(run.turnSessions[1], run.sessionIds[1], `${where}: the second turn ran in the second session`);
@@ -516,17 +544,20 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
       assert.equal(ends.length, 1, `${where}: the turn reached a terminal`);
       if (allowed) {
         // The command ran: what it printed, the marker, reached the host.
-        assert.ok(
-          tools.some((item) => item.status === "completed" && toolOutput(item).includes(scenario.marker!)),
-          `${where}: a command or tool item completed with the marker in its output (items: ${JSON.stringify(tools.map((item) => [item.kind, item.status, toolOutput(item)]))})`,
+        about(tools, () =>
+          assert.ok(
+            tools.some((item) => item.status === "completed" && toolOutput(item).includes(scenario.marker!)),
+            `${where}: a command or tool item completed with the marker in its output (items: ${JSON.stringify(tools.map((item) => [item.kind, item.status, toolOutput(item)]))})`,
+          ),
         );
         assert.equal(ends[0]!.status, "completed", `${where}: the turn completed`);
       } else {
+        const shown = (items: readonly Item[]): string => JSON.stringify(items.map((item) => [item.kind, item.status, toolOutput(item)]));
         const leaked = tools.filter((item) => item.status === "completed" && toolOutput(item).includes(scenario.marker!));
-        assert.deepEqual(leaked, [], `${where}: no completed command or tool item's output holds the marker`);
+        about(leaked, () => assert.ok(leaked.length === 0, `${where}: no completed command or tool item's output holds the marker (items: ${shown(leaked)})`));
         // The host declined every command, so none ran.
         const ran = tools.filter((item) => item.kind === "command_execution" && item.status === "completed");
-        assert.deepEqual(ran, [], `${where}: no command item completed`);
+        about(ran, () => assert.ok(ran.length === 0, `${where}: no command item completed (items: ${shown(ran)})`));
       }
       return;
     }

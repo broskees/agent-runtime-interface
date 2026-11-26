@@ -280,11 +280,15 @@ request, each line the driver writes, each stdin close and each kill becomes a
 frame and goes to the sequencer; a frame other than the recorded one fails the
 call with the drift. Each recorded stdout and stderr line goes to the child's
 pipe, and the exit settles the child's `exited`. A pipe ends once the exit
-came and the lines recorded for it right after the exit, before the next
-frame the driver must send, were handed over: a process may exit before the
-driver read its last output, so those lines still reach the driver. A line
-recorded for the pipe after that fails replay: there is no pipe left to
-take it. A kill returns once the
+came and the last line recorded for that pipe was handed over, wherever the
+recording holds it. A process may exit before the driver read its last
+output, and a driver that drains a pipe apart from waiting for the exit (the
+ACP driver drains stderr that way) may start the next process before it
+takes the first one's last line; the tap records that order, and replay
+plays it. A driver that waits for a pipe's end before it sends the next
+frame, when the recording holds a line for that pipe after that frame, waits
+until the scenario reports a stall; the stall names each pipe held open and
+the line it waits for. A kill returns once the
 recorded exit came, as a host's kill returns once the process is gone. When
 replay fails, every child ends at once (exit by `SIGKILL`, pipes closed after
 what they hold), so the driver's cleanup is not left waiting; the failure is
@@ -318,7 +322,13 @@ Replay detects:
   ACP response to `session/prompt` the turn never ends; without the
   `tool_call_update` that completes the approved command, its output never
   reaches the host; without the one that fails the declined command, the
-  command shows as completed when the turn ends.
+  command shows as completed when the turn ends. When every recorded frame
+  was replayed and a scenario assertion still fails, the Antigravity replay's
+  error names the recording file, the frame replayed last, and the recorded
+  frame the outcome depended on where one can be named: the last recorded
+  inbound frame that holds the native id of an item the assertion looked at
+  (for the commands above, their last `tool_call_update` or permission
+  request). Its line leads the error (`ReplaySequencer.checkFailed`).
 
 Replay does not detect:
 
@@ -391,13 +401,34 @@ another type than the rule's stays as it is. The code is
 
 | What | Key | Neutral value |
 |---|---|---|
-| the plan name: Claude Code's `subscriptionType` in `initializationResult().account` ("Claude Max"); the plan tier the Antigravity CLI 1.5.17 names `userTier` (`entitlement.userTier` in its binary) | `subscriptionType`, `subscriptionPlan`, `subscriptionTier`, `planName`, `planType`, `planTier`, `rateLimitTier`, `userTier` (a string) | `<PLAN>` |
+| the plan name: Claude Code's `subscriptionType` in `initializationResult().account` ("Claude Max"); the plan tier the Antigravity CLI 1.5.17 names `userTier`, `userTierId` or `tierName` (in its binary) | `subscriptionType`, `subscriptionPlan`, `subscriptionTier`, `planName`, `planType`, `planTier`, `rateLimitTier`, `userTier`, `userTierId`, `tierName` (a string) | `<PLAN>` |
 | a rate-limit report: Claude Code's `rate_limit_event` with its status, window, utilization, reset times, threshold and overage state | `rate_limit_info` (an object), replaced whole | `{"status":"allowed","rateLimitType":"five_hour","utilization":0,"resetsAt":4102444800}` |
 | a credential's expiry time: Claude Code's `credential_expires_at` in result messages | a key ending in `expires`, `expiresAt`, `expiry`, `expiration` or `expirationTime` after `credential`, `token`, `oauth`, `auth` or `login` | `2100-01-01T00:00:00.000Z` for a string; `4102444800000` for a number of milliseconds, `4102444800` for seconds |
 | a native process id: Claude Code's `initializationResult().pid`, OpenCode's `GET /api/info` `pid` | `pid`, `ppid`, `processId` (a number) | `1000` (the OpenCode driver checks only that it is a number) |
 | a temp directory that shows the machine's session layout: OpenCode's `GET /api/info` `paths.tmp` | `tmp`, `tmpDir`, `temp`, `tempDir`, `tmpPath`, `tempPath` (a string) | `/tmp/ari-recording` |
 | a socket path: Claude Code's `messaging_socket_path`, `/tmp/cc-socks/<pid>.sock` | a key ending in `socketPath` or `socketFile` (a string) | `/tmp/ari-recording/agent.sock` |
 | the machine's shell: OpenCode's `shell.created` event | `shell`, when the string is a path | `/bin/sh` |
+| a quota's figures: the Antigravity CLI 1.5.17 binary's quota bucket fields `remainingFraction` and `remainingAmount` | `remainingFraction`, `remainingAmount`, `usedFraction`, `usedAmount`, `consumedFraction`, `consumedAmount` (a number, or a number written as a string) | `0`, or `"0"` |
+| a quota's or a rate limit's reset time: the binary's `resetTime` | `resetTime`, `resetsTime`, `resetAt`, `resetsAt`, `quotaResetTime`, `quotaResetAt` | as a credential's expiry time |
+| a credit balance: the binary's `usedPromptCredits`, `availableFlowCredits`, `monthlyPromptCredits`, `consumedCredits`, `availableCredits` | a key ending in `credits` (a number, or a number written as a string) | `0`, or `"0"` |
+| whether the user is signed in to a provider: the binary's `isAuthenticated` | `signedIn`, `isSignedIn`, `loggedIn`, `isLoggedIn`, `authenticated`, `isAuthenticated` (a boolean) | `true` |
+| whether a provider still needs the user to sign in: the binary's `needs_auth` | `needsAuth`, `needsSignIn`, `needsLogin` (a boolean) | `false` |
+
+Three more account details have a shape rather than one field:
+
+- which providers the user is signed in to: a list whose every entry is an
+  object holding one of the sign-in status keys above becomes `[]`, the
+  provider the recording used included;
+- ACP's usage report: a `usage_update` session update (`UsageUpdate`) gets
+  `used` and `size` 0, the tokens in context and the context window;
+- ACP's cost and token counts: a `Cost` under `cost` (an object with a number
+  `amount` and a string `currency`) gets `amount` 0, and a `Usage` under
+  `usage` (with numbers `totalTokens`, `inputTokens` and `outputTokens`, the
+  unstable usage of a prompt's result) gets every token count 0.
+
+These shapes are ACP's: Claude Code's turn usage (`input_tokens` and the other
+snake-case counts) and OpenCode's cost of a message (a number under `cost`)
+stay as they are.
 
 With the recording's model (`recordedModel`, the header's `model`), a model
 list keeps only that model, so which providers and models the user's
@@ -819,16 +850,27 @@ or `AGY_` (the prefixes of the driver's CLI manifest), then adds:
 
 A process the driver starts with no working directory (the driver names none
 for `agy acp`) starts in `<workspace>/cwd`, not in the recorder's directory:
-Antigravity loads workspace rules and customizations from the folder it works
-in, `.agents/`, `AGENTS.md` and `GEMINI.md`, and from its parents up to the
-repository root ("Customization discovery"), and the recorder runs in the
-user's checkout. For the same reason the recorder stops, before it starts
-`agy`, when its temp workspace lies inside the user's home (a `TMPDIR` in the
-home): the folders above the workspace would be the user's. The host gives the
-thread no tool server, so the session has no MCP server at all. `test/drivers/antigravity/recorder.suite.ts` seeds a
-home with each of these files and a marker in each, records all six
-scenarios against a fake `agy` that loads them the way the docs say, and
-shows none reached the recording and every file is unchanged.
+Antigravity loads workspace rules and customizations, `.agents/`, `AGENTS.md`
+and `GEMINI.md`, from the folder it works in and from each parent folder up to
+the root of its repository, such as the folder that holds `.git`; outside a
+repository it checks only the folder it works in ("Customization discovery",
+"Workspace folders and parent directories"). A repository's root can also
+name a personal folder in `.gemini/config.json`. So `<workspace>/cwd` is the
+root of a Git repository of its own (`cwd/.git` holds `HEAD`, `objects/` and
+`refs/`, which Git looks for), and `agy` reads none of the workspace's
+parents, wherever `TMPDIR` points. The recorder also stops before it starts
+`agy` when its temp workspace lies inside the user's home (a `TMPDIR` in the
+home), or when a folder above the workspace holds `AGENTS.md`, `GEMINI.md` or
+`.agents/`; the error names each one it found. Then a lookup that goes further
+than the docs say finds nothing of the user's either. The host gives the
+thread no tool server, so the session has no MCP server at all.
+`test/drivers/antigravity/recorder.suite.ts` seeds a home with each of these
+files and a marker in each, records all six scenarios against a fake `agy`
+that loads them the way the docs say, and shows none reached the recording and
+every file is unchanged. It also records with `TMPDIR` in a Git project beside
+the home: with `AGENTS.md`, `GEMINI.md` and `.agents/` at the project's root
+the recorder stops before it starts `agy`; with a personal folder the
+project's `.gemini/config.json` names, `agy` loads nothing of it.
 
 The sources are Antigravity's docs, read 2026-11-25: "Customization
 discovery" (https://antigravity.google/docs/customization-discovery),
@@ -1004,9 +1046,10 @@ one file per scenario, also for a scenario whose checks failed (it says
 which, and exits 1). When it cannot write a recording, it stops after that
 scenario. Its last lines name every recovery file and every kept workspace,
 whatever else failed. Without `ARI_LIVE_RECORD=1` it exits 2 before it loads
-anything or starts any process; with its temp workspace inside your home,
-without a sign-in file, or without a model the agent offers, it exits 2
-before the first prompt.
+anything or starts any process; with its temp workspace inside your home or
+below a folder holding `AGENTS.md`, `GEMINI.md` or `.agents/`, without a
+sign-in file, or without a model the agent offers, it exits 2 before the
+first prompt.
 
 ## How to refresh
 

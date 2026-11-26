@@ -465,3 +465,36 @@ test("the account-detail rules apply in both directions, and without a recorded 
   // Fields of other types, and other keys, stay: a status, a model's own shell tool, a path-less shell name.
   assert.deepEqual(sanitise({ dir: "in", kind: "event", id: 1, event: { status: "allowed_warning", name: "shell", shell: "bash", pid: "not-a-number" } }), { dir: "in", kind: "event", id: 1, event: { status: "allowed_warning", name: "shell", shell: "bash", pid: "not-a-number" } });
 });
+
+test("ACP's usage figures, a quota's figures and reset time, credit balances and per-provider sign-in status become neutral values of the same type, keyed on their fields, and the usage shapes of other agents stay", () => {
+  const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home" }, user: "ari-nobody" });
+  const update = (value: unknown): Frame => ({ dir: "in", kind: "stdout", proc: 1, message: { jsonrpc: "2.0", method: "session/update", params: { sessionId: "s", update: value } } });
+  const updateOf = (frame: Frame): unknown => ((frame["message"] as { params: { update: unknown } }).params.update);
+  // ACP UsageUpdate with its Cost; and the unstable Usage of a prompt's result.
+  assert.deepEqual(updateOf(sanitise(update({ sessionUpdate: "usage_update", used: 3271, size: 131072, cost: { amount: 0.02187, currency: "USD" } }))), { sessionUpdate: "usage_update", used: 0, size: 0, cost: { amount: 0, currency: "USD" } });
+  assert.deepEqual(
+    sanitise({ dir: "in", kind: "stdout", proc: 1, message: { jsonrpc: "2.0", id: 4, result: { stopReason: "end_turn", usage: { totalTokens: 4100, inputTokens: 3900, outputTokens: 200, thoughtTokens: 64, cachedReadTokens: 2048, cachedWriteTokens: null } } } }),
+    { dir: "in", kind: "stdout", proc: 1, message: { jsonrpc: "2.0", id: 4, result: { stopReason: "end_turn", usage: { totalTokens: 0, inputTokens: 0, outputTokens: 0, thoughtTokens: 0, cachedReadTokens: 0, cachedWriteTokens: null } } } },
+  );
+  // A quota bucket and credits as the Antigravity CLI 1.5.17 binary names them, and a reset time in seconds.
+  assert.deepEqual(
+    sanitise({ remainingFraction: 0.239, remainingAmount: "412", resetTime: "2026-11-26T03:00:00Z", resetsAt: 1796072400, usedPromptCredits: 18307, availableCredits: "1693", consumedCredits: 12.5, userTierId: "g1-ultra-tier", tierName: "Ultra" }),
+    { remainingFraction: 0, remainingAmount: "0", resetTime: NEUTRAL_TIME.iso, resetsAt: NEUTRAL_TIME.seconds, usedPromptCredits: 0, availableCredits: "0", consumedCredits: 0, userTierId: PLACEHOLDERS.plan, tierName: PLACEHOLDERS.plan },
+  );
+  // Sign-in status: a list of providers with theirs goes whole; a status on its own becomes signed in, needing no sign-in.
+  assert.deepEqual(
+    sanitise({ providers: [{ id: "google", isAuthenticated: true }, { id: "vertex", signed_in: false, needs_auth: true }], account: { loggedIn: false, needsAuth: true, isAuthenticated: "yes" } }),
+    { providers: [], account: { loggedIn: true, needsAuth: false, isAuthenticated: "yes" } },
+  );
+  // Other shapes stay: Claude Code's turn usage (snake-case counts), OpenCode's cost per message (a number), a list without sign-in status, ACP's authMethods.
+  const others = {
+    usage: { input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 0 },
+    cost: 0.0123,
+    tokens: { input: 12, output: 3 },
+    providers: [{ id: "google", name: "Google" }],
+    authMethods: [{ id: "oauth-personal", name: "Log in with Google", description: null }],
+    size: 4096,
+    used: 7,
+  };
+  assert.deepEqual(sanitise(others), others);
+});

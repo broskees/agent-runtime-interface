@@ -4,7 +4,9 @@
 // workspace laid out as the recorder lays it out (./run.ts), with the model the
 // header names. When the scenario ends, the sequencer must have matched every
 // recorded outbound frame, the driver must have taken every recorded inbound
-// frame, and the scenario's assertions must hold.
+// frame, and the scenario's assertions must hold. A failed assertion names the
+// recording file, the frame replayed last, and the recorded frame the outcome
+// depended on where one can be named (ReplaySequencer.checkFailed).
 
 import * as fs from "node:fs";
 import type { DiagnosticEntry } from "../../../src/generated/host.ts";
@@ -13,7 +15,7 @@ import type { Frame, Recording } from "../format.ts";
 import { readRecording } from "../format.ts";
 import { REPLAY_IGNORED_FIELDS } from "../ignored-fields.ts";
 import { createSanitiser } from "../sanitiser.ts";
-import { ScenarioStallError, checkScenario, scenarioNamed } from "../scenarios.ts";
+import { ScenarioCheckError, ScenarioStallError, checkScenario, scenarioNamed } from "../scenarios.ts";
 import type { ScenarioRun } from "../scenarios.ts";
 import type { ReplaySequencer } from "../sequencer.ts";
 import { startStdioReplay } from "../stdio/replay-process.ts";
@@ -86,7 +88,13 @@ export async function replayAntigravity(source: Recording | string, options: Ant
     }
     await replay.sequencer.whenTaken(options.idleMs ?? 500);
     replay.sequencer.finish();
-    checkScenario(result.run, replayedNativeAnswers(recording, replay.sequencer));
+    try {
+      checkScenario(result.run, replayedNativeAnswers(recording, replay.sequencer));
+    } catch (error) {
+      // Every recorded frame was replayed, yet the outcome is wrong: the error names the recorded frame the outcome depended on.
+      const nativeIds = error instanceof ScenarioCheckError ? error.items.flatMap((item) => (typeof item.native?.id === "string" ? [item.native.id] : [])) : [];
+      throw replay.sequencer.checkFailed(error, nativeIds);
+    }
     return { run: result.run, replay, diagnostics: result.diagnostics };
   } finally {
     fs.rmSync(layout.root, { recursive: true, force: true });

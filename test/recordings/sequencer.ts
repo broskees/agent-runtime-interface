@@ -37,6 +37,29 @@ export class ReplayDriftError extends Error {
   }
 }
 
+/** A scenario check that failed once replay was over, with the recording's context. */
+export class ReplayCheckError extends Error {
+  readonly file: string;
+  readonly line: number;
+  constructor(file: string, line: number, message: string, cause: unknown) {
+    super(`${file}:${line}: ${message}`, { cause });
+    this.name = "ReplayCheckError";
+    this.file = file;
+    this.line = line;
+  }
+}
+
+/** The first of `ids` that `value` holds as a string, anywhere inside it. */
+function idIn(value: unknown, ids: ReadonlySet<string>): string | undefined {
+  if (typeof value === "string") return ids.has(value) ? value : undefined;
+  if (typeof value !== "object" || value === null) return undefined;
+  for (const each of Object.values(value)) {
+    const found = idIn(each, ids);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 const SHOWN_CHARACTERS = 6000;
 
 /** A frame as an error shows it: its JSON, cut after a few thousand characters. */
@@ -318,6 +341,29 @@ export class ReplaySequencer {
         `replay drift: the scenario ended with ${this.#untaken.size} recorded inbound frame(s) the driver never took\n  not taken (line ${untaken.line}): ${showFrame(untaken.frame)}\n  last taken by the driver (line ${this.#lastTaken?.line ?? "none"}): ${showFrame(this.#lastTaken?.frame)}`,
       ),
     );
+  }
+
+  /**
+   * A scenario check that failed once replay was over (`error`), with the
+   * recording's context: the frame replayed last, and the recorded frame the
+   * outcome depended on, where one can be named: the last recorded inbound
+   * frame holding one of `nativeIds`, the native ids of the items the check
+   * looked at. The error names the file and the line of that frame, else of
+   * the frame replayed last.
+   */
+  checkFailed(error: unknown, nativeIds: readonly string[]): ReplayCheckError {
+    const message = error instanceof Error ? error.message : String(error);
+    const last = this.#last();
+    const ids = new Set(nativeIds);
+    const lastReplayed = `\n  last replayed (line ${last?.line ?? "none"}): ${showFrame(last?.frame)}`;
+    for (let index = this.recording.frames.length - 1; index >= 0; index -= 1) {
+      const entry = this.recording.frames[index]!;
+      const id = entry.frame.dir === "in" ? idIn(entry.frame, ids) : undefined;
+      if (id === undefined) continue;
+      return new ReplayCheckError(this.recording.file, entry.line, `${message}\n  depended on (line ${entry.line}, the last recorded frame naming ${id}): ${showFrame(entry.frame)}${lastReplayed}`, error);
+    }
+    const why = ids.size === 0 ? "the check looked at no item with a native id" : `no recorded frame names ${[...ids].join(", ")}`;
+    return new ReplayCheckError(this.recording.file, last?.line ?? 1, `${message}\n  depended on: ${why}${lastReplayed}`, error);
   }
 
   /** The line of the frame replayed last. */

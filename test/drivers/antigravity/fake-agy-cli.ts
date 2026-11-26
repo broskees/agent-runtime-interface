@@ -31,7 +31,8 @@
 //                              [{ "value", "name" }]; its current value is the first
 //   ARI_FAKE_AGY_REPLY         the simple scenario's answer
 //   ARI_FAKE_AGY_OUTPUT        what the approval command prints
-//   ARI_FAKE_AGY_PLANT         a session/update (JSON) the agent sends first in every turn
+//   ARI_FAKE_AGY_PLANT         a session/update (JSON), or a list of them, the
+//                              agent sends first in every turn
 //   ARI_FAKE_AGY_WIRE          a JSON lines file that gets every line on its
 //                              stdin ("in"), stdout ("out") and stderr ("err"),
 //                              as the agent's side saw them, in order
@@ -91,12 +92,12 @@ function acp(args: readonly string[]): void {
   const started = `fake agy ${FAKE_AGY_VERSION}: serving ACP on stdio`;
   if (wire !== undefined && wire !== "") fs.appendFileSync(wire, `${JSON.stringify({ direction: "err", line: started })}\n`);
   process.stderr.write(`${started}\n`);
-  const planted = env["ARI_FAKE_AGY_PLANT"];
+  const planted = env["ARI_FAKE_AGY_PLANT"] === undefined ? undefined : (JSON.parse(env["ARI_FAKE_AGY_PLANT"]) as { [key: string]: unknown } | Array<{ [key: string]: unknown }>);
   const puppet: AgyPuppetOptions = {
     extraText: loaded.join("\n"),
     ...(env["ARI_FAKE_AGY_REPLY"] === undefined ? {} : { reply: env["ARI_FAKE_AGY_REPLY"] }),
     ...(env["ARI_FAKE_AGY_OUTPUT"] === undefined ? {} : { commandOutput: env["ARI_FAKE_AGY_OUTPUT"] }),
-    ...(planted === undefined ? {} : { planted: JSON.parse(planted) as { [key: string]: unknown } }),
+    ...(planted === undefined ? {} : { planted: Array.isArray(planted) ? planted : [planted] }),
   };
   let turns = 0;
   const channel: PuppetChannel = new PuppetChannel(child, (turn) => {

@@ -5,7 +5,13 @@
 // `agy` in tests) when recording, the replay process service when replaying.
 //
 // The workspace (one temp directory per scenario) holds:
-//   cwd/            the thread's working directory
+//   cwd/            the thread's working directory, the root of its own Git
+//                   repository (`cwd/.git`): Antigravity reads AGENTS.md,
+//                   GEMINI.md and .agents/ in the folder it works in and in
+//                   each parent folder up to the root of its repository, and
+//                   stops there ("Customization discovery", "Workspace
+//                   folders and parent directories"), so it reads none of
+//                   the workspace's parents
 //   agy-home/       HOME for `agy`, empty (not "home/": a path under it would
 //                   read <WORKSPACE>/home/..., which the scan takes for a
 //                   path starting /home/)
@@ -55,7 +61,15 @@ export interface AntigravityLayout {
   readonly profile: string;
 }
 
-/** A fresh temp workspace, by its real path. */
+/** Makes `directory` the root of a Git repository of its own, with the least one holds: HEAD, objects/ and refs/, which Git looks for. */
+function makeOwnRepository(directory: string): void {
+  const git = path.join(directory, ".git");
+  for (const each of ["objects", path.join("refs", "heads"), path.join("refs", "tags")]) fs.mkdirSync(path.join(git, each), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(git, "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(git, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
+}
+
+/** A fresh temp workspace, by its real path, whose `cwd/` is the root of its own Git repository. */
 export function createAntigravityLayout(prefix: string): AntigravityLayout {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   const instance = path.join(root, "instances", ANTIGRAVITY_RECORDER_INSTANCE_ID);
@@ -75,6 +89,7 @@ export function createAntigravityLayout(prefix: string): AntigravityLayout {
   for (const directory of [layout.cwd, layout.home, layout.configHome, layout.dataHome, layout.stateHome, layout.cacheHome, layout.runtimeDir, layout.tmp, layout.stateDir, path.join(instance, "cache"), path.join(instance, "tmp")]) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   }
+  makeOwnRepository(layout.cwd);
   return layout;
 }
 

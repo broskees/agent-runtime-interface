@@ -22,8 +22,8 @@ export interface AgyPuppetOptions {
   readonly commandOutput?: string;
   /** The answer of the simple scenario; `ok` when left out. */
   readonly reply?: string;
-  /** A `session/update` the agent sends first in every turn, as it is: a test plants values the sanitiser must replace. */
-  readonly planted?: { readonly [key: string]: unknown };
+  /** The `session/update`s the agent sends first in every turn, as they are: a test plants values the sanitiser must replace. */
+  readonly planted?: ReadonlyArray<{ readonly [key: string]: unknown }>;
 }
 
 export interface AgyTurn {
@@ -47,7 +47,7 @@ export async function playAgyTurn(channel: PuppetChannel, turn: AgyTurn, options
   const extra = options.extraText === undefined || options.extraText === "" ? "" : `\n${options.extraText}`;
   const say = (text: string): Promise<void> => call("say", `${text}${extra}`);
   const update = (value: { readonly [key: string]: unknown }): Promise<void> => call("rawUpdate", value);
-  if (options.planted !== undefined) await update(options.planted);
+  for (const planted of options.planted ?? []) await update(planted);
   const index = scenario.prompts.findIndex((each) => turn.prompt.endsWith(each));
   switch (scenario.name) {
     case "simple":

@@ -17,11 +17,18 @@
 // Claude Code also runs with settingSources [] (no user, project or local
 // settings, and so no CLAUDE.md, hooks, agents or skills from files), auto
 // memory off, claude.ai MCP connectors off and nonessential traffic off.
+//
+// The driver runs the user's own `claude`, which it finds through the host
+// and checks with `claude --version`. The host here reports the Claude Code
+// the run names (`claudeCode`): the user's real one when recording live, a
+// stand-in that nothing runs when replaying or recording against a fake SDK.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createMemoryProcess } from "../../../src/conformance/index.ts";
 import { createFakeHost } from "../../../src/conformance/fake-host.ts";
+import { callErrors } from "../../../src/errors.ts";
 import type { DiagnosticEntry } from "../../../src/generated/host.ts";
 import { createClaudeDriver } from "../../../src/drivers/claude/index.ts";
 import type { ClaudeDriverConfig } from "../../../src/drivers/claude/index.ts";
@@ -35,6 +42,15 @@ import type { ClaudeRuntime } from "./frames.ts";
 export const DEFAULT_RECORD_MODEL = "haiku";
 
 export const CLAUDE_RECORDER_INSTANCE_ID = "claude-recorder";
+
+/** Where a replay, or a recording against a fake SDK, says the user's `claude` is. Nothing runs it. */
+export const CLAUDE_STAND_IN_PATH = "/ari-replay/claude";
+
+/** The user's Claude Code as the run's host reports it: the path it finds `claude` at, and the version `claude --version` prints. */
+export interface ClaudeCodeOnPath {
+  readonly path: string;
+  readonly version: string;
+}
 
 export interface ClaudeLayout {
   readonly root: string;
@@ -71,6 +87,8 @@ export function claudeRecorderConfig(model: string): ClaudeDriverConfig {
 export interface ClaudeScenarioInput {
   readonly scenario: Scenario;
   readonly runtime: ClaudeRuntime;
+  /** The `claude` the host finds and the version its `--version` prints; the driver passes that path to the SDK. */
+  readonly claudeCode: ClaudeCodeOnPath;
   readonly layout: ClaudeLayout;
   /** The recorder's (or the replay's) own environment; only PATH reaches Claude Code. */
   readonly sourceEnv: { readonly [name: string]: string | undefined };
@@ -89,14 +107,29 @@ export interface ClaudeScenarioResult {
   readonly diagnostics: readonly DiagnosticEntry[];
 }
 
-/** A host with no tool server for threads: the recorded session gets no MCP server at all. */
-function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrubPrefixes: readonly string[]): HostServices<ClaudeDriverConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[] } {
+/**
+ * A host with no tool server for threads, so the recorded session gets no MCP
+ * server at all. It finds `claude` at `claudeCode.path` and answers that
+ * path's `--version` with `claudeCode.version`; it starts no process, so every
+ * other spawn (`claude auth status --json`) fails as on a host without it.
+ */
+function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrubPrefixes: readonly string[], claudeCode: ClaudeCodeOnPath): HostServices<ClaudeDriverConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[] } {
   const base = path.join(layout.root, "instances", CLAUDE_RECORDER_INSTANCE_ID);
   const paths = { stateDir: path.join(base, "state"), cacheDir: path.join(base, "cache"), tmpDir: path.join(base, "tmp") };
   for (const directory of Object.values(paths)) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const host = createFakeHost<ClaudeDriverConfig>({
     paths,
     envScrubPrefixes,
+    resolveExecutable: async (name) => (name === "claude" ? claudeCode.path : null),
+    spawn: async (request) => {
+      if (request.command !== claudeCode.path || (request.args ?? []).join(" ") !== "--version") throw callErrors.notFound({ resource: "executable", id: request.command });
+      const child = createMemoryProcess({ onStdin: () => undefined, onStdinClosed: () => undefined, onKill: () => undefined });
+      queueMicrotask(() => {
+        child.stdout(`${claudeCode.version} (Claude Code)\n`);
+        child.exit(0, null);
+      });
+      return child.process;
+    },
     ...(apiKey === undefined ? {} : { secrets: [{ namespace: "claude", key: "api-key", value: apiKey }] }),
   });
   return {
@@ -113,7 +146,7 @@ function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrub
 /** Plays `scenario` through a fresh driver over `runtime`. */
 export async function runClaudeScenario(input: ClaudeScenarioInput): Promise<ClaudeScenarioResult> {
   const driver = createClaudeDriver({ loadSdk: async () => input.runtime, newUuid: fixedUuids() });
-  const host = recorderHost(input.layout, input.apiKey, driver.cliManifest?.envScrubPrefixes ?? []);
+  const host = recorderHost(input.layout, input.apiKey, driver.cliManifest?.envScrubPrefixes ?? [], input.claudeCode);
   const instance = await driver.create(host, {
     instanceId: CLAUDE_RECORDER_INSTANCE_ID,
     config: claudeRecorderConfig(input.model),

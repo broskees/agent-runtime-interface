@@ -22,8 +22,18 @@ export interface PiConfig {
 
 export const PI_DRIVER_KIND = "pi";
 
+/**
+ * The oldest `pi` the driver runs: the lower bound of `PI_TESTED_VERSIONS`.
+ * An older `pi` is refused with `driver_unavailable` naming `PI_UPDATE_STEP`;
+ * ARI never installs or updates `pi`.
+ */
+export const PI_MINIMUM_VERSION = "1.6.0";
+
 /** The Pi versions this driver is tested against: the RPC protocol of `@earendil-works/pi-coding-agent` 1.6.0. */
-export const PI_TESTED_VERSIONS = ">=1.6.0 <2.0.0";
+export const PI_TESTED_VERSIONS = `>=${PI_MINIMUM_VERSION} <2.0.0`;
+
+/** Pi's own update step (https://pi.dev/docs/latest/quickstart: "Both installers pin all dependencies and update Pi with `pi update`"), named when `pi` is older than the minimum. */
+export const PI_UPDATE_STEP = "Update pi with `pi update`.";
 
 export const PI_DOCS_URL = "https://pi.dev/docs/latest/rpc";
 

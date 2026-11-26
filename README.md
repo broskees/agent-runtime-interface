@@ -29,7 +29,7 @@ npm install ari
 
 | You use | Also install |
 |---|---|
-| `ari/drivers/claude` | `@anthropic-ai/claude-agent-sdk`, or nothing: `maintenance.install` downloads it (the only way in the standalone `ari-driver`, besides `sdkDirectory`) |
+| `ari/drivers/claude` | Claude Code 2.1.330 or newer, the user's own `claude` on `PATH` (or `executablePath`); and `@anthropic-ai/claude-agent-sdk`, or nothing: `maintenance.install` downloads it (the only way in the standalone `ari-driver`, besides `sdkDirectory`) |
 | `ari/drivers/cursor` | `@cursor/sdk` |
 | `ari/drivers/opencode` | the `opencode` CLI, plus `@opencode-ai/sdk` for an OpenCode 1.x server or `@opencode/client` for 2.x |
 | `ari/drivers/muse` | `@muse-code/sdk` and the `muse` CLI |
@@ -61,18 +61,28 @@ release also carries a standalone `ari-driver` executable for linux-x64,
 linux-arm64, darwin-x64, darwin-arm64 and windows-x64, so a host written in
 another language needs no Node installed.
 
+The `claude` driver always runs the user's own Claude Code: the `claude` on
+the host's `PATH`, or the one the config's `executablePath` names, never a
+Claude Code that npm or ARI installed beside the SDK. ARI never downloads
+Claude Code. It must be 2.1.330 or newer, the version the pinned SDK bundles.
+When it is missing, `status()` reports `driver_unavailable` saying Claude
+Code is not installed and how to install it; when it is older, the error
+names the version and path found, the minimum, and to run `claude update`
+or set `executablePath`. If the driver cannot read the version, `status()`
+reports `driver_unavailable` with the executable's path and what
+`claude --version` printed, if it ran.
+
 The standalone executable cannot import a package by name, so `npm install`
 beside it does not give the `claude` driver its SDK. A host that ships only
 the executable provides `@anthropic-ai/claude-agent-sdk` in one of two ways:
-call `maintenance.install` on the instance, which downloads the pinned SDK and
-its native Claude Code package for the platform from the npm registry (or the
-config's `sdkRegistry`) into the instance's cache directory, checked against
-the registry's sha512 (or sha384, sha256) integrity, with no Node or npm
-needed, and repairs an install that is no longer whole; or set
-`sdkDirectory` in the driver config to a directory where
-`npm install @anthropic-ai/claude-agent-sdk` ran. ARI does not bundle the SDK
-because its licence is Anthropic's, not MIT; the npm package and the
-executable contain none of its code.
+call `maintenance.install` on the instance, which downloads the pinned SDK,
+and only the SDK, from the npm registry (or the config's `sdkRegistry`) into
+the instance's cache directory, checked against the registry's sha512 (or
+sha384, sha256) integrity, with no Node or npm needed, and repairs an install
+that is no longer whole; or set `sdkDirectory` in the driver config to a
+directory where `npm install @anthropic-ai/claude-agent-sdk` ran. ARI does
+not bundle the SDK because its licence is Anthropic's, not MIT; the npm
+package and the executable contain none of its code.
 [docs/drivers/claude.md](docs/drivers/claude.md) has the details.
 
 Each driver has a page in [`docs/drivers/`](docs/drivers/) and a changelog in
@@ -325,6 +335,36 @@ A host never has to wait on an ARI release:
    `pnpm.overrides`) or a patch (`pnpm patch`, `patch-package`) cover an
    urgent fix until it is released.
 
+## Vendor CLIs
+
+ARI runs the vendor CLI the user installed and never downloads, installs or
+updates one. Each CLI driver finds its CLI on `PATH`, or at the path its
+config names, and asks it for its version. The minimum is the lower bound of
+the driver's tested range. With a CLI older than that, `status()` is
+`unavailable` with `driver_unavailable`, and `openSession` rejects with the
+same error before any agent starts. The error names the version found, the
+path, the minimum and the vendor's own update step, for example:
+
+```text
+Codex CLI 0.100.0 (/usr/local/bin/codex) is older than 0.172.0, the oldest version this driver supports. Update Codex using your installation method (npm: `npm install -g @openai/codex`; Homebrew: `brew upgrade --cask codex`). For the standalone installer, rerun the installer from https://learn.chatgpt.com/docs/codex/cli. For a manually downloaded release binary, replace it with the appropriate binary from https://github.com/openai/codex/releases/latest. For other package managers, update with the manager that installed it.
+```
+
+A CLI above the tested range still runs, with an `untested_version` advisory.
+
+| Driver | CLI | Minimum | Update step |
+|---|---|---|---|
+| `antigravity` | `agy` | 1.5.0 | `agy update` |
+| `codex` | `codex` | 0.172.0 | [Update using your installation method](docs/drivers/codex.md#the-users-own-codex-and-its-minimum) |
+| `fx` | `fx` | 0.0.13 | `fx upgrade` |
+| `grok` | `grok` | 1.0.70 | `grok update` |
+| `kiro` | `kiro-cli` | 3.0.0 | `kiro-cli update` |
+| `muse` | `muse` | 1.4.25 | run the installer again: `curl -fsSL https://dev.meta.ai/install.sh \| bash` |
+| `opencode` | `opencode` | 1.19.6 for 1.x, 2.1.2 for 2.x | `opencode upgrade` |
+| `pi` | `pi` | 1.6.0 | `pi update` |
+
+Each driver's page in [`docs/drivers/`](docs/drivers/) cites the vendor's
+documentation for its update step.
+
 ## Versions
 
 ARI keeps three version axes apart:
@@ -337,7 +377,8 @@ ARI keeps three version axes apart:
 
 Each driver declares the vendor versions it is tested against and reports a
 version advisory in `status()` when the installed SDK or CLI is outside that
-range.
+range; a vendor CLI older than the range is refused instead (see
+[Vendor CLIs](#vendor-clis)).
 
 ## More documentation
 

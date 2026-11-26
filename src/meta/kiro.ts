@@ -28,6 +28,13 @@ export const KIRO_CONFIG_SCHEMA: JsonSchema = {
 
 export const KIRO_DEFAULT_CONFIG: KiroConfig = { command: "kiro-cli", ...ACP_BASE_DEFAULTS };
 
+/**
+ * Kiro CLI's own update step (https://kiro.dev/docs/reference/cli-commands/#kiro-cli-update),
+ * named when `kiro-cli` is older than the tested range. ARI never installs or
+ * updates `kiro-cli`.
+ */
+export const KIRO_UPDATE_STEP = "Update Kiro CLI with `kiro-cli update`.";
+
 /** Kiro's interactive chat, for a host's terminal fallback. */
 export const KIRO_CLI_MANIFEST: CliLaunchManifest = { binary: "kiro-cli", args: { fresh: ["chat"] } };
 

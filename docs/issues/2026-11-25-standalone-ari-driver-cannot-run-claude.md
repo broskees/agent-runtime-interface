@@ -151,3 +151,24 @@ or `bun` on `PATH`, the standalone `ari-driver` installed the real SDK
 sign-in completed. Before it, commit `b045e58` made the install record each
 file's mode, so an install whose native binary lost its execute bit is
 reported damaged and repaired (both repair tables above gained that case).
+
+**Note (2026-11-25): ARI no longer downloads Claude Code.** Plan
+`claude-user-binary-20261125-221716`, phase 1, commit `d06aa36`, replaced
+the native-package half of the managed install above: ARI runs the user's
+own Claude Code, and errors when it is missing or too old.
+`maintenance.install` and `maintenance.update` now download
+`@anthropic-ai/claude-agent-sdk` alone. Every query, wherever the SDK comes
+from (npm under Node, `sdkDirectory` or the managed install), runs the
+user's `claude` (the configured `executablePath`, else `claude` on the
+host's `PATH`) as `pathToClaudeCodeExecutable`, with `mcpServersDelivery:
+"initialize"`. It must be Claude Code 2.1.330 or newer, the version the
+pinned SDK bundles: a missing, older or unreadable `claude` leaves the
+driver `driver_unavailable` with an error that names the fix, and a newer
+one gets an `untested_version` advisory. The SDK's native Claude Code
+package is never fetched or run, the install record no longer holds file
+modes, and an install that still holds a native package counts as not
+whole, so `maintenance.install` replaces it with the SDK alone. The tests
+are `test/drivers/claude/sdk-install.test.ts`, `npm-sdk.test.ts`,
+`real-sdk-launch.test.ts`, `availability.test.ts` and
+`test/standalone/claude-sdk.e2e.ts`; `docs/drivers/claude.md` has the
+details.

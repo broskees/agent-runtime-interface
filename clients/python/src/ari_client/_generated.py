@@ -4584,7 +4584,9 @@ class ProcessExit:
 class ResolveExecutableInput:
     name: str
     path: str | None = None
-    """A PATH-style list of directories to search instead of the host default."""
+    """A PATH-style list of directories to search instead of the host default when `env` is not supplied."""
+    env: dict[str, str] | None = None
+    """Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`."""
 
     @classmethod
     def from_json(cls, data: Any) -> ResolveExecutableInput:
@@ -4592,6 +4594,7 @@ class ResolveExecutableInput:
         return cls(
             name=required(data, "name", decode_str),
             path=optional(data, "path", decode_str),
+            env=optional(data, "env", map_of(decode_str)),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -4599,6 +4602,8 @@ class ResolveExecutableInput:
         out["name"] = encode(self.name)
         if self.path is not None:
             out["path"] = encode(self.path)
+        if self.env is not None:
+            out["env"] = encode(self.env)
         return out
 
 
@@ -8847,7 +8852,9 @@ class HostProcessResolveExecutableParams:
     instance_id: str
     name: str
     path: str | None = None
-    """A PATH-style list of directories to search instead of the host default."""
+    """A PATH-style list of directories to search instead of the host default when `env` is not supplied."""
+    env: dict[str, str] | None = None
+    """Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`."""
 
     @classmethod
     def from_json(cls, data: Any) -> HostProcessResolveExecutableParams:
@@ -8856,6 +8863,7 @@ class HostProcessResolveExecutableParams:
             instance_id=required(data, "instanceId", decode_str),
             name=required(data, "name", decode_str),
             path=optional(data, "path", decode_str),
+            env=optional(data, "env", map_of(decode_str)),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -8864,6 +8872,8 @@ class HostProcessResolveExecutableParams:
         out["name"] = encode(self.name)
         if self.path is not None:
             out["path"] = encode(self.path)
+        if self.env is not None:
+            out["env"] = encode(self.env)
         return out
 
 

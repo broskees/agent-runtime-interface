@@ -11,8 +11,8 @@ import type { Model } from "../../../src/drivers/codex/generated/protocol.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 
-/** What the fake `codex` prints for `--version`, after `codex-cli `. */
-export const FAKE_CODEX_CLI_VERSION = "0.172.0-fake";
+/** The supported release printed by the success fixture. The recording's source identifies it as fake. */
+export const FAKE_CODEX_CLI_VERSION = "0.172.0";
 
 /** A ChatGPT sign-in as Codex writes `auth.json` (codex-rs/login/src/auth/storage.rs, `AuthDotJson`), with synthetic tokens. */
 export const FAKE_SIGN_IN = JSON.stringify({ auth_mode: "chatgpt", OPENAI_API_KEY: null, tokens: { id_token: "fake-id-token", access_token: "fake-access-token", refresh_token: "fake-refresh-0001", account_id: "fake-account" }, last_refresh: "2026-11-25T00:00:00Z" }, null, 2);

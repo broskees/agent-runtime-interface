@@ -19,6 +19,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { scanRecordingText } from "../../../scripts/check-recordings.ts";
+import { isAriError } from "../../../src/errors.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { encodeRecording, readRecording } from "../../recordings/format.ts";
@@ -54,7 +55,8 @@ async function recordFake(label: string, env: { [name: string]: string } = {}, s
   fs.mkdirSync(path.join(home, ".codex"), { mode: 0o700 });
   fs.writeFileSync(path.join(home, ".codex", "auth.json"), FAKE_SIGN_IN, { mode: 0o600 });
   const recorderEnv = { PATH: `${fake.bin}${path.delimiter}${process.env["PATH"] ?? "/usr/bin:/bin"}`, HOME: home, USER: "ari-test-user", ...fake.env, ...env };
-  const outcomes = await recordCodex({ scenarios, outDir: path.join(DIRECTORY, label), source: "fake", env: recorderEnv, timeoutMs: 20_000, ...(user === undefined ? {} : { user }) });
+  const systemConfigDir = fs.mkdtempSync(path.join(DIRECTORY, "etc-codex-"));
+  const outcomes = await recordCodex({ scenarios, outDir: path.join(DIRECTORY, label), source: "fake", env: recorderEnv, systemConfigDir, timeoutMs: 20_000, ...(user === undefined ? {} : { user }) });
   return { outcomes, fake, env: recorderEnv };
 }
 
@@ -115,7 +117,7 @@ test("the Codex recording function records all six scenarios from the fake app-s
     assert.ok(!fs.existsSync(outcome.workspace), `${outcome.scenario}: the temp workspace is gone`);
   }
   const processes = fake.processes();
-  assert.equal(processes.filter((each) => each.args[0] === "--version").length, 6, "one codex --version per scenario, for the header");
+  assert.equal(processes.filter((each) => each.args[0] === "--version").length, 13, "six untapped header probes and seven recorded session admission probes");
   assert.equal(processes.filter((each) => each.args[0] === "login").length, 7, "one codex login status per session: six scenarios, the resume scenario with two sessions");
   assert.equal(sessionServers(fake).size, 7, "one codex app-server per session");
   assert.equal(processes.filter((each) => each.args[0] === "app-server").length, 13, "and one per scenario for the model listing");
@@ -126,29 +128,39 @@ test("the Codex recording function records all six scenarios from the fake app-s
 test("each Codex recording holds the spawn requests with the names, never the values, of their variables, every stdin and stdout line in order, the stderr lines and the exits", async () => {
   const { outcomes, fake, env } = await recordAll();
   const recordings = await Promise.all(outcomes.map((outcome) => readRecording(outcome.file!)));
-  const all = recordings.flatMap((recording) => recording.frames.map((entry) => entry.frame));
+  const appServerFrames: Frame[] = [];
   for (const recording of recordings) {
     const frames = recording.frames.map((entry) => entry.frame);
     const spawns = frames.filter((frame) => frame.kind === "spawn");
     const sessions = recording.header.scenario === "resume" ? 2 : 1;
-    assert.equal(spawns.length, 2 * sessions, `${recording.header.scenario}: per session, codex login status and codex app-server`);
+    assert.equal(spawns.length, 3 * sessions, `${recording.header.scenario}: per session, codex --version, codex login status and codex app-server`);
+    const serverProcs = new Set<unknown>();
     spawns.forEach((spawn, index) => {
       const proc = spawn["proc"];
-      if (index % 2 === 0) assert.deepEqual(spawn, { dir: "out", kind: "spawn", proc, command: "codex", args: ["login", "status"], envNames: [], purpose: "probe", stdin: "ignore", timeoutMs: 10_000 });
-      else assert.deepEqual(spawn, { dir: "out", kind: "spawn", proc, command: "codex", args: ["app-server"], envNames: [], purpose: "runtime", stdin: "pipe" }, "the driver's request: the recorder's CODEX_HOME is added below the tap, so neither its name nor its value is here");
       const own = frames.filter((frame) => frame["proc"] === proc);
       assert.equal(own[0], spawn, "the spawn comes first");
       const exits = own.filter((frame) => frame.kind === "exit");
       assert.equal(exits.length, 1, "one exit");
-      if (index % 2 === 0) {
+      const role = index % 3;
+      if (role !== 2) {
+        const isVersion = role === 0;
+        assert.deepEqual(spawn, { dir: "out", kind: "spawn", proc, command: "codex", args: isVersion ? ["--version"] : ["login", "status"], envNames: [], purpose: "probe", stdin: "ignore", timeoutMs: 10_000 });
+        const streams = own.slice(1).filter((frame) => frame.kind !== "exit");
+        assert.deepEqual(streams, [isVersion
+          ? { dir: "in", kind: "stdout", proc, text: `codex-cli ${FAKE_CODEX_CLI_VERSION}` }
+          : { dir: "in", kind: "stderr", proc, text: "Logged in using ChatGPT" }]);
         assert.deepEqual(exits[0], { dir: "in", kind: "exit", proc, code: 0, signal: null });
-        assert.deepEqual(own.filter((frame) => frame.kind === "stderr").map((frame) => frame["text"]), ["Logged in using ChatGPT"]);
+        const nextSpawn = frames.indexOf(spawns[index + 1]!);
+        assert.ok(frames.indexOf(streams[0]!) < nextSpawn && frames.indexOf(exits[0]!) < nextSpawn, "the probe's output and exit both precede the next spawn");
         return;
       }
+      serverProcs.add(proc);
+      assert.deepEqual(spawn, { dir: "out", kind: "spawn", proc, command: "codex", args: ["app-server"], envNames: [], purpose: "runtime", stdin: "pipe" }, "the driver's request: the recorder's CODEX_HOME is added below the tap, so neither its name nor its value is here");
       assert.ok(own.some((frame) => frame.kind === "close_stdin") && own.some((frame) => frame.kind === "kill"), "the driver's close of the app-server is recorded");
       assert.ok((exits[0]!["code"] === 0 && exits[0]!["signal"] === null) || (exits[0]!["code"] === null && exits[0]!["signal"] === "SIGTERM"), `the app-server exited when its stdin closed, or by the kill: ${JSON.stringify(exits[0])}`);
       assert.deepEqual(own.filter((frame) => frame.kind === "stderr").map((frame) => frame["text"]), [`fake codex ${FAKE_CODEX_CLI_VERSION}: serving the app-server protocol on stdio`]);
     });
+    appServerFrames.push(...frames.filter((frame) => serverProcs.has(frame["proc"])));
     assert.ok(!JSON.stringify(frames).includes("codex-home/auth.json") && !JSON.stringify(frames).includes("fake-refresh"), "no sign-in in the recording");
   }
   // Every line on the session app-servers' pipes, as their side saw it, after the recorder's sanitiser, in order.
@@ -162,17 +174,17 @@ test("each Codex recording holds the spawn requests with the names, never the va
     return (sanitise({ dir: kind === "stdin" ? "out" : "in", kind, proc: 0, message: JSON.parse(text) as unknown } as Frame) as Frame)["message"];
   };
   assert.deepEqual(
-    all.filter((frame) => frame.kind === "stdin").map((frame) => frame["message"]),
+    appServerFrames.filter((frame) => frame.kind === "stdin").map((frame) => frame["message"]),
     wire.filter((entry) => entry.direction === "in").map((entry) => sanitiseLine(entry.line, "stdin")),
     "every stdin line, in order",
   );
   assert.deepEqual(
-    all.filter((frame) => frame.kind === "stdout").map((frame) => frame["message"]),
+    appServerFrames.filter((frame) => frame.kind === "stdout").map((frame) => frame["message"]),
     wire.filter((entry) => entry.direction === "out").map((entry) => sanitiseLine(entry.line, "stdout")),
     "every stdout line, in order",
   );
   assert.deepEqual(
-    all.filter((frame) => frame.kind === "stderr" && frame["text"] !== "Logged in using ChatGPT").map((frame) => frame["text"]),
+    appServerFrames.filter((frame) => frame.kind === "stderr").map((frame) => frame["text"]),
     wire.filter((entry) => entry.direction === "err").map((entry) => entry.line),
     "every stderr line of the app-servers",
   );
@@ -258,6 +270,48 @@ function firstServer(recording: Recording): number {
   return Number(recording.frames.find((entry) => entry.frame.kind === "stdin" && messageOf(entry.frame)["method"] === "initialize")!.frame["proc"]);
 }
 
+test("Codex replay reports first-spawn drift when the session admission probe is changed or absent", async () => {
+  const recording = await recordingOf("simple");
+  const admission = recording.frames[0]!.frame;
+  assert.equal(admission.kind, "spawn");
+  assert.deepEqual(admission["args"], ["--version"]);
+  const changed = editedCopy(recording, "changed-admission", (frames) => {
+    frames[0] = { ...frames[0]!, args: ["version"] };
+  });
+  const absent = editedCopy(recording, "absent-admission", (frames) => {
+    for (let index = frames.length - 1; index >= 0; index -= 1) {
+      if (frames[index]!["proc"] === admission["proc"]) frames.splice(index, 1);
+    }
+  });
+  assert.deepEqual(absent.frames[0]?.["args"], ["login", "status"]);
+  for (const { file, frames } of [changed, absent]) {
+    const line = recording.frames[0]!.line;
+    await assert.rejects(replayCodex(file), (error: unknown) => {
+      assert.ok(error instanceof ReplayDriftError, String(error));
+      assert.equal(error.file, file);
+      assert.equal(error.line, line);
+      assert.ok(error.message.includes(`\n  recorded (line ${line}): ${showFrame(frames[0])}`), error.message);
+      assert.ok(error.message.includes(`\n  sent: ${showFrame(admission)}`), error.message);
+      return true;
+    });
+  }
+});
+
+test("Codex replay refuses a prerelease reported by the admission probe even when the header names a supported release", async () => {
+  const recording = await recordingOf("simple");
+  const { file } = editedCopy(recording, "old-admission-version", (frames) => {
+    const index = frames.findIndex((frame) => frame["proc"] === frames[0]!["proc"] && frame.kind === "stdout");
+    const stdout = frames[index]!;
+    assert.equal(stdout["text"], `codex-cli ${FAKE_CODEX_CLI_VERSION}`);
+    frames[index] = { ...stdout, text: "codex-cli 0.172.0-fake" };
+  });
+  await assert.rejects(replayCodex(file), (error: unknown) => {
+    assert.ok(isAriError(error, "driver_unavailable"), String(error));
+    assert.match(error.message, /Codex CLI 0\.172\.0-fake .* is older than 0\.172\.0/);
+    return true;
+  });
+});
+
 for (const name of SCENARIO_NAMES) {
   test(`${name}: Codex replay fails, naming the file, the line and both frames, when the driver writes a stdin frame other than the next recorded one`, async () => {
     const recording = await recordingOf(name);
@@ -342,10 +396,11 @@ function checkError(file: string, check: string, dependedOn: { line: number; fra
 
 test("approval_allowed: Codex replay fails when the frames with the command's output are removed, naming the file, the command's last recorded frame and the frame replayed last", async () => {
   const recording = await recordingOf("approval_allowed");
+  const server = firstServer(recording);
   const marker = SCENARIOS.find((each) => each.name === "approval_allowed")!.marker!;
   // The command's output streams in item/commandExecution/outputDelta and comes whole in its item/completed.
-  const output = recording.frames.flatMap((entry, index) => (entry.frame.kind === "stdout" && commandOf(entry.frame) !== undefined && JSON.stringify(entry.frame).includes(marker) ? [index] : []));
-  const deltas = recording.frames.filter((entry) => entry.frame.kind === "stdout" && messageOf(entry.frame)["method"] === "item/commandExecution/outputDelta");
+  const output = recording.frames.flatMap((entry, index) => (entry.frame["proc"] === server && commandOf(entry.frame) !== undefined && JSON.stringify(entry.frame).includes(marker) ? [index] : []));
+  const deltas = recording.frames.filter((entry) => entry.frame["proc"] === server && entry.frame.kind === "stdout" && messageOf(entry.frame)["method"] === "item/commandExecution/outputDelta");
   assert.ok(output.length >= 1 && deltas.length >= 1, "the recording holds the command's output");
   const call = (messageOf(deltas[0]!.frame)["params"] as { itemId: string }).itemId;
   const { file } = editedCopy(recording, "removed-command-output", (frames) => {
@@ -367,7 +422,8 @@ test("approval_allowed: Codex replay fails when the frames with the command's ou
 
 test("approval_denied: Codex replay fails when the declined command's end says it completed with the marker in its output, naming the file, the command's last recorded frame and the frame replayed last", async () => {
   const recording = await recordingOf("approval_denied");
-  const completed = recording.frames.findIndex((entry) => entry.frame.kind === "stdout" && messageOf(entry.frame)["method"] === "item/completed" && commandOf(entry.frame) !== undefined);
+  const server = firstServer(recording);
+  const completed = recording.frames.findIndex((entry) => entry.frame["proc"] === server && entry.frame.kind === "stdout" && messageOf(entry.frame)["method"] === "item/completed" && commandOf(entry.frame) !== undefined);
   assert.ok(completed !== -1, "the recording holds the declined command's end");
   const call = commandOf(recording.frames[completed]!.frame)!;
   assert.equal(((messageOf(recording.frames[completed]!.frame)["params"] as { item: { status: string } }).item.status), "declined");
@@ -630,14 +686,17 @@ test("the Codex recorder replaces the OS user name, a home path, an email, a sec
   for (const outcome of outcomes) {
     assert.equal(outcome.error, undefined, `${outcome.scenario}: ${outcome.error?.message}`);
     const text = fs.readFileSync(outcome.file!, "utf8");
-    const frames = (await readRecording(outcome.file!)).frames.map((entry) => entry.frame);
+    const recording = await readRecording(outcome.file!);
+    const frames = recording.frames.map((entry) => entry.frame);
+    const server = firstServer(recording);
+    const stdout = frames.filter((frame) => frame["proc"] === server && frame.kind === "stdout");
     assert.ok(!text.includes(outcome.workspace), `${outcome.scenario}: the workspace path`);
     assert.ok(!text.includes(home), `${outcome.scenario}: the HOME`);
     assert.deepEqual(wholeWordsOf(osName, frames, CODEX_PROTOCOL_WORDS), [], `${outcome.scenario}: the OS user name is nowhere in the recording but in protocol words`);
     for (const leaked of ["ari-recorder-user@example.org", secret, "someone-else", "acct-31f9c2", "org-77d1e0", "ChatGPT Pro", "0.82", "2026-12-16", "1796000000123", "2294915", "session.1YX2c84S", "codex-2294915", "zsh", "azure-openai", '"pro"', '"usedPercent":37', '"usedPercent":81', "1796072400", "1796500000", "1693.25", "250.00", "90.17", "1796600000", "workspace_member_usage_limit_reached", "(fake)"]) {
       assert.ok(!text.includes(leaked), `${outcome.scenario}: ${leaked} is gone`);
     }
-    const tool = frames.find((frame) => frame.kind === "stdout" && (messageOf(frame)["params"] as { item?: { id?: string } } | undefined)?.item?.id === "call_planted")!;
+    const tool = stdout.find((frame) => (messageOf(frame)["params"] as { item?: { id?: string } } | undefined)?.item?.id === "call_planted")!;
     const item = (messageOf(tool)["params"] as { item: typeof toolCall }).item;
     assert.equal(item.result.content[0]!.text, `${PLACEHOLDERS.user} asked from ${PLACEHOLDERS.home}/notes, as ${PLACEHOLDERS.email}, with <ARI_TEST_SERVICE_TOKEN> and ${PLACEHOLDERS.otherHome}/x`);
     assert.deepEqual(item.arguments, {
@@ -653,7 +712,7 @@ test("the Codex recorder replaces the OS user name, a home path, an email, a sec
       shell: NEUTRAL_SHELL,
       providers: [],
     });
-    const limits = frames.find((frame) => frame.kind === "stdout" && messageOf(frame)["method"] === "account/rateLimits/updated")!;
+    const limits = stdout.find((frame) => messageOf(frame)["method"] === "account/rateLimits/updated")!;
     assert.deepEqual((messageOf(limits)["params"] as { rateLimits: unknown }).rateLimits, {
       limitId: "codex",
       limitName: null,
@@ -665,9 +724,9 @@ test("the Codex recorder replaces the OS user name, a home path, an email, a sec
       rateLimitReachedType: null,
       spendControlReached: false,
     });
-    const account = frames.find((frame) => frame.kind === "stdout" && messageOf(frame)["method"] === "account/updated")!;
+    const account = stdout.find((frame) => messageOf(frame)["method"] === "account/updated")!;
     assert.deepEqual(messageOf(account)["params"], { authMode: "chatgpt", planType: PLACEHOLDERS.plan });
-    const initialized = frames.find((frame) => frame.kind === "stdout" && typeof (messageOf(frame)["result"] as { userAgent?: unknown } | undefined)?.userAgent === "string")!;
+    const initialized = stdout.find((frame) => typeof (messageOf(frame)["result"] as { userAgent?: unknown } | undefined)?.userAgent === "string")!;
     assert.equal((messageOf(initialized)["result"] as { userAgent: string }).userAgent, "codex_cli_rs/0.172.0", "the client's system after the product goes");
     if (outcome.scenario === "simple") assert.ok(text.includes(`asked is ${PLACEHOLDERS.user}"`), "the reply, sanitised");
     if (outcome.scenario === "approval_allowed") assert.ok(text.includes(`drwx------ 2 ${PLACEHOLDERS.user} ${PLACEHOLDERS.user} 4096`), "the command output, sanitised");

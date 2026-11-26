@@ -14,6 +14,7 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { validateCliManifest } from "../../../src/cli-manifests/index.ts";
 import { IconSchema, isAriError } from "../../../src/index.ts";
 import type { FakeHostOptions } from "../../../src/conformance/index.ts";
+import { parseVersion } from "../../../src/drivers/acp/driver.ts";
 import type { DriverMeta } from "../../../src/meta/acp.ts";
 import type { Driver, Instance, Session } from "../../../src/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
@@ -89,8 +90,21 @@ export interface DriverProfile<Config> {
   readonly hostOptions?: (instanceId: string, paths: HostPaths) => Partial<FakeHostOptions<Config>>;
   /** A config whose agent is not installed, and what the error must name. */
   readonly missing: { readonly config: Config; readonly binary?: string; readonly package?: string };
-  /** For a driver with a vendor release range: version lines the fake prints for `--version`, one inside the range and one outside. */
-  readonly versions?: { readonly tested: string; readonly testedVersion: string; readonly untested: string; readonly untestedVersion: string };
+  /**
+   * For a driver that runs a vendor's CLI: its minimum (the lower bound of its tested range) and the vendor's update
+   * step, `--version` lines the fake prints (at the minimum, above the tested range, below the minimum), and the CLI's
+   * real `--version` output, a committed file under test/fixtures/cli-version-output/, with the version it holds.
+   */
+  readonly versions?: {
+    readonly minimum: string;
+    readonly updateStep: string;
+    readonly atMinimum: string;
+    readonly aboveRange: string;
+    readonly aboveVersion: string;
+    readonly belowMinimum: string;
+    readonly belowVersion: string;
+    readonly realOutput: { readonly file: string; readonly version: string };
+  };
   /** For a driver that runs any agent (its tested range is the ACP protocol versions): the version status() reports. */
   readonly reportedVersion?: string;
   /** What the driver does with each optional member; `supported` members are exercised below. */
@@ -255,15 +269,19 @@ export function driverRuleTests<Config>(profile: DriverProfile<Config>): void {
       }
       return;
     }
+    const { versions } = profile;
+    assert.ok(profile.meta.testedVersions.range.startsWith(`>=${versions.minimum} `), "the minimum is the lower bound of the tested range");
+    // At the minimum: available, no advisory. Above the tested range: available, with the untested_version advisory.
     for (const [line, version, advised] of [
-      [profile.versions.tested, profile.versions.testedVersion, false],
-      [profile.versions.untested, profile.versions.untestedVersion, true],
+      [versions.atMinimum, versions.minimum, false],
+      [versions.aboveRange, versions.aboveVersion, true],
     ] as const) {
       const rig = await openRig(rigOptions(profile, ["--print-version", line]));
       try {
         const status = await rig.instance.status();
-        assert.equal(status.state, "ready");
+        assert.equal(status.state, "ready", line);
         assert.equal(status.version, version);
+        assert.equal(status.error, undefined);
         if (!advised) assert.equal(status.advisory, undefined);
         else {
           assert.equal(status.advisory?.kind, "untested_version");
@@ -276,10 +294,54 @@ export function driverRuleTests<Config>(profile: DriverProfile<Config>): void {
     }
   });
 
+  if (profile.versions !== undefined) {
+    const versions = profile.versions;
+
+    test(`${kind}: reads the vendor's real --version output and refuses old CLIs in status and openSession before any agent starts`, async () => {
+      const output = fs.readFileSync(path.join(REPO_ROOT, "test", "fixtures", "cli-version-output", versions.realOutput.file), "utf8");
+      assert.equal(parseVersion(output), versions.realOutput.version);
+      // The fake appends a newline, so remove the one already present in stdout.
+      const real = await openRig(rigOptions(profile, ["--print-version", output.replace(/\n$/, "")]));
+      try {
+        assert.equal((await real.instance.status()).version, versions.realOutput.version);
+      } finally {
+        await real.cleanup();
+      }
+      const rig = await openRig(rigOptions(profile, ["--print-version", versions.belowMinimum]));
+      try {
+        const where = await rig.host.process.resolveExecutable(profile.executable);
+        assert.ok(where !== null);
+        const status = await rig.instance.status();
+        assert.equal(status.state, "unavailable");
+        assert.equal(status.installed, true);
+        assert.equal(status.version, versions.belowVersion);
+        assert.equal(status.advisory, undefined);
+        assert.equal(status.error?.code, "driver_unavailable");
+        const error = status.error as { message: string; binary?: string; installHint?: string };
+        for (const part of [versions.belowVersion, where, versions.minimum, versions.updateStep]) assert.ok(error.message.includes(part), `the message names ${part}: ${error.message}`);
+        assert.equal(error.binary, profile.missing.binary);
+        assert.equal(error.installHint, versions.updateStep);
+        const probe = await rig.instance.probe();
+        assert.equal(probe.installed, true);
+        assert.equal(probe.version, versions.belowVersion);
+        assert.deepEqual(probe.error, status.error);
+        await assert.rejects(rig.instance.openSession({}), (rejection) => isAriError(rejection, "driver_unavailable") && rejection.message === error.message);
+        assert.ok(rig.host.spawns.length > 0, "the version was asked for");
+        assert.deepEqual(
+          rig.host.spawns.filter((spawn) => spawn.purpose !== "probe" || spawn.args?.[0] !== "--version"),
+          [],
+          "nothing but the version command ran: no agent started",
+        );
+      } finally {
+        await rig.cleanup();
+      }
+    });
+  }
+
   test(`${kind}: an agent that answers an ACP protocol version outside 1 and 2 cannot start a session, and status() gives an advisory that names it`, async () => {
     // A release-range driver's agent prints a version inside its range, so the only advisory can be the protocol's.
     // The fake speaks v1 here: the SDK's v2 agent refuses to answer with any version but 2.
-    const rig = await openRig({ ...rigOptions(profile, ["--answer-protocol", "3", ...(profile.versions === undefined ? [] : ["--print-version", profile.versions.tested])]), protocol: 1 });
+    const rig = await openRig({ ...rigOptions(profile, ["--answer-protocol", "3", ...(profile.versions === undefined ? [] : ["--print-version", profile.versions.atMinimum])]), protocol: 1 });
     try {
       assert.equal((await rig.instance.status()).advisory, undefined, "no session has negotiated yet");
       await assert.rejects(rig.instance.openSession({}), (error) => isAriError(error, "protocol"));

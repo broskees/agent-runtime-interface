@@ -8,7 +8,7 @@ import { openRig } from "../acp/rig.ts";
 import { KIRO_OPTIONS_V1 } from "./fixtures.ts";
 
 test("kiro runs `kiro-cli acp --agent-engine=v3 --auth-method=cli`, turns autopilot off for supervised threads and on under full_access", async () => {
-  const rig = await openRig({ name: "kiro", driver: kiroDriver, config: { ...KIRO_DEFAULT_CONFIG }, executable: "kiro-cli", protocol: 1, agentArgs: ["--load", "--config-options", JSON.stringify(KIRO_OPTIONS_V1)] });
+  const rig = await openRig({ name: "kiro", driver: kiroDriver, config: { ...KIRO_DEFAULT_CONFIG }, executable: "kiro-cli", protocol: 1, agentArgs: ["--load", "--config-options", JSON.stringify(KIRO_OPTIONS_V1), "--print-version", "kiro-cli 3.0.0"] });
   try {
     const { session } = await rig.open();
     const runtime = rig.host.spawns.find((spawn) => spawn.purpose === "runtime")!;

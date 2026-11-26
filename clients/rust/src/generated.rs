@@ -2577,9 +2577,12 @@ pub struct ProcessExit {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResolveExecutableInput {
     pub name: String,
-    /// A PATH-style list of directories to search instead of the host default.
+    /// A PATH-style list of directories to search instead of the host default when `env` is not supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 /// Secrets are addressed by namespace and key. Neither may contain `..` or `/`.
@@ -4546,9 +4549,12 @@ pub struct HostProcessResolveExecutableParams {
     #[serde(rename = "instanceId")]
     pub instance_id: String,
     pub name: String,
-    /// A PATH-style list of directories to search instead of the host default.
+    /// A PATH-style list of directories to search instead of the host default when `env` is not supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

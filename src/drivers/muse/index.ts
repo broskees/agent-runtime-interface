@@ -7,10 +7,12 @@
 // Importing this module loads no vendor code and spawns nothing: `create()`
 // only reads whether the instance holds a managed key. A missing SDK or a
 // missing `muse` binary shows in `status()` and fails `openSession` with
-// `driver_unavailable` naming what to install.
+// `driver_unavailable` naming what to install; a `muse` older than
+// MUSE_MINIMUM_VERSION does the same, naming its update step. ARI never
+// installs or updates `muse`.
 
 import type { CliLaunchManifest } from "../../generated/driver.ts";
-import { MUSE_CONFIG_SCHEMA, MUSE_DRIVER_KIND, MUSE_METADATA, MUSE_TESTED_VERSIONS, museDefaultConfig } from "../../meta/muse.ts";
+import { MUSE_CLI_UPDATE_STEP, MUSE_CONFIG_SCHEMA, MUSE_DRIVER_KIND, MUSE_METADATA, MUSE_MINIMUM_VERSION, MUSE_TESTED_VERSIONS, museDefaultConfig } from "../../meta/muse.ts";
 import type { MuseDriverConfig } from "../../meta/muse.ts";
 import type { Driver } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
@@ -26,7 +28,7 @@ export { MUSE_IDENTITY_VERSION, choiceOption, itemIdFor, musePolicy, planIdFor, 
 export { museMcpServers } from "./session.ts";
 export { loadMuseSdk } from "./sdk.ts";
 export type { MuseSdk, MuseSdkRuntime } from "./sdk.ts";
-export { MUSE_TESTED_VERSIONS };
+export { MUSE_CLI_UPDATE_STEP, MUSE_MINIMUM_VERSION, MUSE_TESTED_VERSIONS };
 
 /**
  * How a host runs Muse Code itself in a terminal: plain `muse`. The driver

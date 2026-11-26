@@ -4,15 +4,18 @@
 // into a package laid out as the real one is (see sdk-fixture.ts).
 //
 // Like the real `sdk.mjs` it is plain JavaScript that imports only Node
-// built-ins, so the standalone ari-driver can load it by file URL. It finds
-// its native Claude Code binary as the real SDK does:
+// built-ins, so the standalone ari-driver can load it by file URL. It picks
+// the Claude Code it runs as the real SDK does:
 // `options.pathToClaudeCodeExecutable`, else the first of its platform
-// packages that resolves from this file, else it throws the real SDK's error.
-// Each query runs that binary once with `--version`, and answers each prompt
-// with an init message, one assistant message and a success result whose
-// text quotes the binary's answer and says how the binary was found, so a
-// test sees which binary ran and whether the driver named it. It
-// spawns nothing else and reaches no network.
+// packages that resolves from this file (the native package npm installs
+// beside it), else it throws the real SDK's error. Each query launches that
+// Claude Code once, with the real SDK's first launch arguments
+// (`--output-format stream-json --verbose --input-format stream-json`), and
+// answers each prompt with an init message, one assistant message and a
+// success result whose text names the Claude Code's path, says how it was
+// found and quotes what the launch printed, so a test sees which Claude Code
+// ran and whether the driver named it. It spawns nothing else and reaches no
+// network.
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -50,12 +53,15 @@ function findExecutable(options) {
   throw new Error(`Native CLI binary for ${process.platform}-${process.arch} not found. Reinstall ${PACKAGE} without --omit=optional, or set options.pathToClaudeCodeExecutable.`);
 }
 
+/** The first arguments the real SDK 0.3.330 launches Claude Code with. */
+const LAUNCH_ARGUMENTS = ["--output-format", "stream-json", "--verbose", "--input-format", "stream-json"];
+
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
 
 export function query({ prompt, options = {} }) {
   const executable = findExecutable(options);
   const found = options.pathToClaudeCodeExecutable === undefined ? "found by the SDK itself" : "named in pathToClaudeCodeExecutable";
-  const native = execFileSync(executable, ["--version"], { encoding: "utf8", env: options.env ?? {} }).trim();
+  const answer = execFileSync(executable, LAUNCH_ARGUMENTS, { encoding: "utf8", env: options.env ?? {} }).trim();
   const sessionId = options.sessionId ?? options.resume ?? randomUUID();
   const model = options.model ?? "fixture-model";
   const pending = [];
@@ -71,8 +77,8 @@ export function query({ prompt, options = {} }) {
     for await (const message of prompt) {
       if (closed) return;
       answered += 1;
-      const text = `fixture SDK reply ${answered}, from the native binary that answered: ${native} (${found})`;
-      push({ type: "system", subtype: "init", uuid: randomUUID(), session_id: sessionId, cwd: options.cwd ?? process.cwd(), model, claude_code_version: native, slash_commands: [], permissionMode: options.permissionMode ?? "default", tools: [] });
+      const text = `fixture SDK reply ${answered}, from the Claude Code at ${executable} (${found}), which answered: ${answer}`;
+      push({ type: "system", subtype: "init", uuid: randomUUID(), session_id: sessionId, cwd: options.cwd ?? process.cwd(), model, claude_code_version: answer, slash_commands: [], permissionMode: options.permissionMode ?? "default", tools: [] });
       push({
         type: "assistant",
         uuid: randomUUID(),

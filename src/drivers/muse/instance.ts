@@ -11,13 +11,17 @@
 //
 // `probe()` loads the SDK (which runs nothing) and runs only `muse --version`;
 // it never starts `muse serve`, which can start MCP servers or write state.
+// The driver runs the `muse` the user installed and never installs or updates
+// one: a `muse` older than MUSE_MINIMUM_VERSION is `driver_unavailable` in
+// `status()` and `openSession`, naming MUSE_CLI_UPDATE_STEP.
 
-import { callErrors, toCallError } from "../../errors.ts";
+import { AriError, callErrors, toCallError } from "../../errors.ts";
+import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { AuthFlow, AuthMethod, AuthState, InstanceStatus, ModelCatalog, ModelInfo, OpenSessionInput, ProbeResult, UpdateAdvisory } from "../../generated/instance.ts";
 import type { LimitStatus } from "../../generated/usage.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
-import { MUSE_CLI_INSTALL_HINT, MUSE_TESTED_VERSIONS } from "../../meta/muse.ts";
+import { MUSE_CLI_INSTALL_HINT, MUSE_CLI_UPDATE_STEP, MUSE_MINIMUM_VERSION, MUSE_TESTED_VERSIONS } from "../../meta/muse.ts";
 import type { MuseDriverConfig } from "../../meta/muse.ts";
 import { MUSE_CAPABILITIES } from "./capabilities.ts";
 import { MuseHost, callErrorFromMuse } from "./host.ts";
@@ -160,6 +164,8 @@ export class MuseInstance implements Instance {
   async status(): Promise<InstanceStatus> {
     const probe = await this.probe();
     if (!probe.installed) return { state: "unavailable", installed: false, ...(probe.error === undefined ? {} : { error: probe.error }) };
+    // Installed but older than the minimum: the driver will not run it.
+    if (probe.error?.code === "driver_unavailable") return { state: "unavailable", installed: true, ...(probe.version === undefined ? {} : { version: probe.version }), error: probe.error };
     const sdk = await this.#loadSdk();
     const auth = await this.#state();
     const advisory = versionAdvisory(probe.version, sdk.version);
@@ -196,18 +202,24 @@ export class MuseInstance implements Instance {
     } catch (error) {
       return { ok: false, installed: false, error: toCallError(error) ?? callErrors.transport(String(error)).callError, checkedAt };
     }
-    const path = await this.#host.process.resolveExecutable(this.#config.binaryPath);
+    const env = this.#forwardedEnvironment();
+    // The process owner interprets env as for spawn. Keep path for older hosts.
+    const path = await this.#host.process.resolveExecutable(this.#config.binaryPath, { env, ...(env["PATH"] === undefined ? {} : { path: env["PATH"] }) });
     if (path === null) return { ok: false, installed: false, error: this.#cliMissing().callError, checkedAt };
     let version: string | undefined;
     let ok = false;
     try {
-      const child = await this.#host.process.spawn({ command: this.#config.binaryPath, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: this.#forwardedEnvironment() });
+      const child = await this.#host.process.spawn({ command: this.#config.binaryPath, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env });
       const [stdout, stderr] = await Promise.all([readAll(child.stdout), readAll(child.stderr)]);
       const exit = await child.exited;
       version = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(`${stdout}\n${stderr}`)?.[1];
       ok = exit.code === 0 && version !== undefined;
     } catch (error) {
       return { ok: false, installed: true, checkedAt, error: toCallError(error) ?? callErrors.transport(String(error)).callError };
+    }
+    if (version !== undefined && compareVersions(version, MUSE_MINIMUM_VERSION) < 0) {
+      const tooOld = new CliTooOldError({ name: "Muse Code", binary: this.#config.binaryPath, version, path, minimum: MUSE_MINIMUM_VERSION, updateStep: MUSE_CLI_UPDATE_STEP });
+      return { ok: false, installed: true, version, error: tooOld.callError, checkedAt };
     }
     const result: ProbeResult = { ok, installed: true, ...(version === undefined ? {} : { version }), checkedAt };
     if (options?.deep === true) return { ...result, auth: await this.#state() };
@@ -414,7 +426,9 @@ export class MuseInstance implements Instance {
   async openSession(input: OpenSessionInput): Promise<Session> {
     if (this.#disposed) throw callErrors.invalidState("instance_disposed");
     const { sdk } = await this.#loadSdk();
-    if ((await this.#host.process.resolveExecutable(this.#config.binaryPath)) === null) throw this.#cliMissing();
+    // A missing `muse`, or one below the minimum, never starts `muse serve`.
+    const probe = await this.probe();
+    if (probe.error?.code === "driver_unavailable") throw new AriError(probe.error);
     const state = await this.#state();
     if (state.status === "unauthenticated") throw callErrors.authRequired([...MUSE_AUTH_METHODS], "Sign in to Muse first");
     this.#sessionCount += 1;

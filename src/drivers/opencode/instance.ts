@@ -8,7 +8,13 @@
 // (`GET /api/info` or `GET /global/health`): they start no server and write
 // nothing. OpenCode keeps sign-in per model provider in its own store, so the
 // instance has no ARI auth group of its own.
+//
+// The driver runs the `opencode` the user installed and never installs or
+// updates one. A version older than its generation's minimum (1.19.6 for
+// 1.x, 2.1.2 for 2.x) is `driver_unavailable` in `status()`, `openSession`
+// and `catalog.list`, naming OPENCODE_UPDATE_STEP.
 
+import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
 import { callErrors, toCallError } from "../../errors.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { CallError } from "../../generated/errors.ts";
@@ -73,6 +79,8 @@ export class OpencodeInstance implements Instance {
     try {
       detected = await this.#pool.detect();
     } catch (error) {
+      // Installed but older than the minimum: the driver will not run it.
+      if (error instanceof CliTooOldError) return { state: "unavailable", installed: true, version: error.version, error: error.callError };
       const callError = asCallError(error);
       return { state: "unavailable", installed: callError.code !== "driver_unavailable" && !this.#pool.external, error: callError };
     }
@@ -96,6 +104,7 @@ export class OpencodeInstance implements Instance {
       const detected = await this.#pool.detect();
       return { ok: true, installed: true, version: detected.version, checkedAt };
     } catch (error) {
+      if (error instanceof CliTooOldError) return { ok: false, installed: true, version: error.version, error: error.callError, checkedAt };
       const callError = asCallError(error);
       const installed = !this.#pool.external && callError.code !== "driver_unavailable";
       return { ok: false, installed, error: callError, checkedAt };

@@ -93,30 +93,44 @@ and its end-to-end phase on a real Mac will check it with real `claude` and
 
 ## Resolution
 
-Fixed in ARI on 2026-11-25 by commit `8f0981b` ("Agents end when their driver
-dies: a guard per agent group, SIGHUP as shutdown, late delegated children
-killed"), plan `driver-death-cleanup-20261125-190011`, phase 1.
+Fixed in ARI on 2026-11-25, plan `driver-death-cleanup-20261125-190011`,
+phase 1, by commits `8f0981b` ("Agents end when their driver dies: a guard
+per agent group, SIGHUP as shutdown, late delegated children killed") and
+`26f0a72` ("The guard moves into the agent's process group, started before
+the agent runs; local agents end within 1 s of shutdown; death tests measure
+from the signal"). `8f0981b` started each guard as a separate process
+outside the agent's group; review showed an owner killed between the two
+spawns left the agent unguarded, and a guard signalling a group by its
+number could hit a group ARI never started once that number was reused.
+`26f0a72` replaced it with the first approach above, in full.
 
 What changed:
 
 - `src/node/process.ts`: every child the process service starts on Linux and
-  macOS gets a guard, a `/bin/sh` in a session of its own that blocks reading
-  a pipe only the owning process holds. When the owner dies for any reason,
-  the pipe reaches end-of-file and the guard sends SIGTERM to the child's
-  process group, waits up to the kill grace (2 s by default) for it to empty,
-  sends SIGKILL to what is left, and exits. While the owner lives the guard
-  only waits; once a group is gone the owner closes the pipe and the guard
-  exits, so `dispose()` returns only after every guard is gone. This is the
-  first approach above, with the guard outside the agent's group: agent
-  spawning is unchanged, and no signal sent to the agent's group ends the
-  guard early. It costs one idle shell per agent (with bash as `/bin/sh`,
-  3.8 MB resident and 0.35 MB proportional) and under 1 ms per spawn.
+  macOS is spawned through a `/bin/sh` launcher. The launcher starts the
+  child's guard in the background, inside the child's own process group
+  (stdio on `/dev/null`, holding only the read end of a pipe the owner
+  holds), then `exec`s the child in its place, so the child keeps its pid and
+  never runs before its guard exists. The guard ignores SIGTERM, SIGHUP,
+  SIGINT and the other usual signals. When the owner dies for any reason (or
+  asks it to, by writing a line to the pipe), it sends SIGTERM to its own
+  group, waits until it is alone or the kill grace (2 s by default) has
+  passed, sends SIGKILL to the group and exits. It only ever signals the
+  group it is a member of, and its membership keeps that group id from being
+  given to anyone else. The command is searched for before the launch, so
+  spawn errors and argv stay as callers saw them (`docs/wire.md` lists the
+  small differences that remain). It costs one idle shell per agent (with
+  bash as `/bin/sh`, about 4.2 MB resident, 0.4 MB of it not shared).
+- `src/wire/server.ts`: local child processes are ended at most 1 s after the
+  connection closes, even while an instance's dispose still runs.
 - `src/wire/cli.ts`: SIGHUP is handled like SIGTERM (dispose, then exit 0).
 - `src/wire/client.ts`: a delegated child whose host spawn resolves after the
   wire closed is killed at once and never registered (the ARI build's
   finding F16).
 - `docs/wire.md` ("Agents end when `ari-driver` dies") and the
-  `src/node/process.ts` header state the guarantee and how it works.
+  `src/node/process.ts` header state the guarantee, how it works, what it
+  costs, and its limit: a process that leaves the agent's group with
+  `setsid()` or `setpgid()` is not reached.
 
 Tests:
 
@@ -124,20 +138,29 @@ Tests:
   a driver whose two agents each run a grandchild that ignores SIGHUP and
   never reads stdin (one agent also ignores SIGTERM). `ari-driver` is
   SIGKILLed, crashes with `process.abort()`, gets SIGHUP, or gets SIGTERM;
-  each time every agent, grandchild, group and guard is gone within 5 s, and
-  after SIGHUP and SIGTERM `ari-driver` exits 0.
+  each time every agent, grandchild, group and guard is gone within 5 s of
+  the signal (sampled from the signal on), and after SIGHUP and SIGTERM
+  `ari-driver` exits 0. The same holds for SIGTERM when the driver's dispose
+  takes 6 s, and for a SIGKILL that lands after an agent's spawn returned
+  but before its guard started (a preload freezes Node inside
+  `child_process.spawn` there).
 - `test/standalone/standalone-binary.e2e.ts` (run by `pnpm run test:binary`):
-  the SIGKILL and SIGHUP cases against the Bun-built standalone `ari-driver`,
-  with no `node` or `bun` on `PATH`.
+  the SIGKILL, SIGHUP and startup-window cases against the Bun-built
+  standalone `ari-driver`, with no `node` or `bun` on `PATH`.
 - `test/node/owner-death.test.ts`: a Node host using the process service
-  directly is SIGKILLed and leaves nothing behind within 5 s; an idle agent
+  directly is SIGKILLed, also inside the startup window, and leaves nothing
+  behind within 5 s; a guard holds its group id until it exits; an idle agent
   and its grandchild keep running for 10 s while the owner lives; an agent
   that exits on its own takes its grandchild and guard with it; 20 agents get
   one guard each, and `dispose()` leaves no guard.
-- `test/wire/late-spawn.test.ts`: the late delegated child is killed and gone
-  within 5 s.
+- `test/node/process.test.ts`: the launcher keeps spawn errors, argv and the
+  environment as a direct spawn gives them, apart from the documented
+  differences.
+- `test/wire/late-spawn.test.ts`: the late delegated child is killed, gone
+  within 5 s, and never in the client's process table.
 - `.github/workflows/ci.yml` gains a `macos-latest` job that runs
   `test/wire/driver-death.test.ts` and `test/node/owner-death.test.ts`.
 
 Not covered: Windows keeps `taskkill /T`, which runs only while the owner
-lives. Real `claude` and `codex` were not run (the plan starts no real agent).
+lives. Processes that leave the agent's group are not reached. Real `claude`
+and `codex` were not run (the plan starts no real agent).

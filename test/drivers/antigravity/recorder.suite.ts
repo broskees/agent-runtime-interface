@@ -17,7 +17,7 @@ import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { readRecording } from "../../recordings/format.ts";
 import { ANTIGRAVITY_SIGN_IN_FILE, profileSignInFile, userSignInFile } from "../../recordings/antigravity/credentials.ts";
-import { AntigravitySignInMissingError, antigravityEnvironment, describeAntigravityRun, failuresOf, recordAntigravity } from "../../recordings/antigravity/record.ts";
+import { AntigravitySignInMissingError, AntigravityWorkspaceInHomeError, antigravityEnvironment, describeAntigravityRun, failuresOf, recordAntigravity } from "../../recordings/antigravity/record.ts";
 import type { AntigravityRecordOutcome } from "../../recordings/antigravity/record.ts";
 import { replayAntigravity } from "../../recordings/antigravity/replay.ts";
 import { ANTIGRAVITY_RECORDER_ENV_POLICY, AntigravityModelChoiceError, createAntigravityLayout, defaultAntigravityModel } from "../../recordings/antigravity/run.ts";
@@ -398,6 +398,17 @@ test("a live run without the user's sign-in file stops before it starts agy, nam
   assert.ok(outcomes[0]!.error instanceof AntigravitySignInMissingError, outcomes[0]!.error?.message);
   assert.ok(outcomes[0]!.error!.message.includes(path.join(home, ".gemini", "antigravity-cli", ANTIGRAVITY_SIGN_IN_FILE)));
   assert.equal(outcomes[0]!.file, undefined);
+  assert.deepEqual(fake.processes(), [], "agy never started");
+  assert.ok(!fs.existsSync(outcomes[0]!.workspace));
+});
+
+test("a temp workspace inside the user's home stops the run before it starts agy: agy reads AGENTS.md, GEMINI.md and .agents/ in the folders above its own", async () => {
+  // A home that holds the system temp directory, and so every workspace the recorder makes.
+  const home = path.dirname(fs.realpathSync(os.tmpdir()));
+  const { outcomes, fake } = await recordWithFake({ HOME: home }, ["simple", "multi_turn"]);
+  assert.equal(outcomes.length, 1, "the run stopped");
+  assert.ok(outcomes[0]!.error instanceof AntigravityWorkspaceInHomeError, outcomes[0]!.error?.message);
+  assert.ok(outcomes[0]!.error!.message.includes(`inside your home ${home}`));
   assert.deepEqual(fake.processes(), [], "agy never started");
   assert.ok(!fs.existsSync(outcomes[0]!.workspace));
 });

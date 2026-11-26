@@ -105,7 +105,7 @@ test("the Antigravity recording function records all six scenarios from the fake
   const acp = fake.processes().filter((each) => each.args[0] === "acp");
   assert.equal(acp.length, 7, "one agy acp per session: six scenarios, the resume scenario with two sessions");
   // scripts/record-antigravity.ts calls this same function.
-  assert.match(fs.readFileSync(path.join(REPO_ROOT, "scripts", "record-antigravity.ts"), "utf8"), /const \{ AntigravitySignInMissingError, describeAntigravityRun, failuresOf, recordAntigravity \} = await import\("\.\.\/test\/recordings\/antigravity\/record\.ts"\);/);
+  assert.match(fs.readFileSync(path.join(REPO_ROOT, "scripts", "record-antigravity.ts"), "utf8"), /const \{ AntigravitySignInMissingError, AntigravityWorkspaceInHomeError, describeAntigravityRun, failuresOf, recordAntigravity \} = await import\("\.\.\/test\/recordings\/antigravity\/record\.ts"\);/);
 });
 
 test("each Antigravity recording holds the spawn request with the names, never the values, of its variables, every stdin and stdout line in order, the stderr lines and the exit", async () => {

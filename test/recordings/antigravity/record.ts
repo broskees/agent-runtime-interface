@@ -163,6 +163,19 @@ export class AntigravitySignInMissingError extends Error {
   }
 }
 
+/**
+ * The temp workspace lies inside the user's home: `agy` reads `AGENTS.md`,
+ * `GEMINI.md` and `.agents/` in the folder it works in and the folders above
+ * it, so it could read the user's own. The recorder stops before it starts
+ * `agy`.
+ */
+export class AntigravityWorkspaceInHomeError extends Error {
+  constructor(workspace: string, home: string) {
+    super(`the recorder's temp workspace ${workspace} is inside your home ${home}, and agy reads AGENTS.md, GEMINI.md and .agents/ in the folders above the folder it works in. Set TMPDIR to a directory outside your home and record again.`);
+    this.name = "AntigravityWorkspaceInHomeError";
+  }
+}
+
 /** Each failure of a scenario, in order. */
 export function failuresOf(outcome: AntigravityRecordOutcome): readonly Error[] {
   if (outcome.error === undefined) return [];
@@ -201,6 +214,11 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
   let recoveryFile: string | undefined;
   let workspaceKept = false;
   try {
+    const home = options.env["HOME"]?.trim();
+    if (home !== undefined && home !== "") {
+      const homes = new Set([home, fs.existsSync(home) ? fs.realpathSync(home) : home]);
+      for (const each of homes) if (layout.root.startsWith(`${each}${path.sep}`)) throw new AntigravityWorkspaceInHomeError(layout.root, home);
+    }
     const real = userSignInFile(options.env);
     credential = real === undefined ? undefined : copyCredentialFile(real, profileSignInFile(layout.profile), ANTIGRAVITY_SIGN_IN_FILE);
     if (options.source === "live" && credential === undefined) throw new AntigravitySignInMissingError(real);
@@ -276,9 +294,10 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
 
 /**
  * Records each scenario in turn. A failed scenario does not stop the others,
- * but four failures stop them all: no sign-in file to copy, a model the agent
- * does not offer, a refreshed sign-in the recorder could keep nowhere but in
- * the workspace, and a recording it could not write.
+ * but five failures stop them all: a temp workspace inside the user's home, no
+ * sign-in file to copy, a model the agent does not offer, a refreshed sign-in
+ * the recorder could keep nowhere but in the workspace, and a recording it
+ * could not write.
  */
 export async function recordAntigravity(options: RecordAntigravityOptions): Promise<AntigravityRecordOutcome[]> {
   const names = options.scenarios ?? SCENARIOS.map((scenario) => scenario.name);
@@ -288,7 +307,7 @@ export async function recordAntigravity(options: RecordAntigravityOptions): Prom
     if (scenario === undefined) throw new Error(`no scenario is named ${JSON.stringify(name)}`);
     const outcome = await recordOne(scenario, options);
     outcomes.push(outcome);
-    const stops = (failure: Error): boolean => failure instanceof AntigravitySignInMissingError || failure instanceof AntigravityModelChoiceError || failure instanceof RecordingNotWrittenError;
+    const stops = (failure: Error): boolean => failure instanceof AntigravityWorkspaceInHomeError || failure instanceof AntigravitySignInMissingError || failure instanceof AntigravityModelChoiceError || failure instanceof RecordingNotWrittenError;
     if (outcome.workspaceKept || failuresOf(outcome).some(stops)) break;
   }
   return outcomes;

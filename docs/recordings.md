@@ -822,8 +822,10 @@ for `agy acp`) starts in `<workspace>/cwd`, not in the recorder's directory:
 Antigravity loads workspace rules and customizations from the folder it works
 in, `.agents/`, `AGENTS.md` and `GEMINI.md`, and from its parents up to the
 repository root ("Customization discovery"), and the recorder runs in the
-user's checkout. The host gives the thread no tool server, so the session has
-no MCP server at all. `test/drivers/antigravity/recorder.suite.ts` seeds a
+user's checkout. For the same reason the recorder stops, before it starts
+`agy`, when its temp workspace lies inside the user's home (a `TMPDIR` in the
+home): the folders above the workspace would be the user's. The host gives the
+thread no tool server, so the session has no MCP server at all. `test/drivers/antigravity/recorder.suite.ts` seeds a
 home with each of these files and a marker in each, records all six
 scenarios against a fake `agy` that loads them the way the docs say, and
 shows none reached the recording and every file is unchanged.
@@ -1002,8 +1004,9 @@ one file per scenario, also for a scenario whose checks failed (it says
 which, and exits 1). When it cannot write a recording, it stops after that
 scenario. Its last lines name every recovery file and every kept workspace,
 whatever else failed. Without `ARI_LIVE_RECORD=1` it exits 2 before it loads
-anything or starts any process; without a sign-in file, or without a model
-the agent offers, it exits 2 before the first prompt.
+anything or starts any process; with its temp workspace inside your home,
+without a sign-in file, or without a model the agent offers, it exits 2
+before the first prompt.
 
 ## How to refresh
 

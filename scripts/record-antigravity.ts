@@ -40,7 +40,7 @@ async function main(argv: readonly string[]): Promise<number> {
   // Only now: these load the driver and start processes.
   const { SCENARIO_NAMES } = await import("../test/recordings/scenarios.ts");
   const { AntigravityModelChoiceError } = await import("../test/recordings/antigravity/run.ts");
-  const { AntigravitySignInMissingError, describeAntigravityRun, failuresOf, recordAntigravity } = await import("../test/recordings/antigravity/record.ts");
+  const { AntigravitySignInMissingError, AntigravityWorkspaceInHomeError, describeAntigravityRun, failuresOf, recordAntigravity } = await import("../test/recordings/antigravity/record.ts");
   let parsed: RecordArguments;
   try {
     parsed = parseRecordArguments(argv, SCENARIO_NAMES, DEFAULT_ANTIGRAVITY_RECORDINGS);
@@ -55,7 +55,7 @@ async function main(argv: readonly string[]): Promise<number> {
     env: process.env,
     log: (line) => process.stdout.write(`record-antigravity: ${line}\n`),
   });
-  const stop = outcomes.flatMap(failuresOf).find((failure) => failure instanceof AntigravityModelChoiceError || failure instanceof AntigravitySignInMissingError);
+  const stop = outcomes.flatMap(failuresOf).find((failure) => failure instanceof AntigravityModelChoiceError || failure instanceof AntigravitySignInMissingError || failure instanceof AntigravityWorkspaceInHomeError);
   if (stop !== undefined) process.stderr.write(`record-antigravity: stopped before the first prompt. ${stop.message}\n`);
   // Every recovery file and every kept workspace, whatever else failed.
   const failed = outcomes.filter((outcome) => outcome.error !== undefined);

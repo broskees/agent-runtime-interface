@@ -68,7 +68,9 @@ Claude Code. It must be 2.1.330 or newer, the version the pinned SDK bundles.
 When it is missing, `status()` reports `driver_unavailable` saying Claude
 Code is not installed and how to install it; when it is older, the error
 names the version and path found, the minimum, and to run `claude update`
-or set `executablePath`.
+or set `executablePath`. If the driver cannot read the version, `status()`
+reports `driver_unavailable` with the executable's path and what
+`claude --version` printed, if it ran.
 
 The standalone executable cannot import a package by name, so `npm install`
 beside it does not give the `claude` driver its SDK. A host that ships only

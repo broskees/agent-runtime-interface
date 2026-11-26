@@ -4499,6 +4499,8 @@ class SpawnRequest:
     cwd: str | None = None
     env: dict[str, str] | None = None
     """Explicit additions, applied after `envPolicy` stripping."""
+    inherit_env: bool | None = None
+    """Defaults to true. When false, start with an empty environment and apply only `env`."""
     purpose: SpawnPurpose | None = None
     stdin: SpawnRequestStdin | None = None
     timeout_ms: int | None = None
@@ -4511,6 +4513,7 @@ class SpawnRequest:
             args=optional(data, "args", list_of(decode_str)),
             cwd=optional(data, "cwd", decode_str),
             env=optional(data, "env", map_of(decode_str)),
+            inherit_env=optional(data, "inheritEnv", decode_bool),
             purpose=optional(data, "purpose", SpawnPurpose.from_json),
             stdin=optional(data, "stdin", SpawnRequestStdin.from_json),
             timeout_ms=optional(data, "timeoutMs", decode_int),
@@ -4525,6 +4528,8 @@ class SpawnRequest:
             out["cwd"] = encode(self.cwd)
         if self.env is not None:
             out["env"] = encode(self.env)
+        if self.inherit_env is not None:
+            out["inheritEnv"] = encode(self.inherit_env)
         if self.purpose is not None:
             out["purpose"] = encode(self.purpose)
         if self.stdin is not None:
@@ -8795,6 +8800,8 @@ class HostProcessSpawnParams:
     cwd: str | None = None
     env: dict[str, str] | None = None
     """Explicit additions, applied after `envPolicy` stripping."""
+    inherit_env: bool | None = None
+    """Defaults to true. When false, start with an empty environment and apply only `env`."""
     purpose: SpawnPurpose | None = None
     stdin: HostProcessSpawnParamsStdin | None = None
     timeout_ms: int | None = None
@@ -8810,6 +8817,7 @@ class HostProcessSpawnParams:
             args=optional(data, "args", list_of(decode_str)),
             cwd=optional(data, "cwd", decode_str),
             env=optional(data, "env", map_of(decode_str)),
+            inherit_env=optional(data, "inheritEnv", decode_bool),
             purpose=optional(data, "purpose", SpawnPurpose.from_json),
             stdin=optional(data, "stdin", HostProcessSpawnParamsStdin.from_json),
             timeout_ms=optional(data, "timeoutMs", decode_int),
@@ -8826,6 +8834,8 @@ class HostProcessSpawnParams:
             out["cwd"] = encode(self.cwd)
         if self.env is not None:
             out["env"] = encode(self.env)
+        if self.inherit_env is not None:
+            out["inheritEnv"] = encode(self.inherit_env)
         if self.purpose is not None:
             out["purpose"] = encode(self.purpose)
         if self.stdin is not None:

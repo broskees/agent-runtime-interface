@@ -770,7 +770,7 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
         throw callErrors.validation([{ path: ["timeoutMs"], message: "must be a non-negative integer" }], "Invalid spawn request: timeoutMs");
       }
 
-      const environment = buildChildEnvironment(baseEnv, envPolicy, request.env ?? {});
+      const environment = buildChildEnvironment(request.inheritEnv === false ? {} : baseEnv, envPolicy, request.env ?? {});
       const launched = isWindows ? startOnWindows(request, environment, stdinMode) : launch(request, environment, stdinMode);
       if ("failure" in launched) throw await launched.failure;
       // From here to `return` nothing awaits, so the child is registered for

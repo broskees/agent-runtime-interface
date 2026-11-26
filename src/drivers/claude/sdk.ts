@@ -15,6 +15,7 @@
 // sdk.d.ts at 0.3.330 and https://docs.claude.com/en/docs/agent-sdk/typescript.
 
 import * as fs from "node:fs/promises";
+import type { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { callErrors } from "../../errors.ts";
 import { CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_STANDALONE_INSTALL_HINT } from "../../meta/claude.ts";
@@ -95,6 +96,28 @@ export type ClaudeHookSettings = { [event: string]: Array<{ matcher?: string; ho
 /** The claude_code preset (sessions) or a plain prompt (text generation, which runs without tools). */
 export type ClaudeSystemPrompt = { type: "preset"; preset: "claude_code"; append?: string; snapshot?: boolean } | string;
 
+export type ClaudeSpawnOptions = {
+  command: string;
+  args: string[];
+  cwd?: string;
+  env: { [name: string]: string | undefined };
+  signal: AbortSignal;
+};
+
+type ClaudeProcessEvents = { exit: [number | null, NodeJS.Signals | null]; error: [Error] };
+
+export type ClaudeSpawnedProcess = {
+  stdin: Writable;
+  stdout: Readable;
+  readonly killed: boolean;
+  readonly exitCode: number | null;
+  readonly signalCode?: NodeJS.Signals | null;
+  kill(signal: NodeJS.Signals): boolean;
+  on<Event extends keyof ClaudeProcessEvents>(event: Event, listener: (...args: ClaudeProcessEvents[Event]) => void): void;
+  once<Event extends keyof ClaudeProcessEvents>(event: Event, listener: (...args: ClaudeProcessEvents[Event]) => void): void;
+  off<Event extends keyof ClaudeProcessEvents>(event: Event, listener: (...args: ClaudeProcessEvents[Event]) => void): void;
+};
+
 /** The `query()` options this driver sets. */
 export type ClaudeQueryOptions = {
   cwd?: string;
@@ -117,6 +140,7 @@ export type ClaudeQueryOptions = {
   forkSession?: boolean;
   resumeSessionAt?: string;
   pathToClaudeCodeExecutable?: string;
+  spawnClaudeCodeProcess?: (options: ClaudeSpawnOptions) => ClaudeSpawnedProcess;
   mcpServers?: Record<string, ClaudeMcpServerConfig>;
   /** How `mcpServers` reach Claude Code: on its command line (`argv`, the SDK's default) or in the initialize request over stdin. */
   mcpServersDelivery?: "argv" | "initialize";

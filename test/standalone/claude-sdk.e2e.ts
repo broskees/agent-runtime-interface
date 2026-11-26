@@ -50,6 +50,8 @@ import {
   writeFixtureSdkDirectory,
 } from "../drivers/claude/sdk-fixture.ts";
 import { NODE_EXECUTABLE } from "../helpers/runtime.ts";
+import { killRecorded, recordAgents, survivorsAt } from "../helpers/process-groups.ts";
+import type { RecordedAgent } from "../helpers/process-groups.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ARI_DRIVER = path.join(ROOT, "build", "standalone", "linux-x64", "ari-driver");
@@ -74,6 +76,91 @@ interface Runtime {
 
 const STANDALONE: Runtime = { name: "the standalone ari-driver", command: [ARI_DRIVER], built: "pnpm run build:binary" };
 const UNDER_NODE: Runtime = { name: "ari-driver under Node", command: [NODE_EXECUTABLE, NODE_ARI_DRIVER], built: "pnpm run build" };
+
+for (const { runtime, delegateProcesses } of [
+  { runtime: UNDER_NODE, delegateProcesses: false },
+  { runtime: STANDALONE, delegateProcesses: false },
+  { runtime: UNDER_NODE, delegateProcesses: true },
+]) {
+  test(`the pinned SDK's Claude Code, grandchild, guard and group end within 5 s of SIGKILLing ${runtime.name}${delegateProcesses ? " with host-delegated processes" : ""}`, async () => {
+    requireBuilt(runtime);
+    const where = nodeFreeRoot();
+    const sdkDirectory = path.join(where.root, "sdk");
+    const sdkPackage = path.join(sdkDirectory, "node_modules", CLAUDE_SDK_PACKAGE);
+    fs.mkdirSync(sdkPackage, { recursive: true });
+    for (const file of ["package.json", "sdk.mjs"]) fs.copyFileSync(path.join(ROOT, "node_modules", CLAUDE_SDK_PACKAGE, file), path.join(sdkPackage, file));
+    const marker = path.join(where.project, "turn-started");
+    // No JS runtime, even by absolute path. Stay alive after stdin EOF: only
+    // the process guard should end the fake and the child it started.
+    fs.writeFileSync(path.join(where.bin, "claude"), `#!/bin/sh
+case "$1" in
+  --version) echo '2.1.330 (Claude Code)'; exit;;
+  auth) echo '{"loggedIn":false}'; exit;;
+esac
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"control_request"'*)
+      id=\${line#*'"request_id":"'}
+      id=\${id%%'"'*}
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"commands":[],"models":[],"account":{},"added":[],"removed":[],"errors":{}}}}\\n' "$id";;
+    *'"type":"user"'*) break;;
+  esac
+done
+/bin/sleep 120 &
+printf '%s %s\\n' "$$" "$!" > turn-started
+wait
+`, { mode: 0o755 });
+    const agents: RecordedAgent[] = [];
+    const config = { sdkDirectory };
+    const host = await createNodeHostServices<typeof config>({
+      hostRoot: path.join(where.root, "host"),
+      instanceId: "claude-death",
+      config: { get: async () => ({ config }) },
+      attachments: { resolve: async () => null },
+      hostTools: { mcpServerFor: async () => { throw new Error("the fixture offers no tools"); } },
+      callbacks: { register: async () => { throw new Error("the fixture offers no sign-in"); } },
+      coordination: createCoordination(),
+      writeDiagnostic: () => undefined,
+      baseEnv: where.env,
+    });
+    const connection = await startAriDriver({ driver: "claude", command: [...runtime.command], env: where.env, cwd: where.project, envPolicy: { stripAmbient: [] }, delegateProcesses });
+    const exited = new Promise((resolve) => connection.child.once("exit", (_code, signal) => resolve(signal)));
+    let reported: { pid: number; grandchildPid: number } | undefined;
+    try {
+      const instance = await connection.driver.create(host, { instanceId: "claude-death", config, environment: where.env });
+      const session = await instance.openSession({ handshakeTimeoutMs: 15_000 });
+      const thread = await session.createThread({ cwd: where.project, policy: { mode: "approval_required", interaction: "default", cwd: where.project } });
+      await session.startTurn({ threadId: thread.id, clientTurnKey: "fixture-death", intent: "start", content: [{ type: "text", text: "fixture" }] });
+      const deadline = Date.now() + 15_000;
+      while (reported === undefined) {
+        const pids = fs.existsSync(marker) && /^(\d+) (\d+)\n$/.exec(fs.readFileSync(marker, "utf8"));
+        if (pids) reported = { pid: Number(pids[1]), grandchildPid: Number(pids[2]) };
+        else if (Date.now() >= deadline) throw new Error("fake Claude Code did not read its prompt");
+        else await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      // Record the group assertion without stopping the death experiment on
+      // a regression. The old SDK-local spawn shares this test's group.
+      let guardError: unknown;
+      try { recordAgents(agents, [reported]); } catch (error) { guardError = error; }
+      const killedAt = Date.now();
+      assert.equal(connection.child.kill("SIGKILL"), true);
+      const survivors = await survivorsAt(agents, killedAt + 5_000);
+      assert.equal(await exited, "SIGKILL");
+      assert.deepEqual(survivors, [], `the SDK child must use a guarded group: ${String(guardError ?? "")}`);
+      if (guardError !== undefined) throw guardError;
+    } finally {
+      connection.child.kill("SIGKILL");
+      try {
+        await connection.close();
+      } finally {
+        // killRecorded signals only the individual fixture pids if they share
+        // an inherited group (the SDK-local-spawn regression case).
+        killRecorded(agents);
+        await host.dispose();
+      }
+    }
+  });
+}
 
 function requireBuilt(runtime: Runtime): void {
   const file = runtime === STANDALONE ? ARI_DRIVER : NODE_ARI_DRIVER;

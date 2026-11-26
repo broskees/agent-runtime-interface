@@ -53,9 +53,10 @@ const readline = require("node:readline");
 const log = process.argv[1] + ".log";
 const record = (entry) => fs.appendFileSync(log, JSON.stringify(entry) + "\\n");
 const args = process.argv.slice(2);
-record({ argv: args });
+record({ argv: args, pid: process.pid, cwd: process.cwd(), ambient: process.env.ANTHROPIC_API_KEY, sdk: process.env.CLAUDE_CODE_ENTRYPOINT });
 if (args[0] === "--version") { process.stdout.write("2.1.330 (Claude Code)\\n"); process.exit(0); }
 if (args[0] === "auth") { process.stdout.write(JSON.stringify({ loggedIn: false, authMethod: "none", apiProvider: "firstParty" }) + "\\n"); process.exit(0); }
+process.stderr.write("stderr over the host process pipe\\n");
 const at = args.indexOf("--session-id");
 const sessionId = at === -1 ? "00000000-0000-4000-8000-000000000000" : args[at + 1];
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -114,6 +115,7 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
     warnings.push({ code: warning.code, message: warning.message });
   };
   process.on("warning", onWarning);
+  const diagnostics: string[] = [];
   const config: ClaudeDriverConfig = { sdkDirectory: path.join(root, "sdk") };
   const host = await createNodeHostServices<ClaudeDriverConfig>({
     hostRoot: path.join(root, "host"),
@@ -127,10 +129,17 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
     },
     callbacks: { register: async (flowId) => ({ url: `http://127.0.0.1:9/${flowId}` }) },
     coordination: createCoordination(),
-    writeDiagnostic: () => undefined,
-    baseEnv: { PATH: bin },
+    writeDiagnostic: ({ msg }) => { diagnostics.push(msg); },
+    baseEnv: { PATH: bin, HOME: root, XDG_CONFIG_HOME: path.join(root, ".config"), XDG_DATA_HOME: path.join(root, ".data"), XDG_STATE_HOME: path.join(root, ".state"), XDG_CACHE_HOME: path.join(root, ".cache"), ANTHROPIC_API_KEY: "fixture-ambient-key" },
   });
-  const instance = await createClaudeDriver().create(host, { instanceId: "claude-real-sdk", config, environment: {} });
+  const children: Array<{ pid: number | undefined; cwd: string | undefined }> = [];
+  const spawn = host.process.spawn;
+  host.process.spawn = async (request) => {
+    const child = await spawn(request);
+    if (request.purpose === "runtime") children.push({ pid: child.pid, cwd: request.cwd });
+    return child;
+  };
+  const instance = await createClaudeDriver().create(host, { instanceId: "claude-real-sdk", config, environment: { HOME: root, PATH: bin } });
   try {
     const status = await instance.status();
     assert.equal(status.state, "ready", JSON.stringify(status));
@@ -152,6 +161,7 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
     }
     assert.equal(terminal.body.type === "turn.terminal" ? terminal.body.status : undefined, "completed", JSON.stringify(events));
     assert.ok(JSON.stringify(events).includes("the user's claude answered the real SDK"), JSON.stringify(events));
+    assert.ok(diagnostics.includes("claude: stderr over the host process pipe"), JSON.stringify(diagnostics));
     await session.close();
 
     assert.deepEqual(warnings.filter((warning) => warning.code === DEPRECATION), [], "the SDK warned about MCP servers on the command line");
@@ -180,6 +190,13 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
     const servers = stdin.find((line) => line.request?.subtype === "mcp_set_servers")?.request?.servers;
     assert.deepEqual(servers, { "fixture-tools": { type: "stdio", command: "/bin/true", args: ["--serve"], env: { FIXTURE_TOKEN: SECRET } } });
     assert.deepEqual(fakeClaudeInvocations(decoy), [], "the native package beside the SDK never ran");
+    await instance.catalog.list({ cwd: project });
+    assert.equal(await instance.textGeneration!.generate({ kind: "title", input: "fixture" }), "the user's claude answered the real SDK");
+    const launched = fs.readFileSync(`${claude}.log`, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { argv?: string[]; pid: number; cwd: string; ambient?: string; sdk?: string });
+    const queries = launched.filter((entry) => entry.argv?.[0] === "--output-format");
+    assert.equal(queries.length, 3, "session, catalog and text generation each launch one query");
+    assert.deepEqual(children, queries.map(({ pid, cwd }) => ({ pid, cwd })), "all three real SDK children were spawned by the host");
+    assert.deepEqual(queries.map(({ sdk, ambient }) => [sdk, ambient]), Array.from({ length: 3 }, () => ["sdk-ts", undefined]), "SDK additions are kept; the host's ambient API key is not inherited");
   } finally {
     await instance.dispose();
     await host.dispose();
@@ -197,13 +214,13 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
   });
   try {
     const launched = Date.now() + 10_000;
-    while (recorded(claude).launches.length < 2) {
+    while (recorded(claude).launches.length < 4) {
       if (Date.now() > launched) throw new Error("the control query never launched the fake claude");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(warnings.filter((warning) => warning.code === DEPRECATION).length, 1, "the warning this test looks for is one it can see");
-    assert.ok(recorded(claude).launches[1]!.includes("--mcp-config"), "without the delivery mode the server goes on the command line");
+    assert.ok(recorded(claude).launches[3]!.includes("--mcp-config"), "without the delivery mode the server goes on the command line");
   } finally {
     control.close();
     process.off("warning", onWarning);

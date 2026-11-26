@@ -13,6 +13,7 @@
 import { readRecording, writeRecording } from "./format.ts";
 import { ACP_PROTOCOL_WORDS } from "./acp/protocol-words.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "./claude/protocol-words.ts";
+import { CODEX_PROTOCOL_WORDS } from "./codex/protocol-words.ts";
 import { OPENCODE_PROTOCOL_WORDS } from "./opencode/protocol-words.ts";
 import type { ProtocolWords } from "./protocol-places.ts";
 import { PLACEHOLDERS, createSanitiser } from "./sanitiser.ts";
@@ -21,6 +22,7 @@ const PROTOCOL_WORDS: { readonly [driver: string]: ProtocolWords } = {
   claude: CLAUDE_PROTOCOL_WORDS,
   opencode: OPENCODE_PROTOCOL_WORDS,
   antigravity: ACP_PROTOCOL_WORDS,
+  codex: CODEX_PROTOCOL_WORDS,
 };
 
 export interface ResanitiseOptions {

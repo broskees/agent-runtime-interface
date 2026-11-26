@@ -27,7 +27,12 @@ export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
 /** What the host does while a scenario runs. */
 export interface HostActions {
-  /** How the host answers each request: the once-only accept option, or the decline option. */
+  /**
+   * How the host answers each request: the once-only accept option, or the
+   * decline option. An agent that offers no plain decline, only a decline
+   * that also stops the turn (Codex's ordinary command approval offers
+   * `accept` and `cancel`), gets that one.
+   */
   readonly answer: "allow_once" | "decline";
   /** Calls `interruptTurn` once, as soon as the turn's first assistant text arrives. */
   readonly interruptAfterFirstText: boolean;
@@ -224,11 +229,14 @@ export async function runScenario(scenario: Scenario, host: ScenarioHost): Promi
     if (body.type === "item.upsert" && body.item.kind !== undefined) itemKinds.set(body.item.id, body.item.kind);
     if (body.type === "request.upsert" && body.request.status === "pending" && body.request.kind !== undefined && !requests.has(body.request.id)) {
       const request = body.request as Request;
-      const wanted = scenario.host.answer === "allow_once" ? (option: { decision: string; scope?: string }) => option.decision === "accept" && (option.scope === undefined || option.scope === "once") : (option: { decision: string }) => option.decision === "decline";
-      const option = (request.options ?? []).find(wanted);
+      const options = request.options ?? [];
+      const option =
+        scenario.host.answer === "allow_once"
+          ? options.find((each) => each.decision === "accept" && (each.scope === undefined || each.scope === "once"))
+          : (options.find((each) => each.decision === "decline") ?? options.find((each) => each.decision === "cancel"));
       requests.set(request.id, { request, ...(option === undefined ? {} : { optionId: option.optionId }) });
       if (option === undefined) {
-        fail(new Error(`request ${request.id} (${request.kind}) offers no ${scenario.host.answer} option: ${JSON.stringify(request.options ?? [])}`));
+        fail(new Error(`request ${request.id} (${request.kind}) offers no ${scenario.host.answer === "allow_once" ? "allow_once" : "decline or cancel"} option: ${JSON.stringify(options)}`));
         return;
       }
       pending.push(current.respond({ requestId: request.id, responseKey: `${scenario.name}-host-${requests.size}`, optionId: option.optionId }).catch(fail));
@@ -564,7 +572,8 @@ export function checkScenario(run: ScenarioRun, native: readonly NativeAnswer[])
       about({ turns: [0], items: tools }, () => {
         assert.ok(commands.length > 0, `${where}: a request of kind command reached the host (requests: ${JSON.stringify(run.requests.map((entry) => entry.request.kind))})`);
         assert.ok(commands.every((entry) => entry.optionId !== undefined), `${where}: the host answered every command request`);
-        const answer = allowed ? native.find((entry) => entry.decision === "accept" && entry.scope === "once") : native.find((entry) => entry.decision === "decline");
+        // A cancel is a decline that also stops the turn: the host's decline where the agent offered no plain one.
+        const answer = allowed ? native.find((entry) => entry.decision === "accept" && entry.scope === "once") : native.find((entry) => entry.decision === "decline" || entry.decision === "cancel");
         assert.ok(answer !== undefined, `${where}: the host's ${allowed ? "allow-once" : "decline"} answer reached the native side as a recorded outbound frame (native answers: ${JSON.stringify(native)})`);
       });
       about(firstOnly, () => assert.equal(ends.length, 1, `${where}: the turn reached a terminal`));

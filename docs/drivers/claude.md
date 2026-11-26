@@ -92,6 +92,19 @@ type declarations), so the SDK and its native package are all it needs. The
 driver looks in this order: `sdkDirectory`, then a managed install, then the
 package by name (under Node). Under Node all three work.
 
+**Checked against the real Claude Code.** `ARI_LIVE_RECORD=1 node
+scripts/live-claude-standalone.ts` (after `pnpm run build:binary`) runs the
+standalone `ari-driver` with no `node` or `bun` on `PATH`: it runs
+`maintenance.install` from `https://registry.npmjs.org`, prints
+`instance/status`, and runs one turn ("Reply with exactly the word: ok") on
+`haiku` with your Claude sign-in, printing every event. `--no-turn` stops
+after the status and spends no quota. It keeps the session apart from your
+Claude setup as the recorder does (see [docs/recordings.md](../recordings.md)),
+with the same handling of a refreshed sign-in, and fails when your
+`settings.json`, `CLAUDE.md` or `~/.claude.json` changed. Without
+`ARI_LIVE_RECORD=1` it exits 2 before it loads or starts anything. It passed
+on 2026-11-25 with SDK 0.3.330 (Claude Code 2.1.330).
+
 **Why ARI does not bundle the SDK.** The SDK's licence is Anthropic's
 ("SEE LICENSE IN README.md", Anthropic's legal agreements), not MIT. ARI
 redistributes none of it: the npm tarball and the standalone executable hold

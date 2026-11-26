@@ -114,6 +114,21 @@ test(`node scripts/record-claude.ts without ${LIVE_RECORD_VARIABLE}=1 exits non-
   }
 });
 
+// The one-time live check of the standalone ari-driver with the real Claude Code shares the recorder's opt-in.
+test(`node scripts/live-claude-standalone.ts without ${LIVE_RECORD_VARIABLE}=1 exits non-zero naming the variable, before it resolves the SDK or spawns anything`, () => {
+  const environments: Array<{ [name: string]: string }> = [{}, { [LIVE_RECORD_VARIABLE]: "0" }, { [LIVE_RECORD_VARIABLE]: "true" }, { [LIVE_RECORD_VARIABLE]: "" }];
+  for (const env of environments) {
+    for (const args of [["scripts/live-claude-standalone.ts"], ["scripts/live-claude-standalone.ts", "--binary", "elsewhere", "--no-turn"]]) {
+      const run = runTrapped(args, env);
+      assert.equal(run.status, 2, `${JSON.stringify(env)} ${args.join(" ")}: ${run.stderr}`);
+      assert.match(run.stderr, /live-claude-standalone: refusing to start a real Claude session/);
+      assert.match(run.stderr, new RegExp(`set ${LIVE_RECORD_VARIABLE}=1 to run it`));
+      assert.deepEqual(run.resolved, [], "no @anthropic-ai package was resolved");
+      assert.deepEqual(run.spawned, [], "nothing was spawned");
+    }
+  }
+});
+
 test(`no package.json script and no CI workflow step sets ${LIVE_RECORD_VARIABLE}`, () => {
   const scripts = (JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts;
   assert.equal(scripts["record:claude"], "node scripts/record-claude.ts");

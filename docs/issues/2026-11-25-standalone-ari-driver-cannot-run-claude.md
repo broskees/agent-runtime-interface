@@ -143,5 +143,11 @@ Tests:
 - `test/package.test.ts`: the package check fails a staged or packed package
   that ships the SDK's `sdk.mjs`.
 
-The live check against the real SDK and Claude Code through the standalone
-binary is phase 2 of the same plan.
+Phase 2 of the same plan checked it live on 2026-11-25 with
+`ARI_LIVE_RECORD=1 node scripts/live-claude-standalone.ts`: with no `node`
+or `bun` on `PATH`, the standalone `ari-driver` installed the real SDK
+0.3.330 and its `linux-x64` native package from `registry.npmjs.org`,
+`instance/status` reported 0.3.330, and a `haiku` turn on the user's Claude
+sign-in completed. Before it, commit `b045e58` made the install record each
+file's mode, so an install whose native binary lost its execute bit is
+reported damaged and repaired (both repair tables above gained that case).

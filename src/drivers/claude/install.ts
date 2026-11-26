@@ -8,7 +8,7 @@
 //   <cacheDir>/adapters/@anthropic-ai/claude-agent-sdk/<version>/
 //     package.json, sdk.mjs, ...                                the SDK
 //     node_modules/@anthropic-ai/claude-agent-sdk-<os>-<arch>/  its native binary
-//     .ari-install.json                                         each file's size and sha256
+//     .ari-install.json                                         each file's size, mode and sha256
 //
 // So the SDK finds its native binary by itself, as in an npm install, and the
 // driver never names it in `pathToClaudeCodeExecutable` (which would change
@@ -23,9 +23,9 @@
 // into the extractor, so what is installed is exactly what was verified.
 //
 // Repair: `.ari-install.json`, written before the rename, records every file.
-// Loading checks each file's size and the sha256 of the SDK's own files (the
-// JavaScript this process imports); `maintenance.install` checks every sha256
-// and reinstalls a directory that is not whole.
+// Loading checks each file's size and execute bits and the sha256 of the SDK's
+// own files (the JavaScript this process imports); `maintenance.install`
+// checks every sha256 too and reinstalls a directory that is not whole.
 //
 // The SDK's `sdk.mjs` bundles everything it runs and imports only Node
 // built-ins; its peers (`zod`, `@anthropic-ai/sdk`,
@@ -105,14 +105,16 @@ async function filesUnder(root: string): Promise<string[]> {
 }
 
 interface InstallRecord {
-  readonly files: ReadonlyArray<{ readonly path: string; readonly size: number; readonly sha256: string }>;
+  /** `mode` is the file's permission bits as installed (`0o755` for the native binary). */
+  readonly files: ReadonlyArray<{ readonly path: string; readonly size: number; readonly mode: number; readonly sha256: string }>;
 }
 
-/** Records every file under `dir` with its size and sha256 in `.ari-install.json`. */
+/** Records every file under `dir` with its size, permission bits and sha256 in `.ari-install.json`. */
 async function writeInstallRecord(dir: string): Promise<void> {
-  const files: Array<{ path: string; size: number; sha256: string }> = [];
+  const files: Array<{ path: string; size: number; mode: number; sha256: string }> = [];
   for (const path of await filesUnder(dir)) {
-    files.push({ path, size: (await fs.stat(`${dir}/${path}`)).size, sha256: await fileDigest(`${dir}/${path}`, "sha256") });
+    const stats = await fs.stat(`${dir}/${path}`);
+    files.push({ path, size: stats.size, mode: stats.mode & 0o777, sha256: await fileDigest(`${dir}/${path}`, "sha256") });
   }
   await fs.writeFile(`${dir}/${CLAUDE_INSTALL_RECORD}`, `${JSON.stringify({ files } satisfies InstallRecord, null, 2)}\n`);
 }
@@ -122,11 +124,18 @@ const EVERY_FILE = (): boolean => true;
 /** Only the SDK's own files, the JavaScript this process imports, have their sha256 checked; the native package's files only their size. */
 const SDK_FILES = (path: string): boolean => !path.startsWith("node_modules/");
 
+function octalMode(mode: number): string {
+  return `0${mode.toString(8).padStart(3, "0")}`;
+}
+
 /**
  * What is wrong with the managed install in `dir`, or null when it is whole:
- * every file `.ari-install.json` lists is there with its recorded size, and,
- * for each file `checkDigest` picks, its recorded sha256. A directory without
- * a readable record was never finished.
+ * every file `.ari-install.json` lists is there with its recorded size, keeps
+ * every execute bit it was installed with (the SDK cannot start a native
+ * binary that lost them), and, for each file `checkDigest` picks, has its
+ * recorded sha256. A directory without a readable record was never finished;
+ * a record without modes (written before they were recorded) counts as
+ * malformed, so `maintenance.install` replaces that install once.
  */
 export async function managedInstallProblem(dir: string, checkDigest: (path: string) => boolean): Promise<string | null> {
   let record: InstallRecord;
@@ -138,14 +147,16 @@ export async function managedInstallProblem(dir: string, checkDigest: (path: str
   if (!Array.isArray(record.files) || record.files.length === 0) return `${CLAUDE_INSTALL_RECORD} lists no files`;
   for (const file of record.files) {
     const safe = typeof file?.path === "string" && file.path.split("/").every((part: string) => part !== "" && part !== "." && part !== "..");
-    if (!safe || typeof file.size !== "number" || typeof file.sha256 !== "string") return `${CLAUDE_INSTALL_RECORD} is malformed`;
-    let size: number;
+    if (!safe || typeof file.size !== "number" || typeof file.mode !== "number" || typeof file.sha256 !== "string") return `${CLAUDE_INSTALL_RECORD} is malformed`;
+    let stats: { size: number; mode: number };
     try {
-      size = (await fs.stat(`${dir}/${file.path}`)).size;
+      stats = await fs.stat(`${dir}/${file.path}`);
     } catch {
       return `${file.path} is missing`;
     }
-    if (size !== file.size) return `${file.path} has ${size} bytes, not the ${file.size} it was installed with`;
+    if (stats.size !== file.size) return `${file.path} has ${stats.size} bytes, not the ${file.size} it was installed with`;
+    const lostExecuteBits = file.mode & 0o111 & ~stats.mode;
+    if (lostExecuteBits !== 0) return `${file.path} is not executable: its mode is ${octalMode(stats.mode & 0o777)}, and it was installed with ${octalMode(file.mode)}`;
     if (checkDigest(file.path) && (await fileDigest(`${dir}/${file.path}`, "sha256")) !== file.sha256) return `${file.path} has changed since it was installed`;
   }
   return null;

@@ -14,7 +14,7 @@ import { scanRecordingText } from "../../../scripts/check-recordings.ts";
 import { DEFAULT_CLAUDE_RECORDINGS, LIVE_RECORD_VARIABLE, parseRecordArguments } from "../../../scripts/record-claude.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
-import { describeClaudeRun, failuresOf, recordClaude, recordModel, userCredentialFile } from "../../recordings/claude/record.ts";
+import { claudeCredentialLock, describeClaudeRun, failuresOf, recordClaude, recordModel, userCredentialFile } from "../../recordings/claude/record.ts";
 import type { RecordClaudeOptions } from "../../recordings/claude/record.ts";
 import { replayClaude } from "../../recordings/claude/replay.ts";
 import { readRecording } from "../../recordings/format.ts";
@@ -115,6 +115,21 @@ test(`node scripts/record-claude.ts without ${LIVE_RECORD_VARIABLE}=1 exits non-
   }
 });
 
+// The one-time live check of the standalone ari-driver with the real Claude Code shares the recorder's opt-in.
+test(`node scripts/live-claude-standalone.ts without ${LIVE_RECORD_VARIABLE}=1 exits non-zero naming the variable, before it resolves the SDK or spawns anything`, () => {
+  const environments: Array<{ [name: string]: string }> = [{}, { [LIVE_RECORD_VARIABLE]: "0" }, { [LIVE_RECORD_VARIABLE]: "true" }, { [LIVE_RECORD_VARIABLE]: "" }];
+  for (const env of environments) {
+    for (const args of [["scripts/live-claude-standalone.ts"], ["scripts/live-claude-standalone.ts", "--binary", "elsewhere", "--no-turn"]]) {
+      const run = runTrapped(args, env);
+      assert.equal(run.status, 2, `${JSON.stringify(env)} ${args.join(" ")}: ${run.stderr}`);
+      assert.match(run.stderr, /live-claude-standalone: refusing to start a real Claude session/);
+      assert.match(run.stderr, new RegExp(`set ${LIVE_RECORD_VARIABLE}=1 to run it`));
+      assert.deepEqual(run.resolved, [], "no @anthropic-ai package was resolved");
+      assert.deepEqual(run.spawned, [], "nothing was spawned");
+    }
+  }
+});
+
 test(`no package.json script and no CI workflow step sets ${LIVE_RECORD_VARIABLE}`, () => {
   const scripts = (JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts;
   assert.equal(scripts["record:claude"], "node scripts/record-claude.ts");
@@ -173,7 +188,13 @@ interface FakeRecording {
 }
 
 /** Records `scenarios` from fresh puppets through the recording function, with the recorder's environment `env`. */
-async function recordFake(env: RecordClaudeOptions["env"], scenarios: Array<Scenario["name"]>, puppet: PuppetOptions = {}, outDir: string = fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-out-"))): Promise<FakeRecording> {
+async function recordFake(
+  env: RecordClaudeOptions["env"],
+  scenarios: Array<Scenario["name"]>,
+  puppet: PuppetOptions = {},
+  outDir: string = fs.mkdtempSync(path.join(os.tmpdir(), "ari-record-out-")),
+  extra: Pick<RecordClaudeOptions, "credentialLockWaitMs"> = {},
+): Promise<FakeRecording> {
   const worlds: FakeClaudeWorld[] = [];
   const outcomes = await recordClaude({
     scenarios,
@@ -186,6 +207,7 @@ async function recordFake(env: RecordClaudeOptions["env"], scenarios: Array<Scen
       return puppetRuntime(started);
     },
     timeoutMs: 10_000,
+    ...extra,
   });
   return { outDir, worlds, outcomes };
 }
@@ -374,6 +396,40 @@ test("when the user's credential file also changed during the run, the recorder 
     assert.equal(outcomes[0]!.workspaceKept, false);
     assert.ok(!fs.existsSync(outcomes[0]!.workspace), "the workspace can go: the recovery file holds the sign-in");
     assert.equal(describeClaudeRun(outcomes, outDir).filter((line) => line.includes(kept)).length, 1, "the run's last lines name the recovery file");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test("while another Claude Code holds its write lock longer than the recorder waits, the recorder leaves the user's file and the lock alone, and keeps the refreshed sign-in in the recovery file", async () => {
+  const { home } = seedHome();
+  const real = path.join(home, ".claude", ".credentials.json");
+  // Where Claude Code takes its lock around every write of its secure storage (docs/recordings.md, "How Claude Code finds the sign-in").
+  const lock = path.join(home, ".claude", ".storage-write.lock");
+  assert.equal(claudeCredentialLock(real).directory, lock);
+  assert.equal(claudeCredentialLock(real).waitMs, 30_000);
+  const { outDir, outcomes } = await recordFake(
+    { HOME: home, PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
+    ["simple"],
+    {
+      onTurn: (_turn, _index, world) => {
+        refreshCredential(world, "refreshed-by-the-recorded-session");
+        // Another Claude Code session is inside its lock, saving, and stays there.
+        fs.mkdirSync(lock);
+      },
+    },
+    undefined,
+    { credentialLockWaitMs: 300 },
+  );
+  try {
+    const kept = recoveryFileFor(real);
+    assert.ok(outcomes[0]!.error?.message.includes(`another Claude Code held its lock ${lock} for 0.3 s, so the recorder did not write the refreshed sign-in back to ${real}`), outcomes[0]!.error?.message);
+    assert.equal(fs.readFileSync(real, "utf8"), CREDENTIAL, "the user's file is left as it is");
+    assert.ok(fs.statSync(lock).isDirectory(), "the other session's lock is not broken");
+    assert.equal(outcomes[0]!.recoveryFile, kept);
+    assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ".credentials.json", value: "refreshed-by-the-recorded-session" }]);
+    assert.equal(outcomes[0]!.workspaceKept, false);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(outDir, { recursive: true, force: true });

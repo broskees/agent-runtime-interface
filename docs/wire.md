@@ -31,10 +31,26 @@ ari-driver ./drivers.js --export mine  # a module with several drivers
 - **Stdout is the protocol.** Before the driver loads, `ari-driver` points
   `console` and `process.stdout.write` at stderr, so a driver that logs
   cannot corrupt a frame. Diagnostics go to stderr.
-- **Lifetime.** It serves until stdin closes, or until SIGTERM or SIGINT, then
-  disposes every instance (which closes their sessions and ends their child
-  processes) and exits 0. Cleanup gets at most 10 seconds. A load failure
-  prints the reason to stderr and exits 1; a usage error exits 2.
+- **Lifetime.** It serves until stdin closes, or until SIGTERM, SIGINT or
+  SIGHUP, then disposes every instance (which closes their sessions) and ends
+  its child processes, and exits 0. Cleanup gets at most 10 seconds. A load
+  failure prints the reason to stderr and exits 1; a usage error exits 2. If
+  it dies without that cleanup, its agents still end: see
+  [Agents end when `ari-driver` dies](#agents-end-when-ari-driver-dies).
+- **The shutdown budget, for driver authors: 2 seconds.** An instance's
+  `dispose()` has 2 seconds from the start of the shutdown (stdin closed, or
+  the signal) to stop its agents its own way: close each session, flush state,
+  let each agent exit. Then `ari-driver` ends every child process it spawned
+  locally (SIGTERM to each process group, SIGKILL 2 seconds later for what is
+  left), even while that `dispose()` still runs, and exits once it returns.
+  The budget is the largest that still ends an agent that ignores SIGTERM
+  within 5 seconds of the shutdown, with a second to spare for a loaded
+  machine. So start every session's shutdown at once, not one after another:
+  a session whose agent takes the whole kill grace to exit would otherwise
+  use up the budget before the next session's shutdown begins. The Claude,
+  Codex and ACP drivers close their sessions together; OpenCode closes them
+  in turn, since its sessions share a server whose per-thread MCP entries
+  each close takes off.
 
 ## Framing
 
@@ -244,10 +260,116 @@ In delegated mode:
    the instance and the `processId`; a child that instance did not spawn
    answers `not_found`.
 5. When the connection closes, the host kills the children it started for
-   the driver.
+   the driver. A spawn that was still in progress then is killed as soon as it
+   resolves, and never registered.
 
 The driver drops output or an exit for a `processId` that is not running,
 and `ari-driver` reports it on stderr.
+
+### Agents end when `ari-driver` dies
+
+On Linux and macOS, every process `ari/node`'s process service starts ends,
+with every process still in its process group, within about the kill grace
+(2 seconds by default) plus a fraction of a second after the process that
+owns the service ends, however it ends: dispose, SIGTERM, SIGINT, SIGHUP,
+SIGKILL, a crash or an out-of-memory kill. That covers the agents
+`ari-driver` spawns locally, and the children a TypeScript host using
+`createNodeHostServices` spawns in delegated mode (there the host is the
+owner).
+
+What it does not reach: a process that has left the child's process group,
+by calling `setsid()` or `setpgid()` (a daemon, `setsid sleep`, a job-control
+shell's background jobs). It is no longer in the group, so neither the owner
+nor the guard ends it. Windows keeps ending a child's tree with
+`taskkill /T`, and only while the owner lives.
+
+How:
+
+- Each child leads its own process group. The process service spawns it
+  through a `/bin/sh` launcher, which first starts the child's guard in the
+  background, in that same group, and then `exec`s the child in its own
+  place. The child keeps the pid the caller sees, and never runs before its
+  guard exists.
+- The guard is a `/bin/sh` with stdio on `/dev/null`, holding only the read
+  end of a pipe whose other end the owner holds; the pipe is passed at spawn,
+  so an owner that dies before the guard starts leaves it an immediate
+  end-of-file. It ignores SIGTERM, SIGHUP and SIGINT (and SIGQUIT, SIGPIPE,
+  SIGALRM, SIGUSR1, SIGUSR2), so a driver's own signal to the group reaches
+  the child but not the guard.
+- When the owner dies, or the owner writes a line to the pipe, the guard
+  sends SIGTERM to its own group and starts a timer, its own child in the
+  group, that sends SIGKILL to the whole group, guard and timer included, once
+  the grace has passed on the clock. Meanwhile it reads membership with
+  `ps -A -o pid= -o ppid= -o pgid=` and `awk`, at 20, 60, 140, 300 and 620 ms
+  and then every 400 ms; when no member but itself and its own helpers is
+  left, it sends SIGKILL to its own group at once. A group that ignores
+  SIGTERM ends about 2.01 seconds after the guard is asked (measured at load
+  average 34), however slow `ps` is.
+- The guard only ever signals the group it is a member of (`kill 0`). While a
+  member exists, the operating system does not give that group id to anyone
+  else, so the guard cannot reach a group ARI did not start.
+- The owner sends a signal to a group by its id only while the group's leader
+  is its own child and not yet reaped, checked in the same synchronous step:
+  an unreaped leader keeps its pid, and so the group id, from being given to
+  anyone else. That covers `kill(signal)`, the SIGKILL on the way out of a
+  host that exits without disposing, and a last SIGKILL when a guard did not
+  end its group within the grace and 5 seconds more. Once the leader is
+  reaped, only the guard signals the group.
+- The owner ends a group the same way, on dispose, a timeout, `kill()`
+  without a signal, and when a child exits on its own (for what it left in
+  its group): it writes a line to the guard's pipe and waits until the group,
+  guard included, is gone, probing with signal 0, which delivers nothing. So
+  `dispose()` returns only once every group and its guard are gone, and waits
+  a whole grace only for a group that will not end on SIGTERM.
+- A group still there when the owner stops waiting (its guard was stopped or
+  killed, or a member cannot be ended) is left alone: the owner logs it with
+  a Node warning, code `ARI_PROCESS_GROUP_LEFT_BEHIND`, and `kill()` or
+  `dispose()` rejects with `invalid_state` (`process_group_left_behind`)
+  once its other cleanup has finished. It sends that group nothing, since its
+  id may name another group by then.
+- `ps` shows a guard as `/bin/sh -c … ari-agent-guard <grace ms> …`. It costs
+  one idle shell per child: on Linux with bash as `/bin/sh`, about 4.2 MB
+  resident, 0.4 MB of it not shared. Spawning takes about the same time as
+  before, under Node and under Bun; disposing 20 children takes about 80 to
+  95 ms instead of about 21 ms (measured at a load average near 10).
+- If the launcher cannot start the guard, the child never runs: it exits with
+  code 126. Someone who kills a guard by hand before it was asked to end its
+  group leaves its child unguarded.
+- Under Bun (the standalone `ari-driver`), the launcher is started with
+  `Bun.spawn` instead of `node:child_process`: Bun 1.3.14's
+  `node:child_process` closes an extra pipe's descriptor twice, the second
+  time when the finished child is garbage-collected, by which time the number
+  can belong to another agent's guard pipe, whose guard would then end a
+  group whose owner still lives.
+- Two narrow cases where "not yet reaped" can be wrong, both the same as the
+  runtime's own `kill`: under Node, libuv reaps every child that exited
+  before it runs their exit callbacks, so a `kill(signal)` made from another
+  child's exit handler in that same moment sees a reaped leader as running;
+  under Bun on a system without `pidfd_open` (Linux before 5.6, gVisor, or a
+  seccomp profile that blocks it), Bun reaps children on a thread of its own
+  and reports the exit later. Either way a wrong signal needs the freed pid to
+  be given to a new process within that moment.
+
+What a caller sees stays as it was, with these exceptions. A spawn error
+rejects as before, and nothing starts outside the launcher: the command is
+first searched for the way spawn searches, and for a command that is not
+found the error is worked out the way spawn would give it, without starting
+anything (Node's argument checks, then the `cwd`, then libc's rules for each
+file the search tries). A command that appears just after the search is not
+started either; that spawn rejects with `invalid_state` (`spawn_failed`).
+The child's argv is the one spawn would give it, except
+that with no `PATH` in the child's environment a bare command name runs by
+its full path (that path is argv[0]), and that for its first few
+milliseconds the pid shows the launcher's command line, until the launcher
+`exec`s the child (while that `exec` runs, Linux shows no arguments at all). `PWD` and `OLDPWD` are put back as the
+child's environment had them, but with bash as `/bin/sh` an environment
+without `SHLVL` gains `SHLVL=0`. On macOS, an executable file that is not a
+program (no `#!` line) is run by `/bin/sh` instead of failing with ENOEXEC;
+on Linux, spawn already runs it so (glibc's `execvp` does).
+
+A host in another language that runs `ari-driver` gets this for free: it only
+has to end `ari-driver` (closing its stdin lets it dispose cleanly). A host
+that runs the children itself in delegated mode owns their cleanup.
 
 ## Synchronous members
 

@@ -196,10 +196,15 @@ describe("maintenance.install and maintenance.update on the claude driver", () =
       const installed = managedDirectory(host.paths.cacheDir);
       assert.deepEqual(fs.readdirSync(installed).sort(), [CLAUDE_INSTALL_RECORD, "node_modules", "package.json", "sdk.mjs"]);
       assert.equal(fs.statSync(managedBinary(host.paths.cacheDir)).mode & 0o111, 0o111, "the native binary is executable");
-      const record = JSON.parse(fs.readFileSync(path.join(installed, CLAUDE_INSTALL_RECORD), "utf8")) as { files: Array<{ path: string; size: number; sha256: string }> };
+      const record = JSON.parse(fs.readFileSync(path.join(installed, CLAUDE_INSTALL_RECORD), "utf8")) as { files: Array<{ path: string; size: number; mode: number; sha256: string }> };
       assert.deepEqual(
-        record.files.map((file) => file.path),
-        [`node_modules/${native.pkg}/${hostNativePackage().binary}`, `node_modules/${native.pkg}/package.json`, "package.json", "sdk.mjs"],
+        record.files.map((file) => [file.path, file.mode]),
+        [
+          [`node_modules/${native.pkg}/${hostNativePackage().binary}`, 0o755],
+          [`node_modules/${native.pkg}/package.json`, 0o644],
+          ["package.json", 0o644],
+          ["sdk.mjs", 0o644],
+        ],
       );
       assert.ok(record.files.every((file) => /^[0-9a-f]{64}$/.test(file.sha256) && file.size > 0));
       assert.deepEqual(fs.readdirSync(host.paths.tmpDir), [], "the downloads are gone");
@@ -396,7 +401,23 @@ describe("a managed install that is not whole", () => {
       detail: /: node_modules\/@anthropic-ai\/claude-agent-sdk-[a-z0-9-]+\/claude(\.exe)? has 10 bytes, not the \d+ it was installed with\./,
     },
     { name: "sdk.mjs changed but kept its size", damage: (cacheDir) => flipLastByte(path.join(managedDirectory(cacheDir), "sdk.mjs")), detail: /: sdk\.mjs has changed since it was installed\./ },
+    // As after a cache is restored by a tool that drops permissions: the same bytes, but the SDK could not start the binary.
+    {
+      name: "the native binary lost its execute permission",
+      damage: (cacheDir) => fs.chmodSync(managedBinary(cacheDir), 0o644),
+      detail: /: node_modules\/@anthropic-ai\/claude-agent-sdk-[a-z0-9-]+\/claude(\.exe)? is not executable: its mode is 0644, and it was installed with 0755\./,
+    },
     { name: "the record of the install is missing", damage: (cacheDir) => fs.rmSync(path.join(managedDirectory(cacheDir), CLAUDE_INSTALL_RECORD)), detail: /\.ari-install\.json, written when an install completes, is missing or unreadable/ },
+    {
+      name: "the record of the install has no modes, as an install made before modes were recorded",
+      damage: (cacheDir) => {
+        const file = path.join(managedDirectory(cacheDir), CLAUDE_INSTALL_RECORD);
+        const record = JSON.parse(fs.readFileSync(file, "utf8")) as { files: Array<{ mode?: number }> };
+        for (const entry of record.files) delete entry.mode;
+        fs.writeFileSync(file, JSON.stringify(record));
+      },
+      detail: /: \.ari-install\.json is malformed\./,
+    },
     // Only the size of the native binary is checked on every load (it is 381 MB); maintenance.install checks its sha256 too.
     { name: "the native binary changed but kept its size", damage: (cacheDir) => flipLastByte(managedBinary(cacheDir)), detail: null },
   ];
@@ -432,6 +453,7 @@ describe("a managed install that is not whole", () => {
         assert.deepEqual(installedEntries(cacheDir), ONE_INSTALL, "the damaged install was replaced, and nothing is left beside it");
         assert.deepEqual(fs.readFileSync(path.join(managedDirectory(cacheDir), "sdk.mjs")), whole.sdk);
         assert.deepEqual(fs.readFileSync(managedBinary(cacheDir)), whole.binary);
+        assert.equal(fs.statSync(managedBinary(cacheDir)).mode & 0o777, 0o755, "the repaired native binary is executable");
         const repaired = await instance.status();
         assert.equal(repaired.installed, true, JSON.stringify(repaired));
         assert.equal(repaired.version, CLAUDE_SDK_VERSION);

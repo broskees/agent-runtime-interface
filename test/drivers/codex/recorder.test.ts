@@ -530,14 +530,14 @@ test("the system's /etc/codex files set the store too: a keyring or auto there s
   }
 });
 
-test("without flock on PATH, which takes Codex's own sign-in lock, the recorder stops before it starts codex and records nothing", async () => {
+test("without flock on PATH, which takes both Codex sign-in locks, the recorder stops before it starts codex and records nothing", async () => {
   const { env, files } = seedHome();
   const empty = fs.mkdtempSync(path.join(DIRECTORY, "no-flock-"));
   const run = await recordWithFake({ ...env, PATH: empty }, ["simple", "multi_turn"]);
   assert.equal(run.outcomes.length, 1, "the run stopped");
   const error = run.outcomes[0]!.error;
   assert.equal(error?.name, "CodexSignInLockError", error?.message);
-  assert.match(error!.message, /the recorder could not run flock \(.+\), which it needs to take Codex's own lock, auth\.lock, when it puts a refreshed sign-in back; it stopped before it started codex\. Install util-linux's flock on PATH/);
+  assert.match(error!.message, /the recorder could not run flock \(.+\), which it needs to take Codex's own locks, auth\.lock and the resolved credential's commit lock, when it puts a refreshed sign-in back; it stopped before it started codex\. Install util-linux's flock on PATH/);
   assert.deepEqual(run.fake.processes(), [], "codex never started");
   assert.deepEqual(fs.readdirSync(run.outDir), []);
   for (const [each, bytes] of files) assert.ok(fs.readFileSync(each).equals(bytes), `${each} changed`);

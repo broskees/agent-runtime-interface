@@ -453,5 +453,9 @@ message with no SDK, and that the executable holds no SDK code.
 `replay.test.ts` and `recorder.test.ts` cover the native recorder
 (`pnpm run record:claude`): they record the six recording scenarios from the
 fake SDK, replay them through a fresh driver, and check the recorder keeps the
-user's Claude setup out. [docs/recordings.md](../recordings.md) describes the
-format and says how to record against the real Claude Code.
+user's Claude setup out. `credential-copy-back-node.test.ts` (Node only) has
+another Claude Code session save a refresh at the moment between the
+copy-back's comparison of the user's `.credentials.json` and its replace,
+and while it holds Claude Code's write lock; no refresh is lost.
+[docs/recordings.md](../recordings.md) describes the format and says how to
+record against the real Claude Code.

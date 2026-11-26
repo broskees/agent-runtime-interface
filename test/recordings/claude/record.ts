@@ -10,13 +10,14 @@
 // sign-in: the user's credential file (`.credentials.json` in the user's
 // Claude config dir, `$CLAUDE_CONFIG_DIR` or `~/.claude`) is copied into the
 // isolated dir, and when Claude Code rewrote the copy (a refreshed token) it
-// goes back to the user's file, so a rotated token is never lost. When it
-// cannot go back (the user's file changed meanwhile too, or the recorder
-// cannot write it), it goes into this run's recovery file beside the user's
-// file (../recovery.ts). Or, with ANTHROPIC_API_KEY set, the driver instance
-// keeps that key as its own. The workspace is removed after every scenario,
-// also after one that fails, unless it holds the only copy of a refreshed
-// sign-in: then the recorder keeps it and stops.
+// goes back to the user's file, under Claude Code's own write lock, so a
+// rotated token is never lost (../credential-file.ts). When it cannot go back
+// (the user's file changed meanwhile too, the recorder cannot write it, or
+// another Claude Code holds the lock), it goes into this run's recovery file
+// beside the user's file (../recovery.ts). Or, with ANTHROPIC_API_KEY set,
+// the driver instance keeps that key as its own. The workspace is removed
+// after every scenario, also after one that fails, unless it holds the only
+// copy of a refreshed sign-in: then the recorder keeps it and stops.
 //
 // The SDK's session functions run in this process and read this process's
 // CLAUDE_CONFIG_DIR (sdk.mjs 0.3.330 resolves the config dir from
@@ -27,7 +28,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Frame, RecordingSource } from "../format.ts";
 import { writeRecording } from "../format.ts";
-import { CredentialsKeptError, CredentialsNotSavedError, RecordingNotWrittenError, keepRefreshedCredentials, recoveryFileFor } from "../recovery.ts";
+import { copyCredentialFile, returnCredentialFile } from "../credential-file.ts";
+import type { CopiedCredentialFile, CredentialWriteLock } from "../credential-file.ts";
+import { CredentialsKeptError, RecordingNotWrittenError } from "../recovery.ts";
 import { createSanitiser } from "../sanitiser.ts";
 import { SCENARIOS, checkScenario } from "../scenarios.ts";
 import type { Scenario, ScenarioName } from "../scenarios.ts";
@@ -62,6 +65,8 @@ export interface RecordClaudeOptions {
   readonly date?: string;
   /** The OS user name the sanitiser replaces; os.userInfo().username when left out. */
   readonly user?: string;
+  /** How long a refreshed sign-in waits for another Claude Code's write lock before it goes to the recovery file instead; 30 s when left out. */
+  readonly credentialLockWaitMs?: number;
 }
 
 export interface ClaudeRecordOutcome {
@@ -116,64 +121,26 @@ export function userCredentialFile(env: { readonly [name: string]: string | unde
   return home === undefined || home === "" ? undefined : path.join(home, ".claude", CLAUDE_CREDENTIAL_FILE);
 }
 
-interface CopiedCredential {
-  readonly real: string;
-  readonly copy: string;
-  readonly original: Buffer;
-}
-
-function copyCredential(env: RecordClaudeOptions["env"], layout: ClaudeLayout): CopiedCredential | undefined {
-  const real = userCredentialFile(env);
-  if (real === undefined || !fs.existsSync(real)) return undefined;
-  const original = fs.readFileSync(real);
-  const copy = path.join(layout.configDir, CLAUDE_CREDENTIAL_FILE);
-  fs.writeFileSync(copy, original, { mode: 0o600 });
-  return { real, copy, original };
-}
-
 /**
- * Puts a credential Claude Code rewrote back where the user keeps it. When it
- * cannot go back (the user's file also changed while the recorder ran, or the
- * recorder cannot write it), the refreshed content is added to the recovery
- * file beside the user's file (`recoveryFileFor`), and this throws a
- * CredentialsKeptError naming it. When even that file cannot take it, this
- * throws a CredentialsNotSavedError: the copy is then the only place the
- * refreshed sign-in is, and the caller must keep it. Any other error leaves
- * the caller unsure whether the copy changed, so it must keep the copy too.
+ * Claude Code's own lock around every write of its secure storage, which on
+ * Linux is `.credentials.json` in the config dir: its `mutate` takes a
+ * proper-lockfile lock on `<config dir>/.storage-write`, that is the
+ * directory `<config dir>/.storage-write.lock`, with `stale: 15000`, and
+ * saves a refreshed sign-in under it only when the stored refresh token is
+ * still the one it used. Read from the native binaries of Claude Code 2.1.251,
+ * 2.1.278, 2.1.319 and 2.1.330 (docs/recordings.md, "How Claude Code finds
+ * the sign-in"). The recorder writes a refreshed sign-in back under the same
+ * lock, so another Claude Code session cannot save between the recorder's
+ * comparison and its replace.
  */
-function returnCredential(credential: CopiedCredential): void {
-  if (!fs.existsSync(credential.copy)) return;
-  const now = fs.readFileSync(credential.copy);
-  if (now.equals(credential.original)) return;
-  const recoveryFile = recoveryFileFor(credential.real);
-  /** Keeps the refreshed content in the recovery file, or throws CredentialsNotSavedError saying why it could not. */
-  const keep = (why: string): never => {
-    try {
-      keepRefreshedCredentials(recoveryFile, [{ id: CLAUDE_CREDENTIAL_FILE, value: now.toString("utf8") }]);
-    } catch (error) {
-      throw new CredentialsNotSavedError(
-        `${why}, and the recorder could not keep the refreshed sign-in in ${recoveryFile} either (${error instanceof Error ? error.message : String(error)}). The refreshed sign-in is only in the recorder's copy, ${credential.copy}.`,
-        credential.copy,
-        recoveryFile,
-      );
-    }
-    throw new CredentialsKeptError(`${why}; it kept the refreshed sign-in in ${recoveryFile}, readable only by you. Write its newest value over ${credential.real}, or sign in again.`, recoveryFile);
-  };
-  let current: Buffer | undefined;
-  const staged = `${credential.real}.ari-recorder-${process.pid}`;
-  try {
-    current = fs.existsSync(credential.real) ? fs.readFileSync(credential.real) : undefined;
-    if (current === undefined || current.equals(credential.original)) {
-      const mode = current === undefined ? 0o600 : fs.statSync(credential.real).mode & 0o777;
-      fs.writeFileSync(staged, now, { mode });
-      fs.renameSync(staged, credential.real);
-      return;
-    }
-  } catch (error) {
-    fs.rmSync(staged, { force: true });
-    keep(`the recorder could not write the sign-in Claude Code refreshed back to ${credential.real} (${error instanceof Error ? error.message : String(error)})`);
-  }
-  keep(`${credential.real} changed while the recorder ran, and Claude Code also refreshed the recorder's copy; the recorder left ${credential.real} as it is`);
+export function claudeCredentialLock(credentialFile: string, waitMs = 30_000): CredentialWriteLock {
+  return { directory: path.join(path.dirname(credentialFile), ".storage-write.lock"), waitMs };
+}
+
+function copyCredential(env: RecordClaudeOptions["env"], layout: ClaudeLayout, lockWaitMs: number | undefined): CopiedCredentialFile | undefined {
+  const real = userCredentialFile(env);
+  if (real === undefined) return undefined;
+  return copyCredentialFile(real, path.join(layout.configDir, CLAUDE_CREDENTIAL_FILE), CLAUDE_CREDENTIAL_FILE, claudeCredentialLock(real, lockWaitMs));
 }
 
 function today(): string {
@@ -197,7 +164,7 @@ async function recordOne(scenario: Scenario, options: RecordClaudeOptions): Prom
   const apiKey = options.env["ANTHROPIC_API_KEY"]?.trim() === "" ? undefined : options.env["ANTHROPIC_API_KEY"]?.trim();
   const model = recordModel(options.env);
   const previousConfigDir = process.env["CLAUDE_CONFIG_DIR"];
-  let credential: CopiedCredential | undefined;
+  let credential: CopiedCredentialFile | undefined;
   let runtime: ClaudeRuntime | undefined;
   const errors: Error[] = [];
   const failed = (reason: unknown): void => {
@@ -206,7 +173,7 @@ async function recordOne(scenario: Scenario, options: RecordClaudeOptions): Prom
   let recoveryFile: string | undefined;
   let workspaceKept = false;
   try {
-    credential = copyCredential(options.env, layout);
+    credential = copyCredential(options.env, layout, options.credentialLockWaitMs);
     if (options.source === "live" && credential === undefined && apiKey === undefined) {
       throw new Error(`no Claude sign-in found: neither ${userCredentialFile(options.env) ?? "~/.claude/.credentials.json"} nor ANTHROPIC_API_KEY. Run \`claude auth login\`, or set ANTHROPIC_API_KEY.`);
     }
@@ -235,7 +202,7 @@ async function recordOne(scenario: Scenario, options: RecordClaudeOptions): Prom
     else process.env["CLAUDE_CONFIG_DIR"] = previousConfigDir;
     if (credential !== undefined) {
       try {
-        returnCredential(credential);
+        returnCredentialFile(credential, "Claude Code");
       } catch (reason) {
         failed(reason);
         // Kept in the recovery file: the copy can go. Anything else: the copy may hold the only refreshed sign-in.

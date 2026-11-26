@@ -28,9 +28,10 @@
 // hooks; auto memory, claude.ai MCP connectors and nonessential traffic off;
 // and a host that gives the session no MCP server. The sign-in: the user's
 // `.credentials.json` is copied into the isolated config dir, and a copy
-// Claude Code refreshed goes back to the user's file, or into a recovery file
-// beside it (test/recordings/credential-file.ts and recovery.ts, shared by
-// the recorders), so a rotated token is never lost. The workspace is removed
+// Claude Code refreshed goes back to the user's file under Claude Code's own
+// write lock, or into a recovery file beside it
+// (test/recordings/credential-file.ts and recovery.ts, shared by the
+// recorders), so a rotated token is never lost. The workspace is removed
 // at the end unless it holds the only copy of a refreshed sign-in.
 //
 // It hashes the user's Claude settings files (settings.json and CLAUDE.md in
@@ -76,7 +77,7 @@ async function main(argv: readonly string[]): Promise<number> {
   const { CLAUDE_INSTALL_RECORD, managedClaudeSdkDirectory } = await import("../src/drivers/claude/install.ts");
   const { createCoordination, createNodeHostServices } = await import("../src/node/index.ts");
   const { startAriDriver } = await import("../src/wire/index.ts");
-  const { CLAUDE_CREDENTIAL_FILE, recordModel, userCredentialFile } = await import("../test/recordings/claude/record.ts");
+  const { CLAUDE_CREDENTIAL_FILE, claudeCredentialLock, recordModel, userCredentialFile } = await import("../test/recordings/claude/record.ts");
   const { CLAUDE_RECORDER_INSTANCE_ID, claudeInstanceEnvironment, claudeRecorderConfig, createClaudeLayout } = await import("../test/recordings/claude/run.ts");
   const { copyCredentialFile, returnCredentialFile } = await import("../test/recordings/credential-file.ts");
   const { CredentialsKeptError } = await import("../test/recordings/recovery.ts");
@@ -151,7 +152,8 @@ async function main(argv: readonly string[]): Promise<number> {
   const model = recordModel(process.env);
   // Over the wire a config is plain JSON values.
   const config: { [field: string]: unknown } = { ...claudeRecorderConfig(model) };
-  const credential = copyCredentialFile(userCredential, path.join(layout.configDir, CLAUDE_CREDENTIAL_FILE), CLAUDE_CREDENTIAL_FILE)!;
+  // A refreshed sign-in goes back under Claude Code's own write lock, so another Claude Code session cannot save between the comparison and the replace.
+  const credential = copyCredentialFile(userCredential, path.join(layout.configDir, CLAUDE_CREDENTIAL_FILE), CLAUDE_CREDENTIAL_FILE, claudeCredentialLock(userCredential))!;
 
   const failures: string[] = [];
   let workspaceKept = false;

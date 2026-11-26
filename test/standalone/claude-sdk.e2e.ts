@@ -8,9 +8,9 @@
 //     instance's cache directory, and afterwards status reports it and a turn
 //     completes, the SDK finding its native binary by itself;
 //   - a managed install whose `sdk.mjs` is missing, or whose native binary is
-//     truncated, is reported in a new driver process naming
-//     `maintenance.install` and `sdkDirectory`, and `maintenance.install`
-//     repairs it;
+//     truncated or lost its execute permission, is reported in a new driver
+//     process naming `maintenance.install` and `sdkDirectory`, and
+//     `maintenance.install` repairs it;
 //   - with no SDK at all, status reports `driver_unavailable` naming
 //     `maintenance.install` and `sdkDirectory`, and no `npm install`, which
 //     the binary could not use;
@@ -191,6 +191,7 @@ for (const runtime of [STANDALONE, UNDER_NODE]) {
 const DAMAGES: Array<{ name: string; damage: (installed: string, binary: string) => void; detail: RegExp }> = [
   { name: "its sdk.mjs is missing", damage: (installed) => fs.rmSync(path.join(installed, "sdk.mjs")), detail: /: sdk\.mjs is missing\./ },
   { name: "its native binary is truncated", damage: (_installed, binary) => fs.truncateSync(binary, 10), detail: /claude(\.exe)? has 10 bytes, not the \d+ it was installed with\./ },
+  { name: "its native binary lost its execute permission", damage: (_installed, binary) => fs.chmodSync(binary, 0o644), detail: /claude(\.exe)? is not executable: its mode is 0644, and it was installed with 0755\./ },
 ];
 
 for (const { name, damage, detail } of DAMAGES) {
@@ -221,6 +222,7 @@ for (const { name, damage, detail } of DAMAGES) {
       const before = registry.requests.length;
       await claude.instance.maintenance!.install!();
       assert.deepEqual(registry.requests.slice(before).filter((request) => request.startsWith("/-/tarballs/")), ["/-/tarballs/1.tgz", "/-/tarballs/0.tgz"], "the repair downloads both again");
+      assert.equal(fs.statSync(binary).mode & 0o777, 0o755, "the repaired native binary is executable");
       const repaired = await claude.instance.status();
       assert.equal(repaired.installed, true, JSON.stringify(repaired));
       assert.equal(repaired.version, CLAUDE_SDK_VERSION);

@@ -46,7 +46,8 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
   so the SDK finds its native binary by itself. Only a sha512, sha384 or
   sha256 `dist.integrity` is accepted, both tarballs are checked before
   either is unpacked, and what is unpacked is what was checked. A record of
-  every file lets `status()` report an install that is not whole and
+  every file (its size, mode and sha256) lets `status()` report an install
+  that is not whole, among it a native binary that lost its execute bit, and
   `maintenance.install` repair it. Both routes import the SDK by file URL.
   The SDK stays out of ARI's package and executables (its licence is
   Anthropic's).

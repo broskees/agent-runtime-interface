@@ -20,7 +20,7 @@ The kit lives in `test/recordings/`:
 | `sequencer.ts` | the replay sequencer, which knows no transport |
 | `recovery.ts` | the recovery file where both recorders keep a refreshed sign-in that cannot go back |
 | `resanitise.ts` | runs a committed recording through the sanitiser again, after a fix to the sanitiser |
-| `credential-file.ts` | copies a sign-in an agent keeps in one file into the recorded agent's profile, and puts a refreshed copy back |
+| `credential-file.ts` | copies a sign-in an agent keeps in one file into the recorded agent's profile, and puts a refreshed copy back, under the agent's own write lock when it has one |
 | `claude/` | the Claude tap, the replay SDK, and the recording and replay functions |
 | `opencode/` | the OpenCode recording proxy, the replay server, the sign-in copy, `opencode serve`, and the recording and replay functions |
 | `stdio/` | the process tap and the replay process service, for every driver that starts its agent through `HostServices.process` and talks to it on stdin and stdout |
@@ -675,9 +675,50 @@ The sources for these choices (Claude Code and Agent SDK docs, read
   `<workspace>/claude-config/`, with mode 0600. It reads no other file there.
 - Claude Code may refresh the token during a run and rewrite the copy. After
   each scenario, also one that fails, the recorder writes a changed copy back
-  to the user's file, so a rotated token is never lost. When the user's file
-  also changed meanwhile, the recorder leaves it as it is and reports the
-  scenario failed.
+  to the user's file, under Claude Code's own write lock (below), so a
+  rotated token is never lost. When the user's file also changed meanwhile,
+  the recorder leaves it as it is and reports the scenario failed.
+- **Claude Code's write lock.** Claude Code 2.1.330, the pinned SDK's
+  `claude-agent-sdk-linux-x64` (read with `strings` from the native binary),
+  writes its secure storage, `.credentials.json` on Linux, only through the
+  storage's `mutate`: no code calls its unlocked `update`. The installed CLIs
+  2.1.251, 2.1.278 and 2.1.319 take the same lock in the same call. `mutate`
+  holds a lock on `<config dir>/.storage-write` with `{ realpath: false,
+  retries: { retries: 10, minTimeout: 100, maxTimeout: 1000 }, stale: 15000
+  }` from a bundled lock module that has proper-lockfile's API (`lock`,
+  `lockSync`, `check`) and its error messages ("Lock file is already being
+  held", "Unable to update lock within the stale threshold"). Claude Code's
+  own code calls it "the lock directory", and the storage module names
+  `.storage-write.lock`. proper-lockfile 4.1.2 (`lib/lockfile.js`) takes
+  such a lock by creating the directory `<file>.lock` with `mkdir`, takes a
+  lock whose directory's mtime is older than `stale` for abandoned and
+  removes it, and removes its own when done.
+- Under that lock Claude Code saves a refreshed claude.ai sign-in as a
+  compare-and-swap ("OAuth refresh CAS save"): only when the stored
+  `refreshToken` is still the one the session refreshed with; otherwise it
+  keeps the stored sign-in. It writes a staging file and renames it over
+  `.credentials.json`, so the file is never missing.
+- So the recorder's copy-back (`test/recordings/credential-file.ts` with
+  `claudeCredentialLock` from `test/recordings/claude/record.ts`) creates
+  `<config dir>/.storage-write.lock` with `mkdir` before it reads the user's
+  file, and removes it after it renamed the refreshed copy over the file. A
+  Claude Code session that saves meanwhile waits for it, then finds a refresh
+  token it did not use and keeps the recorder's. One that saved first changed
+  the file, which the copy-back then leaves alone while it keeps its own
+  refresh in the recovery file. The copy-back never breaks the lock: when
+  another holder keeps it for 30 s, it writes nothing back and keeps the
+  refreshed sign-in in the recovery file. `scripts/live-claude-standalone.ts`
+  uses the same copy-back.
+- What the lock leaves open: Claude Code breaks a lock whose directory is
+  15 s old, and the copy-back does not refresh the directory's mtime. It
+  holds the lock for four synchronous operations on a file of about a
+  kilobyte (read, stat, write the staged copy, rename), so only a recorder
+  process stopped for 15 s inside them could lose its lock. A Claude Code
+  session that then saved would be overwritten, because a rename cannot be
+  made conditional on what the file holds, and Node has no
+  `renameat2(RENAME_EXCHANGE)`. A program that writes `.credentials.json`
+  without the lock races the copy-back within the same four operations; no
+  Claude Code version above does.
 - Whenever a refreshed copy cannot go back (that case, or a file the
   recorder cannot read or replace), the recorder adds it to the run's
   recovery file beside the user's file,
@@ -955,6 +996,12 @@ under them.
   scenario failed. The Claude and OpenCode recorders keep their recovery
   files the same way (`test/recordings/recovery.ts`,
   `test/recordings/credential-file.ts`).
+- The copy-back takes no lock for this file: nobody has checked whether
+  `agy` guards its writes with one. So another `agy` that saves a refresh
+  between the copy-back's comparison and its rename (a stat, a write of the
+  staged copy and the rename) is overwritten. The Claude recorder's
+  copy-back takes Claude Code's lock (see "How Claude Code finds the
+  sign-in").
 - When the recovery file cannot take the value either, the workspace's copy
   holds the only copy. The recorder then keeps that workspace, stops the run,
   and names the workspace and the copy in the error and in the run's last

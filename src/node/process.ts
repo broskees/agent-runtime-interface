@@ -83,6 +83,7 @@ export const DEFAULT_KILL_GRACE_MS = 2000;
 
 /** How long to wait after the guard should have finished, or after SIGKILL, before giving up. */
 const KILL_WAIT_MS = 5000;
+const GROUP_POLL_MS = 10;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 const isWindows = process.platform === "win32";
@@ -205,6 +206,25 @@ function signalGroup(groupId: number, signal: NodeJS.Signals): boolean {
     // EPERM: a member exists that this user may not signal.
     if (code === "EPERM") return true;
     throw error;
+  }
+}
+
+/**
+ * Resolves once process group `groupId` is gone, or after `timeoutMs`. It
+ * probes with signal 0, which delivers nothing, so it can never harm another
+ * group. It waits out members that have exited but are not reaped yet: a
+ * guard is reaped by the system's reaper, not by this process.
+ */
+async function groupGone(groupId: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(-groupId, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+    }
+    if (Date.now() >= deadline) return;
+    await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
   }
 }
 
@@ -546,16 +566,18 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
       const guard = isWindows ? undefined : watchGuardPipe(child.stdio[3] as Duplex);
       let endRequested = false;
       let ended: Promise<void> | undefined;
-      /** Has the guard end the group (SIGTERM, then SIGKILL after the grace) and resolves once the guard has exited. */
+      /** Has the guard end the group (SIGTERM, then SIGKILL after the grace) and resolves once the guard has exited and the group is gone. */
       const endGroup = (): Promise<void> =>
         (ended ??= (async () => {
           if (guard === undefined) return;
           endRequested = true;
           guard.endGroup();
-          if (await settlesWithin(guard.gone, killGraceMs + KILL_WAIT_MS)) return;
-          // The guard has not finished. It still runs, so the group id is still its: end the group from here.
-          if (guard.running) signalGroup(pid, "SIGKILL");
-          await settlesWithin(guard.gone, KILL_WAIT_MS);
+          if (!(await settlesWithin(guard.gone, killGraceMs + KILL_WAIT_MS))) {
+            // The guard has not finished. It still runs, so the group id is still its: end the group from here.
+            if (guard.running) signalGroup(pid, "SIGKILL");
+            await settlesWithin(guard.gone, KILL_WAIT_MS);
+          }
+          await groupGone(pid, KILL_WAIT_MS);
         })());
       // A guard that is gone while nobody asked it to end its group (it was killed, or never started):
       // the child is not reaped yet, so its group id is still its own; end the group now rather than leave it unguarded.

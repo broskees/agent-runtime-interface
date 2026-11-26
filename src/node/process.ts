@@ -28,39 +28,47 @@
 // SIGUSR1, SIGUSR2), so a driver's own signal to the group reaches the child
 // but not the guard. It waits on the pipe. When the owner dies, or the owner
 // writes a line to ask for the group to end, the guard sends SIGTERM to its
-// own group (`kill 0`), waits until no member but itself is left or
-// `killGraceMs` has passed, sends SIGKILL to the group, and exits. It never
-// signals by a number: it signals the group it is a member of, and while it
-// is a member, that group id cannot be given to anyone else. Membership is
-// read with `ps -A -o pid= -o ppid= -o pgid=` and `awk`; if they are
-// missing, the guard waits the whole grace.
+// own group (`kill 0`) and starts a timer, its own child in the group, that
+// sends SIGKILL to the whole group once `killGraceMs` has passed on the clock.
+// Until then it checks whether any member but itself is left, and if none
+// is, sends SIGKILL to its own group at once. It never signals by a number:
+// it signals the group it is a member of, and while it is a member, that
+// group id cannot be given to anyone else. Membership is read with
+// `ps -A -o pid= -o ppid= -o pgid=` and `awk`; if they are missing, the timer
+// alone ends the group.
 //
 // The owner ends a group the same way: it writes a line to the guard's pipe
 // and waits until the group, guard included, is gone (probing with signal 0,
 // which delivers nothing), so cleanup does not wait a whole grace when the
 // group empties sooner. The owner sends a signal to a group by its id only
-// while the group's leader is its own unreaped child, or while the group
-// still exists, so the id cannot belong to anyone else. A guard shows in `ps`
+// while the group's leader is its own unreaped child, checked in the same
+// synchronous step, since only that keeps the id from naming another group.
+// A group still there when the owner stops waiting is logged (a warning with
+// code `ARI_PROCESS_GROUP_LEFT_BEHIND`), sent nothing, and reported by
+// `kill()` and `dispose()` as an `invalid_state` error. A guard shows in `ps`
 // as `/bin/sh -c … ari-agent-guard <grace ms> …`, and costs one idle shell per
 // child. If the launcher cannot start the guard, the child never runs: it
-// exits with code 126. Someone who kills a guard by hand leaves its child
-// unguarded.
+// exits with code 126. Someone who kills a guard by hand before it was asked
+// to end its group leaves its child unguarded.
 //
 // Under Bun the launcher is started with `Bun.spawn` rather than
 // `node:child_process`, whose extra pipes Bun 1.3.14 closes twice (see
 // `fromBunSubprocess`).
 //
 // What the launcher keeps as it was, and what it does not: spawn errors (a
-// missing or non-executable command, a missing `cwd`) reject as before,
-// because the command is searched for first, the way spawn searches, and a
-// command that is not found is handed to spawn itself for the platform's own
-// error. The child's argv is the one spawn would give it, except that with no
-// PATH in the child's environment a bare command name is run by its full path
-// (argv[0] is that path), and for its first few milliseconds the pid shows the
-// launcher's command line, until the launcher `exec`s the child. `PWD` and `OLDPWD` are put back as the child's
-// environment had them. With bash as `/bin/sh`, an environment without `SHLVL`
-// gains `SHLVL=0`. A file the user may execute that is not a program (no `#!`
-// line) is run by `/bin/sh` instead of failing with ENOEXEC.
+// missing or non-executable command, a missing `cwd`) reject as before, and
+// nothing starts outside the launcher: the command is searched for first, the
+// way spawn searches, and for a command that is not found the error spawn
+// would give is worked out without starting anything
+// (`spawnErrorWithoutStarting`). The child's argv is the one spawn would give
+// it, except that with no PATH in the child's environment a bare command name
+// is run by its full path (argv[0] is that path), and for its first few
+// milliseconds the pid shows the launcher's command line, until the launcher
+// `exec`s the child. `PWD` and `OLDPWD` are put back as the child's
+// environment had them. With bash as `/bin/sh`, an environment without
+// `SHLVL` gains `SHLVL=0`. On macOS, a file the user may execute that is not
+// a program (no `#!` line) is run by `/bin/sh` instead of failing with
+// ENOEXEC; on Linux spawn already runs it so.
 //
 // Not reached: a process that leaves the child's group (`setsid`, `setpgid`)
 // is outside the group, and nothing here ends it.
@@ -202,8 +210,11 @@ function findExecutable(name: string, searchPath: string | undefined, cwd: strin
 }
 /**
  * Sends `signal` to process group `groupId`. False when the group no longer
- * exists. Call it only while the group's guard runs: the guard's membership
- * is what keeps the id from naming another group.
+ * exists. Call it only while the group's leader is this process's own child
+ * and not yet reaped (`isRunning()`, checked in the same synchronous step): an
+ * unreaped leader keeps its pid, and so the group id, from being given to
+ * anyone else. Once the leader is reaped, only the guard, a member, may signal
+ * the group, and it does so as `kill 0`.
  */
 function signalGroup(groupId: number, signal: NodeJS.Signals): boolean {
   try {
@@ -279,10 +290,14 @@ const LAUNCH_SCRIPT = [
 // The guard, run as `/bin/sh -c GUARD_SCRIPT ari-agent-guard <grace ms>
 // COUNT_OTHERS` inside the child's process group, with fd 3 the pipe. `read`
 // returns when the owner writes a line or dies. Then: SIGTERM to its own group
-// (`kill 0`), and checks at 20, 60, 140, 300, 620 ms and then every 400 ms until
-// the grace has passed: when no member but itself is left it exits, else at
-// the end it sends SIGKILL to its own group, itself included. POSIX sh, ps and
-// awk only, so it runs under bash, dash and macOS's sh alike.
+// (`kill 0`), and a timer, its own child in the group, that sends SIGKILL to
+// the whole group, guard and timer included, once the grace has passed on the
+// clock, however long the checks take. Meanwhile it checks at 20, 60, 140, 300,
+// 620 ms and then every 400 ms: when no member but itself (and its own helper
+// processes) is left, it sends SIGKILL to its own group at once, which ends the
+// timer too. It never exits any other way, and it signals nothing but its own
+// group. POSIX sh, ps and awk only, so it runs under bash, dash and macOS's sh
+// alike.
 const GUARD_SCRIPT = [
   "set +eu",
   "trap '' HUP INT QUIT PIPE ALRM TERM USR1 USR2",
@@ -291,24 +306,23 @@ const GUARD_SCRIPT = [
   "export LC_ALL",
   "unset PS_PERSONALITY CMD_ENV",
   "read -r _ <&3",
+  "exec 3<&-",
   "kill -s TERM 0",
-  "waited=0",
+  '{ ( sleep "$(printf %d.%03d $(($1 / 1000)) $(($1 % 1000)))"; kill -s KILL 0 ) & }',
   "step=20",
-  `while [ "$waited" -lt "$1" ]; do ${[
-    'if [ $((waited + step)) -gt "$1" ]; then step=$(($1 - waited)); fi',
+  `while :; do ${[
     'sleep "$(printf %d.%03d $((step / 1000)) $((step % 1000)))"',
-    "waited=$((waited + step))",
-    'if [ "$(ps -A -o pid= -o ppid= -o pgid= 2>/dev/null | awk -v me="$$" "$2")" = 0 ]; then exit 0; fi',
+    'if [ "$(ps -A -o pid= -o ppid= -o pgid= 2>/dev/null | awk -v me="$$" "$2")" = 0 ]; then kill -s KILL 0; fi',
     "if [ $step -lt 400 ]; then step=$((step * 2)); fi",
   ].join("; ")}; done`,
-  "kill -s KILL 0",
 ].join("; ");
 
 // The awk program the guard runs over `ps -A -o pid= -o ppid= -o pgid=`. It
 // prints how many members of the guard's group are left besides the guard
-// itself and the processes it runs to look (its children and theirs: the
-// command substitution's subshell, ps, awk). It prints nothing when the
-// guard's own line is missing, which the guard reads as "not alone".
+// itself and its own helper processes (its children and theirs: the timer and
+// its `sleep`, the command substitution's subshell, ps, awk). It prints nothing
+// when the guard's own line is missing, which the guard reads as "not alone":
+// then only the timer ends the group.
 const COUNT_OTHERS = [
   "{ pid[NR] = $1; ppid[NR] = $2; pgid[NR] = $3; if ($1 == me) mine = $3; if ($2 == me) helper[$1] = 1 }",
   'END { if (mine == "") exit; n = 0; for (i = 1; i <= NR; i++) if (pgid[i] == mine && pid[i] != me && ppid[i] != me && !(ppid[i] in helper)) n++; print n }',
@@ -501,29 +515,124 @@ function spawnFailure(command: string, error: NodeJS.ErrnoException): AriError {
   return callErrors.invalidState("spawn_failed", `Cannot spawn ${command}: ${error.message}`);
 }
 
-/**
- * Why `request` cannot run, as spawn itself reports it: the search found no
- * command (or the request has a malformed `cwd`), so spawn is asked directly
- * and its error is the one callers have always seen. Should spawn start
- * something after all (the file appeared in between), that process is ended
- * at once: it ran without a guard.
- */
-async function directSpawnFailure(request: SpawnRequest, environment: { readonly [name: string]: string }): Promise<AriError> {
-  let probe: ChildProcess;
+/** Longest file name exec searches PATH for (NAME_MAX on Linux and macOS); a longer one fails with ENAMETOOLONG. */
+const NAME_MAX = 255;
+
+/** Errors with which exec goes on to the next PATH entry (glibc's execvp; libuv's own search on macOS keeps EACCES, ENOENT and ENOTDIR). */
+const SEARCH_GOES_ON = new Set(["EACCES", "ENOENT", "ENOTDIR", "ESTALE", "ENODEV", "ETIMEDOUT"]);
+
+/** What exec would fail with for `file`, read with stat and access instead of starting it; null when it would run. */
+function execErrorOf(file: string): string | null {
+  let stats: fs.Stats;
   try {
-    probe = spawnChildProcess(request.command, request.args ?? [], { cwd: request.cwd, env: environment, stdio: "ignore", detached: true });
+    stats = fs.statSync(file);
   } catch (error) {
-    return spawnFailure(request.command, error as NodeJS.ErrnoException);
+    return (error as NodeJS.ErrnoException).code ?? "ENOENT";
   }
-  if (probe.pid === undefined) return spawnFailure(request.command, await new Promise<NodeJS.ErrnoException>((resolve) => probe.once("error", resolve)));
-  probe.on("error", () => {});
-  // It is this process's own child and not reaped yet, so its group id is still its own.
+  // exec refuses a directory or any other file that is not a regular one with EACCES.
+  if (!stats.isFile()) return "EACCES";
   try {
-    process.kill(-probe.pid, "SIGKILL");
+    fs.accessSync(file, fs.constants.X_OK);
   } catch {
-    // Already gone.
+    return "EACCES";
   }
-  return callErrors.invalidState("spawn_failed", `Cannot spawn ${request.command}: it was not found when searched for, but appeared when spawned`);
+  return null;
+}
+
+/** What changing into `directory` would fail with, read with stat and access; null when it would work. */
+function chdirErrorOf(directory: string): string | null {
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(directory);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code ?? "ENOENT";
+  }
+  if (!stats.isDirectory()) return "ENOTDIR";
+  try {
+    fs.accessSync(directory, fs.constants.X_OK);
+  } catch {
+    return "EACCES";
+  }
+  return null;
+}
+
+/**
+ * Why `request` cannot run, for a request the search found nothing to run
+ * for, worked out without starting anything: a command that appeared since
+ * the search would otherwise run without a guard. It makes spawn's checks in
+ * spawn's order, so callers get the error spawn itself gave: Node's argument
+ * checks (no NUL byte in the command, an argument, `cwd` or the environment,
+ * and a string `cwd`), then the `cwd` the child changes into, then what exec
+ * would say of each file the search tries, by libc's rules: a name longer
+ * than NAME_MAX fails at once, EACCES from any candidate wins over the last
+ * error, ENOENT and ENOTDIR go on to the next PATH entry, and any other error
+ * stops the search. A command found after all (it appeared in between) is not
+ * started either; the spawn rejects with `spawn_failed`.
+ */
+function spawnErrorWithoutStarting(
+  request: SpawnRequest,
+  environment: { readonly [name: string]: string },
+  searchPath: string | undefined,
+  searchCwd: string,
+): AriError {
+  const command = request.command;
+  const failure = (code: string, message = `spawn ${command} ${code}`): AriError => spawnFailure(command, Object.assign(new Error(message), { code }));
+  const withoutNul = (argument: string, value: string): AriError | null =>
+    value.includes("\0") ? failure("ERR_INVALID_ARG_VALUE", `The argument '${argument}' must be a string without null bytes. Received ${JSON.stringify(value)}`) : null;
+  const nul =
+    withoutNul("file", command) ??
+    (request.args ?? []).reduce<AriError | null>((found, arg, index) => found ?? (typeof arg === "string" ? withoutNul(`args[${index}]`, arg) : null), null) ??
+    Object.entries(environment).reduce<AriError | null>((found, [name, value]) => found ?? withoutNul(`options.env['${name}']`, `${name}=${value}`), null);
+  if (nul !== null) return nul;
+  if (request.cwd !== undefined) {
+    if (typeof request.cwd !== "string") return failure("ERR_INVALID_ARG_TYPE", `The "options.cwd" property must be of type string. Received type ${typeof request.cwd}`);
+    const cwdNul = withoutNul("options.cwd", request.cwd);
+    if (cwdNul !== null) return cwdNul;
+    const cwdError = chdirErrorOf(searchCwd);
+    if (cwdError !== null) return failure(cwdError);
+  }
+  const candidates = command.includes("/")
+    ? [appendToPath(command, [], searchCwd)]
+    : (searchPath ?? DEFAULT_SEARCH_PATH).split(":").map((entry) => appendToPath(entry, [command], searchCwd));
+  if (!command.includes("/") && Buffer.byteLength(command) > NAME_MAX) return failure("ENAMETOOLONG");
+  let deniedAccess = false;
+  let lastError = "ENOENT";
+  for (const candidate of candidates) {
+    const error = execErrorOf(candidate);
+    if (error === null) {
+      return callErrors.invalidState("spawn_failed", `Cannot spawn ${command}: it was not found when searched for, but is there now; it was not started`);
+    }
+    if (!SEARCH_GOES_ON.has(error) || command.includes("/")) return failure(error);
+    if (error === "EACCES") deniedAccess = true;
+    lastError = error;
+  }
+  return failure(deniedAccess ? "EACCES" : lastError);
+}
+
+/** The warning code of the line logged for a process group the owner had to leave behind. */
+export const GROUP_LEFT_BEHIND_WARNING = "ARI_PROCESS_GROUP_LEFT_BEHIND";
+
+/**
+ * Logs a group that was still there when the owner stopped waiting for it:
+ * its guard was stopped or killed, or a member cannot be ended (it is in
+ * uninterruptible sleep, or belongs to another user). Once the leader is
+ * reaped nothing keeps the id from naming another group, so the owner sends
+ * the group nothing more and only reports it.
+ */
+function reportGroupLeftBehind(groupId: number, command: string, waitedMs: number): void {
+  process.emitWarning(
+    `ari/node: process group ${groupId} (${command}) was still there ${waitedMs} ms after its guard was asked to end it; ari/node leaves it and sends it no signal, since once its leader is reaped its id may name another group`,
+    { code: GROUP_LEFT_BEHIND_WARNING },
+  );
+}
+
+/** The error `kill()` and `dispose()` reject with when they had to leave process groups behind. */
+function groupsLeftBehind(groupIds: readonly number[]): AriError {
+  const plural = groupIds.length > 1;
+  return callErrors.invalidState(
+    "process_group_left_behind",
+    `Process group${plural ? "s" : ""} ${groupIds.join(", ")} ${plural ? "were" : "was"} still there after ${plural ? "their guards were" : "its guard was"} asked to end ${plural ? "them" : "it"}; ari/node sent no signal by group id, since once a leader is reaped its id may name another group`,
+  );
 }
 
 export interface ProcessServiceOptions {
@@ -540,7 +649,11 @@ export type ProcessService = HostServices["process"] & {
   /**
    * Ends the process group of every child still running and of every child
    * whose leftovers are being cleaned up, and resolves when they and their
-   * guards are gone. Later spawns reject with `invalid_state`.
+   * guards are gone. Later spawns reject with `invalid_state`. A group still
+   * there when it stops waiting, with its leader already reaped, is logged as
+   * a warning (code `ARI_PROCESS_GROUP_LEFT_BEHIND`) and sent nothing; then
+   * `dispose()` rejects with `invalid_state` (`process_group_left_behind`)
+   * once every other cleanup has finished.
    */
   dispose(): Promise<void>;
 };
@@ -549,11 +662,12 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
   const envPolicy: EnvPolicy = { stripAmbient: [...options.envPolicy.stripAmbient] };
   const baseEnv = options.baseEnv ?? process.env;
   const killGraceMs = Math.max(0, Math.round(options.killGraceMs ?? DEFAULT_KILL_GRACE_MS));
-  const terminators = new Set<() => Promise<void>>();
-  const pendingCleanups = new Set<Promise<void>>();
+  // A cleanup resolves to the id of the group it had to leave behind, or undefined; it never rejects.
+  const terminators = new Set<() => Promise<number | undefined>>();
+  const pendingCleanups = new Set<Promise<number | undefined>>();
   let disposed = false;
 
-  const track = (cleanup: Promise<void>): Promise<void> => {
+  const track = (cleanup: Promise<number | undefined>): Promise<number | undefined> => {
     pendingCleanups.add(cleanup);
     void cleanup.finally(() => pendingCleanups.delete(cleanup));
     return cleanup;
@@ -563,11 +677,16 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
     disposed = true;
     options.signal?.removeEventListener("abort", onAbort);
     for (const terminate of terminators) track(terminate());
-    while (pendingCleanups.size > 0) await Promise.all([...pendingCleanups]);
+    const leftBehind = new Set<number>();
+    while (pendingCleanups.size > 0) {
+      for (const groupId of await Promise.all([...pendingCleanups])) if (groupId !== undefined) leftBehind.add(groupId);
+    }
+    if (leftBehind.size > 0) throw groupsLeftBehind([...leftBehind]);
   };
 
   function onAbort(): void {
-    void dispose();
+    // A group left behind is already logged; an aborted signal has nobody to reject to.
+    void dispose().catch(() => undefined);
   }
   if (options.signal?.aborted === true) disposed = true;
   else options.signal?.addEventListener("abort", onAbort, { once: true });
@@ -583,12 +702,12 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
     environment: { [name: string]: string },
     stdinMode: "pipe" | "ignore",
   ): { readonly started: StartedChild } | { readonly failure: Promise<AriError> } => {
-    if (request.cwd !== undefined && typeof request.cwd !== "string") return { failure: directSpawnFailure(request, environment) };
+    const searchPath = environment.PATH;
+    if (request.cwd !== undefined && typeof request.cwd !== "string") return { failure: Promise.resolve(spawnErrorWithoutStarting(request, environment, searchPath, process.cwd())) };
     // Search where spawn would: relative entries and names against the child's cwd.
     const searchCwd = request.cwd === undefined ? process.cwd() : appendToPath(request.cwd, [], process.cwd());
-    const searchPath = environment.PATH;
     const executable = findExecutable(request.command, searchPath, searchCwd);
-    if (executable === null) return { failure: directSpawnFailure(request, environment) };
+    if (executable === null) return { failure: Promise.resolve(spawnErrorWithoutStarting(request, environment, searchPath, searchCwd)) };
     const args = ["-c", LAUNCH_SCRIPT, LAUNCHER_NAME, GUARD_SCRIPT, String(killGraceMs), COUNT_OTHERS, launchTarget(request.command, executable, searchPath), ...(request.args ?? [])];
     const env = launcherEnvironment(environment);
     try {
@@ -660,28 +779,40 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
       const exited = child.exited;
       const isRunning = child.isRunning;
 
-      let ended: Promise<void> | undefined;
+      let ended: Promise<number | undefined> | undefined;
       /**
-       * Has the guard end the group (SIGTERM, then SIGKILL after the grace)
-       * and resolves once the group, guard included, is gone. The group id
-       * stays the guard's for as long as the group exists, so the SIGKILL
-       * below, sent only while it does, reaches no other group.
+       * Has the guard end the group (SIGTERM, then SIGKILL once the grace has
+       * passed) and resolves once the group, guard included, is gone; to the
+       * group's id when it had to leave the group behind. The owner signals the
+       * group by its id only while the leader is still its unreaped child,
+       * checked in the same synchronous step as the signal: that alone pins the
+       * id. After the leader is reaped, only the guard, a member, ends the
+       * group; a group still there then is reported and sent nothing.
        */
-      const endGroup = (): Promise<void> =>
+      const endGroup = (): Promise<number | undefined> =>
         (ended ??= (async () => {
           child.askGuardToEndGroup();
-          if (await groupGone(pid, killGraceMs + KILL_WAIT_MS)) return;
-          signalGroup(pid, "SIGKILL");
-          await groupGone(pid, KILL_WAIT_MS);
+          let waitedMs = killGraceMs + KILL_WAIT_MS;
+          if (await groupGone(pid, waitedMs)) return undefined;
+          // The guard did not end the group (it was stopped or killed). The unreaped leader still pins the id.
+          if (isRunning()) {
+            signalGroup(pid, "SIGKILL");
+            waitedMs += KILL_WAIT_MS;
+            if (await groupGone(pid, KILL_WAIT_MS)) return undefined;
+          }
+          reportGroupLeftBehind(pid, request.command, waitedMs);
+          return pid;
         })());
 
-      const terminate = async (): Promise<void> => {
+      /** Ends the group and waits for the child's exit; resolves to the group's id when it had to leave the group behind. */
+      const terminate = async (): Promise<number | undefined> => {
         if (isWindows) {
           if (isRunning()) await terminateTreeOnWindows(pid);
-          return;
+          return undefined;
         }
-        await endGroup();
+        const leftBehind = await endGroup();
         await settlesWithin(exited, KILL_WAIT_MS);
+        return leftBehind;
       };
       terminators.add(terminate);
       if (!isWindows) rememberRunningGroup(pid, isRunning);
@@ -721,12 +852,15 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
         },
 
         /**
-         * Without a signal, ends the whole process group and resolves when it is gone. With one, sends it to the
-         * group (the guard ignores the usual ones) while the child is not yet reaped, so the group id is still its.
+         * Without a signal, ends the whole process group and resolves when it is gone; rejects with
+         * `invalid_state` (`process_group_left_behind`) when the group had to be left behind. With one, sends it
+         * to the group (the guard ignores the usual ones) while the child is not yet reaped, so the group id is
+         * still its; after that, it sends nothing.
          */
         async kill(signal) {
           if (signal === undefined) {
-            await track(terminate());
+            const leftBehind = await track(terminate());
+            if (leftBehind !== undefined) throw groupsLeftBehind([leftBehind]);
             return;
           }
           if (typeof signal !== "string" || !Object.hasOwn(osConstants.signals, signal)) {

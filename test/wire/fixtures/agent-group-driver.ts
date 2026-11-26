@@ -6,7 +6,9 @@
 // "plain" or "ignore-term".
 //
 // Config: `disposeDelayMs` makes `instance.dispose()` take that long, like a
-// driver whose own shutdown is slow.
+// driver whose own shutdown is slow. `disposeReportFile`: at the end of
+// `instance.dispose()`, writes `{ agents: [{ pid, grandchildPid, alive }] }`
+// there, `alive` meaning the agent and its grandchild both still ran then.
 //
 // Extension `test.agents`:
 // - `agents`: `[{ pid, grandchildPid }]` for every agent this `ari-driver`
@@ -16,6 +18,7 @@
 //   answers `{ pid }`. The test then has an agent spawned but not yet guarded.
 // - `abort`: crashes `ari-driver` with `process.abort()`, so no cleanup runs.
 
+import * as fs from "node:fs";
 import { referenceCapabilities } from "../../../src/conformance/reference/driver.ts";
 import type { Capabilities } from "../../../src/index.ts";
 import type { Driver, HostServices, Instance, Session } from "../../../src/runtime.ts";
@@ -24,6 +27,15 @@ import { fakeAgentArgs, readFirstLine } from "../../helpers/fake-agent.ts";
 import type { FakeAgentKind } from "../../helpers/fake-agent.ts";
 
 const agents: Array<{ pid: number; grandchildPid: number }> = [];
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const NO_ITEMS = { [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true as const, value: undefined }) }) };
 
@@ -100,8 +112,12 @@ export const agentGroupDriver: Driver = {
         return createSession(host, `${input.instanceId}-session-${sessions}`);
       },
       dispose: async () => {
-        const delayMs = (input.config as { disposeDelayMs?: number }).disposeDelayMs ?? 0;
-        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+        const { disposeDelayMs = 0, disposeReportFile } = input.config as { disposeDelayMs?: number; disposeReportFile?: string };
+        if (disposeDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, disposeDelayMs));
+        if (disposeReportFile !== undefined) {
+          const report = agents.map((agent) => ({ ...agent, alive: isAlive(agent.pid) && isAlive(agent.grandchildPid) }));
+          fs.writeFileSync(disposeReportFile, JSON.stringify({ agents: report }));
+        }
       },
     };
   },

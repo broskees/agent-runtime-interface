@@ -12,6 +12,11 @@
 //   `child_process.spawn` and the launcher is stopped there);
 // - a guard is a member of its agent's group, so that group id stays taken
 //   for as long as the guard runs, and the guard signals nothing outside it;
+// - a group that ignores SIGTERM gets SIGKILL once the grace has passed on the
+//   clock, from the guard's timer, even when the guard's own checks stall;
+// - once a group's leader is reaped, the owner sends that group no signal by
+//   its id, even when the group outlives its guard's grace: it logs the group
+//   and `dispose()` rejects, since the id may name another group by then;
 // - while the owner lives, an idle agent and its grandchild keep running (the
 //   guard never ends a group early), also while other children come and go;
 // - an agent that exits on its own takes its grandchild and its guard with it;
@@ -28,11 +33,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, describe, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { isAriError } from "../../src/index.ts";
 import { createProcessService } from "../../src/node/index.ts";
 import type { ProcessService } from "../../src/node/index.ts";
+import { GROUP_LEFT_BEHIND_WARNING } from "../../src/node/process.ts";
 import { fakeAgentArgs, readFirstLine } from "../helpers/fake-agent.ts";
 import type { FakeAgentKind } from "../helpers/fake-agent.ts";
-import { groupExists, guardsOf, isRunning, killRecorded, processGroupOf, recordAgents, recordPausedLauncher, survivorsAt, survivorsOf } from "../helpers/process-groups.ts";
+import { childrenNamed, groupExists, guardsOf, isRunning, killRecorded, processGroupOf, recordAgents, recordPausedLauncher, survivorsAt, survivorsOf } from "../helpers/process-groups.ts";
 import type { RecordedAgent } from "../helpers/process-groups.ts";
 import { NODE_EXECUTABLE } from "../helpers/runtime.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
@@ -165,6 +172,112 @@ describe("agents end when their owner dies, and not before", () => {
       bystander.kill("SIGKILL");
       await service.dispose();
     }
+  });
+
+  test("a group that ignores SIGTERM gets SIGKILL when the grace has passed on the clock, however long the guard's own checks take", async () => {
+    // The guard's checks of its group stall here: every `sleep` it runs between two checks is stopped as soon as
+    // it starts, as if each `ps` took forever on a loaded machine. Its timer still ends the group on time.
+    const graceMs = 1000;
+    const service = createProcessService({ envPolicy: { stripAmbient: [] }, killGraceMs: graceMs });
+    const agents: RecordedAgent[] = [];
+    const stopped = new Set<number>();
+    let stalling = true;
+    let staller: Promise<void> | undefined;
+    try {
+      const { child, agent } = await startAgent(service, "ignore-term", agents);
+      const guard = agent.guardPids[0]!;
+      staller = (async () => {
+        while (stalling) {
+          for (const pid of childrenNamed(guard, "sleep")) {
+            if (stopped.has(pid)) continue;
+            try {
+              process.kill(pid, "SIGSTOP");
+              stopped.add(pid);
+            } catch {
+              // It ended first.
+            }
+          }
+          await delay(2);
+        }
+      })();
+      const asked = Date.now();
+      const ending = child.kill();
+      assert.deepEqual(await survivorsAt(agents, asked + graceMs + 1000), [], "the group ended within the grace and 1 s more");
+      assert.ok(stopped.size > 0, "the guard's checks were stalled");
+      assert.equal((await child.exited).signal, "SIGKILL", "the agent, which ignores SIGTERM, got SIGKILL");
+      await ending;
+    } finally {
+      stalling = false;
+      await staller;
+      for (const pid of stopped) {
+        try {
+          process.kill(pid, "SIGCONT");
+        } catch {
+          // Gone with its group.
+        }
+      }
+      killRecorded(agents);
+      await service.dispose().catch(() => undefined);
+    }
+  });
+
+  test("once its leader is reaped, a group that outlives its guard's grace is sent no signal by its id: it is logged and dispose() rejects", async () => {
+    // The verifier's probe: the leader is reaped and only a delayed guard holds the group, past the grace and
+    // the owner's 5 s margin. The guard could exit at any moment after the owner's last check, and a new group
+    // take the id, so any signal the owner sent by that id could hit a group ARI never started. process.kill is
+    // intercepted for that id: probes (signal 0) go through, anything else is recorded and not delivered.
+    const service = createProcessService({ envPolicy: { stripAmbient: [] }, killGraceMs: 200 });
+    const agents: RecordedAgent[] = [];
+    const originalKill = process.kill;
+    const realKill = (pid: number, signal?: string | number): true => originalKill.call(process, pid, signal);
+    const sentByGroupId: Array<string | number | undefined> = [];
+    const warnings: Error[] = [];
+    const onWarning = (warning: Error): void => {
+      if ((warning as Error & { code?: string }).code === GROUP_LEFT_BEHIND_WARNING) warnings.push(warning);
+    };
+    process.on("warning", onWarning);
+    let guard: number | undefined;
+    try {
+      const { child, agent } = await startAgent(service, "plain", agents);
+      guard = agent.guardPids[0]!;
+      realKill(guard, "SIGSTOP");
+      process.kill = ((pid: number, signal?: string | number) => {
+        if (Math.abs(pid) === agent.groupId && signal !== 0) {
+          sentByGroupId.push(signal);
+          return true;
+        }
+        return realKill(pid, signal);
+      }) as typeof process.kill;
+      realKill(agent.grandchildPid!, "SIGKILL");
+      realKill(agent.pid, "SIGKILL");
+      assert.equal((await child.exited).signal, "SIGKILL", "the leader was killed by its pid, and is now reaped");
+
+      // The owner asks the stopped guard to end the group, and waits the grace and its 5 s margin in vain.
+      const disposed = await service.dispose().then(
+        () => "resolved",
+        (error: unknown) => error,
+      );
+      assert.deepEqual(sentByGroupId, [], "the owner sent no signal to the group by its id");
+      assert.ok(isAriError(disposed, "invalid_state") && (disposed.callError as { reason?: string }).reason === "process_group_left_behind", `dispose() rejects: ${String(disposed)}`);
+      const deadline = Date.now() + 1000;
+      while (warnings.length === 0 && Date.now() < deadline) await delay(10);
+      assert.equal(warnings.length, 1, "the group left behind is logged once");
+      assert.match(warnings[0]!.message, new RegExp(`process group ${agent.groupId} `));
+      assert.equal(groupExists(agent.groupId), true, "the group is left as it was, held by its stopped guard");
+    } finally {
+      process.kill = originalKill;
+      process.off("warning", onWarning);
+      if (guard !== undefined) {
+        try {
+          realKill(guard, "SIGCONT");
+        } catch {
+          // Gone.
+        }
+      }
+    }
+    // Let go, the guard reads the owner's line and ends its own group.
+    assert.deepEqual(await survivorsAt(agents, Date.now() + LIMIT_MS), [], "the guard ended its group once it could run");
+    killRecorded(agents);
   });
 
   test("while the owner lives, an agent and its grandchild keep running for 10 s with no output and no stdin traffic", async () => {

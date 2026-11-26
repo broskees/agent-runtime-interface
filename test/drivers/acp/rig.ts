@@ -4,8 +4,8 @@
 
 import { setTimeout as sleep } from "node:timers/promises";
 import { createFakeHost } from "../../../src/conformance/index.ts";
-import type { FakeHost, FakeHostOptions, HarnessRig, NativeTurn } from "../../../src/conformance/index.ts";
-import type { AriEvent, OpenSessionInput, RuntimePolicy } from "../../../src/index.ts";
+import type { FakeHost, FakeHostOptions, FakeSpawnRequest, HarnessRig, NativeTurn } from "../../../src/conformance/index.ts";
+import type { AriEvent, OpenSessionInput, RuntimePolicy, SpawnedProcess } from "../../../src/index.ts";
 import type { Instance, Session } from "../../../src/runtime.ts";
 import { acpHarness } from "./harness.ts";
 import type { AcpHarness, AcpHarnessOptions } from "./harness.ts";
@@ -53,7 +53,12 @@ function collect(session: Session): OpenedTestSession {
 }
 
 export async function openRig<Config>(
-  options: AcpHarnessOptions<Config> & { readonly fakeHost?: Partial<FakeHostOptions<Config>>; readonly instanceId?: string },
+  options: AcpHarnessOptions<Config> & {
+    readonly fakeHost?: Partial<FakeHostOptions<Config>>;
+    readonly instanceId?: string;
+    /** Wraps each process the harness spawns for the driver, for tests that change how it behaves. */
+    readonly wrapProcess?: (process: SpawnedProcess) => SpawnedProcess;
+  },
 ): Promise<TestRig<Config>> {
   const harness = acpHarness(options);
   const workspace = await harness.workspace();
@@ -65,6 +70,9 @@ export async function openRig<Config>(
     config: options.config,
     envScrubPrefixes: options.driver.cliManifest?.envScrubPrefixes ?? [],
     ...hostOptions,
+    ...(options.wrapProcess === undefined || hostOptions.spawn === undefined
+      ? {}
+      : { spawn: async (request: FakeSpawnRequest) => options.wrapProcess!(await hostOptions.spawn!(request)) }),
     ...(options.fakeHost ?? {}),
   });
   const instance = await options.driver.create(host, { instanceId, config: options.config, environment: {} });

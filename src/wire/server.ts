@@ -36,8 +36,16 @@ import type { NegotiatedVersions } from "./handshake.ts";
 import { DelegatedChildren, createWireHostServices } from "./host-proxy.ts";
 import { OPTIONAL_INSTANCE_MEMBERS, OPTIONAL_SESSION_MEMBERS, defaultMethodVersions, memberAt, presentMembers } from "./methods.ts";
 
-/** How long after the connection closes local child processes are ended, even while an instance's dispose still runs. */
-export const LOCAL_PROCESSES_END_AFTER_MS = 1000;
+/**
+ * How long after the connection closes local child processes are ended, even
+ * while an instance's dispose still runs: the budget a driver's own shutdown
+ * has to stop its agents its own way. It is the largest that keeps every agent
+ * gone within 5 s of `ari-driver` being told to stop, for an agent that
+ * ignores SIGTERM: this head start, then the 2 s kill grace after SIGTERM,
+ * leaves 1 s for scheduling under load (the guard ends such a group about
+ * 2.01 s after it is asked, measured at load average 34).
+ */
+export const LOCAL_PROCESSES_END_AFTER_MS = 2000;
 
 export interface ServeDriverOptions {
   /** The contract version this side speaks. Defaults to this package's. */

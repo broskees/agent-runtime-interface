@@ -44,6 +44,30 @@ export function processGroupOf(pid: number): number {
   return Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).trim());
 }
 
+/** The pids of the direct children of `parent` whose command name is `name` (such as `sleep`). */
+export function childrenNamed(parent: number, name: string): number[] {
+  if (hasProc) {
+    return readdirSync("/proc").flatMap((entry) => {
+      if (!/^\d+$/.test(entry)) return [];
+      try {
+        // /proc/<pid>/stat is "pid (comm) state ppid ...".
+        const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+        const comm = stat.slice(stat.indexOf("(") + 1, stat.lastIndexOf(")"));
+        const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+        return ppid === parent && comm === name ? [Number(entry)] : [];
+      } catch {
+        return []; // The process ended while being read.
+      }
+    });
+  }
+  return execFileSync("ps", ["-A", "-o", "pid=,ppid=,comm="], { encoding: "utf8" })
+    .split("\n")
+    .flatMap((line) => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+      return match !== null && Number(match[2]) === parent && match[3]!.trim().split("/").pop() === name ? [Number(match[1])] : [];
+    });
+}
+
 /** The pids of the guards in process group `groupId`: its members that run `/bin/sh -c … ari-agent-guard …`. */
 export function guardsOf(groupId: number): number[] {
   if (hasProc) {

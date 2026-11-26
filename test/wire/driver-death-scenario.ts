@@ -5,7 +5,7 @@
 //   two threads, so two fake agents run, each with a grandchild in its group
 //   (one agent ignores SIGTERM, so only SIGKILL ends it). The test records
 //   every agent pid, grandchild pid, group id and guard pid, ends `ari-driver`
-//   one of four ways, and from that moment on samples what is left: all of it
+//   one of five ways, and from that moment on samples what is left: all of it
 //   must be gone within 5 s, whenever `ari-driver` itself exits.
 // - `runDeathInStartupWindow`: `ari-driver` is SIGKILLed after an agent's
 //   spawn returned but before that agent's guard exists, and the agent's
@@ -36,8 +36,8 @@ export const AGENT_GROUP_DRIVER = path.join(REPO_ROOT, "test", "wire", "fixtures
 /** The preload that freezes Node inside the agent's spawn; pass it with `--import`. */
 export const PAUSE_AFTER_AGENT_SPAWN = path.join(REPO_ROOT, "test", "helpers", "pause-after-agent-spawn.ts");
 
-/** How `ari-driver` ends: a signal from outside, or a crash inside the driver (`process.abort()`). */
-export type DriverDeath = "SIGKILL" | "SIGHUP" | "SIGTERM" | "abort";
+/** How `ari-driver` ends: a signal from outside, a crash inside the driver (`process.abort()`), or the host closing its stdin. */
+export type DriverDeath = "SIGKILL" | "SIGHUP" | "SIGTERM" | "abort" | "EOF";
 
 export const DEATH_LIMIT_MS = 5000;
 /** How long `ari-driver` may take to exit at all; its own cleanup is bounded by 10 s. */
@@ -53,6 +53,8 @@ export interface DriverDeathOptions {
   readonly cwd?: string;
   /** How long the driver's `instance.dispose()` takes. */
   readonly disposeDelayMs?: number;
+  /** Where the driver's `instance.dispose()` writes which agents still ran when it ended. */
+  readonly disposeReportFile?: string;
 }
 
 export interface DriverDeathOutcome {
@@ -99,7 +101,10 @@ export async function runDriverDeath(options: DriverDeathOptions): Promise<Drive
   const exited = exitOf(connection);
   const agents: RecordedAgent[] = [];
   try {
-    const session = await openSession(connection, options.disposeDelayMs === undefined ? {} : { disposeDelayMs: options.disposeDelayMs });
+    const session = await openSession(connection, {
+      ...(options.disposeDelayMs === undefined ? {} : { disposeDelayMs: options.disposeDelayMs }),
+      ...(options.disposeReportFile === undefined ? {} : { disposeReportFile: options.disposeReportFile }),
+    });
     const cwd = options.cwd ?? os.tmpdir();
     for (const [index, kind] of AGENT_KINDS.entries()) await startTurn(session, cwd, kind, `turn-${index}`);
     const reported = (await session.ext!("test.agents", "agents", {})) as Array<{ pid: number; grandchildPid: number }>;
@@ -108,6 +113,7 @@ export async function runDriverDeath(options: DriverDeathOptions): Promise<Drive
 
     const endedAt = Date.now();
     if (options.death === "abort") void session.ext!("test.agents", "abort", {}).catch(() => undefined);
+    else if (options.death === "EOF") connection.child.stdin!.end();
     else connection.child.kill(options.death);
     // Sampled from the signal on, while ari-driver may still be cleaning up.
     const survivors = await survivorsAt(agents, endedAt + DEATH_LIMIT_MS);
@@ -122,7 +128,7 @@ export async function runDriverDeath(options: DriverDeathOptions): Promise<Drive
 /** Checks a death's outcome: the exit `ari-driver` must show, and nothing of its agents left within 5 s of the signal. */
 export function assertEndedEverything(outcome: DriverDeathOutcome, death: DriverDeath): void {
   assert.deepEqual(outcome.survivors, [], `everything ended within ${DEATH_LIMIT_MS} ms of the ${death}`);
-  if (death === "SIGHUP" || death === "SIGTERM") {
+  if (death === "SIGHUP" || death === "SIGTERM" || death === "EOF") {
     assert.deepEqual(outcome.exit, { code: 0, signal: null }, `after ${death}, ari-driver ran its dispose path and exited normally`);
   } else {
     assert.deepEqual(outcome.exit, { code: null, signal: death === "abort" ? "SIGABRT" : "SIGKILL" }, `ari-driver died by ${death}`);

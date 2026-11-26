@@ -21,9 +21,9 @@
 // those. It also stops before it starts `codex` unless the user's Codex keeps
 // its sign-in in the file it copies (./credential-store.ts). A sign-in
 // `codex` refreshed during the run (Codex rotates a ChatGPT refresh token)
-// goes back to the user's file under Codex's own lock (./sign-in-lock.ts), or,
-// when it cannot, into this run's recovery file beside it
-// (../credential-file.ts). The workspace is removed after every scenario,
+// goes back to the resolved target under both Codex locks (./sign-in-lock.ts),
+// or, when it cannot, into this run's recovery file (../recovery.ts). The
+// workspace is removed after every scenario,
 // also after one that fails, unless it holds the only copy of a refreshed
 // sign-in: then the recorder keeps it and stops.
 
@@ -36,7 +36,7 @@ import type { ProcessService } from "../../../src/node/process.ts";
 import { CODEX_SOURCE } from "../../../scripts/codegen-codex.ts";
 import type { Frame, RecordingSource } from "../format.ts";
 import { writeRecording } from "../format.ts";
-import { copyCredentialFile, returnCredentialFile } from "../credential-file.ts";
+import { copyCredentialFile } from "../credential-file.ts";
 import type { CopiedCredentialFile } from "../credential-file.ts";
 import { CredentialsKeptError, CredentialsNotSavedError, RecordingNotWrittenError, keepRefreshedCredentials, recoveryFileFor } from "../recovery.ts";
 import { createSanitiser } from "../sanitiser.ts";
@@ -287,6 +287,27 @@ function today(): string {
 /** How long the copy-back waits for another codex to let go of auth.lock. Codex holds it only while it commits a sign-in, never across a network request (codex-rs/login/src/auth/storage_commit.rs:1–2). */
 export const CODEX_SIGN_IN_LOCK_WAIT_MS = 30_000;
 
+const CODEX_COMMIT_LOCK_WAIT_MS = 5_000;
+
+interface CopiedCodexSignIn extends CopiedCredentialFile {
+  /** Resolved target at copy time. `real` still names the selected home's auth.json. */
+  readonly target: string;
+}
+
+/** Copy the target's bytes, never the link, and remember which file the run refreshed. */
+export function copyCodexSignIn(real: string, copy: string): CopiedCodexSignIn | undefined {
+  let target: string;
+  try {
+    target = fs.realpathSync.native(real);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (!fs.lstatSync(target).isFile()) throw new Error(`Codex sign-in ${real} must resolve to a regular file`);
+  const credential = copyCredentialFile(target, copy, CODEX_SIGN_IN_FILE);
+  return credential === undefined ? undefined : { ...credential, real, target };
+}
+
 /** Keeps the refreshed copy in the recovery file beside the user's file, as ../credential-file.ts does, and throws CredentialsKeptError naming it; CredentialsNotSavedError when even that file cannot take it. */
 function keepRefreshedSignIn(credential: CopiedCredentialFile, why: string): never {
   const recoveryFile = recoveryFileFor(credential.real);
@@ -302,32 +323,65 @@ function keepRefreshedSignIn(credential: CopiedCredentialFile, why: string): nev
   throw new CredentialsKeptError(`${why}; it kept the refreshed sign-in in ${recoveryFile}, readable only by you. Write its newest value over ${credential.real}, or sign in again.`, recoveryFile);
 }
 
-/**
- * Puts a sign-in the recorded codex refreshed back over the user's file
- * (returnCredentialFile, ../credential-file.ts) while it holds Codex's own
- * lock, auth.lock in the user's Codex home (./sign-in-lock.ts), from before
- * it reads the user's file until after it replaced it: another codex commits
- * a sign-in only under that lock, so none lands between the recorder's
- * comparison and its replace. An unchanged copy needs no lock. The recorder
- * never breaks the lock: when another codex holds it for `waitMs`, or the
- * recorder cannot take it, the refreshed sign-in goes to the recovery file
- * instead. Throws as returnCredentialFile does.
- */
-export async function returnCodexSignIn(credential: CopiedCredentialFile, env: { readonly [name: string]: string | undefined }, waitMs: number = CODEX_SIGN_IN_LOCK_WAIT_MS): Promise<void> {
-  if (!fs.existsSync(credential.copy) || fs.readFileSync(credential.copy).equals(credential.original)) return;
-  const codexHome = path.dirname(credential.real);
-  const lockFile = path.join(codexHome, CODEX_SIGN_IN_LOCK);
-  let lock: HeldCodexSignInLock | undefined;
+/** Compare and replace the resolved file under both pinned Codex locks. Never rename over a link. */
+export async function returnCodexSignIn(credential: CopiedCodexSignIn, env: { readonly [name: string]: string | undefined }, homeWaitMs = CODEX_SIGN_IN_LOCK_WAIT_MS, commitWaitMs = CODEX_COMMIT_LOCK_WAIT_MS): Promise<void> {
+  if (!fs.existsSync(credential.copy)) return;
+  const refreshed = fs.readFileSync(credential.copy);
+  if (refreshed.equals(credential.original)) return;
+  const { real, target } = credential;
+  const writeFailure = `the recorder could not write the sign-in codex refreshed back to ${real}`;
+  const requireLock = async (file: string, waitMs: number, mode?: number): Promise<HeldCodexSignInLock> => {
+    let held: HeldCodexSignInLock | undefined;
+    try {
+      held = await takeCodexSignInLock(file, waitMs, env, mode);
+    } catch (error) {
+      return keepRefreshedSignIn(credential, `the recorder could not take Codex's lock ${file} to write the sign-in codex refreshed back to ${real} (${error instanceof Error ? error.message : String(error)})`);
+    }
+    return held ?? keepRefreshedSignIn(credential, `another codex held its lock ${file} for ${waitMs / 1000} s, so the recorder did not write the sign-in codex refreshed back to ${real}`);
+  };
+  const checkTarget = (): void => {
+    if (fs.realpathSync.native(real) !== target) throw new Error("the sign-in resolves to a different target than the one copied");
+  };
+  const homeLock = await requireLock(path.join(path.dirname(real), CODEX_SIGN_IN_LOCK), homeWaitMs);
+  let commitLock: HeldCodexSignInLock | undefined;
   try {
-    lock = await takeCodexSignInLock(codexHome, waitMs, env);
-  } catch (error) {
-    keepRefreshedSignIn(credential, `the recorder could not take Codex's lock ${lockFile} to write the sign-in codex refreshed back to ${credential.real} (${error instanceof Error ? error.message : String(error)})`);
-  }
-  if (lock === undefined) keepRefreshedSignIn(credential, `another codex held its lock ${lockFile} for ${waitMs / 1000} s, so the recorder did not write the sign-in codex refreshed back to ${credential.real}`);
-  try {
-    returnCredentialFile(credential, "codex");
+    try {
+      checkTarget();
+    } catch (error) {
+      return keepRefreshedSignIn(credential, `${writeFailure} (${error instanceof Error ? error.message : String(error)})`);
+    }
+    // storage_commit.rs:28–68 uses Path::with_extension("json.lock"), not a lock beside the symlink.
+    const commitLockFile = target.slice(0, target.length - path.extname(target).length) + ".json.lock";
+    commitLock = await requireLock(commitLockFile, commitWaitMs, 0o600);
+    try {
+      checkTarget();
+      const metadata = fs.lstatSync(target);
+      if (!metadata.isFile() || metadata.nlink > 1) throw new Error("the credential target is not a regular file with one link");
+      if (fs.readFileSync(target).equals(credential.original)) {
+        // Like storage_file.rs and storage.rs, require a writable target, then replace it with a private, synced file.
+        if ((metadata.mode & 0o222) === 0) throw new Error("the credential target is read-only");
+        fs.closeSync(fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW));
+        const staging = fs.mkdtempSync(path.join(path.dirname(target), ".ari-recorder-"));
+        try {
+          const replacement = path.join(staging, CODEX_SIGN_IN_FILE);
+          fs.writeFileSync(replacement, refreshed, { mode: 0o600, flag: "wx", flush: true });
+          checkTarget();
+          fs.renameSync(replacement, target);
+        } finally {
+          fs.rmSync(staging, { recursive: true, force: true });
+        }
+        return;
+      }
+    } catch (error) {
+      return keepRefreshedSignIn(credential, `${writeFailure} (${error instanceof Error ? error.message : String(error)})`);
+    }
+    return keepRefreshedSignIn(credential, `${real} changed while the recorder ran, and codex also refreshed the recorder's copy; the recorder left ${real} as it is`);
   } finally {
-    await lock.release();
+    try {
+      await commitLock?.release();
+    } finally {
+      await homeLock.release();
+    }
   }
 }
 
@@ -336,7 +390,7 @@ async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promi
   const layout = createCodexLayout(`ari-codex-record-${scenario.name}-`);
   const frames: Frame[] = [];
   let model: string | undefined;
-  let credential: CopiedCredentialFile | undefined;
+  let credential: CopiedCodexSignIn | undefined;
   let service: ProcessService | undefined;
   let vendorVersion = "unknown";
   const errors: Error[] = [];
@@ -355,9 +409,9 @@ async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promi
     if (above.length > 0) throw new CodexWorkspaceCustomizedError(layout.root, above);
     const real = userSignInFile(options.env);
     checkCodexCredentialStore(userCodexHome(options.env), options.systemConfigDir ?? CODEX_SYSTEM_CONFIG_DIR, real ?? `~/.codex/${CODEX_SIGN_IN_FILE}`);
-    // A sign-in to copy may come back refreshed, under Codex's lock, which the recorder takes with flock.
+    // A sign-in to copy may come back refreshed, under Codex's locks, which the recorder takes with flock.
     if (real !== undefined && fs.existsSync(real)) checkFlockRuns(options.env);
-    credential = real === undefined ? undefined : copyCredentialFile(real, workspaceSignInFile(layout.codexHome), CODEX_SIGN_IN_FILE);
+    credential = real === undefined ? undefined : copyCodexSignIn(real, workspaceSignInFile(layout.codexHome));
     if (options.source === "live" && credential === undefined) throw new CodexSignInMissingError(real);
     service = codexProcessService(layout, options.env);
     vendorVersion = await agentVersion(service, codexDriver.defaultConfig().binaryPath);

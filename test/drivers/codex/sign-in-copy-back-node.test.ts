@@ -2,7 +2,8 @@
 // recorder: the fake codex rotates the refresh token, and another codex
 // saves its own refresh of the user's sign-in at the very moment between the
 // copy-back's comparison of the user's `auth.json` and its replace. Codex
-// 0.172.0 saves a refresh only under flock(2) on `auth.lock` in its home, and
+// 0.172.0 saves a refresh only under flock(2) on `auth.lock` in its home and
+// on the resolved target's commit lock (`storage_commit.rs:28–68`), and
 // only while the stored sign-in is still the one it refreshed
 // (codex-rs/login/src/auth/storage.rs:189–212, manager.rs:1768–1802); it
 // waits for the lock as long as another holds it. Neither refresh may be
@@ -12,7 +13,7 @@
 // it into test/recordings/credential-file.ts's `node:fs` import with
 // `module.syncBuiltinESMExports()`, which Bun 1.3.14 does not support;
 // test/bun-excluded.txt leaves this file out of the Bun run. The other codex
-// is a child process, `flock` on the same `auth.lock`.
+// is a child process that takes those locks in the pinned order.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -52,13 +53,20 @@ const refreshTokenOf = (text: string): unknown => (JSON.parse(text) as { tokens?
 /**
  * One attempt by another codex to save the sign-in it refreshed with
  * fake-refresh-0001, as Codex 0.172.0 saves one: under flock on `auth.lock`
- * it reads the stored sign-in and writes only while its refresh token is
+ * and the resolved credential's commit lock, it reads and writes only while its refresh token is
  * still the one it used ("raced" else), a new file renamed over the old.
  * "locked" when the lock was held and `wait` is false: Codex would wait.
  */
 function otherCodexSaves(codexHome: string, wait: boolean): "saved" | "raced" | "locked" {
   const save = `const fs = require("node:fs"); const [file, used, refreshed] = process.argv.slice(1); if (JSON.parse(fs.readFileSync(file, "utf8")).tokens?.refresh_token !== used) process.exit(3); fs.writeFileSync(file + ".other-codex", refreshed, { mode: 0o600 }); fs.renameSync(file + ".other-codex", file);`;
-  const run = spawnSync("flock", [...(wait ? [] : ["--nonblock"]), "--conflict-exit-code", "4", path.join(codexHome, "auth.lock"), NODE_EXECUTABLE, "-e", save, path.join(codexHome, "auth.json"), USED, OTHER], { encoding: "utf8", env: { PATH, HOME: DIRECTORY } });
+  const underHomeLock = `
+    const fs = require("node:fs"); const path = require("node:path");
+    const [home, save, used, refreshed, wait] = process.argv.slice(1);
+    const target = fs.realpathSync.native(path.join(home, "auth.json"));
+    const lock = target.slice(0, target.length - path.extname(target).length) + ".json.lock";
+    const result = require("node:child_process").spawnSync("flock", [wait === "true" ? "--timeout=5" : "--nonblock", "--conflict-exit-code", "4", lock, process.execPath, "-e", save, target, used, refreshed], { stdio: "inherit" });
+    process.exit(result.status ?? 1);`;
+  const run = spawnSync("flock", [wait ? "--timeout=5" : "--nonblock", "--conflict-exit-code", "4", path.join(codexHome, "auth.lock"), NODE_EXECUTABLE, "-e", underHomeLock, codexHome, save, USED, OTHER, String(wait)], { encoding: "utf8", env: { PATH, HOME: DIRECTORY } });
   if (run.status === 0) return "saved";
   if (run.status === 3) return "raced";
   if (run.status === 4) return "locked";
@@ -72,17 +80,20 @@ function survivingSignIns(real: string): string[] {
   return [fs.readFileSync(real, "utf8"), ...kept];
 }
 
-test("when another codex saves a refresh between the copy-back's comparison of the user's auth.json and its replace, neither its refresh nor the recorded codex's is lost", async () => {
+for (const profile of ["same home", "a second home that links to the recorder's auth.json"] as const) test(`when another codex in ${profile} saves a refresh at the copy-back's rename, no committed refresh is lost`, async () => {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "user-home-")));
   const codexHome = path.join(home, ".codex");
   fs.mkdirSync(codexHome, { mode: 0o700 });
   const real = path.join(codexHome, "auth.json");
   fs.writeFileSync(real, FAKE_SIGN_IN, { mode: 0o600 });
+  const otherHome = profile === "same home" ? codexHome : fs.mkdtempSync(path.join(DIRECTORY, "other-codex-"));
+  const otherSignIn = path.join(otherHome, "auth.json");
+  if (otherHome !== codexHome) fs.symlinkSync(real, otherSignIn);
   const fake = fakeCodexOnPath(DIRECTORY);
   const attempts: Array<"saved" | "raced" | "locked"> = [];
   // The copy-back's replace of the user's file is a rename onto it, after it compared the file with the original.
   patchableFs.renameSync = (from: fs.PathLike, to: fs.PathLike) => {
-    if (attempts.length === 0 && to === real) attempts.push(otherCodexSaves(codexHome, false));
+    if (attempts.length === 0 && to === real) attempts.push(otherCodexSaves(otherHome, false));
     realRenameSync(from, to);
   };
   syncBuiltinESMExports();
@@ -101,7 +112,7 @@ test("when another codex saves a refresh between the copy-back's comparison of t
     syncBuiltinESMExports();
   }
   // Codex waits for its lock; once the recorder let go, the other codex tries again.
-  if (attempts.at(-1) === "locked") attempts.push(otherCodexSaves(codexHome, true));
+  if (attempts.at(-1) === "locked") attempts.push(otherCodexSaves(otherHome, true));
 
   const outcome = outcomes[0]!;
   const report = JSON.stringify({ attempts, error: outcome.error?.message, real: refreshTokenOf(fs.readFileSync(real, "utf8")), recovery: fs.existsSync(recoveryFileFor(real)) });
@@ -113,6 +124,7 @@ test("when another codex saves a refresh between the copy-back's comparison of t
   if (refreshTokenOf(fs.readFileSync(real, "utf8")) !== "fake-refresh-recorded-codex") assert.equal(outcome.recoveryFile, recoveryFileFor(real), `the run says where it kept the recorded codex's refresh: ${report}`);
   else assert.equal(outcome.error, undefined, report);
   assert.equal(spawnSync("flock", ["--nonblock", path.join(codexHome, "auth.lock"), "true"], { env: { PATH } }).status, 0, "nobody holds Codex's lock afterwards");
+  if (otherHome !== codexHome) assert.equal(fs.readlinkSync(otherSignIn), real, "the second home still links to the same credential");
   assert.deepEqual(fs.readdirSync(codexHome).filter((name) => name.includes(".ari-recorder-") && name !== path.basename(recoveryFileFor(real))), [], "no staged file is left");
   assert.ok(!fs.existsSync(outcome.workspace), "the workspace is removed");
 });

@@ -151,7 +151,7 @@ test("the docs name the file the Codex recorder copies for the sign-in, with the
   assert.match(setup, /`Authorization: Bearer none`/);
 });
 
-test("the docs say where the Codex recorder reads the sign-in's store from, which file wins, how it takes Codex's own auth.lock with the pinned source line, and the window that remains", () => {
+test("the docs say where the Codex recorder reads the sign-in's store from, which file wins, how it takes both Codex locks with the pinned source lines, and the window that remains", () => {
   const signIn = section("How Codex finds the sign-in");
   const order = ["`/etc/codex/requirements.toml`", "`/etc/codex/managed_config.toml`", "the user's `config.toml` in the\n  Codex home", "`/etc/codex/config.toml`"].map((source) => signIn.indexOf(source));
   assert.ok(order.every((at) => at !== -1), `the section names the four files the store comes from: ${JSON.stringify(order)}`);
@@ -159,6 +159,8 @@ test("the docs say where the Codex recorder reads the sign-in's store from, whic
   assert.match(signIn, /the first that sets it winning/);
   assert.match(signIn, /lock on `auth\.lock` in its home/);
   assert.match(signIn, /`File::lock` \(`storage\.rs:189–212`/);
+  assert.match(signIn, /Inside `auth\.lock`, Codex takes the\s+resolved credential target's commit lock \(`login\/src\/auth\/storage_commit\.rs:28–68`\)/);
+  assert.match(signIn, /leaving any symbolic links in place/);
   assert.match(signIn, /On Linux, Rust's `File::lock` is\s+`flock\(2\)`/);
   assert.match(signIn, /Node 22\.23\.1 and 24\.18\.0, two of the versions CI runs, have no `node:ffi`/);
   assert.match(signIn, /The window that remains:/);

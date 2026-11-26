@@ -1303,14 +1303,16 @@ sign-in, before it starts `codex` ("How Codex finds the sign-in").
 - A ChatGPT sign-in's refresh token rotates: Codex writes the refreshed
   tokens back to `auth.json`, as a new file renamed over the old one
   (`FileAuthStorage::save`, `storage.rs:274–295`). After each scenario, also
-  one that fails, the recorder writes a changed copy back over the user's
-  file, so a rotated token is never lost. When the user's file also changed
-  meanwhile, or the recorder cannot write it, the recorder leaves it as it
-  is, adds the refreshed content to the run's recovery file beside it,
+  one that fails, the recorder writes a changed copy back to the resolved
+  credential target, leaving any symbolic links in place
+  (`codex-rs/login/src/auth/storage_file.rs:10–32`). If the target changed,
+  disappeared or cannot safely be replaced, the recorder leaves it alone.
+  It adds the refreshed content to the run's recovery file beside the
+  selected home's `auth.json` (not beside the target of a link),
   `auth.json.ari-recorder-refreshed-<pid>.json` (mode 0600; one record
   `{ "id": "auth.json", "value" }`, with `olderValues` when a later scenario
   kept a newer one), and reports the scenario failed
-  (`test/recordings/credential-file.ts`, `test/recordings/recovery.ts`).
+  (`test/recordings/codex/record.ts`, `test/recordings/recovery.ts`).
 - Another `codex` of the user's may save its own refresh at the same time.
   Codex 0.172.0 commits a sign-in (a refresh, a login, a logout, a workspace
   switch) only while it holds an exclusive lock on `auth.lock` in its home,
@@ -1319,17 +1321,20 @@ sign-in, before it starts `codex` ("How Codex finds the sign-in").
   `File::lock` (`storage.rs:189–212`; taken at
   `login/src/auth/manager.rs:1023, 1090, 1261, 1768` and
   `manager/workspace_switching.rs:344`). It waits as long as another holder
-  has it, and never removes the file. Each save also takes `auth.json.lock`,
-  but only inside `auth.lock` (`login/src/auth/storage_commit.rs:29–68`), so
-  holding `auth.lock` keeps every Codex commit out. Network requests hold
-  neither (`storage_commit.rs:1–2`). The recorder's copy-back holds the same
-  `auth.lock` from before it reads the user's file until after its rename
-  replaced it, waits up to 30 s for another holder, and never breaks the lock:
-  after 30 s it leaves the user's file and keeps the refreshed sign-in in the
-  recovery file (`returnCodexSignIn` in `test/recordings/codex/record.ts`). A
-  copy `codex` did not change takes no lock, and adds nothing to the user's
-  Codex home.
-- How the recorder takes that lock. On Linux, Rust's `File::lock` is
+  has it, and never removes the file. Inside `auth.lock`, Codex takes the
+  resolved credential target's commit lock (`login/src/auth/storage_commit.rs:28–68`).
+  It replaces the target's extension with `json.lock`, giving `auth.json.lock`
+  for a target named `auth.json`. Two Codex homes linked to the same target
+  have different home locks but share this commit lock. Network requests
+  hold neither (`storage_commit.rs:1–2`). The recorder takes the same locks
+  in that order and holds both across comparison and replacement. It waits
+  up to 30 s for the home lock and 5 s for the commit lock. It never breaks the lock
+  or removes either lock file. If either lock is unavailable, or the link no
+  longer resolves to the target copied at the start, the refresh goes to recovery.
+  The recorder also declines to replace hard-linked or read-only targets,
+  as the pinned file store does (`storage_file.rs:34–59`). An unchanged copy
+  takes no locks and adds no lock files.
+- How the recorder takes those locks. On Linux, Rust's `File::lock` is
   `flock(2)`, a lock on the open file that the kernel drops when its holder
   closes the file or exits, so it is never left stale. Checked with rustc
   1.97.1: while a program holding `File::lock` ran, `flock -n` on the same
@@ -1342,14 +1347,14 @@ sign-in, before it starts `codex` ("How Codex finds the sign-in").
   recorder holds the lock through util-linux's `flock` command
   (`test/recordings/codex/sign-in-lock.ts`), from Node and Bun alike. When
   `flock` does not run, the recorder stops before it starts `codex`.
-- The window that remains: a program that writes `auth.json` without taking
-  `auth.lock` (a Codex release other than 0.172.0, if one commits without
-  it, which the recorder did not check; an editor; a script) can still write
-  between the copy-back's comparison and its rename, and that write is lost.
-  That window is one read, one write and one rename of a small file long.
-  `test/drivers/codex/sign-in-copy-back-node.test.ts` makes another codex save
-  at exactly that moment through the lock: it waits, then finds the newer
-  sign-in and keeps it, and neither refresh is lost.
+- The window that remains: a program that ignores the locks can still write
+  between comparison and replacement. The locks do not serialize manual
+  edits to the link chain. The recorder checks the resolved path again just
+  before the rename, but cannot prevent a change after that check.
+  `test/drivers/codex/sign-in-copy-back-node.test.ts` makes another writer
+  try at the rename, both from the same home and from a second linked home.
+  The writer cannot commit there. On retry it sees the newer sign-in and
+  does not overwrite it.
 - When the recovery file cannot take the value either, the workspace's copy
   holds the only copy. The recorder then keeps that workspace, stops the run,
   and names the workspace and the copy in the error and in the run's last

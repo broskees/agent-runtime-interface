@@ -19,6 +19,13 @@
 # pinned toolchain. Its Node runs the gate's scripts (codegen, build, checks)
 # and the test children that need Node. The Bun run leaves out only the test
 # files test/bun-excluded.txt lists, each with the Node-only feature it needs.
+#
+# The macOS job checks, on macOS, the promise the gate checks on Linux: every
+# agent ari/node's process service starts, with everything in its process
+# group, ends within seconds after its owner dies (ari-driver SIGKILLed,
+# crashed, or sent SIGHUP or SIGTERM; a host using the process service
+# directly SIGKILLed), and no guard process is left behind. It needs only Node
+# and pnpm: the tests run the built ari-driver (dist/wire/cli.js) under Node.
 
 name: CI
 
@@ -106,3 +113,30 @@ jobs:
 
       - name: Gate
         run: pnpm run ${{ matrix.gate }}
+
+  driver-death-macos:
+    name: agents end when their owner dies (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Agents end when ari-driver or an in-process host dies
+        run: node --test test/wire/driver-death.test.ts test/node/owner-death.test.ts

@@ -228,13 +228,21 @@ test("the recorder starts codex with a CODEX_HOME, HOME, XDG directories, TMPDIR
     SCENARIO_NAMES.map((name) => [name, undefined]),
   );
   const processes = fake.processes();
-  assert.equal(processes.filter((each) => each.args[0] === "--version").length, outcomes.length, "one codex --version per scenario, for the header");
+  assert.equal(processes.filter((each) => each.args[0] === "--version").length, 13, "six header probes and seven session admission probes");
   assert.equal(processes.filter((each) => each.args[0] === "app-server").length, 13, "one app-server per session, and one per scenario for the model listing");
   const scenarioOf = (started: FakeCodexProcess): CodexRecordOutcome => {
     const outcome = outcomes.find((each) => started.cwd.startsWith(`${each.workspace}${path.sep}`));
     assert.ok(outcome !== undefined, `codex started in a scenario's workspace: ${started.cwd} (${started.args.join(" ")})`);
     return outcome;
   };
+  for (const outcome of outcomes) {
+    const oneSession = [["--version"], ["login", "status"], ["app-server"]];
+    assert.deepEqual(
+      processes.filter((started) => scenarioOf(started) === outcome).map((started) => started.args),
+      [["--version"], ["app-server"], ...oneSession, ...(outcome.scenario === "resume" ? oneSession : [])],
+      `${outcome.scenario}: header probe and model listing, then admission, login status and app-server per session`,
+    );
+  }
   for (const started of processes) {
     const workspace = scenarioOf(started).workspace;
     assert.equal(started.cwd, path.join(workspace, "cwd"), "codex works in the workspace, not in the recorder's directory");

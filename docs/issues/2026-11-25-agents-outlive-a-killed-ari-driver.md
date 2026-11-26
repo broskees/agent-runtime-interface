@@ -90,3 +90,115 @@ standalone `ari-driver` per driver and relies on ARI to end the agents. Its
 threat model records this as an open risk (`docs/architecture/threat-model.md`),
 and its end-to-end phase on a real Mac will check it with real `claude` and
 `codex`.
+
+## Resolution
+
+Fixed in ARI on 2026-11-25, plan `driver-death-cleanup-20261125-190011`,
+phase 1, by these commits:
+
+- `8f0981b` ("Agents end when their driver dies: a guard per agent group,
+  SIGHUP as shutdown, late delegated children killed") started each guard as
+  a separate process outside the agent's group. Review showed that an owner
+  killed between the two spawns left the agent unguarded, and that a guard
+  signalling a group by its number could hit a group ARI never started once
+  that number was reused.
+- `26f0a72` ("The guard moves into the agent's process group, started before
+  the agent runs; local agents end within 1 s of shutdown; death tests measure
+  from the signal") replaced it with the first approach above, in full.
+- `7c89550`: `dispose()` waits until each group is gone, not only its guard
+  (the guard is reaped by the system's reaper, so it can briefly stay a
+  zombie in the group); the startup-window test pauses the launcher before
+  its first command every time.
+- `e016ac5`: under Bun the launcher is started with `Bun.spawn`. Bun 1.3.14's
+  `node:child_process` closes an extra pipe's descriptor twice, the second
+  time when the finished child is garbage-collected; that stale close hit a
+  live agent's guard pipe and ended its group while its owner lived.
+- `103bcd6`: the owner signals a group by its id only while the group's
+  leader is its own unreaped child; review showed its last SIGKILL, sent once
+  the group outlived the guard's grace, could reach a new group that had
+  taken the id. A group left behind is now logged and reported, never
+  signalled. The guard ends its group on the clock (a timer in the group), a
+  command the search does not find is never started to learn its error, and
+  `ari-driver` gives a driver's dispose a 2 s budget, with Codex and ACP
+  closing their sessions at once.
+
+What changed:
+
+- `src/node/process.ts`: every child the process service starts on Linux and
+  macOS is spawned through a `/bin/sh` launcher. The launcher starts the
+  child's guard in the background, inside the child's own process group
+  (stdio on `/dev/null`, holding only the read end of a pipe the owner
+  holds), then `exec`s the child in its place, so the child keeps its pid and
+  never runs before its guard exists. The guard ignores SIGTERM, SIGHUP,
+  SIGINT and the other usual signals. When the owner dies for any reason (or
+  asks it to, by writing a line to the pipe), it sends SIGTERM to its own
+  group and starts a timer in the group that sends SIGKILL to the whole group
+  once the kill grace (2 s by default) has passed on the clock; it ends the
+  group sooner when it finds itself alone. It only ever signals the group it
+  is a member of, and its membership keeps that group id from being given to
+  anyone else. The owner signals a group by id only while the group's leader
+  is its own unreaped child; a group still there when it stops waiting is
+  logged (warning `ARI_PROCESS_GROUP_LEFT_BEHIND`) and `kill()` or
+  `dispose()` rejects with `invalid_state`, but the group is sent nothing.
+  The command is searched for before the launch, and for a command that is
+  not found the error spawn would give is worked out without starting
+  anything, so spawn errors and argv stay as callers saw them (`docs/wire.md`
+  lists the small differences that remain). It costs one idle shell per agent
+  (with bash as `/bin/sh`, about 4.2 MB resident, 0.4 MB of it not shared).
+- `src/wire/server.ts`: local child processes are ended 2 s after the
+  connection closes (the shutdown budget `docs/wire.md` names for driver
+  authors), even while an instance's dispose still runs.
+- `src/drivers/codex/instance.ts`, `src/drivers/acp/driver.ts`: `dispose()`
+  closes every session at once.
+- `src/wire/cli.ts`: SIGHUP is handled like SIGTERM (dispose, then exit 0).
+- `src/wire/client.ts`: a delegated child whose host spawn resolves after the
+  wire closed is killed at once and never registered (the ARI build's
+  finding F16).
+- `docs/wire.md` ("Agents end when `ari-driver` dies") and the
+  `src/node/process.ts` header state the guarantee, how it works, what it
+  costs, and its limit: a process that leaves the agent's group with
+  `setsid()` or `setpgid()` is not reached.
+
+Tests:
+
+- `test/wire/driver-death.test.ts`: the built `ari-driver` under Node serves
+  a driver whose two agents each run a grandchild that ignores SIGHUP and
+  never reads stdin (one agent also ignores SIGTERM). `ari-driver` is
+  SIGKILLed, crashes with `process.abort()`, gets SIGHUP, or gets SIGTERM;
+  each time every agent, grandchild, group and guard is gone within 5 s of
+  the signal (sampled from the signal on), and after SIGHUP and SIGTERM
+  `ari-driver` exits 0. The same holds for SIGTERM when the driver's dispose
+  takes 6 s, and for a SIGKILL that lands after an agent's spawn returned
+  but before its guard started (a preload freezes Node inside
+  `child_process.spawn` there). When the host closes its stdin, a driver
+  whose dispose takes 1.8 s finishes it with its agents untouched, and then
+  everything is gone within 5 s.
+- `test/standalone/standalone-binary.e2e.ts` (run by `pnpm run test:binary`):
+  the SIGKILL, SIGHUP and startup-window cases against the Bun-built
+  standalone `ari-driver`, with no `node` or `bun` on `PATH`.
+- `test/node/owner-death.test.ts`: a Node host using the process service
+  directly is SIGKILLed, also inside the startup window, and leaves nothing
+  behind within 5 s; a guard holds its group id until it exits; an idle agent
+  and its grandchild keep running for 10 s while the owner lives, and while
+  other children come and go and are garbage-collected; an agent that exits
+  on its own takes its grandchild and guard with it; 20 agents get one guard
+  each, and `dispose()` leaves no guard. A group that ignores SIGTERM gets
+  SIGKILL on time even with the guard's checks stalled. With its leader
+  reaped and its guard held stopped past the grace, a group gets no signal by
+  its id (`process.kill` intercepted): it is logged and `dispose()` rejects.
+- `test/node/process.test.ts`: the launcher keeps spawn errors, argv and the
+  environment as a direct spawn gives them, apart from the documented
+  differences.
+- `test/node/process-node.test.ts` (Node only): a command that appears just
+  after the search is not started, and every spawn that cannot start rejects
+  as Node's own spawn does, with nothing spawned.
+- `test/drivers/codex/dispose.test.ts`, `test/drivers/acp/protocol.suite.ts`:
+  `dispose()` begins ending all three sessions together.
+- `test/wire/late-spawn.test.ts`: the late delegated child is killed, gone
+  within 5 s, and never in the client's process table.
+- `.github/workflows/ci.yml` gains a `macos-latest` job that runs
+  `test/wire/driver-death.test.ts` and `test/node/owner-death.test.ts`.
+
+Not covered: Windows keeps `taskkill /T`, which runs only while the owner
+lives. Processes that leave the agent's group are not reached. Real `claude`
+and `codex` were not run (the plan starts no real agent).

@@ -35,6 +35,25 @@ function str(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/** The 1.x SDK's abort listener calls reader.cancel() without observing its promise. */
+async function fetchEventStream(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  const request = input instanceof Request && init === undefined ? input : new Request(input, init);
+  // Keep the SDK's default of no fetch idle timeout on a long-lived stream.
+  Object.assign(request, { timeout: false });
+  const response = await fetch(request);
+  if (!response.ok || response.body === null) return response;
+
+  // In Bun 1.4.5 abort errors the fetch body before the SDK cancels its reader.
+  // Give the SDK EOF on our own abort, but propagate an unexpected stream error.
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  void response.body.pipeTo(writable, { preventAbort: true }).catch(async (error: unknown) => {
+    const end = request.signal.aborted ? writable.close() : writable.abort(error);
+    // The SDK may already have cancelled the readable, which closes the pipe.
+    await end.catch(() => undefined);
+  });
+  return new Response(readable, response);
+}
+
 /** The SDK's result as data, or an ARI call error that says what the server answered. */
 function data(result: V1Result, what: string): unknown {
   if (result.error === undefined && (result.response === undefined || result.response.status < 400)) return result.data;
@@ -325,7 +344,7 @@ export class V1Runtime implements NativeRuntime {
     const controller = new AbortController();
     const translator = new V1Translator();
     let failure: unknown;
-    const subscription = await this.#client.event.subscribe({ directory }, { signal: controller.signal, sseMaxRetryAttempts: 1, onSseError: (error) => (failure = error) });
+    const subscription = await this.#client.event.subscribe({ directory }, { fetch: fetchEventStream, signal: controller.signal, sseMaxRetryAttempts: 1, onSseError: (error) => (failure = error) });
     const iterator = subscription.stream[Symbol.asyncIterator]();
     // The server's first event confirms the subscription; events published before it would be lost.
     let resolveConnected: () => void = () => undefined;

@@ -7,7 +7,9 @@
 // Stdout carries protocol frames only. Before the driver loads, `console` and
 // `process.stdout.write` are pointed at stderr, so a driver that logs cannot
 // corrupt the protocol. The process serves until the host closes stdin (or
-// sends SIGTERM or SIGINT), then disposes every instance and exits.
+// sends SIGTERM, SIGINT or SIGHUP), then disposes every instance and exits.
+// If it dies without that cleanup (SIGKILL, a crash), each agent it spawned
+// is still ended by its guard (see ../node/process.ts).
 //
 // Importing this module does nothing; it runs only as the program itself.
 
@@ -109,9 +111,11 @@ export async function runAriDriver(argv: readonly string[], options: RunAriDrive
     onProblem: (message) => process.stderr.write(`ari-driver: ${message}\n`),
   });
 
+  // SIGHUP (the terminal or the host's session went away) is a request to shut down, like SIGTERM and SIGINT.
   const stop = (): void => void server.close();
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
+  process.once("SIGHUP", stop);
   await server.disconnected;
   // The host went away: dispose the instances, but never wait forever for a driver that hangs.
   await Promise.race([server.closed, delay(CLEANUP_LIMIT_MS)]);

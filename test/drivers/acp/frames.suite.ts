@@ -21,7 +21,7 @@ const EXPECTED_RECORDINGS: { readonly [source: string]: number } = {
   // for a release range a CLI below the minimum and the real --version output (1 each), the protocol advisory, resume
   // instructions (2), no driver text, host instructions (2). Four release-range drivers and two protocol-range ones: 4 × 12 + 2 × 9.
   "test/drivers/acp/driver-rules.ts": 66,
-  "test/drivers/acp/protocol.suite.ts": 23,
+  "test/drivers/acp/protocol.suite.ts": 24,
   "test/drivers/acp/standalone.suite.ts": 4,
   "test/drivers/antigravity/antigravity.suite.ts": 7,
   "test/drivers/fx/fx.suite.ts": 1,

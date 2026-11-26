@@ -178,7 +178,8 @@ anywhere else, such as a session the user's own `pi` keeps, is refused with
 `validation` before Pi starts (symbolic links followed). A bare id is looked
 up only in that directory: when no file there holds it, the driver starts a
 fresh session with `session.replaced` if the host passed `policy`, and rejects
-with `not_found` otherwise. The driver lists no native sessions
+with `validation` otherwise, because it needs `policy.cwd` to start a new
+session. The driver lists no native sessions
 (`nativeSessions` is absent).
 
 ## Prompt content

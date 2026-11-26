@@ -239,9 +239,19 @@ class WireClient {
   }
 
   #process(params: Params): SpawnedProcess {
-    const entry = this.#processes.get(params.processId as string);
-    if (entry === undefined || entry.instanceId !== params.instanceId) throw callErrors.notFound({ resource: "process", id: params.processId as string });
+    return this.lookupProcess(params.instanceId as string, params.processId as string);
+  }
+
+  /** The registered child `processId` of instance `instanceId`; `not_found` when there is none. */
+  lookupProcess(instanceId: string, processId: string): SpawnedProcess {
+    const entry = this.#processes.get(processId);
+    if (entry === undefined || entry.instanceId !== instanceId) throw callErrors.notFound({ resource: "process", id: processId });
     return entry.child;
+  }
+
+  /** The `processId`s of the registered children. */
+  processIds(): string[] {
+    return [...this.#processes.keys()];
   }
 
   async #hostRequest(method: string, params: Params, context: WireRequestContext): Promise<unknown> {
@@ -323,6 +333,12 @@ class WireClient {
     }
     this.#usedProcessIds.add(processId);
     const child = await host.process.spawn(without(params, "instanceId", "processId") as never);
+    if (this.connection.closed) {
+      // The connection closed while the host was spawning, and the close handler has already
+      // killed every registered child. Nobody would ever kill this one, so end it now.
+      await child.kill().catch(() => undefined);
+      throw callErrors.transport(`The ari/wire connection closed while the host was spawning process ${processId}; the process was killed`);
+    }
     this.#processes.set(processId, { child, instanceId: params.instanceId as string });
     this.connection.afterResponse(context, () => void this.#pumpProcess(processId, child));
     return child.pid === undefined ? {} : { pid: child.pid };
@@ -703,7 +719,7 @@ export async function connectDriver(transport: WireTransport, options: ConnectDr
     defaultConfig: () => jsonCopy(defaultConfig),
     create: (host, input) => client.create(host, input),
   };
-  return {
+  const wireConnection: WireDriverConnection = {
     driver,
     negotiated,
     closed: connection.done,
@@ -712,4 +728,21 @@ export async function connectDriver(transport: WireTransport, options: ConnectDr
       await connection.done;
     },
   };
+  clients.set(wireConnection, client);
+  return wireConnection;
+}
+
+/** The client behind each connection `connectDriver` returned, for `delegatedProcessTable`. */
+const clients = new WeakMap<WireDriverConnection, WireClient>();
+
+/**
+ * The delegated children `connection`'s client has registered: their
+ * `processId`s, and the lookup `host/process.write`, `.closeStdin` and
+ * `.kill` use, which rejects `not_found` for a child it does not hold. For
+ * tests; `ari/wire` does not export it.
+ */
+export function delegatedProcessTable(connection: WireDriverConnection): { readonly processIds: string[]; lookup(instanceId: string, processId: string): SpawnedProcess } {
+  const client = clients.get(connection);
+  if (client === undefined) throw new TypeError("delegatedProcessTable: not a connection connectDriver returned");
+  return { processIds: client.processIds(), lookup: (instanceId, processId) => client.lookupProcess(instanceId, processId) };
 }

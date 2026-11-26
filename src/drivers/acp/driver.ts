@@ -287,7 +287,9 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
   }
 
   async dispose(): Promise<void> {
-    for (const session of this.#sessions) await session.close();
+    // Every session ends at once: each waits for its own agent's process group, which can take the whole kill
+    // grace, and ari-driver ends what is left 2 s after its shutdown began (docs/wire.md, "Lifetime").
+    await Promise.all([...this.#sessions].map((session) => session.close()));
     this.#sessions.clear();
   }
 }

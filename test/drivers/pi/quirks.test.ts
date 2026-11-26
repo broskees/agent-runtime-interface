@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { after, test } from "node:test";
-import { isAriError } from "../../../src/index.ts";
+import { isAriError, toCallError } from "../../../src/index.ts";
 import type { AriEvent, Request } from "../../../src/index.ts";
 import { FAKE_PI } from "./harness.ts";
 import { checkRunsAgainstPiTypes } from "./pi-types.ts";
@@ -331,6 +331,19 @@ test("a resume by bare session id gives Pi the session's file, so it works from 
   // An id no session file holds never reaches Pi: the driver starts a fresh session and says the old one is gone.
   const unknownId = "00000000-0000-4000-8000-00000000eeee";
   const spawnsBefore = opened.host.spawns.length;
+  const eventsBefore = second.events.length;
+  const documented = fs.readFileSync(new URL("../../../docs/drivers/pi.md", import.meta.url), "utf8");
+  const documentedCode = /if the host passed `policy`, and rejects\s+with `([^`]+)` otherwise/.exec(documented)?.[1];
+  await assert.rejects(second.session.resumeThread({ native: { id: unknownId, strength: "strong" } }), (error: unknown) => {
+    const callError = toCallError(error);
+    assert.ok(callError);
+    assert.equal(callError.code, "validation");
+    assert.equal(callError.code, documentedCode, "the Pi docs name the error a caller receives");
+    assert.ok(callError.code === "validation" && callError.issues?.some((issue) => issue.path?.join(".") === "policy.cwd"));
+    return true;
+  });
+  assert.equal(opened.host.spawns.length, spawnsBefore, "a validation error never starts Pi");
+  assert.equal(second.events.length, eventsBefore, "no replacement is announced without a policy");
   const fresh = await second.session.resumeThread({ native: { id: unknownId, strength: "strong" }, policy: policy(opened.otherCwd) });
   assert.notEqual(fresh.native.id, unknownId);
   const replaced = second.events.find((event) => event.body.type === "session.replaced");

@@ -116,7 +116,7 @@ interface LiveTurn {
 const loaded = new Set<string>();
 const turns = new Map<string, LiveTurn>();
 const activeBySession = new Map<string, LiveTurn>();
-const approvals = new Map<string, { replies: string[]; waiters: Array<(reply: string) => void> }>();
+const approvals = new Map<string, { toolCallId?: string; replies: string[]; waiters: Array<(reply: string) => void> }>();
 const activity: { feedback: unknown[]; mcp: unknown[]; extensions: Array<{ params: unknown; result: unknown }> } = { feedback: [], mcp: [], extensions: [] };
 let turnCounter = 0;
 let toolCounter = 0;
@@ -282,7 +282,7 @@ function buildV1(): acp1.AgentApp {
           if (error !== undefined) reject(new acp1.RequestError(error.code, error.message));
           else resolve({ stopReason: stopReason as acp1.StopReason, ...meta("prompt") });
         });
-        send({ event: "turn", turnId: turn.turnId, prompt: promptText(params.prompt as Array<{ type: string; text?: string }>) });
+        send({ event: "turn", turnId: turn.turnId, sessionId: params.sessionId, prompt: promptText(params.prompt as Array<{ type: string; text?: string }>) });
       }),
     )
     .onNotification("session/cancel", ({ params }) => {
@@ -340,7 +340,7 @@ function buildV2(): acp2.AgentApp {
         for (const block of params.prompt) await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "user_message_chunk", messageId, content: block } });
       } else await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "user_message", messageId, content: params.prompt } });
       await context.notify("session/update", { sessionId: params.sessionId, update: { sessionUpdate: "state_update", state: "running" } });
-      send({ event: "turn", turnId: turn.turnId, prompt: text });
+      send({ event: "turn", turnId: turn.turnId, sessionId: params.sessionId, prompt: text });
       return { messageId, ...meta("prompt") };
     })
     .onNotification("session/cancel", ({ params }) => {
@@ -397,7 +397,7 @@ async function requestApproval(turnId: string, approval: NativeApproval): Promis
   toolCounter += 1;
   const approvalId = `approval-${approvalCounter}`;
   const toolCallId = `call-${toolCounter}`;
-  const record = { replies: [] as string[], waiters: [] as Array<(reply: string) => void> };
+  const record = { toolCallId, replies: [] as string[], waiters: [] as Array<(reply: string) => void> };
   approvals.set(approvalId, record);
   const options = approval.options.map((entry) => ({ optionId: entry.optionId, name: entry.label, kind: OPTION_KINDS[entry.decision] ?? "reject_once" }));
   const toolCall = {
@@ -445,6 +445,8 @@ const puppet: { [method: string]: (...args: never[]) => unknown } = {
       else record.waiters.push(resolve);
     }),
   approvalReplies: (approvalId: string) => approvals.get(approvalId)?.replies ?? [],
+  // The tool call an approval asked about, so a puppet can report how it ended.
+  approvalToolCall: (approvalId: string) => approvals.get(approvalId)?.toolCallId ?? null,
   complete: (turnId: string) => liveTurn(turnId).finish("end_turn"),
   fail: (turnId: string, failure: { kind: string; message: string }) => liveTurn(turnId).finish("error", { code: -32603, message: failure.message }),
   stopRequested: (turnId: string) =>

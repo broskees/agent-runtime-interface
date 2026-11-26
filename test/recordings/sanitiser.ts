@@ -28,13 +28,22 @@
 //     plan name (<PLAN>), a rate-limit report (NEUTRAL_RATE_LIMIT_INFO), a
 //     credential's expiry time (NEUTRAL_TIME), the process id (NEUTRAL_PID),
 //     a temp directory (NEUTRAL_TMP_PATH), a socket path
-//     (NEUTRAL_SOCKET_PATH) and the machine's shell (NEUTRAL_SHELL);
+//     (NEUTRAL_SOCKET_PATH), the machine's shell (NEUTRAL_SHELL), a quota's
+//     figures (0) and reset time (NEUTRAL_TIME), a credit balance (0), and
+//     whether the user is signed in to a provider (true) or must sign in
+//     (false);
+//   - which providers the user is signed in to: a list whose every entry
+//     holds a sign-in status, with [];
+//   - ACP's usage figures, with 0: a `usage_update`'s tokens in context and
+//     context window, a Cost's amount, and a Usage's token counts;
 //   - with `recordedModel`, a model list keeps only the recorded model: in
 //     OpenCode 2.x's `GET /api/model` answer (an array of objects with a
 //     string providerID and modelID) with only the fields a driver reads, so
 //     which providers the user is signed in to, and how, stays out; in Claude
 //     Code's `initializationResult().models` (objects with a string value and
-//     resolvedModel) whole, so the models the user's plan offers stay out;
+//     resolvedModel) whole, so the models the user's plan offers stay out; in
+//     an ACP agent's model picker (a session config option of category
+//     `model`) with the option's current value too, which the driver reads;
 //   - the OS user name (os.userInfo().username, and the values of USER and
 //     LOGNAME where they differ) with <USER>. How depends on what the string
 //     is:
@@ -105,6 +114,19 @@ export const NEUTRAL_SHELL = "/bin/sh";
 /** The neutral rate-limit report (Claude Code's `rate_limit_event` rate_limit_info, `SDKRateLimitInfo`): allowed, nothing used, resetting at NEUTRAL_TIME. */
 export const NEUTRAL_RATE_LIMIT_INFO = { status: "allowed", rateLimitType: "five_hour", utilization: 0, resetsAt: NEUTRAL_TIME.seconds } as const;
 
+/** A key that says whether the user is signed in to a provider, compared without case, `-` or `_`. */
+const SIGN_IN_STATUS_KEY = /^(?:is)?(?:signedin|loggedin|authenticated)$/;
+
+/** A time as the neutral time of the same type: an ISO string, or seconds or milliseconds since the epoch by its size. */
+function neutralTime(value: unknown): unknown {
+  return typeof value === "string" ? NEUTRAL_TIME.iso : typeof value === "number" ? (value > 100_000_000_000 ? NEUTRAL_TIME.milliseconds : NEUTRAL_TIME.seconds) : value;
+}
+
+/** A figure as 0 of the same type: the number 0, or "0" for a number written as a string (a protobuf int64 in JSON). */
+function neutralFigure(value: unknown): unknown {
+  return typeof value === "number" ? 0 : typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value) ? "0" : value;
+}
+
 /**
  * Account details replaced whole by a fixed neutral value of the same type,
  * keyed on the field. A key is compared without case, `-` or `_`; a value of
@@ -112,15 +134,22 @@ export const NEUTRAL_RATE_LIMIT_INFO = { status: "allowed", rateLimitType: "five
  */
 export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonly key: RegExp; readonly neutral: (value: unknown) => unknown }> = [
   // Claude Code's `subscriptionType` ("Claude Max") in initializationResult().account, and other names of a plan.
-  { what: "plan name", key: /^(?:subscriptiontype|subscriptionplan|subscriptiontier|planname|plantype|plantier|ratelimittier)$/, neutral: (value) => (typeof value === "string" ? PLACEHOLDERS.plan : value) },
+  // `userTier`, `userTierId` and `tierName` are the names the Antigravity CLI 1.5.17 binary gives the account's plan tier.
+  { what: "plan name", key: /^(?:subscriptiontype|subscriptionplan|subscriptiontier|planname|plantype|plantier|ratelimittier|usertier|usertierid|tiername)$/, neutral: (value) => (typeof value === "string" ? PLACEHOLDERS.plan : value) },
   // Claude Code's rate_limit_event: status, window, utilization, reset time, threshold and overage state.
   { what: "rate-limit report", key: /^ratelimitinfo$/, neutral: (value) => (typeof value === "object" && value !== null && !Array.isArray(value) ? { ...NEUTRAL_RATE_LIMIT_INFO } : value) },
   // Claude Code's `credential_expires_at` in result messages, and other credential expiry times.
-  {
-    what: "credential expiry",
-    key: /(?:credential|token|oauth|auth|login)expir(?:es|y|ation)(?:at|time)?$/,
-    neutral: (value) => (typeof value === "string" ? NEUTRAL_TIME.iso : typeof value === "number" ? (value > 100_000_000_000 ? NEUTRAL_TIME.milliseconds : NEUTRAL_TIME.seconds) : value),
-  },
+  { what: "credential expiry", key: /(?:credential|token|oauth|auth|login)expir(?:es|y|ation)(?:at|time)?$/, neutral: neutralTime },
+  // A quota's figures, as the Antigravity CLI 1.5.17 binary names them for a quota bucket (`remainingFraction`, `remainingAmount`): 0.
+  { what: "quota figure", key: /^(?:remaining|used|consumed)(?:fraction|amount)$/, neutral: neutralFigure },
+  // A quota's or rate limit's reset time (the binary's `resetTime`): NEUTRAL_TIME.
+  { what: "quota reset time", key: /^(?:quota)?resets?(?:time|at)$/, neutral: neutralTime },
+  // A credit balance, as the binary names its credit figures (`usedPromptCredits`, `availableFlowCredits`, `monthlyPromptCredits`, `consumedCredits`, `availableCredits`): 0.
+  { what: "credit balance", key: /credits$/, neutral: neutralFigure },
+  // Whether the user is signed in to a provider (the binary's `isAuthenticated`; `signedIn`, `loggedIn`): always true.
+  { what: "sign-in status", key: SIGN_IN_STATUS_KEY, neutral: (value) => (typeof value === "boolean" ? true : value) },
+  // Whether a provider still needs the user to sign in (the binary's `needs_auth`): always false.
+  { what: "sign-in needed", key: /^needs(?:auth|signin|login)$/, neutral: (value) => (typeof value === "boolean" ? false : value) },
   { what: "process id", key: /^(?:pid|ppid|processid)$/, neutral: (value) => (typeof value === "number" ? NEUTRAL_PID : value) },
   // OpenCode's `GET /api/info` paths.tmp, which names the temp directory of the machine's session.
   { what: "temp directory", key: /^(?:tmp|tmpdir|temp|tempdir|tmppath|temppath)$/, neutral: (value) => (typeof value === "string" ? NEUTRAL_TMP_PATH : value) },
@@ -150,6 +179,56 @@ function entriesWith(value: readonly unknown[], fields: readonly string[]): bool
   return value.length > 0 && value.every((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry) && fields.every((field) => typeof (entry as Entry)[field] === "string"));
 }
 
+/**
+ * An ACP session config option of category `model` (an ACP agent's model
+ * picker, such as `agy acp`'s) with only the values a replay needs: the
+ * recorded model and the value the option currently holds, which the driver
+ * compares before it changes the model. The other values are the models the
+ * user's account offers. Grouped values keep the same members; a group left
+ * empty goes.
+ */
+function acpModelOptionWith(option: Entry, model: string): Entry {
+  const kept = new Set([model, option["currentValue"]]);
+  const values = (option["options"] as readonly unknown[]).flatMap((entry): unknown[] => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const members = (entry as Entry)["options"];
+    if (Array.isArray(members)) {
+      const inGroup = members.filter((member) => typeof member === "object" && member !== null && kept.has((member as Entry)["value"]));
+      return inGroup.length === 0 ? [] : [{ ...(entry as Entry), options: inGroup }];
+    }
+    return kept.has((entry as Entry)["value"]) ? [entry] : [];
+  });
+  return { ...option, options: values };
+}
+
+/** A key as the rules compare it: without case, `-` or `_`. */
+function plainKey(key: string): string {
+  return key.toLowerCase().replace(/[-_]/g, "");
+}
+
+/** A list of providers, each with whether the user is signed in to it: which providers the user is signed in to. */
+function isSignInList(value: readonly unknown[]): boolean {
+  return value.length > 0 && value.every((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry) && Object.keys(entry).some((field) => SIGN_IN_STATUS_KEY.test(plainKey(field))));
+}
+
+/** The token counts of an ACP Usage (the unstable `usage` of a prompt's result). */
+const ACP_USAGE_TOKEN_FIELDS = ["totalTokens", "inputTokens", "outputTokens", "thoughtTokens", "cachedReadTokens", "cachedWriteTokens"] as const;
+
+/**
+ * An ACP usage report with its figures 0, keyed on ACP's fields: in a
+ * `usage_update` session update (UsageUpdate) the tokens in context, `used`,
+ * and the context window's `size`; in a Cost (`amount` and `currency`, under
+ * `cost`) the `amount`; in a Usage (under `usage`, with `totalTokens`,
+ * `inputTokens` and `outputTokens`) every token count. Anything else stays.
+ */
+function withNeutralAcpUsage(entry: Entry, key: string | undefined): Entry {
+  const zeroed = (fields: readonly string[]): Entry => ({ ...entry, ...Object.fromEntries(fields.filter((field) => typeof entry[field] === "number").map((field) => [field, 0])) });
+  if (entry["sessionUpdate"] === "usage_update") return zeroed(["used", "size"]);
+  if (key === "cost" && typeof entry["amount"] === "number" && typeof entry["currency"] === "string") return zeroed(["amount"]);
+  if (key === "usage" && ["totalTokens", "inputTokens", "outputTokens"].every((field) => typeof entry[field] === "number")) return zeroed(ACP_USAGE_TOKEN_FIELDS);
+  return entry;
+}
+
 /** A key whose value identifies an account, compared without case, `-` or `_`: `chatgpt-account-id`, `account_id`, `accountUuid`. */
 export const ACCOUNT_ID_KEY = /accountid$|accountuuid$/;
 /** A key whose value identifies an organisation, compared the same way: `x-opencode-org-id`, `organization_id`, `organizationUuid`. */
@@ -158,7 +237,7 @@ export const ORG_ID_KEY = /(?:org|organization|organisation)(?:id|uuid)$/;
 /** The placeholder for the value under `key` when the key names an account or organisation id. */
 function idPlaceholder(key: string | undefined): string | undefined {
   if (key === undefined) return undefined;
-  const plain = key.toLowerCase().replace(/[-_]/g, "");
+  const plain = plainKey(key);
   if (ACCOUNT_ID_KEY.test(plain)) return PLACEHOLDERS.accountId;
   if (ORG_ID_KEY.test(plain)) return PLACEHOLDERS.orgId;
   return undefined;
@@ -299,7 +378,7 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
 
   const neutralRules = (key: string | undefined): ReadonlyArray<(typeof NEUTRAL_FIELD_RULES)[number]> => {
     if (key === undefined) return [];
-    const plain = key.toLowerCase().replace(/[-_]/g, "");
+    const plain = plainKey(key);
     return NEUTRAL_FIELD_RULES.filter((rule) => rule.key.test(plain));
   };
 
@@ -309,6 +388,8 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const neutral = rule.neutral(value);
       if (neutral !== value) return neutral;
     }
+    // Which providers the user is signed in to: the list goes whole, the provider the recording used too.
+    if (Array.isArray(value) && isSignInList(value)) return [];
     if (Array.isArray(value) && input.recordedModel !== undefined) {
       const model = input.recordedModel;
       const entries = value as readonly Entry[];
@@ -325,8 +406,11 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
     }
     if (Array.isArray(value)) return value.map((each) => walk(each, side, key));
     if (typeof value === "object" && value !== null) {
+      // An ACP agent's model picker: only the recorded model and the current one stay.
+      const picked = input.recordedModel !== undefined && (value as Entry)["category"] === "model" && Array.isArray((value as Entry)["options"]) ? acpModelOptionWith(value as Entry, input.recordedModel) : (value as Entry);
+      const source = withNeutralAcpUsage(picked, key);
       const out: { [key: string]: unknown } = {};
-      for (const [field, entry] of Object.entries(value)) out[text(field, "path")] = walk(entry, side, field);
+      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field);
       return out;
     }
     return value;

@@ -88,9 +88,9 @@ on a real Mac checks both.
 ## Resolution
 
 Fixed by approach 2 plus a managed install (plan
-`standalone-claude-20261125-190353`, phase 1): commit `f1a8db3`, then the
-commit after `d492fe1` that tightens the install's integrity checks and adds
-its repair (see the branch log). Approach 1 was ruled out: the
+`standalone-claude-20261125-190353`, phase 1): commit `f1a8db3`, then
+`2a29185`, which tightens the install's integrity checks, lays the install
+out as npm does and adds its repair. Approach 1 was ruled out: the
 SDK's licence is Anthropic's ("SEE LICENSE IN README.md"), not MIT, so ARI
 does not redistribute it.
 

@@ -96,10 +96,10 @@ export function antigravityProcessService(layout: AntigravityLayout, env: { read
   };
 }
 
-/** The version `<command> --version` prints, run through the recorder's own process service (not recorded), or "unknown". */
+/** The version `<command> --version` prints, run through the recorder's own process service (not recorded), or "unknown". It runs with auto-update off, as the driver runs `agy acp`. */
 export async function agentVersion(service: ProcessService, command: string): Promise<string> {
   try {
-    const child = await service.spawn({ command, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000 });
+    const child = await service.spawn({ command, args: ["--version"], env: { AGY_CLI_DISABLE_AUTO_UPDATE: "1" }, purpose: "probe", stdin: "ignore", timeoutMs: 10_000 });
     let output = "";
     const decoder = new TextDecoder();
     const drain = async (stream: AsyncIterable<Uint8Array>): Promise<void> => {

@@ -280,8 +280,11 @@ request, each line the driver writes, each stdin close and each kill becomes a
 frame and goes to the sequencer; a frame other than the recorded one fails the
 call with the drift. Each recorded stdout and stderr line goes to the child's
 pipe, and the exit settles the child's `exited`. A pipe ends once the exit
-came and every line recorded for that pipe was handed over, so a line
-recorded after the exit still reaches the driver. A kill returns once the
+came and the lines recorded for it right after the exit, before the next
+frame the driver must send, were handed over: a process may exit before the
+driver read its last output, so those lines still reach the driver. A line
+recorded for the pipe after that fails replay: there is no pipe left to
+take it. A kill returns once the
 recorded exit came, as a host's kill returns once the process is gone. When
 replay fails, every child ends at once (exit by `SIGKILL`, pipes closed after
 what they hold), so the driver's cleanup is not left waiting; the failure is
@@ -332,9 +335,8 @@ Replay does not detect:
   the driver's `next()` returned.
 - whether the driver awaited a process's exit. The exit counts as taken when
   the replay child's `exited` settles.
-- a stdout or stderr line added after the others of its process, which the
-  driver reads and ignores: the pipe stays open until every recorded line was
-  handed over, and the driver reads to its end.
+- a stdout or stderr line added right after its process's exit, which the
+  driver reads to the end of the pipe and ignores.
 
 ## Fields replay ignores
 

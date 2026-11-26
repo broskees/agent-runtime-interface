@@ -223,7 +223,7 @@ test("the recorder starts agy with a profile, HOME, XDG directories, TMPDIR and 
     assert.ok(!fs.existsSync(path.join(workspace, "no-session-bus")) || !outcome.workspaceKept);
     assert.deepEqual(
       Object.keys(started.env).filter((name) => /^(GEMINI_|GOOGLE_|GCLOUD_|CLOUDSDK_|AGY_)/.test(name)).sort(),
-      started.args[0] === "acp" ? ALLOWED_AGENT_VARIABLES : ["AGY_CLI_FORCE_FILE_TOKEN_STORAGE"],
+      started.args[0] === "acp" ? ALLOWED_AGENT_VARIABLES : ["AGY_CLI_DISABLE_AUTO_UPDATE", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE"],
       `${outcome.scenario}: none of the user's Google or Antigravity variables`,
     );
     if (started.args[0] !== "acp") continue;

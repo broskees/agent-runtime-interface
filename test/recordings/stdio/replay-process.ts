@@ -9,9 +9,11 @@
 //   - each recorded stdout and stderr line goes to the child's pipe once every
 //     frame before it has happened, and counts as taken when the driver's
 //     reader takes it off the pipe; the exit settles `exited` and counts as
-//     taken then. A pipe ends once the exit came and every line recorded for
-//     it was handed over, so a line recorded after the exit (the process
-//     exited before the driver read its last output) still reaches the driver.
+//     taken then. A pipe ends once the exit came and the lines recorded for
+//     it right after the exit, before the next frame the driver must send,
+//     were handed over: a process may exit before the driver read its last
+//     output, so those lines still reach the driver. A line recorded for it
+//     after that has no pipe to go to, and replay fails on it.
 // Once replay has failed, every process ends at once (exit by SIGKILL, pipes
 // closed after what they hold), so the driver's cleanup does not wait for
 // frames that will never come; the failure is what the replay reports.
@@ -99,15 +101,15 @@ class ReplayChild {
   readonly proc: number;
   readonly stdout: ReplayPipe;
   readonly stderr: ReplayPipe;
-  readonly #lines: { readonly stdout: number; readonly stderr: number };
+  /** Once the exit came: how many lines each pipe gets in all before it ends. */
+  #lines: { readonly stdout: number; readonly stderr: number } | undefined;
   readonly exited: Promise<ProcessExit>;
   #exit!: (exit: ProcessExit) => void;
   #hasExited = false;
   failure: { line: number; message: string; code?: string } | undefined;
 
-  constructor(proc: number, lines: { readonly stdout: number; readonly stderr: number }, taken: (line: number) => void) {
+  constructor(proc: number, taken: (line: number) => void) {
     this.proc = proc;
-    this.#lines = lines;
     this.stdout = new ReplayPipe(taken);
     this.stderr = new ReplayPipe(taken);
     this.exited = new Promise((resolve) => (this.#exit = resolve));
@@ -117,8 +119,10 @@ class ReplayChild {
     return this.#hasExited;
   }
 
-  exit(exit: ProcessExit): void {
+  /** The process exited; each pipe ends once it has handed over `lines` lines in all. */
+  exit(exit: ProcessExit, lines: { readonly stdout: number; readonly stderr: number }): void {
     this.#hasExited = true;
+    this.#lines = lines;
     this.#exit(exit);
     this.endPipes();
   }
@@ -133,9 +137,9 @@ class ReplayChild {
     if (!this.stderr.ended) this.stderr.end();
   }
 
-  /** Ends each pipe once the process exited and every line recorded for it was handed over. */
+  /** Ends each pipe once the process exited and the lines it gets after the exit were handed over. */
   endPipes(): void {
-    if (!this.#hasExited) return;
+    if (this.#lines === undefined) return;
     if (!this.stdout.ended && this.stdout.delivered >= this.#lines.stdout) this.stdout.end();
     if (!this.stderr.ended && this.stderr.delivered >= this.#lines.stderr) this.stderr.end();
   }
@@ -143,14 +147,25 @@ class ReplayChild {
 
 export function startStdioReplay(recording: Recording, options: StdioReplayOptions): StdioReplay {
   const children = new Map<number, ReplayChild>();
-  // How many lines the recording holds for each pipe of each process.
-  const lines = new Map<number, { stdout: number; stderr: number }>();
-  for (const { frame } of recording.frames) {
-    if (frame.kind !== "stdout" && frame.kind !== "stderr") continue;
-    const counts = lines.get(procOf(frame)) ?? { stdout: 0, stderr: 0 };
-    counts[frame.kind] += 1;
-    lines.set(procOf(frame), counts);
-  }
+  // For each recorded exit, by its line: how many lines each pipe of its process gets in all, counting those recorded
+  // after the exit up to the next frame the driver must send.
+  const linesAtEnd = new Map<number, { stdout: number; stderr: number }>();
+  const counted = new Map<number, { stdout: number; stderr: number }>();
+  const frames = recording.frames;
+  frames.forEach(({ frame, line }, index) => {
+    if (frame.kind === "stdout" || frame.kind === "stderr") {
+      const counts = counted.get(procOf(frame)) ?? { stdout: 0, stderr: 0 };
+      counts[frame.kind] += 1;
+      counted.set(procOf(frame), counts);
+    }
+    if (frame.kind !== "exit") return;
+    const total = { ...(counted.get(procOf(frame)) ?? { stdout: 0, stderr: 0 }) };
+    for (let after = index + 1; after < frames.length && frames[after]!.frame.dir === "in"; after += 1) {
+      const later = frames[after]!.frame;
+      if ((later.kind === "stdout" || later.kind === "stderr") && procOf(later) === procOf(frame)) total[later.kind] += 1;
+    }
+    linesAtEnd.set(line, total);
+  });
 
   const sequencer: ReplaySequencer = new ReplaySequencer({
     recording,
@@ -167,7 +182,7 @@ export function startStdioReplay(recording: Recording, options: StdioReplayOptio
           child.endPipes();
           return;
         case "exit":
-          child.exit({ code: (frame["code"] ?? null) as number | null, signal: (frame["signal"] ?? null) as string | null });
+          child.exit({ code: (frame["code"] ?? null) as number | null, signal: (frame["signal"] ?? null) as string | null }, linesAtEnd.get(line)!);
           // `exited` settles now: the driver has it.
           queueMicrotask(() => sequencer.taken(line));
           return;
@@ -192,7 +207,7 @@ export function startStdioReplay(recording: Recording, options: StdioReplayOptio
 
   const spawn = async (request: SpawnRequest): Promise<SpawnedProcess> => {
     const proc = children.size + 1;
-    const child = new ReplayChild(proc, lines.get(proc) ?? { stdout: 0, stderr: 0 }, (line) => sequencer.taken(line));
+    const child = new ReplayChild(proc, (line) => sequencer.taken(line));
     children.set(proc, child);
     send(spawnFrame(proc, request));
     if (child.failure !== undefined) {

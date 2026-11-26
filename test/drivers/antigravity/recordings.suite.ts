@@ -31,6 +31,7 @@ import { FRAME_FORMAT_FIELDS, NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_SHEL
 import { SCENARIOS, SCENARIO_NAMES, checkScenario } from "../../recordings/scenarios.ts";
 import type { ScenarioName } from "../../recordings/scenarios.ts";
 import { ReplayDriftError, showFrame } from "../../recordings/sequencer.ts";
+import { resanitiseRecording } from "../../recordings/resanitise.ts";
 import { FAKE_AGY_VERSION, fakeAgyOnPath } from "./fake-agy.ts";
 import type { FakeAgy } from "./fake-agy.ts";
 
@@ -261,19 +262,26 @@ for (const name of SCENARIO_NAMES) {
     });
   });
 
-  test(`${name}: Antigravity replay fails, naming the file, the line and both frames, when the scenario ends with recorded frames the driver never sent`, async () => {
+  test(`${name}: Antigravity replay fails, naming the file, the line and both frames, when the scenario ends with recorded frames the driver never sent or took`, async () => {
     const recording = await recordingOf(name);
     const extra: Frame = { dir: "out", kind: "stdin", proc: 1, message: { jsonrpc: "2.0", id: 99, method: "session/close", params: { sessionId: "sess-never" } } };
-    const { file } = editedCopy(recording, "appended", (frames) => frames.push(extra));
+    const answer: Frame = { dir: "in", kind: "stdout", proc: 1, message: { jsonrpc: "2.0", id: 99, result: {} } };
     const line = recording.frames.at(-1)!.line + 1;
     const last = recording.frames.at(-1)!;
-    await assert.rejects(replayAntigravity(file, { timeoutMs: 10_000 }), (error: unknown) =>
-      assertDrift(error, file, line, [
-        /replay drift: the scenario ended with 1 recorded frame\(s\) not replayed/,
-        new RegExp(`next recorded \\(line ${line}\\): ${escape(JSON.stringify(extra))}`),
-        new RegExp(`last replayed \\(line ${line - 1}\\): ${escape(showFrame(last.frame))}`),
-      ]),
-    );
+    // A request the driver never sends; then also its answer, which the driver never gets to take.
+    for (const [label, appended] of [
+      ["appended", [extra]],
+      ["appended-with-answer", [extra, answer]],
+    ] as const) {
+      const { file } = editedCopy(recording, label, (frames) => frames.push(...appended));
+      await assert.rejects(replayAntigravity(file, { timeoutMs: 10_000 }), (error: unknown) =>
+        assertDrift(error, file, line, [
+          new RegExp(`replay drift: the scenario ended with ${appended.length} recorded frame\\(s\\) not replayed`),
+          new RegExp(`next recorded \\(line ${line}\\): ${escape(JSON.stringify(extra))}`),
+          new RegExp(`last replayed \\(line ${line - 1}\\): ${escape(showFrame(last.frame))}`),
+        ]),
+      );
+    }
   });
 
   test(`${name}: Antigravity replay fails, naming the file, the line and both frames, when the recorded stdout frame that ends the first turn is removed`, async () => {
@@ -313,7 +321,7 @@ test("approval_denied: Antigravity replay fails when the stdout frame that fails
   await assert.rejects(replayAntigravity(file, { timeoutMs: 10_000 }), /scenario approval_denied: no command item completed/);
 });
 
-test("replay ends a process's pipes once its exit came and every line recorded for them was handed over: a line recorded after the exit still reaches the driver", async () => {
+test("replay ends a process's pipes once its exit came and the lines recorded right after it were handed over: a line recorded after the exit still reaches the driver", async () => {
   const recording = await recordingOf("simple");
   const frames = recording.frames.map((entry) => entry.frame);
   const exit = frames.findIndex((frame) => frame.kind === "exit");
@@ -327,7 +335,24 @@ test("replay ends a process's pipes once its exit came and every line recorded f
   assert.ok(replay.sequencer.done());
 });
 
-test("what replay does not detect: a stdout or stderr line added after the others of its process, which the driver reads to the end of its pipe and ignores", async () => {
+test("a line of a process recorded after its exit and a later frame of the driver's fails replay, naming the file, the line and the frame: its pipe has ended", async () => {
+  const recording = await recordingOf("resume");
+  const frames = recording.frames.map((entry) => entry.frame);
+  const stderr = frames.findIndex((frame) => frame.kind === "stderr" && frame["proc"] === 1);
+  const secondSpawn = frames.findIndex((frame) => frame.kind === "spawn" && frame["proc"] === 2);
+  // The first process's stderr line now comes after the driver started the second process.
+  const { file, frames: edited } = editedCopy(recording, "stderr-after-next-spawn", (copy) => {
+    const [line] = copy.splice(stderr, 1);
+    copy.splice(secondSpawn, 0, line!);
+  });
+  const moved = edited.findIndex((frame) => frame.kind === "stderr" && frame["proc"] === 1);
+  const line = moved + 2;
+  await assert.rejects(replayAntigravity(file, { timeoutMs: 10_000 }), (error: unknown) =>
+    assertDrift(error, file, line, [/replay could not deliver the recorded frame: the stderr of process 1 has ended/, new RegExp(`recorded \\(line ${line}\\): ${escape(JSON.stringify(edited[moved]))}`), new RegExp(`last replayed \\(line ${line - 1}\\): .*"kind":"spawn","proc":2`)]),
+  );
+});
+
+test("what replay does not detect: a stdout or stderr line added right after its process's exit, which the driver reads to the end of its pipe and ignores", async () => {
   const recording = await recordingOf("simple");
   const { file } = editedCopy(recording, "late-lines", (frames) => {
     frames.push({ dir: "in", kind: "stdout", proc: 1, message: { jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-1", update: { sessionUpdate: "usage_update", used: 1, size: 2 } } } });
@@ -356,6 +381,16 @@ test("Antigravity replay ignores only the ARI version in the initialize request:
     frames[0] = { ...frames[0]!, envNames: ["GEMINI_HOME"] };
   });
   await assert.rejects(replayAntigravity(spawn.file), /first difference at envNames/);
+});
+
+test("resanitise-recordings runs an Antigravity recording through the sanitiser again with the ACP protocol words, and one with nothing new to replace comes out byte-identical", async () => {
+  const recording = await recordingOf("approval_allowed");
+  const copy = path.join(DIRECTORY, "copies", "resanitise-approval_allowed.ndjson");
+  fs.mkdirSync(path.dirname(copy), { recursive: true });
+  fs.copyFileSync(recording.file, copy);
+  assert.equal(await resanitiseRecording(copy, { env: {}, user: "ari-nobody" }), false);
+  assert.ok(fs.readFileSync(copy).equals(fs.readFileSync(recording.file)));
+  await replayAntigravity(copy);
 });
 
 test("the scenario checks read the approval answers off the recorded permission requests and the driver's answers", async () => {
@@ -487,7 +522,10 @@ test("the Antigravity recorder replaces the OS user name, a home path, an email,
     await replayAntigravity(outcome.file!);
   }
   // check:recordings itself, over a tree holding the recordings, run as the gate runs it.
-  const check = spawnSync(NODE_EXECUTABLE, [path.join(REPO_ROOT, "scripts", "check-recordings.ts"), "--root", root], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME: home } });
+  const check = spawnSync(NODE_EXECUTABLE, [path.join(REPO_ROOT, "scripts", "check-recordings.ts"), "--root", root], {
+    encoding: "utf8",
+    env: { PATH: process.env["PATH"] ?? "", HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), XDG_DATA_HOME: path.join(home, ".local", "share"), XDG_STATE_HOME: path.join(home, ".local", "state"), XDG_CACHE_HOME: path.join(home, ".cache") },
+  });
   assert.equal(check.status, 0, check.stderr);
   assert.match(check.stdout, /check-recordings: 2 recording file\(s\), no paths, emails or tokens/);
 });

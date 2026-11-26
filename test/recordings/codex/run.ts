@@ -37,6 +37,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createFakeHost } from "../../../src/conformance/fake-host.ts";
 import type { DiagnosticEntry, HostToolServer } from "../../../src/generated/host.ts";
+import type { Request } from "../../../src/generated/request.ts";
 import { codexDriver } from "../../../src/drivers/codex/index.ts";
 import type { CodexDriverConfig } from "../../../src/drivers/codex/index.ts";
 import type { HostServices, Session } from "../../../src/runtime.ts";
@@ -122,6 +123,7 @@ export interface CodexScenarioInput {
   /** The model the driver starts the thread with. */
   readonly model: string;
   readonly timeoutMs: number;
+  readonly mayApprove?: (request: Request) => boolean;
   readonly native?: NativeProgress;
   /** Wraps each session the host opens; tests use it to play a host that behaves differently. */
   readonly wrapSession?: (session: Session) => Session;
@@ -180,6 +182,7 @@ export async function runCodexScenario(input: CodexScenarioInput): Promise<Codex
       },
       cwd: input.layout.cwd,
       timeoutMs: input.timeoutMs,
+      ...(input.mayApprove === undefined ? {} : { mayApprove: input.mayApprove }),
       ...(input.native === undefined ? {} : { native: input.native }),
     });
     return { run, diagnostics: host.diagnosticEntries };

@@ -105,6 +105,9 @@ export const PLACEHOLDERS = {
   token: "<TOKEN>",
   accountId: "<ACCOUNT_ID>",
   orgId: "<ORG_ID>",
+  projectId: "<PROJECT_ID>",
+  installationId: "<INSTALLATION_ID>",
+  serverName: "<SERVER_NAME>",
   plan: "<PLAN>",
 } as const;
 
@@ -189,6 +192,7 @@ export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonl
   { what: "Codex reset credits", key: /^ratelimitresetcredits$/, neutral: (value) => (isRecord(value) && typeof value["availableCount"] === "number" ? { ...NEUTRAL_RESET_CREDITS, credits: [] } : value) },
   // A usage percentage anywhere else (Codex's usedPercent and remainingPercent): 0.
   { what: "usage percentage", key: /^(?:used|remaining)percent$/, neutral: neutralFigure },
+  { what: "Codex item token count", key: /^contenttokencount$/, neutral: neutralFigure },
   // Whether the account reached a limit (Codex's rateLimitReachedType, spendControlReached): not reached.
   { what: "limit reached", key: /^ratelimitreachedtype$/, neutral: (value) => (typeof value === "string" ? null : value) },
   { what: "limit reached", key: /^spendcontrolreached$/, neutral: (value) => (typeof value === "boolean" ? false : value) },
@@ -196,7 +200,7 @@ export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonl
   { what: "sign-in status", key: SIGN_IN_STATUS_KEY, neutral: (value) => (typeof value === "boolean" ? true : value) },
   // Whether a provider still needs the user to sign in (the binary's `needs_auth`): always false.
   { what: "sign-in needed", key: /^needs(?:auth|signin|login)$/, neutral: (value) => (typeof value === "boolean" ? false : value) },
-  { what: "process id", key: /^(?:pid|ppid|processid)$/, neutral: (value) => (typeof value === "number" ? NEUTRAL_PID : value) },
+  { what: "process id", key: /^(?:pid|ppid|processid)$/, neutral: (value) => (typeof value === "number" ? NEUTRAL_PID : typeof value === "string" && /^\d+$/.test(value) ? String(NEUTRAL_PID) : value) },
   // OpenCode's `GET /api/info` paths.tmp, which names the temp directory of the machine's session.
   { what: "temp directory", key: /^(?:tmp|tmpdir|temp|tempdir|tmppath|temppath)$/, neutral: (value) => (typeof value === "string" ? NEUTRAL_TMP_PATH : value) },
   // Claude Code's `messaging_socket_path`, /tmp/cc-socks/<pid>.sock.
@@ -288,7 +292,16 @@ function idPlaceholder(key: string | undefined): string | undefined {
   const plain = plainKey(key);
   if (ACCOUNT_ID_KEY.test(plain)) return PLACEHOLDERS.accountId;
   if (ORG_ID_KEY.test(plain)) return PLACEHOLDERS.orgId;
+  if (plain === "projectid") return PLACEHOLDERS.projectId;
   return undefined;
+}
+
+/** Keep the native usage shape, not the measured usage. The context window describes the model, not the account. */
+function neutralCodexTokenUsage(entry: Entry): Entry {
+  const counts = (value: unknown): unknown => isRecord(value)
+    ? Object.fromEntries(Object.entries(value).map(([key, count]) => [key, neutralFigure(count)]))
+    : value;
+  return { ...entry, total: counts(entry["total"]), last: counts(entry["last"]) };
 }
 
 export interface SanitiserInput {
@@ -500,7 +513,19 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const picked = input.recordedModel !== undefined && (value as Entry)["category"] === "model" && Array.isArray((value as Entry)["options"]) ? acpModelOptionWith(value as Entry, input.recordedModel) : (value as Entry);
       const source = withNeutralAcpUsage(picked, key);
       const out: { [key: string]: unknown } = {};
-      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field, slotIn(protocolWords, slot, source, field));
+      for (const [field, entry] of Object.entries(source)) {
+        // Codex remote control also announces these machine identifiers when disabled.
+        const remoteControl = side === "in" && source["method"] === "remoteControl/status/changed" && field === "params" && isRecord(entry);
+        const cleaned = remoteControl ? {
+          ...entry,
+          ...(typeof entry["serverName"] === "string" ? { serverName: PLACEHOLDERS.serverName } : {}),
+          ...(typeof entry["installationId"] === "string" ? { installationId: PLACEHOLDERS.installationId } : {}),
+        } : entry;
+        const safeEntry = side === "in" && field === "tokenUsage" && isRecord(cleaned) && isRecord(cleaned["total"]) && isRecord(cleaned["last"])
+          ? neutralCodexTokenUsage(cleaned)
+          : cleaned;
+        out[text(field, "path")] = walk(safeEntry, side, field, slotIn(protocolWords, slot, source, field));
+      }
       return out;
     }
     return value;

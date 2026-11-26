@@ -90,3 +90,54 @@ standalone `ari-driver` per driver and relies on ARI to end the agents. Its
 threat model records this as an open risk (`docs/architecture/threat-model.md`),
 and its end-to-end phase on a real Mac will check it with real `claude` and
 `codex`.
+
+## Resolution
+
+Fixed in ARI on 2026-11-25 by commit `8f0981b` ("Agents end when their driver
+dies: a guard per agent group, SIGHUP as shutdown, late delegated children
+killed"), plan `driver-death-cleanup-20261125-190011`, phase 1.
+
+What changed:
+
+- `src/node/process.ts`: every child the process service starts on Linux and
+  macOS gets a guard, a `/bin/sh` in a session of its own that blocks reading
+  a pipe only the owning process holds. When the owner dies for any reason,
+  the pipe reaches end-of-file and the guard sends SIGTERM to the child's
+  process group, waits up to the kill grace (2 s by default) for it to empty,
+  sends SIGKILL to what is left, and exits. While the owner lives the guard
+  only waits; once a group is gone the owner closes the pipe and the guard
+  exits, so `dispose()` returns only after every guard is gone. This is the
+  first approach above, with the guard outside the agent's group: agent
+  spawning is unchanged, and no signal sent to the agent's group ends the
+  guard early. It costs one idle shell per agent (with bash as `/bin/sh`,
+  3.8 MB resident and 0.35 MB proportional) and under 1 ms per spawn.
+- `src/wire/cli.ts`: SIGHUP is handled like SIGTERM (dispose, then exit 0).
+- `src/wire/client.ts`: a delegated child whose host spawn resolves after the
+  wire closed is killed at once and never registered (the ARI build's
+  finding F16).
+- `docs/wire.md` ("Agents end when `ari-driver` dies") and the
+  `src/node/process.ts` header state the guarantee and how it works.
+
+Tests:
+
+- `test/wire/driver-death.test.ts`: the built `ari-driver` under Node serves
+  a driver whose two agents each run a grandchild that ignores SIGHUP and
+  never reads stdin (one agent also ignores SIGTERM). `ari-driver` is
+  SIGKILLed, crashes with `process.abort()`, gets SIGHUP, or gets SIGTERM;
+  each time every agent, grandchild, group and guard is gone within 5 s, and
+  after SIGHUP and SIGTERM `ari-driver` exits 0.
+- `test/standalone/standalone-binary.e2e.ts` (run by `pnpm run test:binary`):
+  the SIGKILL and SIGHUP cases against the Bun-built standalone `ari-driver`,
+  with no `node` or `bun` on `PATH`.
+- `test/node/owner-death.test.ts`: a Node host using the process service
+  directly is SIGKILLed and leaves nothing behind within 5 s; an idle agent
+  and its grandchild keep running for 10 s while the owner lives; an agent
+  that exits on its own takes its grandchild and guard with it; 20 agents get
+  one guard each, and `dispose()` leaves no guard.
+- `test/wire/late-spawn.test.ts`: the late delegated child is killed and gone
+  within 5 s.
+- `.github/workflows/ci.yml` gains a `macos-latest` job that runs
+  `test/wire/driver-death.test.ts` and `test/node/owner-death.test.ts`.
+
+Not covered: Windows keeps `taskkill /T`, which runs only while the owner
+lives. Real `claude` and `codex` were not run (the plan starts no real agent).

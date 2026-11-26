@@ -26,16 +26,19 @@ The kit lives in `test/recordings/`:
 | `stdio/` | the process tap and the replay process service, for every driver that starts its agent through `HostServices.process` and talks to it on stdin and stdout |
 | `acp/` | the ACP protocol words and the approval answers read off ACP traffic |
 | `antigravity/` | the Antigravity layout and model choice, the sign-in file, and the recording and replay functions |
+| `codex/` | the Codex protocol words, the approval answers and turns read off app-server traffic, the Codex layout, the sign-in file, the model choice, and the recording and replay functions |
+| `protocol-places.ts` | protocol words by place: where the pinned types put a string literal in an inbound frame |
 
 `scripts/record-claude.ts` is the Claude recorder, `scripts/record-opencode.ts`
-the OpenCode recorder and `scripts/record-antigravity.ts` the Antigravity
-recorder. `scripts/check-recordings.ts` is the scan the gate runs.
+the OpenCode recorder, `scripts/record-antigravity.ts` the Antigravity
+recorder and `scripts/record-codex.ts` the Codex recorder. `scripts/check-recordings.ts` is the scan the gate runs.
 `scripts/resanitise-recordings.ts` sanitises committed recordings again.
 Nothing here ships in the npm tarball.
 
 The live recordings are in `test/drivers/claude/recordings/` and
 `test/drivers/opencode/recordings/`, one file per scenario. The Antigravity
-recorder writes to `test/drivers/antigravity/recordings/`. The gate replays
+recorder writes to `test/drivers/antigravity/recordings/`, the Codex recorder
+to `test/drivers/codex/recordings/`. The gate replays
 them: `test/drivers/claude/live-recordings.test.ts` and
 `test/drivers/opencode/live-recordings.suite.ts` take the list of files from
 the scenario module, check each header (`source: live`, the vendor version
@@ -161,8 +164,8 @@ request before the close, and a replay could see them the other way round.
 
 The process tap (`test/recordings/stdio/tap.ts`) wraps the `HostServices.process`
 the recorder hands a driver that starts its agent as a process and talks to it
-on stdin and stdout (the Antigravity driver; later the Codex driver and the
-other ACP flavors). It records the traffic between the driver and every
+on stdin and stdout (the Antigravity and Codex drivers; later the other ACP
+flavors). It records the traffic between the driver and every
 process the driver starts, and knows nothing of the protocol on the pipes.
 Every frame names its process by `proc`: 1, 2, ... in the order the driver
 asked the host to spawn them.
@@ -188,8 +191,8 @@ before its line feed. A line is kept as parsed JSON, so replay compares JSON
 values, not bytes.
 
 `resolveExecutable` and the host's `envPolicy` pass through the tap
-unrecorded. The recorder's own `agy --version` for the header goes around the
-tap.
+unrecorded. The recorder's own `agy --version` and `codex --version` for the
+header, and the Codex recorder's model listing, go around the tap.
 
 ## The scenarios
 
@@ -204,6 +207,12 @@ mode. All six run under the `approval_required` mode.
 | `multi_turn` | sends two prompts on one thread | both turns `completed`, in order; the second turn's text holds the word the first prompt gave |
 | `approval_allowed` | allows the command once | a `command` request reaches the host; the allow-once answer is a recorded outbound frame; a command or tool item completes; the turn completes |
 | `approval_denied` | declines the command | the same request; the decline is a recorded outbound frame; no completed command or tool item's output holds the marker; the turn ends |
+
+The host answers a request with its `decline` option. An agent that offers
+none, only a decline that also stops the turn (`cancel`), gets that one:
+Codex's ordinary command approval offers `accept` and `cancel` only
+(`codex-rs/protocol/src/approvals.rs:379–411` at tag `rust-v0.172.0`), and a
+`cancel` answer counts as the decline in the check.
 | `interrupt` | calls `interruptTurn` after the first assistant text | the turn ends `interrupted` |
 | `resume` | closes the session after one turn, then resumes the thread by its native handle in a new session | the second turn completes with no `session.replaced`, and its text holds the word the first prompt gave |
 
@@ -322,7 +331,12 @@ Replay detects:
   ACP response to `session/prompt` the turn never ends; without the
   `tool_call_update` that completes the approved command, its output never
   reaches the host; without the one that fails the declined command, the
-  command shows as completed when the turn ends. When every recorded frame
+  command shows as completed when the turn ends. For Codex: without the
+  `turn/completed` notification the turn never ends; without the frames that
+  carry the approved command's output (`item/commandExecution/outputDelta`
+  and its `item/completed`), no completed command holds the marker; a
+  declined command's `item/completed` that says `completed` with the marker
+  fails `approval_denied`. When every recorded frame
   was replayed and a scenario assertion still fails, the Antigravity replay's
   error names the recording file, the recorded frame the outcome depended on,
   whose line leads the error, and the frame replayed last
@@ -364,6 +378,20 @@ Replay does not detect:
   the replay child's `exited` settles.
 - a stdout or stderr line added right after its process's exit, which the
   driver reads to the end of the pipe and ignores.
+- for Codex, a removed `item/completed` of a command whose output was
+  streamed: the driver settles every item still open as `completed` when the
+  turn completes, with the output streamed so far, so the outcome is the
+  same.
+
+The Codex replay names the frames a failed assertion depended on as the
+Antigravity replay does: the last recorded inbound frame holding the native id
+of an item it looked at, else, for each turn, the `turn/completed` that ended
+it, labelled with the line of the turn's `turn/start` request
+(`codexTurnsDependedOn`): `depended on (line 25, the turn/completed that ended
+turn 1, started at line 13)`. When an app-server's stdin request and its
+answer are appended after its exit, Codex replay reports both as not replayed:
+the Codex driver does not wait for an app-server's stdout to end when it
+closes a session.
 
 ## Fields replay ignores
 
@@ -372,13 +400,16 @@ checks this table against the code's list. OpenCode replay leaves out no
 field: the driver builds every request from the scenario, its config and what
 the server answered, so a replay sends the same requests byte for byte, and a
 recording holds no request headers. Antigravity replay leaves out only the ARI
-version in the driver's ACP `initialize` request (`clientInfo.version`).
+version in the driver's ACP `initialize` request (`clientInfo.version`), and
+Codex replay only the ARI version in the driver's app-server `initialize`
+request.
 
 | Driver | Frame kind | Field | Reason |
 |---|---|---|---|
 | claude | `query` | `options.env.CLAUDE_AGENT_SDK_CLIENT_APP` | the driver sets it to ari/ followed by the ARI version, which changes with every ARI release |
 | claude | `query` | `options.env.ANTHROPIC_API_KEY` | present only when the recorder ran with ANTHROPIC_API_KEY set; a replay has no key, and a recording holds only its placeholder |
 | antigravity | `stdin` | `message.params.clientInfo.version` | the driver's ACP initialize request names the ARI version, which changes with every ARI release |
+| codex | `stdin` | `message.params.clientInfo.version` | the driver's initialize request names the ARI version, which changes with every ARI release |
 
 ## Sanitising and the scan
 
@@ -431,6 +462,18 @@ another type than the rule's stays as it is. The code is
 | a credit balance: the binary's `usedPromptCredits`, `availableFlowCredits`, `monthlyPromptCredits`, `consumedCredits`, `availableCredits` | a key ending in `credits` (a number, or a number written as a string) | `0`, or `"0"` |
 | whether the user is signed in to a provider: the binary's `isAuthenticated` | `signedIn`, `isSignedIn`, `loggedIn`, `isLoggedIn`, `authenticated`, `isAuthenticated` (a boolean) | `true` |
 | whether a provider still needs the user to sign in: the binary's `needs_auth` | `needsAuth`, `needsSignIn`, `needsLogin` (a boolean) | `false` |
+| Codex's rate-limit windows: a rate-limit snapshot's (`RateLimitSnapshot`, in `account/rateLimits/updated` and `account/rateLimits/read`) `primary` and `secondary` `RateLimitWindow`, with its used percentage, window length and reset time | `primary`, `secondary` (an object with a number `usedPercent`), replaced whole | `{"usedPercent":0,"windowDurationMins":300,"resetsAt":4102444800}` and `{"usedPercent":0,"windowDurationMins":10080,"resetsAt":4102444800}`: the driver names them `5h` and `weekly` |
+| Codex's credit balance: a rate-limit snapshot's `credits` (`CreditsSnapshot`) | `credits` (an object with a boolean `hasCredits`), replaced whole | `{"hasCredits":false,"unlimited":false,"balance":"0"}` |
+| Codex's spend-control limit: a rate-limit snapshot's `individualLimit` (`SpendControlLimitSnapshot`) | `individualLimit` (an object with a number `remainingPercent`), replaced whole | `{"limit":"0","remainingPercent":0,"resetsAt":4102444800,"used":"0"}` |
+| Codex's rate-limit reset credits: `rateLimitResetCredits` (`RateLimitResetCreditsSummary`) of a usage read | `rateLimitResetCredits` (an object with a number `availableCount`), replaced whole | `{"availableCount":0,"credits":[]}` |
+| any other usage percentage | `usedPercent`, `remainingPercent` (a number) | `0` |
+| whether the account reached a limit: Codex's `rateLimitReachedType` and `spendControlReached` | `rateLimitReachedType` (a string), `spendControlReached` (a boolean) | `null`, `false` |
+| the client's machine in a user agent: Codex's `initialize` answer names the operating system, its version, the architecture and the terminal after the product (`codex_cli_rs/0.172.0 (<system>; x86_64) <terminal>`) | `userAgent` (a string with a space) | the product and its version alone, `codex_cli_rs/0.172.0` |
+
+Codex's plan type (`planType`, in a rate-limit snapshot and in
+`account/updated`) is a plan name, `<PLAN>`, by the first rule. The Codex
+driver reads none of these but the windows and the credit balance, which it
+turns into a `limits.updated` event.
 
 Three more account details have a shape rather than one field:
 
@@ -1042,6 +1085,156 @@ and the agent offers no Flash model, or the agent offers no model option, the
 recorder stops before the first prompt, lists the models, and records
 nothing. Replay gives each turn the model the header names.
 
+## How the Codex recorder keeps the user's setup out
+
+The recorded `codex app-server` must not load the user's Codex config, MCP
+servers, plugins, memories, skills, rules, sessions, goals or `AGENTS.md`,
+and must not change any of them. Codex keeps all of these in its home,
+`CODEX_HOME`, else `~/.codex` (`codex-rs/utils/home-dir/src/lib.rs:13–60`):
+`config.toml` with its `[mcp_servers]` and `[plugins]`
+(`codex-rs/config/src/loader/local.rs:122`, `codex-rs/config/src/mcp_edit.rs:13–21`,
+`codex-rs/core-plugins/src/loader.rs:722–760`), `managed_config.toml`
+(`codex-rs/config/src/loader/layer_io.rs:232`), `AGENTS.md` and
+`AGENTS.override.md` (`codex-rs/core/src/agents_md.rs:44–47`), `memories/`
+and `memories_v2/` (`codex-rs/protocol/src/memory_version.rs:17–22`), `skills/`
+(`codex-rs/ext/skills/src/host_roots.rs:151–157`), `rules/`
+(`codex-rs/core/src/exec_policy.rs:966`), installed plugins under `plugins/`,
+and the state database that keeps threads and their goals, `state_5.sqlite`
+(`codex-rs/state/src/sqlite.rs:53`), in `CODEX_SQLITE_HOME` when set, else in
+the home (`codex-rs/core/src/config/mod.rs:295–305, 4529–4540`). Outside the
+home it reads skills in `~/.agents/skills`
+(`codex-rs/ext/skills/src/host_roots.rs:159–165`), and, from the folder it
+works in up to the project root, the nearest folder holding `.git`,
+`AGENTS.md`, `AGENTS.override.md`, `.codex/` and `.agents/skills`; outside a
+repository only the folder it works in (`codex-rs/core/src/agents_md.rs:7–18`,
+`codex-rs/config/src/project_root_markers.rs:5`). All sources are files of
+Codex tag `rust-v0.172.0` (commit `3d86e43b075adeba2193ec5c22ac92f55afd82e6`).
+
+The recorder runs each scenario in its own temp workspace: `cwd/` (the
+thread's directory, and the directory `codex` runs in), `codex-home/`,
+`user-home/`, `xdg-config/`, `xdg-data/`, `xdg-state/`, `xdg-cache/`,
+`xdg-runtime/`, `tmp/` and `instances/` (the host's directories). The driver
+uses the ambient account, so it starts `codex app-server` and
+`codex login status` with no variables of its own. The recorder's host starts
+them with the recorder's own environment, less `HOME`, `TMPDIR` and every
+`XDG_*` variable, strips every variable whose name starts with `CODEX_` or
+`OPENAI_`, and then adds:
+
+| Variable | Value | Why |
+|---|---|---|
+| `CODEX_HOME` | `<workspace>/codex-home`, holding only the copy of the user's `auth.json` | Codex keeps the user's config, MCP servers, plugins, memories, skills, rules, sessions and goals in its home (above); added after the stripping, on every spawn |
+| `HOME` | `<workspace>/user-home`, empty | Codex reads `~/.agents/skills`, and `~/.codex` without `CODEX_HOME` |
+| `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` | `<workspace>/xdg-config`, `xdg-data`, `xdg-state`, `xdg-cache`, `xdg-runtime` | the XDG base directories |
+| `TMPDIR` | `<workspace>/tmp` | so a temp path `codex` reports is inside the workspace |
+
+Codex reads many `CODEX_` and `OPENAI_` variables: its home and state
+database (`CODEX_HOME`, `CODEX_SQLITE_HOME`), sign-ins (`OPENAI_API_KEY`,
+`CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENAI_IDENTITY_TOKEN_FILE`),
+endpoints (`OPENAI_BASE_URL`, `CODEX_AUTHAPI_BASE_URL`) and more. The driver's
+CLI manifest strips only `OPENAI_API_KEY`, `CODEX_API_KEY` and
+`OPENAI_ADMIN_KEY`; the recorder strips them all
+(`CODEX_RECORDER_ENV_POLICY` in `test/recordings/codex/run.ts`).
+
+A process the driver starts with no working directory (the driver names none
+for `codex app-server`) starts in `<workspace>/cwd`, not in the recorder's
+directory. `<workspace>/cwd` is the root of a Git repository of its own
+(`cwd/.git` holds `HEAD`, `objects/` and `refs/`), so Codex's lookup of
+`AGENTS.md`, `.codex/` and `.agents/skills` stops there, wherever `TMPDIR`
+points. The recorder also stops before it starts `codex` when its temp
+workspace lies inside the user's home, or when a folder above the workspace
+holds `AGENTS.md`, `AGENTS.override.md`, `.codex` or `.agents`; the error
+names each one it found.
+
+The driver passes the host's tool server for a thread in every
+`thread/resume` (docs/drivers/codex.md, "Host instructions and tools"), and
+fails the resume when the host has none. The recorder's host names
+`ari-recorder-tools`, an HTTP MCP server at
+`http://127.0.0.1:9/ari-recorder/no-tools`: on the loopback discard port
+nothing listens on an ordinary machine, so Codex's connection is refused and
+the session gets no tools. A new thread gets no MCP server at all.
+
+`test/drivers/codex/recorder.test.ts` seeds a home with a `config.toml` (with
+an MCP entry and an enabled plugin), the plugin, a memory, `AGENTS.md`,
+`AGENTS.override.md`, a skill, a rule, a stand-in for the state database and
+`~/.agents/skills`, a marker in each, and sets `CODEX_HOME`,
+`CODEX_SQLITE_HOME`, `OPENAI_API_KEY`, `OPENAI_BASE_URL` and
+`CODEX_ACCESS_TOKEN`. It records all six scenarios against a fake `codex`
+(`test/drivers/codex/fake-codex-cli.ts`) that loads them where Codex does
+(`test/drivers/codex/user-setup.ts`), and shows every `codex` started with
+`CODEX_HOME`, `HOME`, the XDG directories, `TMPDIR` and its working directory
+in the workspace and no other `CODEX_` or `OPENAI_` variable, none of the
+markers reached the recording, and every seeded file is unchanged.
+
+Not isolated: the machine's system configuration (`/etc/codex/config.toml`,
+`/etc/codex/requirements.toml`, the system skills in `/etc/codex/skills`),
+macOS managed preferences, and a ChatGPT enterprise workspace's
+cloud-managed configuration (`codex-rs/config/src/loader/README.md`, "Layering
+model"). A machine or account that has them records under them.
+
+### How Codex finds the sign-in
+
+- Codex keeps a ChatGPT or API-key sign-in in `auth.json` in its home. At
+  tag `rust-v0.172.0`, `codex-rs/login/src/auth/storage.rs:167–168` names the
+  file, `pub(super) fn get_auth_file(codex_home: &Path) -> PathBuf {` and
+  `codex_home.join("auth.json")`, and `FileAuthStorage::load` reads it
+  (`storage.rs:263–271`, `let auth_file = get_auth_file(&self.codex_home);`). The home is `CODEX_HOME`, else `~/.codex`,
+  so the user's file is `~/.codex/auth.json`, or `auth.json` in the
+  `CODEX_HOME` of the recorder's environment. That is file storage, Codex's
+  default when `config.toml` sets no `cli_auth_credentials_store`
+  (`codex-rs/config/src/types.rs:139–149`,
+  `codex-rs/core/src/config/mod.rs:4792–4797`); with `keyring` or `auto`
+  there, Codex keeps the sign-in in the OS keyring instead.
+- So the recorder copies only that file, into `<workspace>/codex-home/auth.json`,
+  mode 0600 in a directory only the user can enter. The workspace's Codex
+  home holds no `config.toml`, so the recorded Codex uses file storage. The
+  recorder reads nothing else of the user's, and never the keyring.
+- A ChatGPT sign-in's refresh token rotates: Codex writes the refreshed
+  tokens back to `auth.json`, as a new file renamed over the old one
+  (`FileAuthStorage::save`, `storage.rs:274–295`). After each scenario, also
+  one that fails, the recorder writes a changed copy back over the user's
+  file, so a rotated token is never lost. When the user's file also changed
+  meanwhile, or the recorder cannot write it, the recorder leaves it as it
+  is, adds the refreshed content to the run's recovery file beside it,
+  `auth.json.ari-recorder-refreshed-<pid>.json` (mode 0600; one record
+  `{ "id": "auth.json", "value" }`, with `olderValues` when a later scenario
+  kept a newer one), and reports the scenario failed
+  (`test/recordings/credential-file.ts`, `test/recordings/recovery.ts`).
+- When the recovery file cannot take the value either, the workspace's copy
+  holds the only copy. The recorder then keeps that workspace, stops the run,
+  and names the workspace and the copy in the error and in the run's last
+  lines.
+- When the user has no `auth.json` (the sign-in is in the keyring, or there is
+  none), a live run stops before it starts `codex`, naming the file. To
+  record, sign in with file storage (`codex login` with no
+  `cli_auth_credentials_store` set).
+
+The workspace, with the copied sign-in, is removed after each scenario, also
+after one that fails, unless it holds the only copy of a refreshed sign-in.
+
+### The Codex model
+
+Codex lists its models with the app-server's `model/list` request: each
+`Model` has an `id`, a `model`, a `displayName`, a `description`, whether it
+is `hidden` and whether it `isDefault`, and no size or price (the vendored
+schema's `Model`; `codex-rs/app-server/src/request_processors/catalog_processor.rs:302–358`
+lists the catalog in its order, without hidden models unless asked). Before
+the first prompt of each scenario the recorder asks, through a driver
+instance whose `codex app-server` starts in the scenario's workspace around
+the tap (not recorded). It records with the model `ARI_RECORD_CODEX_MODEL`
+names, else with the first model listed whose id or name holds the word
+`luna`, `nano` or `mini` (any case): OpenAI's API docs ("Models",
+https://developers.openai.com/api/docs/models, read 2026-11-25) name GPT-6
+Luna the model "for cost-sensitive, high-volume workloads", and OpenAI named
+its earlier small models mini and nano. Codex 0.172.0's bundled catalog lists
+`gpt-6-luna` ("Fast and affordable model for easier tasks") as its first such
+model (`codex-rs/models-manager/models.json`). The driver config's `model`
+starts the thread with it (`thread/start`), and Codex resumes a thread with
+the model it ran with (`codex-rs/app-server/src/request_processors/thread_processor.rs:305–334`).
+When the variable names a model Codex does not list, or it is not set and
+Codex lists no such model, the recorder stops before the first prompt, lists
+the models, and records nothing. Replay starts the thread with the model the
+header names.
+
 ## How to record
 
 You need Claude Code signed in on this machine (`claude auth status`), or an
@@ -1122,12 +1315,40 @@ below a folder holding `AGENTS.md`, `GEMINI.md` or `.agents/`, without a
 sign-in file, or without a model the agent offers, it exits 2 before the
 first prompt.
 
+### Recording Codex
+
+You need the Codex CLI on `PATH` (`codex --version` prints `codex-cli 0.172.0`
+for the version the driver is built on) and a sign-in in `~/.codex/auth.json`
+(see "How Codex finds the sign-in"). Recording spends your Codex usage: eight
+short turns.
+
+1. Run `pnpm install --frozen-lockfile`.
+2. Run `ARI_LIVE_RECORD=1 pnpm run record:codex`.
+3. To record with another model, set `ARI_RECORD_CODEX_MODEL` to one Codex
+   lists; a model it does not list stops the recorder before the first
+   prompt with the list.
+4. To record some scenarios only, or to write somewhere else, use the
+   arguments of `record:claude`: `-- simple resume`, `--out <dir>`.
+5. Run `pnpm run check:recordings`, then the replay tests.
+6. Read the diff of `test/drivers/codex/recordings/` before you commit it.
+
+The recorder writes `test/drivers/codex/recordings/<scenario>.ndjson`, one
+file per scenario, also for a scenario whose checks failed (it says which,
+and exits 1). When it cannot write a recording, it stops after that
+scenario. Its last lines name every recovery file and every kept workspace,
+whatever else failed. Without `ARI_LIVE_RECORD=1` it exits 2 before it loads
+anything or starts any process; with its temp workspace inside your home or
+below a folder holding `AGENTS.md`, `AGENTS.override.md`, `.codex` or
+`.agents`, without a sign-in file, or without a model Codex lists, it exits 2
+before the first prompt.
+
 ## How to refresh
 
 Record again when the vendor's version changes: a new pinned
 `@anthropic-ai/claude-agent-sdk` (which bundles a new Claude Code), a new
 `opencode` or pinned `@opencode/client`, a new `agy` or vendored ACP schema
-release, or a change to the scenarios.
+release, a new `codex` or vendored Codex schema, or a change to the
+scenarios.
 
 1. Bump the pinned SDK (or install the new `opencode`) and run `pnpm install`.
 2. Record all six again, as above.

@@ -76,6 +76,9 @@ test('the docs have the "How to record" and "How to refresh" sections a person f
   assert.match(section("Recording OpenCode"), /ARI_LIVE_RECORD=1 ARI_RECORD_OPENCODE_MODEL=<provider\/model> pnpm run record:opencode/);
   assert.match(section("Recording Antigravity"), /ARI_LIVE_RECORD=1 pnpm run record:antigravity/);
   assert.match(section("The Antigravity model"), /`ARI_RECORD_ANTIGRAVITY_MODEL`/);
+  assert.match(section("Recording Codex"), /ARI_LIVE_RECORD=1 pnpm run record:codex/);
+  assert.match(section("The Codex model"), /`ARI_RECORD_CODEX_MODEL`/);
+  assert.match(section("The Codex model"), /`luna`, `nano` or `mini`/);
   assert.match(section("How to refresh"), /Record again when the vendor's version changes/);
 });
 
@@ -130,4 +133,18 @@ test("the docs name the file the Antigravity recorder copies for the sign-in, wh
   for (const variable of ["HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "TMPDIR", "DBUS_SESSION_BUS_ADDRESS", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE"]) {
     assert.ok(tableRows(setup).some((row) => row[0] === `\`${variable}\``), `the table names ${variable}`);
   }
+});
+
+test("the docs name the file the Codex recorder copies for the sign-in, with the pinned rust-v0.172.0 source line that reads it, the variables it sets and the configuration it does not keep out", () => {
+  const signIn = section("How Codex finds the sign-in");
+  assert.match(signIn, /`~\/\.codex\/auth\.json`/);
+  assert.match(signIn, /`<workspace>\/codex-home\/auth\.json`/);
+  assert.match(signIn, /At\s+tag `rust-v0\.172\.0`, `codex-rs\/login\/src\/auth\/storage\.rs:167–168` names the\s+file, `pub\(super\) fn get_auth_file\(codex_home: &Path\) -> PathBuf \{` and\s+`codex_home\.join\("auth\.json"\)`/);
+  assert.match(signIn, /`FileAuthStorage::load` reads it\s+\(`storage\.rs:263–271`/);
+  assert.match(signIn, /So the recorder copies only that file/);
+  assert.match(signIn, /refresh token rotates/);
+  const setup = section("How the Codex recorder keeps the user's setup out");
+  for (const variable of ["CODEX_HOME", "HOME", "TMPDIR"]) assert.ok(tableRows(setup).some((row) => row[0] === `\`${variable}\``), `the table names ${variable}`);
+  for (const source of ["`/etc/codex/config.toml`", "`/etc/codex/requirements.toml`", "macOS managed preferences", "cloud-managed configuration"]) assert.ok(setup.includes(source), `the Codex section names ${source}`);
+  assert.match(setup, /strips every variable whose name starts with `CODEX_` or\s+`OPENAI_`/);
 });

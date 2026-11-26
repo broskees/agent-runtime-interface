@@ -35,14 +35,11 @@ import type { ScenarioName, ScenarioRun } from "../../recordings/scenarios.ts";
 import { ReplayCheckError, ReplayDriftError, showFrame } from "../../recordings/sequencer.ts";
 import { resanitiseRecording } from "../../recordings/resanitise.ts";
 import { replacedProtocolWords, wholeWordsOf } from "../../recordings/whole-words.ts";
-import { FAKE_CODEX_CLI_VERSION, fakeCodexOnPath } from "./fake-codex.ts";
+import { FAKE_CODEX_CLI_VERSION, FAKE_SIGN_IN, fakeCodexOnPath } from "./fake-codex.ts";
 import type { FakeCodex } from "./fake-codex.ts";
 
 const DIRECTORY = fs.mkdtempSync(path.join(os.tmpdir(), "ari-codex-recordings-"));
 process.on("exit", () => fs.rmSync(DIRECTORY, { recursive: true, force: true }));
-
-/** A ChatGPT sign-in as Codex writes `auth.json` (codex-rs/login/src/auth/storage.rs, AuthDotJson), with synthetic tokens. */
-export const FAKE_SIGN_IN = JSON.stringify({ auth_mode: "chatgpt", OPENAI_API_KEY: null, tokens: { id_token: "fake-id-token", access_token: "fake-access-token", refresh_token: "fake-refresh-0001", account_id: "fake-account" }, last_refresh: "2026-11-25T00:00:00Z" }, null, 2);
 
 interface Recorded {
   readonly outcomes: CodexRecordOutcome[];

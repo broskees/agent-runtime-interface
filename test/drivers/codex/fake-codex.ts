@@ -14,6 +14,9 @@ import { REPO_ROOT } from "../../helpers/spec.ts";
 /** What the fake `codex` prints for `--version`, after `codex-cli `. */
 export const FAKE_CODEX_CLI_VERSION = "0.172.0-fake";
 
+/** A ChatGPT sign-in as Codex writes `auth.json` (codex-rs/login/src/auth/storage.rs, `AuthDotJson`), with synthetic tokens. */
+export const FAKE_SIGN_IN = JSON.stringify({ auth_mode: "chatgpt", OPENAI_API_KEY: null, tokens: { id_token: "fake-id-token", access_token: "fake-access-token", refresh_token: "fake-refresh-0001", account_id: "fake-account" }, last_refresh: "2026-11-25T00:00:00Z" }, null, 2);
+
 function model(id: string, displayName: string, description: string, isDefault: boolean): Model {
   return { id, model: id, displayName, description, hidden: false, isDefault, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }, { reasoningEffort: "medium", description: "Balanced" }] };
 }

@@ -9,13 +9,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { recordingFiles, scanRecordingText, scanRecordings } from "../../scripts/check-recordings.ts";
 import { REPO_ROOT } from "../helpers/spec.ts";
 import { encodeRecording, parseRecording, readRecording } from "./format.ts";
 import type { Frame, RecordingMetadata } from "./format.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "./claude/protocol-words.ts";
 import { resanitiseRecording } from "./resanitise.ts";
-import { NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_SHELL, NEUTRAL_SOCKET_PATH, NEUTRAL_TIME, NEUTRAL_TMP_PATH, PLACEHOLDERS, createSanitiser, secretVariablesOf, userNames } from "./sanitiser.ts";
+import { NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_SHELL, NEUTRAL_SOCKET_PATH, NEUTRAL_TIME, NEUTRAL_TMP_PATH, PLACEHOLDERS, createSanitiser, osUserName, secretVariablesOf, userNames } from "./sanitiser.ts";
 
 const METADATA: RecordingMetadata = {
   driver: "claude",
@@ -246,6 +247,40 @@ test("the user names are the OS user's (os.userInfo), and USER and LOGNAME too w
   assert.deepEqual(userNames({ env: { USER: osName, LOGNAME: osName } }), [osName]);
   const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: "stale-user", LOGNAME: "other-login" } });
   assert.equal(sanitise(`/srv/${osName}/a /srv/stale-user/b /srv/other-login/c`), "/srv/<USER>/a /srv/<USER>/b /srv/<USER>/c");
+});
+
+test("under Bun with USER and LOGNAME stripped, where os.userInfo() says unknown, the sanitiser still finds the OS user name and replaces it", () => {
+  const account = osUserName();
+  assert.ok(account !== undefined && account !== "" && account !== "unknown", `the OS has a user name: ${String(account)}`);
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-bun-user-")));
+  try {
+    const home = path.join(directory, "child-home");
+    fs.mkdirSync(home);
+    const script = path.join(directory, "probe.ts");
+    fs.writeFileSync(
+      script,
+      [
+        'import * as os from "node:os";',
+        `const { createSanitiser } = await import(${JSON.stringify(pathToFileURL(path.join(REPO_ROOT, "test", "recordings", "sanitiser.ts")).href)});`,
+        'const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: process.env.HOME } });',
+        "const name = process.env.ARI_TEST_ACCOUNT;",
+        'process.stdout.write(JSON.stringify({ reported: os.userInfo().username, user: process.env.USER ?? null, logname: process.env.LOGNAME ?? null, out: sanitise(`drwx------ 2 ${name} ${name} 4096 Nov 25 12:00 project`) }));',
+      ].join("\n"),
+    );
+    const env: { [name: string]: string } = {};
+    for (const [name, value] of Object.entries(process.env)) if (value !== undefined && name !== "USER" && name !== "LOGNAME") env[name] = value;
+    Object.assign(env, { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), XDG_DATA_HOME: path.join(home, ".local", "share"), XDG_STATE_HOME: path.join(home, ".local", "state"), XDG_CACHE_HOME: path.join(home, ".cache"), ARI_TEST_ACCOUNT: account });
+    // Bun runs the probe: the runtime running this test under `bun test`, else the bun on PATH (every CI leg installs it).
+    const bun = process.versions["bun"] === undefined ? "bun" : process.execPath;
+    const run = spawnSync(bun, [script], { cwd: directory, encoding: "utf8", env });
+    assert.equal(run.status, 0, `${bun} ${script}: ${run.error?.message ?? run.stderr}`);
+    const probe = JSON.parse(run.stdout) as { reported: string; user: string | null; logname: string | null; out: string };
+    assert.deepEqual({ user: probe.user, logname: probe.logname }, { user: null, logname: null }, "the probe ran without USER and LOGNAME");
+    assert.ok(probe.reported === "unknown" || probe.reported === account, `Bun's os.userInfo().username: ${probe.reported}`);
+    assert.equal(probe.out, `drwx------ 2 ${PLACEHOLDERS.user} ${PLACEHOLDERS.user} 4096 Nov 25 12:00 project`, `os.userInfo() said ${probe.reported}`);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("a $HOME holding a quote, a backslash and a space is found by the scan through JSON's escaping, and the sanitiser removes it", () => {

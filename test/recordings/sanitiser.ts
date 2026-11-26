@@ -295,12 +295,50 @@ function realPath(value: string): string {
   }
 }
 
-function osUser(): string | undefined {
+/** What Bun 1.3.14's os.userInfo() reports as the user name when neither USER nor LOGNAME is set. */
+const BUN_UNKNOWN_USER = "unknown";
+
+/** The name /etc/passwd gives the user id `uid`, if the file has it (it has every local account on Linux; macOS keeps people elsewhere). */
+function passwdName(uid: number): string | undefined {
+  let text: string;
   try {
-    return os.userInfo().username;
+    text = fs.readFileSync("/etc/passwd", "utf8");
   } catch {
     return undefined;
   }
+  for (const line of text.split("\n")) {
+    const [name, , id] = line.split(":");
+    if (name !== undefined && name !== "" && id !== undefined && Number(id) === uid) return name;
+  }
+  return undefined;
+}
+
+/**
+ * The OS user's name: os.userInfo().username, except where that is Bun's
+ * "unknown" (Bun 1.3.14 takes the name from USER and LOGNAME, and reports
+ * "unknown" when a launcher strips both). Then the name the user's id has in
+ * /etc/passwd, else the name of the home directory when the user owns it.
+ */
+export function osUserName(): string | undefined {
+  let info: os.UserInfo<string> | undefined;
+  try {
+    info = os.userInfo();
+  } catch {
+    info = undefined;
+  }
+  const reported = info?.username;
+  if (reported !== undefined && reported !== "" && reported !== BUN_UNKNOWN_USER) return reported;
+  const uid = typeof process.getuid === "function" ? process.getuid() : info?.uid;
+  if (uid === undefined || uid < 0) return reported === "" ? undefined : reported;
+  const named = passwdName(uid);
+  if (named !== undefined) return named;
+  const home = info?.homedir ?? os.homedir();
+  try {
+    if (home !== "" && fs.statSync(home).uid === uid) return home.split(/[/\\]/).filter((segment) => segment !== "").at(-1) ?? reported;
+  } catch {
+    // No home to look at.
+  }
+  return reported === "" ? undefined : reported;
 }
 
 // What the scan refuses, as replacements. Each regex is global.
@@ -322,7 +360,7 @@ const PATH_TOKEN = /(?<![A-Za-z0-9._~-])(?:[A-Za-z]:[\\/]|[/\\~])[^\s"'`<>|,;()[
 
 /** The user names the sanitiser replaces: the OS user's, and USER and LOGNAME when they differ. */
 export function userNames(input: Pick<SanitiserInput, "env" | "user">): string[] {
-  const names = [input.user ?? osUser(), input.env["USER"], input.env["LOGNAME"]];
+  const names = [input.user ?? osUserName(), input.env["USER"], input.env["LOGNAME"]];
   return [...new Set(names.filter((name): name is string => name !== undefined && name !== "" && !/[/\\\s]/.test(name)))];
 }
 

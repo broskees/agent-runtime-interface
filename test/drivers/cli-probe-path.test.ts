@@ -2,10 +2,12 @@
 // the same search, including when the instance overrides the host's PATH.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { createFakeHost } from "../../src/conformance/index.ts";
 import { codexDriver } from "../../src/drivers/codex/index.ts";
 import { museDriver } from "../../src/drivers/muse/index.ts";
@@ -64,3 +66,17 @@ function checkProbePath<Config>(driver: Driver<Config>, command: string, old: st
 
 checkProbePath(codexDriver, "codex", "0.100.0", "0.172.0");
 checkProbePath(museDriver, "muse", "1.4.7", "1.4.25");
+
+for (const command of ["codex", "muse"]) {
+  test(`${command} names the old executable selected by the delegated owner's Win32 Path override (modeled on POSIX)`, () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-cli-probe-win32-")));
+    try {
+      // Node's builtin ESM exports are mutable via syncBuiltinESMExports. Keep
+      // the model in its own Node process, including when Bun runs this suite.
+      const fixture = fileURLToPath(new URL("./fixtures/cli-probe-win32.ts", import.meta.url));
+      execFileSync("node", [fixture, command, root], { timeout: 15_000, stdio: "pipe" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}

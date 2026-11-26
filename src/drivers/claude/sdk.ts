@@ -14,8 +14,11 @@
 // Field names follow the SDK (snake_case where it uses it). Sources: the SDK's
 // sdk.d.ts at 0.3.330 and https://docs.claude.com/en/docs/agent-sdk/typescript.
 
+import * as fs from "node:fs/promises";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { callErrors } from "../../errors.ts";
-import { CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE } from "../../meta/claude.ts";
+import { CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_STANDALONE_INSTALL_HINT } from "../../meta/claude.ts";
 
 /** The SDK's `UUID` (from `node:crypto`): five hyphen-separated groups. */
 export type ClaudeUuid = `${string}-${string}-${string}-${string}-${string}`;
@@ -295,6 +298,13 @@ export interface ClaudeSdkRuntime {
   readonly claudeCodeVersion: string | undefined;
   /** The bundled native Claude Code binary, or null when the SDK's platform package is missing. */
   readonly bundledExecutable: string | null;
+  /**
+   * True when the SDK cannot find `bundledExecutable` by itself, so every
+   * query names it in `pathToClaudeCodeExecutable`. A managed install keeps
+   * the native package in a directory of its own, outside any `node_modules`
+   * the SDK searches. Left out, the SDK finds its binary as it always does.
+   */
+  readonly passBundledExecutable?: boolean;
 }
 
 /** Loads the SDK. Rejects with `driver_unavailable` naming the package when it is not installed. */
@@ -325,12 +335,113 @@ export function nativeBinaryCandidates(platform: string, arch: string, preferMus
   return packages.map((name) => `${name}/claude${extension}`);
 }
 
+/** True on Linux when this process runs on musl, decided as the SDK decides it: the process report names no glibc version. */
+export function prefersMusl(): boolean {
+  if (process.platform !== "linux") return false;
+  const report = typeof process.report?.getReport === "function" ? (process.report.getReport() as { header?: { glibcVersionRuntime?: string } }) : undefined;
+  return report !== undefined && report.header?.glibcVersionRuntime === undefined;
+}
+
+/**
+ * True when `moduleUrl` lies in a Bun standalone executable's embedded file
+ * system: `/$bunfs/` on Linux and macOS, `B:/~BUN/` on Windows (Bun's
+ * `StandaloneModuleGraph` base paths). Code there cannot import a package by
+ * name, because Bun resolves the name against that embedded root and never
+ * against a `node_modules` on disk; a file URL still loads.
+ */
+export function isStandaloneExecutableModule(moduleUrl: string): boolean {
+  return /^file:\/\/\/(?:\$bunfs\/|[A-Za-z]:\/~BUN\/)/.test(moduleUrl);
+}
+
+/**
+ * The native binary the SDK whose entry module is `entryFile` would run: the
+ * first of its platform packages that resolves from that file, as the SDK
+ * resolves them (`createRequire` on its own module). Null when none does.
+ */
+async function findBundledExecutable(entryFile: string): Promise<string | null> {
+  const require = createRequire(entryFile);
+  for (const candidate of nativeBinaryCandidates(process.platform, process.arch, prefersMusl())) {
+    try {
+      const resolved = require.resolve(candidate);
+      await fs.access(resolved);
+      return resolved;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/** The SDK package's version, bundled Claude Code version and entry module, from its package.json. */
+function readSdkManifest(text: string): { version: string | undefined; claudeCodeVersion: string | undefined; entry: string } {
+  const manifest = JSON.parse(text) as { version?: unknown; claudeCodeVersion?: unknown; main?: unknown; exports?: unknown };
+  // The "." export: a string, or conditions of which `import` or `default` names the module (the SDK uses `default`).
+  const root = typeof manifest.exports === "object" && manifest.exports !== null ? (manifest.exports as { [subpath: string]: unknown })["."] : manifest.exports;
+  const conditions = typeof root === "object" && root !== null ? (root as { [condition: string]: unknown }) : {};
+  const fromExports = typeof root === "string" ? root : [conditions["import"], conditions["default"]].find((target): target is string => typeof target === "string");
+  return {
+    version: typeof manifest.version === "string" ? manifest.version : undefined,
+    claudeCodeVersion: typeof manifest.claudeCodeVersion === "string" ? manifest.claudeCodeVersion : undefined,
+    entry: fromExports ?? (typeof manifest.main === "string" ? manifest.main : "index.js"),
+  };
+}
+
+/**
+ * Imports the SDK package installed in `packageDirectory` by the file URL of
+ * its entry module, never by package name, so it loads in the standalone
+ * executable too. The module's own imports then resolve from its place on
+ * disk. `unavailable` builds the error for a package that is missing or fails
+ * to load.
+ */
+export async function importClaudeSdkPackage(
+  packageDirectory: string,
+  unavailable: (detail: string) => Error,
+): Promise<{ sdk: ClaudeSdk; version: string | undefined; claudeCodeVersion: string | undefined; entryFile: string }> {
+  let manifest: ReturnType<typeof readSdkManifest>;
+  try {
+    manifest = readSdkManifest(await fs.readFile(`${packageDirectory}/package.json`, "utf8"));
+  } catch (error) {
+    throw unavailable(`${packageDirectory}/package.json cannot be read (${errorText(error)})`);
+  }
+  const entryFile = `${packageDirectory}/${manifest.entry.replace(/^\.\//, "")}`;
+  let sdk: ClaudeSdk;
+  try {
+    sdk = (await import(pathToFileURL(entryFile).href)) as ClaudeSdk;
+  } catch (error) {
+    throw unavailable(`${entryFile} failed to load: ${errorText(error)}`);
+  }
+  return { sdk, version: manifest.version, claudeCodeVersion: manifest.claudeCodeVersion, entryFile };
+}
+
+/**
+ * Loads the SDK from `directory`, a directory `npm install
+ * @anthropic-ai/claude-agent-sdk` ran in (the `sdkDirectory` config field):
+ * `<directory>/node_modules/@anthropic-ai/claude-agent-sdk`, imported by file
+ * URL, and the native binary from the platform package beside it, which the
+ * SDK finds by itself too.
+ */
+export async function loadClaudeSdkFromDirectory(directory: string): Promise<ClaudeSdkRuntime> {
+  const hint = `Install it there (npm install --prefix ${directory} ${CLAUDE_SDK_PACKAGE}), or remove sdkDirectory from the driver config and run maintenance.install.`;
+  const loaded = await importClaudeSdkPackage(`${directory.replace(/[\\/]+$/, "")}/node_modules/${CLAUDE_SDK_PACKAGE}`, (detail) =>
+    callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: hint }, `The Claude Agent SDK cannot be loaded from sdkDirectory ${directory}: ${detail}. ${hint}`),
+  );
+  return { sdk: loaded.sdk, version: loaded.version, claudeCodeVersion: loaded.claudeCodeVersion, bundledExecutable: await findBundledExecutable(loaded.entryFile) };
+}
+
 /**
  * The default loader: `import("@anthropic-ai/claude-agent-sdk")`, then the
  * SDK's package.json for its version, then the native binary the SDK would
- * run, found the way the SDK finds it. Nothing is spawned.
+ * run, found the way the SDK finds it. Nothing is spawned. In the standalone
+ * executable a package cannot be imported by name, so there it reports the
+ * SDK missing at once, naming the two steps that work there.
  */
 export async function loadClaudeSdk(): Promise<ClaudeSdkRuntime> {
+  if (isStandaloneExecutableModule(import.meta.url)) {
+    throw callErrors.driverUnavailable(
+      { package: CLAUDE_SDK_PACKAGE, installHint: CLAUDE_STANDALONE_INSTALL_HINT },
+      `The Claude Agent SDK (${CLAUDE_SDK_PACKAGE}) is not installed for this standalone ari-driver, which cannot load a package by name. ${CLAUDE_STANDALONE_INSTALL_HINT}`,
+    );
+  }
   let sdk: ClaudeSdk;
   try {
     sdk = (await import(SDK_SPECIFIER)) as ClaudeSdk;
@@ -338,35 +449,19 @@ export async function loadClaudeSdk(): Promise<ClaudeSdkRuntime> {
     if (isModuleNotFound(error)) {
       throw callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: CLAUDE_INSTALL_HINT }, `The Claude Agent SDK (${CLAUDE_SDK_PACKAGE}) is not installed. ${CLAUDE_INSTALL_HINT}`);
     }
-    throw callErrors.driverUnavailable(
-      { package: CLAUDE_SDK_PACKAGE, installHint: CLAUDE_INSTALL_HINT },
-      `The Claude Agent SDK (${CLAUDE_SDK_PACKAGE}) failed to load: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    throw callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: CLAUDE_INSTALL_HINT }, `The Claude Agent SDK (${CLAUDE_SDK_PACKAGE}) failed to load: ${errorText(error)}`);
   }
-  const [{ createRequire }, fs, { fileURLToPath }] = await Promise.all([import("node:module"), import("node:fs/promises"), import("node:url")]);
   const entry = import.meta.resolve(SDK_SPECIFIER);
   let version: string | undefined;
   let claudeCodeVersion: string | undefined;
   try {
-    const manifest = JSON.parse(await fs.readFile(new URL("./package.json", entry), "utf8")) as { version?: unknown; claudeCodeVersion?: unknown };
-    if (typeof manifest.version === "string") version = manifest.version;
-    if (typeof manifest.claudeCodeVersion === "string") claudeCodeVersion = manifest.claudeCodeVersion;
+    ({ version, claudeCodeVersion } = readSdkManifest(await fs.readFile(new URL("./package.json", entry), "utf8")));
   } catch {
     version = undefined;
   }
-  const require = createRequire(fileURLToPath(entry));
-  const report = typeof process.report?.getReport === "function" ? (process.report.getReport() as { header?: { glibcVersionRuntime?: string } }) : undefined;
-  const preferMusl = process.platform === "linux" && report !== undefined && report.header?.glibcVersionRuntime === undefined;
-  let bundledExecutable: string | null = null;
-  for (const candidate of nativeBinaryCandidates(process.platform, process.arch, preferMusl)) {
-    try {
-      const resolved = require.resolve(candidate);
-      await fs.access(resolved);
-      bundledExecutable = resolved;
-      break;
-    } catch {
-      continue;
-    }
-  }
-  return { sdk, version, claudeCodeVersion, bundledExecutable };
+  return { sdk, version, claudeCodeVersion, bundledExecutable: await findBundledExecutable(fileURLToPath(entry)) };
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

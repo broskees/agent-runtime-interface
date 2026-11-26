@@ -18,10 +18,12 @@
 // picked up without editing anything. A module path (`ari-driver
 // ./my-driver.js`) still loads from disk at run time.
 //
-// The optional vendor SDKs in `peerDependencies` stay outside the bundle: a
-// driver that needs one reports it missing in `status()`, as it does under
-// Node when the package is not installed. Drivers whose SDK ships its own
-// native binaries need those provisioned beside the executable.
+// The optional vendor SDKs in `peerDependencies` stay outside the bundle, and
+// the executable cannot import a package by name at run time. The `claude`
+// driver therefore loads its SDK by file URL, from the directory its
+// `sdkDirectory` config names or from what `maintenance.install` downloaded
+// (the SDK's licence is Anthropic's, so ARI does not ship it). The other
+// SDK drivers report their SDK missing in `status()`.
 //
 // `--fakes` also compiles the fake native agents the end-to-end tests use,
 // test/drivers/pi/fake-pi.ts as `pi` and test/drivers/acp/standalone-agent.ts

@@ -5,6 +5,11 @@
 // `create()` does neither: a missing SDK or native binary shows in
 // `status()` and fails `openSession` with `driver_unavailable`.
 //
+// Where no package can be imported by name (the standalone `ari-driver`),
+// the SDK comes from the directory the config's `sdkDirectory` names, or
+// from `maintenance.install`, which downloads it from an npm registry into
+// the instance's cache directory. Both load it by file URL.
+//
 // `createClaudeDriver({ loadSdk, newUuid })` builds the driver with another
 // SDK loader (a host that bundles the SDK, or a test's fake) and another
 // source of the UUIDs it gives Claude; `claudeDriver` uses the defaults.

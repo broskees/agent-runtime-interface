@@ -619,6 +619,10 @@ export class FakeServer {
   alive = true;
   url = "";
 
+  get subscriberCount(): number {
+    return this.#subscribers.size;
+  }
+
   constructor(world: FakeWorld, password: string | undefined) {
     this.world = world;
     this.number = world.nextServer();
@@ -1013,7 +1017,12 @@ export class FakeServer {
   async #handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", this.url);
     const chunks: Buffer[] = [];
-    for await (const chunk of request) chunks.push(chunk as Buffer);
+    const length = request.headers["content-length"];
+    // Don't iterate an empty request. Bun 1.3.14 then stops reporting the
+    // later disconnect of the socket carrying its streaming response.
+    if (request.headers["transfer-encoding"] !== undefined || (length !== undefined && length !== "0")) {
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+    }
     const raw = Buffer.concat(chunks).toString("utf8");
     let body: unknown;
     const hasBody = raw !== "";
@@ -1053,7 +1062,7 @@ export class FakeServer {
       return;
     }
     if (matched.operationId === "event.subscribe" || matched.operationId === "v2.event.subscribe") {
-      this.#subscribe(url, response);
+      this.#subscribe(url, request.socket, response);
       return;
     }
     const answer = this.world.generation === 1 ? this.#routeV1(matched, url, body as Json | undefined) : this.#routeV2(matched, url, body as Json | undefined);
@@ -1065,12 +1074,19 @@ export class FakeServer {
     answer.after?.();
   }
 
-  #subscribe(url: URL, response: http.ServerResponse): void {
+  #subscribe(url: URL, socket: http.IncomingMessage["socket"], response: http.ServerResponse): void {
     const directory = this.world.generation === 1 ? (url.searchParams.get("directory") ?? undefined) : undefined;
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform" });
     const subscriber: Subscriber = { directory, response };
     this.#subscribers.add(subscriber);
-    response.on("close", () => this.#subscribers.delete(subscriber));
+    const unsubscribe = (): void => {
+      this.#subscribers.delete(subscriber);
+      socket.off("close", unsubscribe);
+      response.off("close", unsubscribe);
+    };
+    // Bun 1.3.14 reports a client's disconnect on the socket but not the response.
+    socket.once("close", unsubscribe);
+    response.once("close", unsubscribe);
     // The first event of every stream (1.x `handlers/event.ts`, 2.x `groups/event`).
     const connected = this.world.generation === 1 ? { id: this.world.nextId("evt"), type: "server.connected", properties: {} } : { id: this.world.nextId("evt"), type: "server.connected", data: {} };
     this.world.checkEvent(connected);

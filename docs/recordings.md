@@ -26,16 +26,19 @@ The kit lives in `test/recordings/`:
 | `stdio/` | the process tap and the replay process service, for every driver that starts its agent through `HostServices.process` and talks to it on stdin and stdout |
 | `acp/` | the ACP protocol words and the approval answers read off ACP traffic |
 | `antigravity/` | the Antigravity layout and model choice, the sign-in file, and the recording and replay functions |
+| `codex/` | the Codex protocol words, the approval answers and turns read off app-server traffic, the Codex layout, the sign-in file, the model choice, and the recording and replay functions |
+| `protocol-places.ts` | protocol words by place: where the pinned types put a string literal in an inbound frame |
 
 `scripts/record-claude.ts` is the Claude recorder, `scripts/record-opencode.ts`
-the OpenCode recorder and `scripts/record-antigravity.ts` the Antigravity
-recorder. `scripts/check-recordings.ts` is the scan the gate runs.
+the OpenCode recorder, `scripts/record-antigravity.ts` the Antigravity
+recorder and `scripts/record-codex.ts` the Codex recorder. `scripts/check-recordings.ts` is the scan the gate runs.
 `scripts/resanitise-recordings.ts` sanitises committed recordings again.
 Nothing here ships in the npm tarball.
 
 The live recordings are in `test/drivers/claude/recordings/` and
 `test/drivers/opencode/recordings/`, one file per scenario. The Antigravity
-recorder writes to `test/drivers/antigravity/recordings/`. The gate replays
+recorder writes to `test/drivers/antigravity/recordings/`, the Codex recorder
+to `test/drivers/codex/recordings/`. The gate replays
 them: `test/drivers/claude/live-recordings.test.ts` and
 `test/drivers/opencode/live-recordings.suite.ts` take the list of files from
 the scenario module, check each header (`source: live`, the vendor version
@@ -161,8 +164,8 @@ request before the close, and a replay could see them the other way round.
 
 The process tap (`test/recordings/stdio/tap.ts`) wraps the `HostServices.process`
 the recorder hands a driver that starts its agent as a process and talks to it
-on stdin and stdout (the Antigravity driver; later the Codex driver and the
-other ACP flavors). It records the traffic between the driver and every
+on stdin and stdout (the Antigravity and Codex drivers; later the other ACP
+flavors). It records the traffic between the driver and every
 process the driver starts, and knows nothing of the protocol on the pipes.
 Every frame names its process by `proc`: 1, 2, ... in the order the driver
 asked the host to spawn them.
@@ -188,8 +191,8 @@ before its line feed. A line is kept as parsed JSON, so replay compares JSON
 values, not bytes.
 
 `resolveExecutable` and the host's `envPolicy` pass through the tap
-unrecorded. The recorder's own `agy --version` for the header goes around the
-tap.
+unrecorded. The recorder's own `agy --version` and `codex --version` for the
+header, and the Codex recorder's model listing, go around the tap.
 
 ## The scenarios
 
@@ -204,6 +207,12 @@ mode. All six run under the `approval_required` mode.
 | `multi_turn` | sends two prompts on one thread | both turns `completed`, in order; the second turn's text holds the word the first prompt gave |
 | `approval_allowed` | allows the command once | a `command` request reaches the host; the allow-once answer is a recorded outbound frame; a command or tool item completes; the turn completes |
 | `approval_denied` | declines the command | the same request; the decline is a recorded outbound frame; no completed command or tool item's output holds the marker; the turn ends |
+
+The host answers a request with its `decline` option. An agent that offers
+none, only a decline that also stops the turn (`cancel`), gets that one:
+Codex's ordinary command approval offers `accept` and `cancel` only
+(`codex-rs/protocol/src/approvals.rs:379–411` at tag `rust-v0.172.0`), and a
+`cancel` answer counts as the decline in the check.
 | `interrupt` | calls `interruptTurn` after the first assistant text | the turn ends `interrupted` |
 | `resume` | closes the session after one turn, then resumes the thread by its native handle in a new session | the second turn completes with no `session.replaced`, and its text holds the word the first prompt gave |
 
@@ -322,7 +331,12 @@ Replay detects:
   ACP response to `session/prompt` the turn never ends; without the
   `tool_call_update` that completes the approved command, its output never
   reaches the host; without the one that fails the declined command, the
-  command shows as completed when the turn ends. When every recorded frame
+  command shows as completed when the turn ends. For Codex: without the
+  `turn/completed` notification the turn never ends; without the frames that
+  carry the approved command's output (`item/commandExecution/outputDelta`
+  and its `item/completed`), no completed command holds the marker; a
+  declined command's `item/completed` that says `completed` with the marker
+  fails `approval_denied`. When every recorded frame
   was replayed and a scenario assertion still fails, the Antigravity replay's
   error names the recording file, the recorded frame the outcome depended on,
   whose line leads the error, and the frame replayed last
@@ -364,6 +378,20 @@ Replay does not detect:
   the replay child's `exited` settles.
 - a stdout or stderr line added right after its process's exit, which the
   driver reads to the end of the pipe and ignores.
+- for Codex, a removed `item/completed` of a command whose output was
+  streamed: the driver settles every item still open as `completed` when the
+  turn completes, with the output streamed so far, so the outcome is the
+  same.
+
+The Codex replay names the frames a failed assertion depended on as the
+Antigravity replay does: the last recorded inbound frame holding the native id
+of an item it looked at, else, for each turn, the `turn/completed` that ended
+it, labelled with the line of the turn's `turn/start` request
+(`codexTurnsDependedOn`): `depended on (line 25, the turn/completed that ended
+turn 1, started at line 13)`. When an app-server's stdin request and its
+answer are appended after its exit, Codex replay reports both as not replayed:
+the Codex driver does not wait for an app-server's stdout to end when it
+closes a session.
 
 ## Fields replay ignores
 
@@ -372,7 +400,9 @@ checks this table against the code's list. OpenCode replay leaves out no
 field: the driver builds every request from the scenario, its config and what
 the server answered, so a replay sends the same requests byte for byte, and a
 recording holds no request headers. Antigravity replay leaves out only the ARI
-version in the driver's ACP `initialize` request (`clientInfo.version`).
+version in the driver's ACP `initialize` request (`clientInfo.version`), and
+Codex replay only the ARI version in the driver's app-server `initialize`
+request.
 
 | Driver | Frame kind | Field | Reason |
 |---|---|---|---|
@@ -381,16 +411,18 @@ version in the driver's ACP `initialize` request (`clientInfo.version`).
 | claude | `query` | `options.pathToClaudeCodeExecutable` | the path of the user's claude, which differs between machines (a replay names /ari-replay/claude); recordings made before the driver ran the user's Claude Code have none |
 | claude | `query` | `options.mcpServersDelivery` | the driver sets it to initialize on every query since it runs the user's Claude Code; recordings made before then have none, and test/drivers/claude/availability.test.ts checks every query sets it |
 | antigravity | `stdin` | `message.params.clientInfo.version` | the driver's ACP initialize request names the ARI version, which changes with every ARI release |
+| codex | `stdin` | `message.params.clientInfo.version` | the driver's initialize request names the ARI version, which changes with every ARI release |
 
 ## Sanitising and the scan
 
 The repository is public, so every recorder sanitises each frame before it
 writes. All recorders use one sanitiser, `test/recordings/sanitiser.ts`. It
 replaces, in every string and object key (a frame's own format fields, `dir`,
-`kind`, `query`, `id`, `method`, `toolName` and `contentType`, stay as the
-recorder wrote them when they hold a string, a number, a boolean or null; an
-OpenCode request's `query` is an object of the request's query parameters,
-and is sanitised like any other value):
+`kind`, `query`, `id`, `method` and `contentType`, stay as the recorder wrote
+them when they hold a string, a number, a boolean or null; an OpenCode
+request's `query` is an object of the request's query parameters, and is
+sanitised like any other value; a Claude `can_use_tool` frame's `toolName` is
+the agent's tool name, and is sanitised like its `input`):
 
 | What | Placeholder |
 |---|---|
@@ -399,7 +431,7 @@ and is sanitised like any other value):
 | `$HOME`, and its real path | `<HOME>` |
 | the values of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` | `<ANTHROPIC_API_KEY>`, `<ANTHROPIC_AUTH_TOKEN>`, `<CLAUDE_CODE_OAUTH_TOKEN>` |
 | the value of every other variable of the recorder's environment whose name ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, when it is 8 characters or more | `<NAME>`, for example `<GEMINI_API_KEY>` |
-| the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ): in an inbound frame wherever it is a whole word, except in a protocol word; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
+| the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ; under Bun, whose `os.userInfo()` says `unknown` when `USER` and `LOGNAME` are not set, the name `/etc/passwd` gives the user's id, else the name of the home directory the user owns): in an inbound frame wherever it is a whole word, except in a protocol word at its place; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
 | email addresses | `<EMAIL>` |
 | the string value under a key that names an account or organisation id (compared without case, `-` or `_`: a key ending in `accountid` or `accountuuid`, or in `orgid`, `organizationid`, `organisationid` or their `uuid` forms), in both directions. OpenCode 2.1.2's model list carries the user's ChatGPT account id (`chatgpt-account-id`) and OpenCode organisation id (`x-opencode-org-id`) as request headers of their models | `<ACCOUNT_ID>`, `<ORG_ID>` |
 | another home directory: `/home/<name>`, `/Users/<name>`, `/root` | `<OTHER_HOME>` |
@@ -432,6 +464,18 @@ another type than the rule's stays as it is. The code is
 | a credit balance: the binary's `usedPromptCredits`, `availableFlowCredits`, `monthlyPromptCredits`, `consumedCredits`, `availableCredits` | a key ending in `credits` (a number, or a number written as a string) | `0`, or `"0"` |
 | whether the user is signed in to a provider: the binary's `isAuthenticated` | `signedIn`, `isSignedIn`, `loggedIn`, `isLoggedIn`, `authenticated`, `isAuthenticated` (a boolean) | `true` |
 | whether a provider still needs the user to sign in: the binary's `needs_auth` | `needsAuth`, `needsSignIn`, `needsLogin` (a boolean) | `false` |
+| Codex's rate-limit windows: a rate-limit snapshot's (`RateLimitSnapshot`, in `account/rateLimits/updated` and `account/rateLimits/read`) `primary` and `secondary` `RateLimitWindow`, with its used percentage, window length and reset time | `primary`, `secondary` (an object with a number `usedPercent`), replaced whole | `{"usedPercent":0,"windowDurationMins":300,"resetsAt":4102444800}` and `{"usedPercent":0,"windowDurationMins":10080,"resetsAt":4102444800}`: the driver names them `5h` and `weekly` |
+| Codex's credit balance: a rate-limit snapshot's `credits` (`CreditsSnapshot`) | `credits` (an object with a boolean `hasCredits`), replaced whole | `{"hasCredits":false,"unlimited":false,"balance":"0"}` |
+| Codex's spend-control limit: a rate-limit snapshot's `individualLimit` (`SpendControlLimitSnapshot`) | `individualLimit` (an object with a number `remainingPercent`), replaced whole | `{"limit":"0","remainingPercent":0,"resetsAt":4102444800,"used":"0"}` |
+| Codex's rate-limit reset credits: `rateLimitResetCredits` (`RateLimitResetCreditsSummary`) of a usage read | `rateLimitResetCredits` (an object with a number `availableCount`), replaced whole | `{"availableCount":0,"credits":[]}` |
+| any other usage percentage | `usedPercent`, `remainingPercent` (a number) | `0` |
+| whether the account reached a limit: Codex's `rateLimitReachedType` and `spendControlReached` | `rateLimitReachedType` (a string), `spendControlReached` (a boolean) | `null`, `false` |
+| the client's machine in a user agent: Codex's `initialize` answer names the operating system, its version, the architecture and the terminal after the product (`codex_cli_rs/0.172.0 (<system>; x86_64) <terminal>`) | `userAgent` (a string with a space) | the product and its version alone, `codex_cli_rs/0.172.0` |
+
+Codex's plan type (`planType`, in a rate-limit snapshot and in
+`account/updated`) is a plan name, `<PLAN>`, by the first rule. The Codex
+driver reads none of these but the windows and the credit balance, which it
+turns into a `limits.updated` event.
 
 Three more account details have a shape rather than one field:
 
@@ -491,10 +535,16 @@ How the user name goes depends on what the string is:
   There every whole-word occurrence of each user name is replaced in every
   string value, so the owner column of an `ls -l` loses it. A whole word is
   one not next to a letter, a digit or an underscore. The one exception is a
-  value that is one of the protocol words of its key (below): an account
-  named `user` keeps Claude Code's `type: "user"`, `role: "user"` and
-  `apiKeySource: "user"`, which the driver reads and replay needs, and an
-  account named `text` keeps OpenCode's `type: "session.text.delta"`.
+  value that is one of the protocol words of its key at its place (below):
+  an account named `user` keeps Claude Code's `type: "user"`,
+  `role: "user"` and `apiKeySource: "user"` where the SDK's types put them,
+  which the driver reads and replay needs, and an account named `text`
+  keeps OpenCode's `type: "session.text.delta"`. The same word in a value
+  the pinned types do not describe is free text: on an account named
+  `memory`, `running` or `unknown`, an opaque `tool_use_result` (the SDK
+  types it `unknown`) loses `name: "memory"`, `status: "running"` and
+  `error: "unknown"`, though the SDK allows each of them for that key
+  elsewhere.
 - **Outbound frames** hold what the driver sent, built from the scenario
   module and the host's config. There, and in every object key, the name is
   replaced only where it is a whole segment of a path: a string part that
@@ -511,64 +561,125 @@ Known limit: an outbound frame that carries inbound text back, such as a
 the request, gets only the path rule. A user name in that text as a free word
 would stay. The six scenarios send no such answer.
 
+### Protocol words by place
+
+A protocol word keeps the user name only where the pinned types put it: the
+same key and word anywhere else is free text. `test/recordings/protocol-places.ts`
+holds each kit's words by place. A place is one spot of an inbound frame the
+pinned types describe (the set of object types a value there can have),
+named by the first path of keys that reaches it from the frame: the empty
+name is the frame, `message` its `message`, `message.params` that message's `params`,
+and so on; an array's elements share the array's place. For each key of an
+object at a place, the table lists the words the types allow as the key's
+string value there and the place of the key's object value; `*` stands for
+the keys a type declares by an index signature or `additionalProperties`. A
+value with no place (a type of `unknown`, `any` or `object`, or JSON Schema
+`true`) is opaque, and nothing below it is a protocol word.
+
+The object types at a place are alternatives, and their words are not pooled
+where the types say which one an object is. When every type at a place
+requires one key whose value is a string literal, and the literals tell the
+types apart (a discriminant, such as a content block's `type`), that key's
+slot lists `variants`: for each literal, the place of the types that allow
+it. An object there takes its keys' slots from the variant its own value of
+that key names, and so on down (an SDK message's `subtype` below its
+`type`). An object whose value names no variant is opaque. So on an account
+named `web_search`, a `tool_use` block's `name: "web_search"` becomes
+`<USER>`, because the pinned `BetaToolUseBlock.name` is a plain string. A
+`server_tool_use` block's keeps the word, because `BetaServerToolUseBlock.name`
+allows that literal (`@anthropic-ai/sdk` 1.12.0,
+`resources/beta/messages/messages.d.ts:5219–5225, 6195–6199`); `web_fetch`
+the same. The sanitiser walks each inbound frame and the table together. Each kit derives its table
+from its pinned sources with `placeProtocolWords`, breadth first with keys
+sorted, so the same sources give the same table;
+`test/recordings/protocol-words.test.ts` fails when a committed table and its
+derivation differ.
+
 ### Claude protocol words
 
-`test/recordings/claude/protocol-words.ts` lists, for each object key the
-pinned SDK can put in an inbound Claude frame, the string literals its types
-allow as that key's value. `test/recordings/claude/derive-protocol-words.ts`
-derives them with the TypeScript checker from
-`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` (0.3.330) and the
-`@anthropic-ai/sdk` types it imports. It starts from `SDKMessage`, the return
-types of the `Query` methods and SDK functions the driver calls, and the
-options `CanUseTool` receives, and follows every property, union member,
-array element and index signature. `test/recordings/protocol-words.test.ts`
-fails when the committed list and the derivation differ; after an SDK bump,
-run `node test/recordings/claude/derive-protocol-words.ts` and paste the result.
+`test/recordings/claude/protocol-words.ts` holds, by place, the string
+literals the pinned SDK's types allow in an inbound Claude frame.
+`test/recordings/claude/derive-protocol-words.ts` derives them with the
+TypeScript checker from `node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts`
+(0.3.330) and the `@anthropic-ai/sdk` types it imports. Its roots are the
+fields of an inbound frame: a `message` frame's `message` is `SDKMessage`; a
+`result` frame's `value` is the return type of a `Query` method or SDK
+function the driver calls; a `can_use_tool` frame's `options` are the options
+`CanUseTool` receives. A `can_use_tool` frame's `toolName` and `input` are a
+string and a `Record<string, unknown>` there, so they hold no protocol word.
+The walk follows every property, union member, array element and index
+signature, and stops at `unknown`: a user message's `tool_use_result` and a
+session message's `message` are opaque. After an SDK bump, run
+`node test/recordings/claude/derive-protocol-words.ts` and put the result in
+the file.
 
-A value is kept only when it is one of its key's words: `type: "user"` stays,
-but `error: "permission denied for <name>"` loses the name, because `error`'s
-words are its enum values (`authentication_failed`, `rate_limit`, ...). The
-52 keys are `allowed_callers`, `apiKeySource`, `apiProvider`, `behavior`, `category`, `compact_result`, `costBasis`, `destination`, `direction`, `effort`, `error`, `errorCode`, `error_code`, `fast_mode_disabled_reason`, `fast_mode_state`, `file_type`, `first_stream_post_queued_behind`, `first_text_post_queued_behind`, `fromMode`, `kind`, `level`, `limitScope`, `lost`, `media_type`, `mode`, `model`, `name`, `outcome`, `overageDisabledReason`, `overageStatus`, `oversized_image`, `permissionMode`, `priority`, `rateLimitType`, `reason`, `response_inclusion`, `role`, `scope`, `service_tier`, `speed`, `startup_failure_reason`, `state`, `status`, `stop_reason`, `subkind`, `subtype`, `supportedEffortLevels`, `terminal_reason`, `trigger`, `ttl`, `type`, `view_mode`.
+A value is kept only when it is one of its key's words at its place:
+`type: "user"` of an SDK message stays, but `error: "permission denied for
+<name>"` loses the name, because that `error`'s words are its enum values
+(`authentication_failed`, `rate_limit`, `unknown`, ...). The 52 keys holding
+words are `allowed_callers`, `apiKeySource`, `apiProvider`, `behavior`, `category`, `compact_result`, `costBasis`, `destination`, `direction`, `effort`, `error`, `errorCode`, `error_code`, `fast_mode_disabled_reason`, `fast_mode_state`, `file_type`, `first_stream_post_queued_behind`, `first_text_post_queued_behind`, `fromMode`, `kind`, `level`, `limitScope`, `lost`, `media_type`, `mode`, `model`, `name`, `outcome`, `overageDisabledReason`, `overageStatus`, `oversized_image`, `permissionMode`, `priority`, `rateLimitType`, `reason`, `response_inclusion`, `role`, `scope`, `service_tier`, `speed`, `startup_failure_reason`, `state`, `status`, `stop_reason`, `subkind`, `subtype`, `supportedEffortLevels`, `terminal_reason`, `trigger`, `ttl`, `type`, `view_mode`.
 
 ### ACP protocol words
 
-`test/recordings/acp/protocol-words.ts` lists, for each object key an ACP
-agent can put in a message to the client, the string values the vendored ACP
-schemas allow there. `test/recordings/acp/derive-protocol-words.ts` derives
-them from `vendor-schemas/acp/schema-v2.0.0-beta.3/`, the release the ACP
-drivers are built on. It starts, in `v1/schema.unstable.json` and
-`v2/schema.unstable.json`, from the `Agent` message (every request, response
-and notification an agent sends) and the `ProtocolLevel` message
-(`$/cancel_request`), follows every `$ref`, `allOf`, `anyOf`, `oneOf`,
-property, array item and additional property, and takes each `const` and
-`enum`. A JSON-RPC message's `method` holds a method name rather than a schema
-literal, so `method` gets the `clientMethods` and `protocolMethods` of each
-version's `meta.unstable.json`: the methods an agent sends.
-`test/recordings/protocol-words.test.ts` fails when the committed list and the
-derivation differ; after a schema bump, run
-`node test/recordings/acp/derive-protocol-words.ts` and paste the result.
+`test/recordings/acp/protocol-words.ts` holds, by place, the string values
+the vendored ACP schemas allow in an inbound ACP stdio frame.
+`test/recordings/acp/derive-protocol-words.ts` derives them from
+`vendor-schemas/acp/schema-v2.0.0-beta.3/`, the release the ACP drivers are
+built on. Its root is a `stdout` frame's `message`: in
+`v1/schema.unstable.json` and `v2/schema.unstable.json`, the `Agent` message
+(every request, response and notification an agent sends) and the
+`ProtocolLevel` message (`$/cancel_request`). The walk follows every `$ref`,
+`allOf`, `anyOf`, `oneOf`, property, array item and additional property, and
+takes each `const` and `enum`; an agent's `_meta` is opaque. A JSON-RPC
+message's `method` holds a method name rather than a schema literal, so the
+message's `method` gets the `clientMethods` and `protocolMethods` of each
+version's `meta.unstable.json`: the methods an agent sends. After a schema
+bump, run `node test/recordings/acp/derive-protocol-words.ts` and put the
+result in the file.
 
-The 20 keys are `apiType`, `audience`, `category`, `fileType`, `format`, `jsonrpc`, `kind`, `method`, `mode`, `operation`, `position`, `priority`, `sessionUpdate`, `severity`, `state`, `status`, `stopReason`, `supported`, `theme`, `type`.
+The 20 keys holding words are `apiType`, `audience`, `category`, `fileType`, `format`, `jsonrpc`, `kind`, `method`, `mode`, `operation`, `position`, `priority`, `sessionUpdate`, `severity`, `state`, `status`, `stopReason`, `supported`, `theme`, `type`.
 
 ### OpenCode protocol words
 
-`test/recordings/opencode/protocol-words.ts` lists, for each object key an
-OpenCode 2.x server can put in an inbound OpenCode frame, the string literals
-the types allow as that key's value. `test/recordings/opencode/derive-protocol-words.ts`
-derives them with the TypeScript checker from
-`node_modules/@opencode/client/dist/promise/index.d.ts` (2.1.2) and the
-generated types it exports. It starts from `OpenCodeEvent` (every event of
-`GET /api/event`), `ServerInfo` (the driver reads `GET /api/info` itself), the
-awaited return type of every client call the driver makes (each method of
-`V2Client` in `src/drivers/opencode/sdk.ts`, looked up by the same path in the
-client), and every error body the client declares (each exported type with a
-`_tag`), and follows every property, union member, array element and index
-signature. `test/recordings/protocol-words.test.ts` fails when the committed
-list and the derivation differ; after a client bump, or when the driver calls
-another client method, run `node test/recordings/opencode/derive-protocol-words.ts`
-and paste the result.
+`test/recordings/opencode/protocol-words.ts` holds, by place, the string
+literals the pinned client's types allow in an inbound OpenCode frame.
+`test/recordings/opencode/derive-protocol-words.ts` derives them with the
+TypeScript checker from `node_modules/@opencode/client/dist/promise/index.d.ts`
+(2.1.2) and the generated types it exports. Its roots are the fields of an
+inbound frame: an `event` frame's `event` is `OpenCodeEvent` (every event of
+`GET /api/event`); a `response` frame's `body` is `ServerInfo` (the driver
+reads `GET /api/info` itself), the awaited return type of every client call
+the driver makes (each method of `V2Client` in `src/drivers/opencode/sdk.ts`,
+looked up by the same path in the client), or an error body the client
+declares (each exported type with a `_tag`). The walk follows every property,
+union member, array element and index signature, and stops at `unknown`.
+After a client bump, or when the driver calls another client method, run
+`node test/recordings/opencode/derive-protocol-words.ts` and put the result in
+the file.
 
-The 20 keys are `_tag`, `cacheFormat`, `command`, `delivery`, `effect`, `encoding`, `event`, `exit`, `finish`, `format`, `maxTokensField`, `name`, `op`, `outcome`, `reason`, `reasoningField`, `reply`, `status`, `type`, `variant`.
+The 20 keys holding words are `_tag`, `cacheFormat`, `command`, `delivery`, `effect`, `encoding`, `event`, `exit`, `finish`, `format`, `maxTokensField`, `name`, `op`, `outcome`, `reason`, `reasoningField`, `reply`, `status`, `type`, `variant`.
+
+### Codex protocol words
+
+`test/recordings/codex/protocol-words.ts` holds, by place, the string values
+the vendored Codex app-server schema allows in an inbound Codex stdio frame.
+`test/recordings/codex/derive-protocol-words.ts` derives them from
+`vendor-schemas/codex/3d86e43b075adeba2193ec5c22ac92f55afd82e6/codex_app_server_protocol.schemas.json`
+(Codex tag `rust-v0.172.0`, the schema the driver's client is generated
+from). Its root is a `stdout` frame's `message`, which is what
+`codex app-server` writes: a server request (every variant of
+`ServerRequest`), a notification (every variant of `ServerNotification`), an
+error answer (`JSONRPCError`), or the answer to one of the requests the
+driver sends (`CLIENT_REQUESTS` of `scripts/codegen-codex.ts`), `{ id,
+result }` with that request's response type: `<X>Response` for params
+`<X>Params`, except where the schema's `hand-written-additions.json` names
+another, as the codegen reads it. The walk follows every `$ref`, `allOf`,
+`anyOf`, `oneOf`, property, array item and additional property, and takes
+each `const` and `enum`. After a schema bump, or when the driver sends
+another request, run `node test/recordings/codex/derive-protocol-words.ts`
+and put the result in the file.
+
+The 60 keys holding words are `access`, `accountRoutingOverride`, `action`, `activeFlags`, `approvalPolicy`, `approvalsReviewer`, `authMode`, `authStatus`, `availableDecisions`, `changeType`, `codexErrorInfo`, `cyber`, `daybreakAvailability`, `decisionSource`, `delivery`, `detail`, `eventName`, `executionMode`, `failureReason`, `format`, `handlerType`, `historyMode`, `inputModalities`, `itemType`, `itemsView`, `kind`, `match_type`, `method`, `mode`, `multiAgentMode`, `multiAgentVersion`, `networkAccess`, `onboardingEntrypoint`, `operation`, `outcome`, `personality`, `phase`, `planType`, `preferredModelDisplayMode`, `protocol`, `rateLimitReachedType`, `reason`, `resetType`, `riskLevel`, `role`, `runtimeStatus`, `scope`, `source`, `status`, `stream`, `subAgent`, `subject`, `summary`, `tool`, `trustedContacts`, `turnKind`, `type`, `userAuthorization`, `verifications`, `version`.
 
 `pnpm run check:recordings` (`scripts/check-recordings.ts`) is a step of both
 `gate` and `gate:bun`. It scans every file under `test/drivers/*/recordings/`,
@@ -1037,6 +1148,251 @@ and the agent offers no Flash model, or the agent offers no model option, the
 recorder stops before the first prompt, lists the models, and records
 nothing. Replay gives each turn the model the header names.
 
+## How the Codex recorder keeps the user's setup out
+
+The recorded `codex app-server` must not load the user's Codex config, MCP
+servers, plugins, memories, skills, rules, sessions, goals or `AGENTS.md`,
+and must not change any of them. Codex keeps all of these in its home,
+`CODEX_HOME`, else `~/.codex` (`codex-rs/utils/home-dir/src/lib.rs:13–60`):
+`config.toml` with its `[mcp_servers]` and `[plugins]`
+(`codex-rs/config/src/loader/local.rs:122`, `codex-rs/config/src/mcp_edit.rs:13–21`,
+`codex-rs/core-plugins/src/loader.rs:722–760`), `managed_config.toml`
+(`codex-rs/config/src/loader/layer_io.rs:232`), `AGENTS.md` and
+`AGENTS.override.md` (`codex-rs/core/src/agents_md.rs:44–47`), `memories/`
+and `memories_v2/` (`codex-rs/protocol/src/memory_version.rs:17–22`), `skills/`
+(`codex-rs/ext/skills/src/host_roots.rs:151–157`), `rules/`
+(`codex-rs/core/src/exec_policy.rs:966`), installed plugins under `plugins/`,
+and the state database that keeps threads and their goals, `state_5.sqlite`
+(`codex-rs/state/src/sqlite.rs:53`), in `CODEX_SQLITE_HOME` when set, else in
+the home (`codex-rs/core/src/config/mod.rs:295–305, 4529–4540`). Outside the
+home it reads skills in `~/.agents/skills`
+(`codex-rs/ext/skills/src/host_roots.rs:159–165`), and, from the folder it
+works in up to the project root, the nearest folder holding `.git`,
+`AGENTS.md`, `AGENTS.override.md`, `.codex/` and `.agents/skills`; outside a
+repository only the folder it works in (`codex-rs/core/src/agents_md.rs:7–18`,
+`codex-rs/config/src/project_root_markers.rs:5`). All sources are files of
+Codex tag `rust-v0.172.0` (commit `3d86e43b075adeba2193ec5c22ac92f55afd82e6`).
+
+The recorder runs each scenario in its own temp workspace: `cwd/` (the
+thread's directory, and the directory `codex` runs in), `codex-home/`,
+`user-home/`, `xdg-config/`, `xdg-data/`, `xdg-state/`, `xdg-cache/`,
+`xdg-runtime/`, `tmp/` and `instances/` (the host's directories). The driver
+uses the ambient account, so it starts `codex app-server` and
+`codex login status` with no variables of its own. The recorder's host starts
+them with the recorder's own environment, less `HOME`, `TMPDIR`,
+`DBUS_SESSION_BUS_ADDRESS` and every `XDG_*` variable,
+strips every variable whose name starts with `CODEX_` or `OPENAI_`, and then
+adds:
+
+| Variable | Value | Why |
+|---|---|---|
+| `CODEX_HOME` | `<workspace>/codex-home`, holding the recorder's `config.toml` and the copy of the user's `auth.json` | Codex keeps the user's config, MCP servers, plugins, memories, skills, rules, sessions and goals in its home (above); added after the stripping, on every spawn |
+| `HOME` | `<workspace>/user-home`, empty | Codex reads `~/.agents/skills`, and `~/.codex` without `CODEX_HOME` |
+| `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` | `<workspace>/xdg-config`, `xdg-data`, `xdg-state`, `xdg-cache`, `xdg-runtime` | the XDG base directories |
+| `TMPDIR` | `<workspace>/tmp` | so a temp path `codex` reports is inside the workspace |
+| `DBUS_SESSION_BUS_ADDRESS` | `unix:path=<workspace>/no-session-bus`, where nothing listens | the Secret Service of the user's keyring is on the session bus; out of reach even if a setting the recorder does not control sends `codex` to the keyring |
+
+The recorder's `config.toml` in `<workspace>/codex-home` holds only
+`cli_auth_credentials_store = "file"` and `mcp_oauth_credentials_store = "file"`:
+the recorded Codex keeps its CLI sign-in in `auth.json` and an MCP server's
+OAuth credentials in `.credentials.json` there, never in the OS keyring
+(`codex-rs/config/src/types.rs:136–166`). Without the second,
+`mcp_oauth_credentials_store` is `auto`, which tries the keyring first.
+Codex's MCP client on Linux reads the keyring through the kernel keyring as
+well as the Secret Service (`keyring` with `linux-native-async-persistent`,
+`codex-rs/rmcp-client/Cargo.toml:88`), so the session bus alone would not keep
+it out.
+
+Codex reads many `CODEX_` and `OPENAI_` variables: its home and state
+database (`CODEX_HOME`, `CODEX_SQLITE_HOME`), sign-ins (`OPENAI_API_KEY`,
+`CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENAI_IDENTITY_TOKEN_FILE`),
+endpoints (`OPENAI_BASE_URL`, `CODEX_AUTHAPI_BASE_URL`) and more. The driver's
+CLI manifest strips only `OPENAI_API_KEY`, `CODEX_API_KEY` and
+`OPENAI_ADMIN_KEY`; the recorder strips them all
+(`CODEX_RECORDER_ENV_POLICY` in `test/recordings/codex/run.ts`).
+
+A process the driver starts with no working directory (the driver names none
+for `codex app-server`) starts in `<workspace>/cwd`, not in the recorder's
+directory. `<workspace>/cwd` is the root of a Git repository of its own
+(`cwd/.git` holds `HEAD`, `objects/` and `refs/`), so Codex's lookup of
+`AGENTS.md`, `.codex/` and `.agents/skills` stops there, wherever `TMPDIR`
+points. The recorder also stops before it starts `codex` when its temp
+workspace lies inside the user's home, or when a folder above the workspace
+holds `AGENTS.md`, `AGENTS.override.md`, `.codex` or `.agents`; the error
+names each one it found.
+
+The driver passes the host's tool server for a thread in every
+`thread/resume` (docs/drivers/codex.md, "Host instructions and tools"), and
+fails the resume when the host has none. The recorder's host names
+`ari-recorder-tools`, an HTTP MCP server at
+`http://127.0.0.1:9/ari-recorder/no-tools`: on the loopback discard port
+nothing listens on an ordinary machine, so Codex's connection is refused and
+the session gets no tools. A new thread gets no MCP server at all. The server
+carries the header `Authorization: Bearer none`, so Codex's MCP client looks
+up no OAuth credentials for it, in the keyring or a file, before it tries to
+connect. It skips that lookup for a server whose headers hold an
+`Authorization` (`codex-rs/rmcp-client/src/rmcp_client.rs:1459–1470`, and
+`auth_status.rs:161–164` for the server's sign-in status).
+
+`test/drivers/codex/recorder.test.ts` seeds a home with a `config.toml` (with
+an MCP entry and an enabled plugin), the plugin, a memory, `AGENTS.md`,
+`AGENTS.override.md`, a skill, a rule, a stand-in for the state database and
+`~/.agents/skills`, a marker in each, and sets `CODEX_HOME`,
+`CODEX_SQLITE_HOME`, `OPENAI_API_KEY`, `OPENAI_BASE_URL` and
+`CODEX_ACCESS_TOKEN`. It records all six scenarios against a fake `codex`
+(`test/drivers/codex/fake-codex-cli.ts`) that loads them where Codex does
+(`test/drivers/codex/user-setup.ts`), and shows every `codex` started with
+`CODEX_HOME`, `HOME`, the XDG directories, `TMPDIR`, the unreachable session
+bus and its working directory in the workspace and no other `CODEX_` or
+`OPENAI_` variable, that it loaded only the recorder's `config.toml`, that
+none of the markers reached the recording, that every `thread/resume` named
+the tool server with its `Authorization` header, and that every seeded file
+is unchanged and nothing was added to the user's Codex home.
+
+Not isolated: the machine's system configuration (`/etc/codex/config.toml`,
+`/etc/codex/requirements.toml`, the legacy `/etc/codex/managed_config.toml`
+that Linux and macOS still read, the system skills in `/etc/codex/skills`),
+macOS managed preferences, and a ChatGPT enterprise workspace's
+cloud-managed configuration (`codex-rs/config/src/loader/README.md`, "Layering
+model"; `codex-rs/config/src/loader/layer_io.rs:22, 223–232` for
+`managed_config.toml`). A machine or account that has them records under
+them. Of these files the recorder reads one setting, the store of the CLI
+sign-in, before it starts `codex` ("How Codex finds the sign-in").
+
+### How Codex finds the sign-in
+
+- Codex keeps a ChatGPT or API-key sign-in in `auth.json` in its home. At
+  tag `rust-v0.172.0`, `codex-rs/login/src/auth/storage.rs:167–168` names the
+  file, `pub(super) fn get_auth_file(codex_home: &Path) -> PathBuf {` and
+  `codex_home.join("auth.json")`, and `FileAuthStorage::load` reads it
+  (`storage.rs:263–271`, `let auth_file = get_auth_file(&self.codex_home);`). The home is `CODEX_HOME`, else `~/.codex`,
+  so the user's file is `~/.codex/auth.json`, or `auth.json` in the
+  `CODEX_HOME` of the recorder's environment. That is file storage, Codex's
+  default when no configuration sets `cli_auth_credentials_store`
+  (`codex-rs/config/src/types.rs:136–149`,
+  `codex-rs/core/src/config/mod.rs:4792–4797`). With `keyring` or `auto`,
+  Codex keeps the sign-in in the OS keyring (`auto` reads the file only when
+  the keyring holds none or fails, `storage.rs:593–620`); with `ephemeral`,
+  only in the memory of each process. An `auth.json` is then no proof that it
+  holds the sign-in Codex uses.
+- So before it starts `codex`, the recorder reads `cli_auth_credentials_store`,
+  and nothing else, from the four files Codex 0.172.0 on Linux takes it from,
+  the first that sets it winning (`test/recordings/codex/credential-store.ts`):
+  `/etc/codex/requirements.toml`, a system requirement that overrides any
+  `config.toml` (`codex-rs/config/src/loader/mod.rs:775–777`,
+  `codex-rs/core/src/config/auth_keyring.rs:71–73`); the legacy
+  `/etc/codex/managed_config.toml`, a config layer above all others
+  (`loader/layer_io.rs:22, 223–232`, `loader/mod.rs:459–484`; its reading as
+  requirements covers only `approval_policy`, `approvals_reviewer` and
+  `sandbox_mode`, `loader/mod.rs:1000–1037`); the user's `config.toml` in the
+  Codex home; and `/etc/codex/config.toml` (`loader/mod.rs:83, 275–292`). It
+  reads only the key's top-level value, with a TOML reader of its own that
+  reads strings, arrays and inline tables as TOML does, and never copies
+  anything of those files into a recording. Unless the winner says `file`,
+  or none sets the key, the run stops before it starts `codex`: the error
+  names the setting, the file that set it, and what to do (set it to `file`
+  or remove it, which a system file needs root for, then `codex login`). A
+  file it cannot read, or whose text is no TOML it can read, stops the run
+  too. It does not read macOS managed preferences, a `--profile` file or
+  cloud-managed configuration (whose requirements cannot set the store,
+  `codex-rs/config/src/requirements_layers/layer.rs:13–19`). A local
+  development build of Codex (version 0.0.0) would take `keyring` and `auto`
+  for `file` (`core/src/config/mod.rs:307–318`); the recorder stops anyway.
+- So the recorder copies only that file, into `<workspace>/codex-home/auth.json`,
+  mode 0600 in a directory only the user can enter, beside its own
+  `config.toml` (`cli_auth_credentials_store = "file"`). The recorder reads
+  nothing else of the user's, and never the keyring.
+- A ChatGPT sign-in's refresh token rotates: Codex writes the refreshed
+  tokens back to `auth.json`, as a new file renamed over the old one
+  (`FileAuthStorage::save`, `storage.rs:274–295`). After each scenario, also
+  one that fails, the recorder writes a changed copy back to the resolved
+  credential target, leaving any symbolic links in place
+  (`codex-rs/login/src/auth/storage_file.rs:10–32`). If the target changed,
+  disappeared or cannot safely be replaced, the recorder leaves it alone.
+  It adds the refreshed content to the run's recovery file beside the
+  selected home's `auth.json` (not beside the target of a link),
+  `auth.json.ari-recorder-refreshed-<pid>.json` (mode 0600; one record
+  `{ "id": "auth.json", "value" }`, with `olderValues` when a later scenario
+  kept a newer one), and reports the scenario failed
+  (`test/recordings/codex/record.ts`, `test/recordings/recovery.ts`).
+- Another `codex` of the user's may save its own refresh at the same time.
+  Codex 0.172.0 commits a sign-in (a refresh, a login, a logout, a workspace
+  switch) only while it holds an exclusive lock on `auth.lock` in its home,
+  around the whole read, compare and write: `lock_for_write` opens the file
+  read-write, creating it and never truncating it, and calls Rust's
+  `File::lock` (`storage.rs:189–212`; taken at
+  `login/src/auth/manager.rs:1023, 1090, 1261, 1768` and
+  `manager/workspace_switching.rs:344`). It waits as long as another holder
+  has it, and never removes the file. Inside `auth.lock`, Codex takes the
+  resolved credential target's commit lock (`login/src/auth/storage_commit.rs:28–68`).
+  It replaces the target's extension with `json.lock`, giving `auth.json.lock`
+  for a target named `auth.json`. Two Codex homes linked to the same target
+  have different home locks but share this commit lock. Network requests
+  hold neither (`storage_commit.rs:1–2`). The recorder takes the same locks
+  in that order and holds both across comparison and replacement. It waits
+  up to 30 s for the home lock and 5 s for the commit lock. It never breaks the lock
+  or removes either lock file. If either lock is unavailable, or the link no
+  longer resolves to the target copied at the start, the refresh goes to recovery.
+  The recorder also declines to replace hard-linked or read-only targets,
+  as the pinned file store does (`storage_file.rs:34–59`). An unchanged copy
+  takes no locks and adds no lock files.
+- How the recorder takes those locks. On Linux, Rust's `File::lock` is
+  `flock(2)`, a lock on the open file that the kernel drops when its holder
+  closes the file or exits, so it is never left stale. Checked with rustc
+  1.97.1: while a program holding `File::lock` ran, `flock -n` on the same
+  file was refused and a POSIX `lockf` on it was granted (they are separate
+  locks on Linux); while `flock` held it, `File::try_lock` said
+  `WouldBlock`. Node cannot take a `flock(2)` lock itself: `node:fs` has no
+  such call, and `node:ffi` is in Node 26 only, as an experimental module;
+  Node 22.23.1 and 24.18.0, two of the versions CI runs, have no `node:ffi`
+  (`ERR_UNKNOWN_BUILTIN_MODULE`). Bun's `node:fs` has none either. So the
+  recorder holds the lock through util-linux's `flock` command
+  (`test/recordings/codex/sign-in-lock.ts`), from Node and Bun alike. When
+  `flock` does not run, the recorder stops before it starts `codex`.
+- The window that remains: a program that ignores the locks can still write
+  between comparison and replacement. The locks do not serialize manual
+  edits to the link chain. The recorder checks the resolved path again just
+  before the rename, but cannot prevent a change after that check.
+  `test/drivers/codex/sign-in-copy-back-node.test.ts` makes another writer
+  try at the rename, both from the same home and from a second linked home.
+  The writer cannot commit there. On retry it sees the newer sign-in and
+  does not overwrite it.
+- When the recovery file cannot take the value either, the workspace's copy
+  holds the only copy. The recorder then keeps that workspace, stops the run,
+  and names the workspace and the copy in the error and in the run's last
+  lines.
+- When the user has no `auth.json` (there is no sign-in, or it is in the
+  keyring), a live run stops before it starts `codex`, naming the file. To
+  record, sign in with file storage (`codex login` with no
+  `cli_auth_credentials_store` set).
+
+The workspace, with the copied sign-in, is removed after each scenario, also
+after one that fails, unless it holds the only copy of a refreshed sign-in.
+
+### The Codex model
+
+Codex lists its models with the app-server's `model/list` request: each
+`Model` has an `id`, a `model`, a `displayName`, a `description`, whether it
+is `hidden` and whether it `isDefault`, and no size or price (the vendored
+schema's `Model`; `codex-rs/app-server/src/request_processors/catalog_processor.rs:302–358`
+lists the catalog in its order, without hidden models unless asked). Before
+the first prompt of each scenario the recorder asks, through a driver
+instance whose `codex app-server` starts in the scenario's workspace around
+the tap (not recorded). It records with the model `ARI_RECORD_CODEX_MODEL`
+names, else with the first model listed whose id or name holds the word
+`luna`, `nano` or `mini` (any case): OpenAI's API docs ("Models",
+https://developers.openai.com/api/docs/models, read 2026-11-25) name GPT-6
+Luna the model "for cost-sensitive, high-volume workloads", and OpenAI named
+its earlier small models mini and nano. Codex 0.172.0's bundled catalog lists
+`gpt-6-luna` ("Fast and affordable model for easier tasks") as its first such
+model (`codex-rs/models-manager/models.json`). The driver config's `model`
+starts the thread with it (`thread/start`), and Codex resumes a thread with
+the model it ran with (`codex-rs/app-server/src/request_processors/thread_processor.rs:305–334`).
+When the variable names a model Codex does not list, or it is not set and
+Codex lists no such model, the recorder stops before the first prompt, lists
+the models, and records nothing. Replay starts the thread with the model the
+header names.
+
 ## How to record
 
 You need Claude Code signed in on this machine (`claude auth status`), or an
@@ -1123,12 +1479,40 @@ below a folder holding `AGENTS.md`, `GEMINI.md` or `.agents/`, without a
 sign-in file, or without a model the agent offers, it exits 2 before the
 first prompt.
 
+### Recording Codex
+
+You need the Codex CLI on `PATH` (`codex --version` prints `codex-cli 0.172.0`
+for the version the driver is built on) and a sign-in in `~/.codex/auth.json`
+(see "How Codex finds the sign-in"). Recording spends your Codex usage: eight
+short turns.
+
+1. Run `pnpm install --frozen-lockfile`.
+2. Run `ARI_LIVE_RECORD=1 pnpm run record:codex`.
+3. To record with another model, set `ARI_RECORD_CODEX_MODEL` to one Codex
+   lists; a model it does not list stops the recorder before the first
+   prompt with the list.
+4. To record some scenarios only, or to write somewhere else, use the
+   arguments of `record:claude`: `-- simple resume`, `--out <dir>`.
+5. Run `pnpm run check:recordings`, then the replay tests.
+6. Read the diff of `test/drivers/codex/recordings/` before you commit it.
+
+The recorder writes `test/drivers/codex/recordings/<scenario>.ndjson`, one
+file per scenario, also for a scenario whose checks failed (it says which,
+and exits 1). When it cannot write a recording, it stops after that
+scenario. Its last lines name every recovery file and every kept workspace,
+whatever else failed. Without `ARI_LIVE_RECORD=1` it exits 2 before it loads
+anything or starts any process; with its temp workspace inside your home or
+below a folder holding `AGENTS.md`, `AGENTS.override.md`, `.codex` or
+`.agents`, without a sign-in file, or without a model Codex lists, it exits 2
+before the first prompt.
+
 ## How to refresh
 
 Record again when the vendor's version changes: a new pinned
 `@anthropic-ai/claude-agent-sdk` (which bundles a new Claude Code), a new
 `opencode` or pinned `@opencode/client`, a new `agy` or vendored ACP schema
-release, or a change to the scenarios.
+release, a new `codex` or vendored Codex schema, or a change to the
+scenarios.
 
 1. Bump the pinned SDK (or install the new `opencode`) and run `pnpm install`.
 2. Record all six again, as above.

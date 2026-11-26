@@ -713,7 +713,9 @@ export class CodexInstance implements Instance {
 
   async dispose(): Promise<void> {
     this.#disposed = true;
-    for (const session of this.#sessions) await session.close();
+    // Every session ends at once: each waits for its own app-server's process group, which can take the whole
+    // kill grace, and ari-driver ends what is left 2 s after its shutdown began (docs/wire.md, "Lifetime").
+    await Promise.all([...this.#sessions].map((session) => session.close()));
     this.#sessions.clear();
     await this.#restartAccountConnection();
     this.#changed();

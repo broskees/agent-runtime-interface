@@ -11,6 +11,7 @@ import type { AcpDriverConfig } from "../../../src/drivers/acp/index.ts";
 import type { AriEvent, ConfigOption, Item } from "../../../src/index.ts";
 import { isAriError } from "../../../src/index.ts";
 import type { FakeNativeTurn } from "./harness.ts";
+import { endsBegunTogether, slowEnds } from "../../helpers/slow-ends.ts";
 import { openRig, until } from "./rig.ts";
 
 function config(maxProtocolVersion: 1 | 2, extra: Partial<AcpDriverConfig> = {}): AcpDriverConfig {
@@ -480,3 +481,26 @@ for (const chunks of [false, true] as const) {
     }
   });
 }
+
+
+test("dispose() ends every session at once: three agents that each take 1 s to end all start ending together", async () => {
+  // ari-driver gives a driver's dispose 2 s before it ends the agents itself (docs/wire.md, "Lifetime"); an agent
+  // that takes the whole kill grace to end must not hold up the next session's own shutdown.
+  const ends = slowEnds(1000);
+  const rig = await openRig({ name: "dispose", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2, wrapProcess: ends.wrap });
+  try {
+    for (const key of ["d1", "d2", "d3"]) {
+      const { session, waitFor } = await rig.open();
+      const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+      await session.startTurn({ threadId: thread.id, clientTurnKey: key, intent: "start", content: [{ type: "text", text: "Hi" }] });
+      await (await rig.nextTurn()).complete();
+      await waitFor((event) => event.body.type === "turn.terminal", "turn.terminal");
+    }
+    const started = Date.now();
+    await rig.instance.dispose();
+    assert.equal(ends.startedAt.length, 3, "each session's agent was ended");
+    assert.equal(endsBegunTogether(ends.startedAt, 500), 3, `the three ends began together: ${ends.startedAt.map((time) => time - started).join(", ")} ms after dispose()`);
+  } finally {
+    await rig.cleanup();
+  }
+});

@@ -79,6 +79,19 @@ async function runTurn(rig: OpencodeTestRig, opened: { session: Session; events:
 }
 
 describe("the runtime follows the server's version", () => {
+  test("closing a 1.x session cancels its live event subscription without abort errors or stopping the external server", async () => {
+    const rig = await rigFor(1, true);
+    const opened = await rig.open();
+    await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const server = liveServer(rig);
+    assert.equal(server.subscriberCount, 1);
+    await opened.session.close();
+    const deadline = Date.now() + 5_000;
+    while (server.subscriberCount > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(server.subscriberCount, 0, "closing the session closes the HTTP event stream");
+    assert.equal(server.alive, true);
+  });
+
   test("OpenCode 1.19.6: the 1.x API, one server per thread, process_per_thread", async () => {
     const rig = await rigFor(1);
     const opened = await rig.open();

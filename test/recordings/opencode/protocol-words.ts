@@ -442,7 +442,12 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
         "reasoning",
         "text",
         "tool"
-      ]
+      ],
+      "variants": {
+        "reasoning": "body.data.content[type=reasoning]",
+        "text": "body.data.content[type=text]",
+        "tool": "body.data.content[type=tool]"
+      }
     }
   },
   "body.data.content.state": {
@@ -464,7 +469,13 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
         "error",
         "running",
         "streaming"
-      ]
+      ],
+      "variants": {
+        "completed": "body.data.content.state[status=completed]",
+        "error": "body.data.content.state[status=error]",
+        "running": "body.data.content.state[status=running]",
+        "streaming": "body.data.content.state[status=streaming]"
+      }
     }
   },
   "body.data.content.state.content": {
@@ -472,6 +483,17 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
       "words": [
         "file",
         "text"
+      ],
+      "variants": {
+        "file": "body.data.content.state.content[type=file]",
+        "text": "event.data.content[type=text]"
+      }
+    }
+  },
+  "body.data.content.state.content[type=file]": {
+    "type": {
+      "words": [
+        "file"
       ]
     }
   },
@@ -485,7 +507,133 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
       "place": "body.metadata.type"
     }
   },
+  "body.data.content.state[status=completed]": {
+    "content": {
+      "place": "body.data.content.state.content"
+    },
+    "input": {
+      "place": "body.data.content.state[status=completed].input"
+    },
+    "metadata": {
+      "place": "body.data.content.state[status=completed].metadata"
+    },
+    "status": {
+      "words": [
+        "completed"
+      ]
+    }
+  },
+  "body.data.content.state[status=completed].input": {
+    "*": {
+      "place": "body.metadata.type"
+    }
+  },
+  "body.data.content.state[status=completed].metadata": {
+    "*": {
+      "place": "body.metadata.type"
+    }
+  },
+  "body.data.content.state[status=error]": {
+    "content": {
+      "place": "body.data.content.state.content"
+    },
+    "error": {
+      "place": "body.data.error"
+    },
+    "input": {
+      "place": "body.data.content.state[status=error].input"
+    },
+    "metadata": {
+      "place": "body.data.content.state[status=error].metadata"
+    },
+    "status": {
+      "words": [
+        "error"
+      ]
+    }
+  },
+  "body.data.content.state[status=error].input": {
+    "*": {
+      "place": "body.metadata.type"
+    }
+  },
+  "body.data.content.state[status=error].metadata": {
+    "*": {
+      "place": "body.metadata.type"
+    }
+  },
+  "body.data.content.state[status=running]": {
+    "input": {
+      "place": "body.data.content.state[status=running].input"
+    },
+    "metadata": {
+      "place": "body.data.content.state[status=running].metadata"
+    },
+    "status": {
+      "words": [
+        "running"
+      ]
+    }
+  },
+  "body.data.content.state[status=running].input": {
+    "*": {
+      "place": "body.metadata.type"
+    }
+  },
+  "body.data.content.state[status=running].metadata": {
+    "*": {
+      "place": "body.metadata.type"
+    }
+  },
+  "body.data.content.state[status=streaming]": {
+    "status": {
+      "words": [
+        "streaming"
+      ]
+    }
+  },
   "body.data.content.time": {},
+  "body.data.content[type=reasoning]": {
+    "native": {
+      "place": "body.data.native"
+    },
+    "time": {
+      "place": "body.data.content[type=reasoning].time"
+    },
+    "type": {
+      "words": [
+        "reasoning"
+      ]
+    }
+  },
+  "body.data.content[type=reasoning].time": {},
+  "body.data.content[type=text]": {
+    "native": {
+      "place": "body.data.native"
+    },
+    "type": {
+      "words": [
+        "text"
+      ]
+    }
+  },
+  "body.data.content[type=tool]": {
+    "native": {
+      "place": "body.data.native"
+    },
+    "state": {
+      "place": "body.data.content.state"
+    },
+    "time": {
+      "place": "body.data.content[type=tool].time"
+    },
+    "type": {
+      "words": [
+        "tool"
+      ]
+    }
+  },
+  "body.data.content[type=tool].time": {},
   "body.data.cost": {
     "cache": {
       "place": "body.data.cost.cache"
@@ -520,6 +668,24 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
     "type": {
       "words": [
         "inline",
+        "uri"
+      ],
+      "variants": {
+        "inline": "body.data.files.source[type=inline]",
+        "uri": "body.data.files.source[type=uri]"
+      }
+    }
+  },
+  "body.data.files.source[type=inline]": {
+    "type": {
+      "words": [
+        "inline"
+      ]
+    }
+  },
+  "body.data.files.source[type=uri]": {
+    "type": {
+      "words": [
         "uri"
       ]
     }
@@ -568,6 +734,24 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
     "type": {
       "words": [
         "native",
+        "summary"
+      ],
+      "variants": {
+        "native": "body.data.settings.compaction[type=native]",
+        "summary": "body.data.settings.compaction[type=summary]"
+      }
+    }
+  },
+  "body.data.settings.compaction[type=native]": {
+    "type": {
+      "words": [
+        "native"
+      ]
+    }
+  },
+  "body.data.settings.compaction[type=summary]": {
+    "type": {
+      "words": [
         "summary"
       ]
     }
@@ -629,6 +813,24 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
     "type": {
       "words": [
         "before",
+        "through"
+      ],
+      "variants": {
+        "before": "body.fork.boundary[type=before]",
+        "through": "body.fork.boundary[type=through]"
+      }
+    }
+  },
+  "body.fork.boundary[type=before]": {
+    "type": {
+      "words": [
+        "before"
+      ]
+    }
+  },
+  "body.fork.boundary[type=through]": {
+    "type": {
+      "words": [
         "through"
       ]
     }
@@ -1070,6 +1272,24 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
       "words": [
         "file",
         "text"
+      ],
+      "variants": {
+        "file": "event.data.content[type=file]",
+        "text": "event.data.content[type=text]"
+      }
+    }
+  },
+  "event.data.content[type=file]": {
+    "type": {
+      "words": [
+        "file"
+      ]
+    }
+  },
+  "event.data.content[type=text]": {
+    "type": {
+      "words": [
+        "text"
       ]
     }
   },
@@ -1104,7 +1324,15 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
         "multiselect",
         "number",
         "string"
-      ]
+      ],
+      "variants": {
+        "boolean": "event.data.form.fields[type=boolean]",
+        "external": "event.data.form.fields[type=external]",
+        "integer": "event.data.form.fields[type=integer]",
+        "multiselect": "event.data.form.fields[type=multiselect]",
+        "number": "event.data.form.fields[type=number]",
+        "string": "event.data.form.fields[type=string]"
+      }
     },
     "when": {
       "place": "event.data.form.fields.when"
@@ -1117,6 +1345,77 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
         "eq",
         "neq"
       ]
+    }
+  },
+  "event.data.form.fields[type=boolean]": {
+    "type": {
+      "words": [
+        "boolean"
+      ]
+    },
+    "when": {
+      "place": "event.data.form.fields.when"
+    }
+  },
+  "event.data.form.fields[type=external]": {
+    "type": {
+      "words": [
+        "external"
+      ]
+    }
+  },
+  "event.data.form.fields[type=integer]": {
+    "type": {
+      "words": [
+        "integer"
+      ]
+    },
+    "when": {
+      "place": "event.data.form.fields.when"
+    }
+  },
+  "event.data.form.fields[type=multiselect]": {
+    "options": {
+      "place": "event.data.form.fields.options"
+    },
+    "type": {
+      "words": [
+        "multiselect"
+      ]
+    },
+    "when": {
+      "place": "event.data.form.fields.when"
+    }
+  },
+  "event.data.form.fields[type=number]": {
+    "type": {
+      "words": [
+        "number"
+      ]
+    },
+    "when": {
+      "place": "event.data.form.fields.when"
+    }
+  },
+  "event.data.form.fields[type=string]": {
+    "format": {
+      "words": [
+        "date",
+        "date-time",
+        "email",
+        "uri"
+      ]
+    },
+    "options": {
+      "place": "event.data.form.fields.options"
+    },
+    "type": {
+      "words": [
+        "string"
+      ]
+    },
+    "when": {
+      "place": "event.data.form.fields.when"
     }
   },
   "event.data.form.metadata": {
@@ -1133,7 +1432,13 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
         "killed",
         "running",
         "timeout"
-      ]
+      ],
+      "variants": {
+        "exited": "event.data.info",
+        "killed": "event.data.shell",
+        "running": "event.data.info",
+        "timeout": "event.data.shell"
+      }
     },
     "time": {
       "place": "event.data.info.time"
@@ -1170,7 +1475,13 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
         "move",
         "synthetic",
         "user"
-      ]
+      ],
+      "variants": {
+        "compaction": "event.data.item[type=compaction]",
+        "move": "event.data.item[type=move]",
+        "synthetic": "event.data.item[type=synthetic]",
+        "user": "event.data.item[type=user]"
+      }
     }
   },
   "event.data.item.payload": {
@@ -1191,6 +1502,101 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
     }
   },
   "event.data.item.payload.metadata": {
+    "*": {}
+  },
+  "event.data.item[type=compaction]": {
+    "delivery": {
+      "words": [
+        "queue",
+        "steer"
+      ]
+    },
+    "payload": {
+      "place": "event.data.item[type=compaction].payload"
+    },
+    "type": {
+      "words": [
+        "compaction"
+      ]
+    }
+  },
+  "event.data.item[type=compaction].payload": {},
+  "event.data.item[type=move]": {
+    "delivery": {
+      "words": [
+        "queue",
+        "steer"
+      ]
+    },
+    "payload": {
+      "place": "event.data.item[type=move].payload"
+    },
+    "type": {
+      "words": [
+        "move"
+      ]
+    }
+  },
+  "event.data.item[type=move].payload": {
+    "location": {
+      "place": "event.data.location"
+    }
+  },
+  "event.data.item[type=synthetic]": {
+    "delivery": {
+      "words": [
+        "queue",
+        "steer"
+      ]
+    },
+    "payload": {
+      "place": "event.data.item[type=synthetic].payload"
+    },
+    "type": {
+      "words": [
+        "synthetic"
+      ]
+    }
+  },
+  "event.data.item[type=synthetic].payload": {
+    "metadata": {
+      "place": "event.data.item[type=synthetic].payload.metadata"
+    }
+  },
+  "event.data.item[type=synthetic].payload.metadata": {
+    "*": {}
+  },
+  "event.data.item[type=user]": {
+    "delivery": {
+      "words": [
+        "queue",
+        "steer"
+      ]
+    },
+    "payload": {
+      "place": "event.data.item[type=user].payload"
+    },
+    "type": {
+      "words": [
+        "user"
+      ]
+    }
+  },
+  "event.data.item[type=user].payload": {
+    "agents": {
+      "place": "body.data.agents"
+    },
+    "files": {
+      "place": "body.data.files"
+    },
+    "metadata": {
+      "place": "event.data.item[type=user].payload.metadata"
+    },
+    "skills": {
+      "place": "body.data.skills"
+    }
+  },
+  "event.data.item[type=user].payload.metadata": {
     "*": {}
   },
   "event.data.location": {},
@@ -1249,10 +1655,39 @@ export const OPENCODE_PROTOCOL_WORDS: ProtocolWords = {
         "busy",
         "idle",
         "retry"
-      ]
+      ],
+      "variants": {
+        "busy": "event.data.status[type=busy]",
+        "idle": "event.data.status[type=idle]",
+        "retry": "event.data.status[type=retry]"
+      }
     }
   },
   "event.data.status.action": {},
+  "event.data.status[type=busy]": {
+    "type": {
+      "words": [
+        "busy"
+      ]
+    }
+  },
+  "event.data.status[type=idle]": {
+    "type": {
+      "words": [
+        "idle"
+      ]
+    }
+  },
+  "event.data.status[type=retry]": {
+    "action": {
+      "place": "event.data.status.action"
+    },
+    "type": {
+      "words": [
+        "retry"
+      ]
+    }
+  },
   "event.data.terminal": {
     "output": {
       "place": "event.data.terminal.output"

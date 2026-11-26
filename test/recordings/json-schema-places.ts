@@ -5,8 +5,9 @@
 // through `$ref`, `allOf`, `anyOf`, `oneOf`, `items` and `prefixItems`; its
 // shapes the schemas among those with `properties` or an
 // `additionalProperties` schema. A shape's fields are its `properties`, and
-// its `additionalProperties` schema is its schema for every other key. A
-// schema of `true`, or one with neither, holds no shape: the walk stops there.
+// its `additionalProperties` schema is its schema for every other key; it
+// requires the keys its `required` lists. A schema of `true`, or one with
+// neither, holds no shape: the walk stops there.
 //
 // `$ref` resolves through the document each schema object came from:
 // `schemaDocument` reads a file and records where every object in it came
@@ -86,5 +87,6 @@ export function jsonSchemaGraph(): ProtocolGraph<Schema, unknown> {
       return own;
     },
     anyKey: (shape) => (isSchema(shape["additionalProperties"]) ? [shape["additionalProperties"]] : undefined),
+    requires: (shape, key) => Array.isArray(shape["required"]) && (shape["required"] as unknown[]).includes(key),
   };
 }

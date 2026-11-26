@@ -572,8 +572,22 @@ object at a place, the table lists the words the types allow as the key's
 string value there and the place of the key's object value; `*` stands for
 the keys a type declares by an index signature or `additionalProperties`. A
 value with no place (a type of `unknown`, `any` or `object`, or JSON Schema
-`true`) is opaque, and nothing below it is a protocol word. The sanitiser
-walks each inbound frame and the table together. Each kit derives its table
+`true`) is opaque, and nothing below it is a protocol word.
+
+The object types at a place are alternatives, and their words are not pooled
+where the types say which one an object is. When every type at a place
+requires one key whose value is a string literal, and the literals tell the
+types apart (a discriminant, such as a content block's `type`), that key's
+slot lists `variants`: for each literal, the place of the types that allow
+it. An object there takes its keys' slots from the variant its own value of
+that key names, and so on down (an SDK message's `subtype` below its
+`type`). An object whose value names no variant is opaque. So on an account
+named `web_search`, a `tool_use` block's `name: "web_search"` becomes
+`<USER>`, because the pinned `BetaToolUseBlock.name` is a plain string. A
+`server_tool_use` block's keeps the word, because `BetaServerToolUseBlock.name`
+allows that literal (`@anthropic-ai/sdk` 1.12.0,
+`resources/beta/messages/messages.d.ts:5219–5225, 6195–6199`); `web_fetch`
+the same. The sanitiser walks each inbound frame and the table together. Each kit derives its table
 from its pinned sources with `placeProtocolWords`, breadth first with keys
 sorted, so the same sources give the same table;
 `test/recordings/protocol-words.test.ts` fails when a committed table and its

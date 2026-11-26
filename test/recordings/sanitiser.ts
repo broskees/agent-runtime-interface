@@ -50,12 +50,15 @@
 //         output, assistant text, stderr, file contents, a tool's name),
 //         every whole-word occurrence, in every string value, except a value
 //         that is one of the protocol words of its key at its place: where
-//         the pinned types put that word at that path of keys from the frame
-//         (the driver kit's `protocolWords`, ./protocol-places.ts; for
-//         Claude derived from the pinned sdk.d.ts). So the owner column of an
-//         `ls -l` is replaced, `type: "user"` of an SDK message stays on an
-//         account named `user`, and `name: "memory"` inside an opaque tool
-//         result goes on an account named `memory`;
+//         the pinned types put that word at that path of keys from the frame,
+//         in the object type the object's own discriminant names (the driver
+//         kit's `protocolWords`, ./protocol-places.ts; for Claude derived from
+//         the pinned sdk.d.ts). So the owner column of an `ls -l` is
+//         replaced, `type: "user"` of an SDK message stays on an account
+//         named `user`, `name: "memory"` inside an opaque tool result goes on
+//         an account named `memory`, and `name: "web_search"` of a
+//         `tool_use` block goes on an account named `web_search` (only a
+//         `server_tool_use` block's name may be that word);
 //       - in an outbound frame (what the driver sent, built from the scenario
 //         and the host's config) and in every object key, only where the
 //         name is a whole segment of a path (/srv/<name>/x, C:\Users\<name>,
@@ -72,7 +75,7 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { FRAME_PLACE, slotAt, slotBelow } from "./protocol-places.ts";
+import { FRAME_PLACE, slotAt, slotIn } from "./protocol-places.ts";
 import type { ProtocolSlot, ProtocolWords } from "./protocol-places.ts";
 
 /** The credential variables whose values never reach a recording. */
@@ -497,7 +500,7 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const picked = input.recordedModel !== undefined && (value as Entry)["category"] === "model" && Array.isArray((value as Entry)["options"]) ? acpModelOptionWith(value as Entry, input.recordedModel) : (value as Entry);
       const source = withNeutralAcpUsage(picked, key);
       const out: { [key: string]: unknown } = {};
-      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field, slotBelow(protocolWords, slot, field));
+      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field, slotIn(protocolWords, slot, source, field));
       return out;
     }
     return value;

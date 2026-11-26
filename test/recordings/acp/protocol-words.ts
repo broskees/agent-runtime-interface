@@ -649,6 +649,29 @@ export const ACP_PROTOCOL_WORDS: ProtocolWords = {
         "completed",
         "in_progress",
         "pending"
+      ],
+      "variants": {
+        "cancelled": "message.params.update.plan.entries[status=cancelled]",
+        "completed": "message.params.update.plan.entries",
+        "in_progress": "message.params.update.plan.entries",
+        "pending": "message.params.update.plan.entries"
+      }
+    }
+  },
+  "message.params.update.plan.entries[status=cancelled]": {
+    "priority": {
+      "words": [
+        "high",
+        "low",
+        "medium"
+      ]
+    },
+    "status": {
+      "words": [
+        "cancelled",
+        "completed",
+        "in_progress",
+        "pending"
       ]
     }
   },

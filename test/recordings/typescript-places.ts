@@ -5,8 +5,9 @@
 // array elements, its shapes the object types among them (an intersection is
 // one shape, the properties TypeScript gives it). A shape's fields are its
 // declared properties (not its symbol-keyed ones, which JSON never holds), and
-// its string index signature is its type for every other key. `unknown`, `any`, type parameters and functions hold neither
-// words nor shapes, so the walk stops there.
+// its string index signature is its type for every other key; a property it
+// does not mark optional (`?`) it requires. `unknown`, `any`, type parameters
+// and functions hold neither words nor shapes, so the walk stops there.
 
 import ts from "typescript";
 import type { ProtocolGraph } from "./protocol-places.ts";
@@ -55,6 +56,10 @@ export function typeScriptGraph(checker: ts.TypeChecker): ProtocolGraph<ts.Type,
     anyKey: (shape) => {
       const index = checker.getIndexTypeOfType(shape, ts.IndexKind.String);
       return index === undefined ? undefined : [index];
+    },
+    requires: (shape, key) => {
+      const property = checker.getPropertyOfType(shape, key);
+      return property !== undefined && (property.flags & ts.SymbolFlags.Optional) === 0;
     },
   };
 }

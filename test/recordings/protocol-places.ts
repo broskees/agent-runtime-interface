@@ -17,15 +17,28 @@
 // `object`, or JSON Schema `true`) is opaque: nothing below it is a protocol
 // word.
 //
+// The object types of a place are alternatives, and their keys' words are not
+// pooled across them where the types say which one an object is: when every
+// type there requires one key whose value is a string literal, and the
+// literals tell types apart (a discriminant, such as a content block's
+// `type`), that key's slot lists `variants`, for each literal the place of
+// the types that allow it. An object at the place then takes its keys' slots
+// from the variant its own value names (`slotIn`), so a `tool_use` block's
+// `name` is free text although a `server_tool_use` block's `name` may be
+// `web_search`; an object whose value names no variant is opaque. The first
+// such key in sorted order is the place's discriminant; a variant place may
+// have its own (an SDK message's `subtype` below its `type`).
+//
 // Each driver kit derives its words from its pinned sources with
 // `placeProtocolWords` (./claude, ./opencode, ./acp and ./codex
 // derive-protocol-words.ts), commits the result as protocol-words.ts, and
 // test/recordings/protocol-words.test.ts checks the two still agree.
 
-/** One key at one place: the words its string value may be, and the place of its object value. */
+/** One key at one place: the words its string value may be, and the place of its object value; for the place's discriminant, the place of the object holding it, by the word it holds. */
 export interface ProtocolSlot {
   readonly words?: readonly string[];
   readonly place?: string;
+  readonly variants?: { readonly [word: string]: string };
 }
 
 /** For each place, its keys' slots. */
@@ -44,12 +57,35 @@ export function slotAt(words: ProtocolWords, place: string | undefined, key: str
   return slots?.[key] ?? slots?.[ANY_KEY];
 }
 
-/** The slot an object value of `slot` opens, keyed for `key` of that object. */
+/** The slot an object value of `slot` opens, keyed for `key` of that object, whatever variant the object is: the place's own slot, with every variant's words. */
 export function slotBelow(words: ProtocolWords, slot: ProtocolSlot | undefined, key: string): ProtocolSlot | undefined {
   return slot?.place === undefined ? undefined : slotAt(words, slot.place, key);
 }
 
-/** Whether `value` is a protocol word of the slot `path` reaches from the frame (`["message", "type"]`). */
+/**
+ * The slot of `key` in `object`, an object value of `slot`. Where the
+ * object's place has a discriminant (a slot with `variants`), the slot is the
+ * one of the variant the object's own value of it names, and so on down; the
+ * discriminant's own slot is the place's. Undefined at an opaque place, and
+ * where the object's value of the discriminant names no variant: the pinned
+ * types describe no such object.
+ */
+export function slotIn(words: ProtocolWords, slot: ProtocolSlot | undefined, object: { readonly [key: string]: unknown }, key: string): ProtocolSlot | undefined {
+  let place = slot?.place;
+  while (place !== undefined) {
+    const slots = words[place];
+    const discriminant = slots === undefined ? undefined : Object.keys(slots).find((each) => slots[each]!.variants !== undefined);
+    if (discriminant === undefined || discriminant === key) return slotAt(words, place, key);
+    const variants = slots![discriminant]!.variants!;
+    const value = object[discriminant];
+    const next = typeof value === "string" && Object.hasOwn(variants, value) ? variants[value] : undefined;
+    if (next === place) return slotAt(words, place, key);
+    place = next;
+  }
+  return undefined;
+}
+
+/** Whether `value` is a protocol word of the slot `path` reaches from the frame (`["message", "type"]`), whatever variant each object on the way is. */
 export function isProtocolWordAt(words: ProtocolWords, path: readonly string[], value: string): boolean {
   let slot: ProtocolSlot | undefined;
   path.forEach((key, index) => {
@@ -86,6 +122,8 @@ export interface ProtocolGraph<Shape, Value> {
   fields(shape: Shape): ReadonlyMap<string, readonly Value[]>;
   /** The type of every key `shape` declares by an index signature or `additionalProperties`, if any. */
   anyKey(shape: Shape): readonly Value[] | undefined;
+  /** Whether `shape` requires its declared field `key`: every object of the shape has it. */
+  requires(shape: Shape, key: string): boolean;
 }
 
 /**
@@ -133,6 +171,32 @@ export function placeProtocolWords<Shape, Value>(roots: { readonly [field: strin
 
   const join = (place: string, key: string): string => (place === FRAME_PLACE ? key : `${place}.${key}`);
 
+  /**
+   * The first key, in sorted order, that every shape of a place requires,
+   * whose value in each is only string literals, and whose literals tell some
+   * shapes apart: for each literal, the shapes that allow it. A key that also
+   * allows other values (a number, or any string beside the literals) counts
+   * by its literals: an object holding another value is then opaque, the
+   * side that replaces more.
+   */
+  const discriminantOf = (shapes: readonly Shape[]): { key: string; byWord: Map<string, Shape[]> } | undefined => {
+    if (shapes.length < 2) return undefined;
+    const keys = [...new Set(shapes.flatMap((shape) => [...graph.fields(shape).keys()]))].sort();
+    for (const key of keys) {
+      const byWord = new Map<string, Shape[]>();
+      const literalInEach = shapes.every((shape) => {
+        const values = graph.fields(shape).get(key);
+        if (values === undefined || !graph.requires(shape, key)) return false;
+        const words = new Set(values.flatMap((value) => [...graph.words(value)]));
+        if (words.size === 0 || values.some((value) => [...graph.shapes(value)].length > 0)) return false;
+        for (const word of words) byWord.set(word, [...(byWord.get(word) ?? []), shape]);
+        return true;
+      });
+      if (literalInEach && [...byWord.values()].some((subset) => subset.length < shapes.length)) return { key, byWord };
+    }
+    return undefined;
+  };
+
   const frame: { [key: string]: ProtocolSlot } = {};
   for (const field of Object.keys(roots).sort()) frame[field] = slotOf(roots[field]!, field);
   result[FRAME_PLACE] = frame;
@@ -150,8 +214,23 @@ export function placeProtocolWords<Shape, Value>(roots: { readonly [field: strin
       if (slot.words !== undefined || slot.place !== undefined || opens) slots[key] = slot;
     }
     if (opens) slots[ANY_KEY] = slotOf(open, join(next, ANY_KEY));
+    const discriminant = discriminantOf(shapes);
+    if (discriminant !== undefined) {
+      const variants: { [word: string]: string } = {};
+      for (const word of [...discriminant.byWord.keys()].sort()) variants[word] = placeFor(discriminant.byWord.get(word)!, `${next}[${discriminant.key}=${word}]`);
+      slots[discriminant.key] = { ...slots[discriminant.key]!, variants };
+    }
     result[next] = slots;
   }
+
+  /** `place` and every variant place below it. */
+  const withVariants = (place: string): string[] => {
+    const found = [place];
+    for (let index = 0; index < found.length; index += 1) {
+      for (const slot of Object.values(result[found[index]!] ?? {})) for (const variant of Object.values(slot.variants ?? {})) if (!found.includes(variant)) found.push(variant);
+    }
+    return found;
+  };
 
   for (const entry of extra) {
     let place = FRAME_PLACE;
@@ -160,7 +239,12 @@ export function placeProtocolWords<Shape, Value>(roots: { readonly [field: strin
       if (slots === undefined) throw new Error(`no place ${place} on the way to ${entry.path.join(".")}`);
       const slot = slots[key] ?? {};
       if (index === entry.path.length - 1) {
-        slots[key] = { ...slot, words: [...new Set([...(slot.words ?? []), ...entry.words])].sort() };
+        // A variant of the place holds the key too: the words go to each.
+        for (const each of withVariants(place)) {
+          const own = result[each]![key] ?? {};
+          if (own.variants !== undefined) throw new Error(`${entry.path.join(".")} is a discriminant at ${each}: its words are the pinned types'`);
+          result[each]![key] = { ...own, words: [...new Set([...(own.words ?? []), ...entry.words])].sort() };
+        }
         return;
       }
       if (slot.place === undefined) throw new Error(`${entry.path.slice(0, index + 1).join(".")} opens no place`);

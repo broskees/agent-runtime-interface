@@ -200,19 +200,34 @@ test("the sanitiser replaces the value of every variable whose name ends in _KEY
   }
 });
 
+/** Each kind of SDK message the pinned types tell apart, by the discriminant values that select it (`{ type: "system", subtype: "init" }`), with its place. */
+function messageKinds(words: ProtocolWords): Array<{ readonly select: { readonly [key: string]: string }; readonly place: string }> {
+  const kinds: Array<{ select: { [key: string]: string }; place: string }> = [];
+  const visit = (place: string, select: { [key: string]: string }): void => {
+    const slots = words[place]!;
+    const discriminant = Object.keys(slots).find((key) => slots[key]!.variants !== undefined);
+    if (discriminant === undefined) kinds.push({ select, place });
+    else for (const [word, variant] of Object.entries(slots[discriminant]!.variants!)) if (variant !== place) visit(variant, { ...select, [discriminant]: word });
+  };
+  visit("message", {});
+  return kinds;
+}
+
 test("in an inbound frame the user name goes wherever it is a whole word, except in a protocol word of its key at its place; in an outbound frame only from paths", () => {
+  const kinds = messageKinds(CLAUDE_PROTOCOL_WORDS);
+  assert.ok(kinds.some((kind) => kind.select["type"] === "system" && kind.select["subtype"] === "init"), "the SDK messages are told apart by type, and system messages by subtype");
   for (const user of ["user", "root", "assistant", "system", "text", "default", "message", "end", "joe"]) {
     const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: user, LOGNAME: user }, user, protocolWords: CLAUDE_PROTOCOL_WORDS });
-    // Every key of an SDK message whose protocol words there hold this name, set to it: those values stay.
-    const protocol = Object.fromEntries(
-      Object.entries(CLAUDE_PROTOCOL_WORDS["message"]!)
-        .filter(([key, slot]) => slot.words?.includes(user) === true && !["message", "error"].includes(key))
-        .map(([key]) => [key, user]),
-    );
-    const roles = ["user", "assistant", "system"].includes(user);
+    // In each kind of SDK message, every key whose protocol words there hold this name, set to it: those values stay.
+    for (const kind of kinds) {
+      const protocol = { ...Object.fromEntries(Object.entries(CLAUDE_PROTOCOL_WORDS[kind.place]!).filter(([, slot]) => slot.words?.includes(user) === true).map(([key]) => [key, user])), ...kind.select };
+      assert.deepEqual(sanitise({ dir: "in", kind: "message", query: "q1", message: protocol } as Frame).message, protocol, `account ${user}, a ${JSON.stringify(kind.select)} message`);
+    }
+    // A user message, or an assistant message on an account named assistant, with the name everywhere else.
+    const role = user === "assistant" ? "assistant" : "user";
     const payload = {
-      ...protocol,
-      message: { ...(roles ? { role: user } : {}), content: [{ type: "text", text: `the ${user} ran ls as ${user}'s shell` }] },
+      type: role,
+      message: { role, content: [{ type: "text", text: `the ${user} ran ls as ${user}'s shell` }] },
       tool_use_result: { stdout: `drwx------ 2 ${user} ${user} 4096 Nov 24 12:00 .\n`, stderr: "" },
       error: `permission denied for ${user}`,
       file: `/var/lib/${user}/x`,
@@ -227,8 +242,8 @@ test("in an inbound frame the user name goes wherever it is a whole word, except
         kind: "message",
         query: "q1",
         message: {
-          ...protocol,
-          message: { ...(roles ? { role: user } : {}), content: [{ type: "text", text: "the <USER> ran ls as <USER>'s shell" }] },
+          type: payload.type,
+          message: { role, content: [{ type: "text", text: "the <USER> ran ls as <USER>'s shell" }] },
           tool_use_result: { stdout: "drwx------ 2 <USER> <USER> 4096 Nov 24 12:00 .\n", stderr: "" },
           error: "permission denied for <USER>",
           file: "/var/lib/<USER>/x",
@@ -247,7 +262,7 @@ test("a word the pinned types allow for a key at one place loses the user name a
   const sanitiseAs = (user: string, protocolWords: ProtocolWords) => createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: user, LOGNAME: user }, user, protocolWords });
   // The Claude SDK types a user message's tool_use_result as unknown: none of its fields is a protocol word, whatever the key.
   for (const [user, typed] of [
-    ["memory", { type: "stream_event", event: { type: "content_block_start", content_block: { type: "tool_reference", tool_changes: [{ tool: { definition: { name: "memory" } } }] } } }],
+    ["memory", { type: "stream_event", event: { type: "content_block_start", content_block: { type: "compaction", content: null, encrypted_content: null, tool_changes: [{ type: "tool_addition", tool: { type: "tool_definition", definition: { type: "memory_20250818", name: "memory" } } }] } } }],
     ["unknown", { type: "assistant", error: "unknown" }],
     ["running", { type: "system", subtype: "task_updated", patch: { status: "running" } }],
   ] as const) {
@@ -263,6 +278,23 @@ test("a word the pinned types allow for a key at one place loses the user name a
   const text = sanitiseAs("text", ACP_PROTOCOL_WORDS);
   const update = { jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello text" }, _meta: { "ari.test/x": { type: "text" } } } } };
   assert.deepEqual(text({ dir: "in", kind: "stdout", proc: 1, message: update } as Frame), { dir: "in", kind: "stdout", proc: 1, message: { ...update, params: { ...update.params, update: { ...update.params.update, content: { type: "text", text: "hello <USER>" }, _meta: { "ari.test/x": { type: "<USER>" } } } } } });
+});
+
+test("a tool_use block's name loses the user name although a server_tool_use block's name may be that word: on accounts named web_search and web_fetch", () => {
+  for (const user of ["web_search", "web_fetch"]) {
+    const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: user, LOGNAME: user }, user, protocolWords: CLAUDE_PROTOCOL_WORDS });
+    const block = (type: string, name: string) => ({ type, id: "toolu_1", name, input: {} });
+    const streamed = (type: string, name: string) => ({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: block(type, name) } });
+    const said = (type: string, name: string) => ({ type: "assistant", message: { role: "assistant", content: [block(type, name)] } });
+    for (const message of [streamed, said]) {
+      // The pinned BetaToolUseBlock.name is a string: the name of a tool of the agent's, which may be named like the account.
+      assert.deepEqual(sanitise({ dir: "in", kind: "message", query: "q1", message: message("tool_use", user) } as Frame).message, message("tool_use", "<USER>"), `account ${user}: a tool_use block's name goes`);
+      // BetaServerToolUseBlock.name is one of the server tools' names, web_search and web_fetch among them: the word stays.
+      assert.deepEqual(sanitise({ dir: "in", kind: "message", query: "q1", message: message("server_tool_use", user) } as Frame).message, message("server_tool_use", user), `account ${user}: a server_tool_use block's name stays`);
+    }
+    // A block whose type no pinned block has is opaque: the name goes, its type too.
+    assert.deepEqual(sanitise({ dir: "in", kind: "message", query: "q1", message: streamed(user, user) } as Frame).message, streamed("<USER>", "<USER>"), `account ${user}: a block of no pinned type`);
+  }
 });
 
 test("the user names are the OS user's (os.userInfo), and USER and LOGNAME too when they differ", () => {

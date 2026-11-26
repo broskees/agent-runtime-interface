@@ -388,6 +388,87 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "networkAccess",
         "requestPermissions",
         "writeStdin"
+      ],
+      "variants": {
+        "applyPatch": "message.params.action[type=applyPatch]",
+        "command": "message.params.action[type=command]",
+        "execve": "message.params.action[type=execve]",
+        "mcpToolCall": "message.params.action[type=mcpToolCall]",
+        "networkAccess": "message.params.action[type=networkAccess]",
+        "requestPermissions": "message.params.action[type=requestPermissions]",
+        "writeStdin": "message.params.action[type=writeStdin]"
+      }
+    }
+  },
+  "message.params.action[type=applyPatch]": {
+    "type": {
+      "words": [
+        "applyPatch"
+      ]
+    }
+  },
+  "message.params.action[type=command]": {
+    "source": {
+      "words": [
+        "shell",
+        "unifiedExec"
+      ]
+    },
+    "type": {
+      "words": [
+        "command"
+      ]
+    }
+  },
+  "message.params.action[type=execve]": {
+    "source": {
+      "words": [
+        "shell",
+        "unifiedExec"
+      ]
+    },
+    "type": {
+      "words": [
+        "execve"
+      ]
+    }
+  },
+  "message.params.action[type=mcpToolCall]": {
+    "type": {
+      "words": [
+        "mcpToolCall"
+      ]
+    }
+  },
+  "message.params.action[type=networkAccess]": {
+    "protocol": {
+      "words": [
+        "http",
+        "https",
+        "socks5Tcp",
+        "socks5Udp"
+      ]
+    },
+    "type": {
+      "words": [
+        "networkAccess"
+      ]
+    }
+  },
+  "message.params.action[type=requestPermissions]": {
+    "permissions": {
+      "place": "message.params.permissions"
+    },
+    "type": {
+      "words": [
+        "requestPermissions"
+      ]
+    }
+  },
+  "message.params.action[type=writeStdin]": {
+    "type": {
+      "words": [
+        "writeStdin"
       ]
     }
   },
@@ -422,7 +503,12 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "glob_pattern",
         "path",
         "special"
-      ]
+      ],
+      "variants": {
+        "glob_pattern": "message.params.additionalPermissions.fileSystem.entries.path[type=glob_pattern]",
+        "path": "message.params.additionalPermissions.fileSystem.entries.path[type=path]",
+        "special": "message.params.additionalPermissions.fileSystem.entries.path[type=special]"
+      }
     },
     "value": {
       "place": "message.params.additionalPermissions.fileSystem.entries.path.value"
@@ -437,7 +523,81 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "slash_tmp",
         "tmpdir",
         "unknown"
+      ],
+      "variants": {
+        "minimal": "message.params.additionalPermissions.fileSystem.entries.path.value[kind=minimal]",
+        "project_roots": "message.params.additionalPermissions.fileSystem.entries.path.value[kind=project_roots]",
+        "root": "message.params.additionalPermissions.fileSystem.entries.path.value[kind=root]",
+        "slash_tmp": "message.params.additionalPermissions.fileSystem.entries.path.value[kind=slash_tmp]",
+        "tmpdir": "message.params.additionalPermissions.fileSystem.entries.path.value[kind=tmpdir]",
+        "unknown": "message.params.additionalPermissions.fileSystem.entries.path.value[kind=unknown]"
+      }
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path.value[kind=minimal]": {
+    "kind": {
+      "words": [
+        "minimal"
       ]
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path.value[kind=project_roots]": {
+    "kind": {
+      "words": [
+        "project_roots"
+      ]
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path.value[kind=root]": {
+    "kind": {
+      "words": [
+        "root"
+      ]
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path.value[kind=slash_tmp]": {
+    "kind": {
+      "words": [
+        "slash_tmp"
+      ]
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path.value[kind=tmpdir]": {
+    "kind": {
+      "words": [
+        "tmpdir"
+      ]
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path.value[kind=unknown]": {
+    "kind": {
+      "words": [
+        "unknown"
+      ]
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path[type=glob_pattern]": {
+    "type": {
+      "words": [
+        "glob_pattern"
+      ]
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path[type=path]": {
+    "type": {
+      "words": [
+        "path"
+      ]
+    }
+  },
+  "message.params.additionalPermissions.fileSystem.entries.path[type=special]": {
+    "type": {
+      "words": [
+        "special"
+      ]
+    },
+    "value": {
+      "place": "message.params.additionalPermissions.fileSystem.entries.path.value"
     }
   },
   "message.params.additionalPermissions.network": {},
@@ -467,6 +627,32 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "add",
         "delete",
         "update"
+      ],
+      "variants": {
+        "add": "message.params.changes.kind[type=add]",
+        "delete": "message.params.changes.kind[type=delete]",
+        "update": "message.params.changes.kind[type=update]"
+      }
+    }
+  },
+  "message.params.changes.kind[type=add]": {
+    "type": {
+      "words": [
+        "add"
+      ]
+    }
+  },
+  "message.params.changes.kind[type=delete]": {
+    "type": {
+      "words": [
+        "delete"
+      ]
+    }
+  },
+  "message.params.changes.kind[type=update]": {
+    "type": {
+      "words": [
+        "update"
       ]
     }
   },
@@ -476,6 +662,40 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "listFiles",
         "read",
         "search",
+        "unknown"
+      ],
+      "variants": {
+        "listFiles": "message.params.commandActions[type=listFiles]",
+        "read": "message.params.commandActions[type=read]",
+        "search": "message.params.commandActions[type=search]",
+        "unknown": "message.params.commandActions[type=unknown]"
+      }
+    }
+  },
+  "message.params.commandActions[type=listFiles]": {
+    "type": {
+      "words": [
+        "listFiles"
+      ]
+    }
+  },
+  "message.params.commandActions[type=read]": {
+    "type": {
+      "words": [
+        "read"
+      ]
+    }
+  },
+  "message.params.commandActions[type=search]": {
+    "type": {
+      "words": [
+        "search"
+      ]
+    }
+  },
+  "message.params.commandActions[type=unknown]": {
+    "type": {
+      "words": [
         "unknown"
       ]
     }
@@ -597,6 +817,32 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
       "words": [
         "add",
         "delete",
+        "update"
+      ],
+      "variants": {
+        "add": "message.params.fileChanges.*[type=add]",
+        "delete": "message.params.fileChanges.*[type=delete]",
+        "update": "message.params.fileChanges.*[type=update]"
+      }
+    }
+  },
+  "message.params.fileChanges.*[type=add]": {
+    "type": {
+      "words": [
+        "add"
+      ]
+    }
+  },
+  "message.params.fileChanges.*[type=delete]": {
+    "type": {
+      "words": [
+        "delete"
+      ]
+    }
+  },
+  "message.params.fileChanges.*[type=update]": {
+    "type": {
+      "words": [
         "update"
       ]
     }
@@ -791,6 +1037,40 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "openPage",
         "other",
         "search"
+      ],
+      "variants": {
+        "findInPage": "message.params.item.action[type=findInPage]",
+        "openPage": "message.params.item.action[type=openPage]",
+        "other": "message.params.item.action[type=other]",
+        "search": "message.params.item.action[type=search]"
+      }
+    }
+  },
+  "message.params.item.action[type=findInPage]": {
+    "type": {
+      "words": [
+        "findInPage"
+      ]
+    }
+  },
+  "message.params.item.action[type=openPage]": {
+    "type": {
+      "words": [
+        "openPage"
+      ]
+    }
+  },
+  "message.params.item.action[type=other]": {
+    "type": {
+      "words": [
+        "other"
+      ]
+    }
+  },
+  "message.params.item.action[type=search]": {
+    "type": {
+      "words": [
+        "search"
       ]
     }
   },
@@ -862,6 +1142,32 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "inputAudio",
         "inputImage",
         "inputText"
+      ],
+      "variants": {
+        "inputAudio": "message.params.item.contentItems[type=inputAudio]",
+        "inputImage": "message.params.item.contentItems[type=inputImage]",
+        "inputText": "message.params.item.contentItems[type=inputText]"
+      }
+    }
+  },
+  "message.params.item.contentItems[type=inputAudio]": {
+    "type": {
+      "words": [
+        "inputAudio"
+      ]
+    }
+  },
+  "message.params.item.contentItems[type=inputImage]": {
+    "type": {
+      "words": [
+        "inputImage"
+      ]
+    }
+  },
+  "message.params.item.contentItems[type=inputText]": {
+    "type": {
+      "words": [
+        "inputText"
       ]
     }
   },
@@ -903,7 +1209,12 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "block",
         "hide",
         "show"
-      ]
+      ],
+      "variants": {
+        "block": "message.params.item.moderation.display[mode=block]",
+        "hide": "message.params.item.moderation.display[mode=hide]",
+        "show": "message.params.item.moderation.display[mode=show]"
+      }
     },
     "reason": {
       "place": "message.params.item.moderation.display.reason"
@@ -936,6 +1247,24 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
       "words": [
         "cyber",
         "protection"
+      ],
+      "variants": {
+        "cyber": "message.params.item.moderation.display.reason[kind=cyber]",
+        "protection": "message.params.item.moderation.display.reason[kind=protection]"
+      }
+    }
+  },
+  "message.params.item.moderation.display.reason[kind=cyber]": {
+    "kind": {
+      "words": [
+        "cyber"
+      ]
+    }
+  },
+  "message.params.item.moderation.display.reason[kind=protection]": {
+    "kind": {
+      "words": [
+        "protection"
       ]
     }
   },
@@ -943,6 +1272,42 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
     "kind": {
       "words": [
         "wellbeingPromptHelpline"
+      ]
+    }
+  },
+  "message.params.item.moderation.display[mode=block]": {
+    "mode": {
+      "words": [
+        "block"
+      ]
+    },
+    "reason": {
+      "place": "message.params.item.moderation.display.reason"
+    }
+  },
+  "message.params.item.moderation.display[mode=hide]": {
+    "mode": {
+      "words": [
+        "hide"
+      ]
+    },
+    "replacement": {
+      "place": "message.params.item.moderation.display.replacement"
+    }
+  },
+  "message.params.item.moderation.display[mode=show]": {
+    "annotation": {
+      "place": "message.params.item.moderation.display.annotation"
+    },
+    "mode": {
+      "words": [
+        "show"
+      ]
+    },
+    "trustedContacts": {
+      "words": [
+        "check",
+        "skip"
       ]
     }
   },
@@ -969,6 +1334,32 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
       "words": [
         "inlineMarkdown",
         "inlineVisualization",
+        "wholeItem"
+      ],
+      "variants": {
+        "inlineMarkdown": "message.params.item.presentation[type=inlineMarkdown]",
+        "inlineVisualization": "message.params.item.presentation[type=inlineVisualization]",
+        "wholeItem": "message.params.item.presentation[type=wholeItem]"
+      }
+    }
+  },
+  "message.params.item.presentation[type=inlineMarkdown]": {
+    "type": {
+      "words": [
+        "inlineMarkdown"
+      ]
+    }
+  },
+  "message.params.item.presentation[type=inlineVisualization]": {
+    "type": {
+      "words": [
+        "inlineVisualization"
+      ]
+    }
+  },
+  "message.params.item.presentation[type=wholeItem]": {
+    "type": {
+      "words": [
         "wholeItem"
       ]
     }
@@ -1046,6 +1437,40 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "list_files",
         "read",
         "search",
+        "unknown"
+      ],
+      "variants": {
+        "list_files": "message.params.parsedCmd[type=list_files]",
+        "read": "message.params.parsedCmd[type=read]",
+        "search": "message.params.parsedCmd[type=search]",
+        "unknown": "message.params.parsedCmd[type=unknown]"
+      }
+    }
+  },
+  "message.params.parsedCmd[type=list_files]": {
+    "type": {
+      "words": [
+        "list_files"
+      ]
+    }
+  },
+  "message.params.parsedCmd[type=read]": {
+    "type": {
+      "words": [
+        "read"
+      ]
+    }
+  },
+  "message.params.parsedCmd[type=search]": {
+    "type": {
+      "words": [
+        "search"
+      ]
+    }
+  },
+  "message.params.parsedCmd[type=unknown]": {
+    "type": {
+      "words": [
         "unknown"
       ]
     }
@@ -1150,6 +1575,24 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
       "words": [
         "threadStart",
         "turn"
+      ],
+      "variants": {
+        "threadStart": "message.params.readState.firstUnread[type=threadStart]",
+        "turn": "message.params.readState.firstUnread[type=turn]"
+      }
+    }
+  },
+  "message.params.readState.firstUnread[type=threadStart]": {
+    "type": {
+      "words": [
+        "threadStart"
+      ]
+    }
+  },
+  "message.params.readState.firstUnread[type=turn]": {
+    "type": {
+      "words": [
+        "turn"
       ]
     }
   },
@@ -1190,7 +1633,14 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "integer",
         "number",
         "string"
-      ]
+      ],
+      "variants": {
+        "array": "message.params.requestedSchema.properties.*[type=array]",
+        "boolean": "message.params.requestedSchema.properties.*[type=boolean]",
+        "integer": "message.params.requestedSchema.properties.*[type=integer]",
+        "number": "message.params.requestedSchema.properties.*[type=integer]",
+        "string": "message.params.requestedSchema.properties.*[type=string]"
+      }
     }
   },
   "message.params.requestedSchema.properties.*.items": {
@@ -1204,10 +1654,71 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
     }
   },
   "message.params.requestedSchema.properties.*.oneOf": {},
+  "message.params.requestedSchema.properties.*[type=array]": {
+    "items": {
+      "place": "message.params.requestedSchema.properties.*.items"
+    },
+    "type": {
+      "words": [
+        "array"
+      ]
+    }
+  },
+  "message.params.requestedSchema.properties.*[type=boolean]": {
+    "type": {
+      "words": [
+        "boolean"
+      ]
+    }
+  },
+  "message.params.requestedSchema.properties.*[type=integer]": {
+    "type": {
+      "words": [
+        "integer",
+        "number"
+      ]
+    }
+  },
+  "message.params.requestedSchema.properties.*[type=string]": {
+    "format": {
+      "words": [
+        "date",
+        "date-time",
+        "email",
+        "uri"
+      ]
+    },
+    "oneOf": {
+      "place": "message.params.requestedSchema.properties.*.oneOf"
+    },
+    "type": {
+      "words": [
+        "string"
+      ]
+    }
+  },
   "message.params.result": {
     "type": {
       "words": [
         "completed",
+        "failed"
+      ],
+      "variants": {
+        "completed": "message.params.result[type=completed]",
+        "failed": "message.params.result[type=failed]"
+      }
+    }
+  },
+  "message.params.result[type=completed]": {
+    "type": {
+      "words": [
+        "completed"
+      ]
+    }
+  },
+  "message.params.result[type=failed]": {
+    "type": {
+      "words": [
         "failed"
       ]
     }
@@ -1329,6 +1840,46 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "active",
         "idle",
         "notLoaded",
+        "systemError"
+      ],
+      "variants": {
+        "active": "message.params.status[type=active]",
+        "idle": "message.params.status[type=idle]",
+        "notLoaded": "message.params.status[type=notLoaded]",
+        "systemError": "message.params.status[type=systemError]"
+      }
+    }
+  },
+  "message.params.status[type=active]": {
+    "activeFlags": {
+      "words": [
+        "waitingOnApproval",
+        "waitingOnUserInput"
+      ]
+    },
+    "type": {
+      "words": [
+        "active"
+      ]
+    }
+  },
+  "message.params.status[type=idle]": {
+    "type": {
+      "words": [
+        "idle"
+      ]
+    }
+  },
+  "message.params.status[type=notLoaded]": {
+    "type": {
+      "words": [
+        "notLoaded"
+      ]
+    }
+  },
+  "message.params.status[type=systemError]": {
+    "type": {
+      "words": [
         "systemError"
       ]
     }
@@ -1728,6 +2279,64 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "apiKey",
         "chatgpt",
         "gcp"
+      ],
+      "variants": {
+        "amazonBedrock": "message.result.account[type=amazonBedrock]",
+        "apiKey": "message.result.account[type=apiKey]",
+        "chatgpt": "message.result.account[type=chatgpt]",
+        "gcp": "message.result.account[type=gcp]"
+      }
+    }
+  },
+  "message.result.account[type=amazonBedrock]": {
+    "type": {
+      "words": [
+        "amazonBedrock"
+      ]
+    }
+  },
+  "message.result.account[type=apiKey]": {
+    "type": {
+      "words": [
+        "apiKey"
+      ]
+    }
+  },
+  "message.result.account[type=chatgpt]": {
+    "planType": {
+      "words": [
+        "business",
+        "edu",
+        "edu_plus",
+        "edu_pro",
+        "ent26",
+        "enterprise",
+        "enterprise_cbp_automation",
+        "enterprise_cbp_usage_based",
+        "free",
+        "go",
+        "plus",
+        "pro",
+        "prolite",
+        "promax",
+        "sci",
+        "sci_plus",
+        "self_serve_business_prolite",
+        "self_serve_business_usage_based",
+        "team",
+        "unknown"
+      ]
+    },
+    "type": {
+      "words": [
+        "chatgpt"
+      ]
+    }
+  },
+  "message.result.account[type=gcp]": {
+    "type": {
+      "words": [
+        "gcp"
       ]
     }
   },
@@ -1943,6 +2552,46 @@ export const CODEX_PROTOCOL_WORDS: ProtocolWords = {
         "dangerFullAccess",
         "externalSandbox",
         "readOnly",
+        "workspaceWrite"
+      ],
+      "variants": {
+        "dangerFullAccess": "message.result.sandbox[type=dangerFullAccess]",
+        "externalSandbox": "message.result.sandbox[type=externalSandbox]",
+        "readOnly": "message.result.sandbox[type=readOnly]",
+        "workspaceWrite": "message.result.sandbox[type=workspaceWrite]"
+      }
+    }
+  },
+  "message.result.sandbox[type=dangerFullAccess]": {
+    "type": {
+      "words": [
+        "dangerFullAccess"
+      ]
+    }
+  },
+  "message.result.sandbox[type=externalSandbox]": {
+    "networkAccess": {
+      "words": [
+        "enabled",
+        "restricted"
+      ]
+    },
+    "type": {
+      "words": [
+        "externalSandbox"
+      ]
+    }
+  },
+  "message.result.sandbox[type=readOnly]": {
+    "type": {
+      "words": [
+        "readOnly"
+      ]
+    }
+  },
+  "message.result.sandbox[type=workspaceWrite]": {
+    "type": {
+      "words": [
         "workspaceWrite"
       ]
     }

@@ -29,7 +29,7 @@ import { recordCodex } from "../../recordings/codex/record.ts";
 import type { CodexRecordOutcome } from "../../recordings/codex/record.ts";
 import { replayCodex } from "../../recordings/codex/replay.ts";
 import { startTurnAfterItsText } from "../../recordings/late-start-turn.ts";
-import { NEUTRAL_CODEX_CREDITS, NEUTRAL_RATE_LIMIT_WINDOWS, NEUTRAL_SPEND_CONTROL_LIMIT, NEUTRAL_TIME, PLACEHOLDERS, createSanitiser } from "../../recordings/sanitiser.ts";
+import { NEUTRAL_CODEX_CREDITS, NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_RATE_LIMIT_WINDOWS, NEUTRAL_SHELL, NEUTRAL_SOCKET_PATH, NEUTRAL_SPEND_CONTROL_LIMIT, NEUTRAL_TIME, NEUTRAL_TMP_PATH, PLACEHOLDERS, createSanitiser } from "../../recordings/sanitiser.ts";
 import { SCENARIOS, SCENARIO_NAMES, ScenarioCheckError, checkScenario } from "../../recordings/scenarios.ts";
 import type { ScenarioName, ScenarioRun } from "../../recordings/scenarios.ts";
 import { ReplayCheckError, ReplayDriftError, showFrame } from "../../recordings/sequencer.ts";
@@ -562,7 +562,7 @@ for (const [recordedAs, replayedAs] of [
   });
 }
 
-test("the Codex recorder replaces the OS user name, a home path, an email, a secret environment value, an account id and each account detail (plan type, rate-limit windows, credit balance) in a recorded Codex frame, the scan and check:recordings pass, and the recording replays", async () => {
+test("the Codex recorder replaces the OS user name, a home path, an email, a secret environment value, an account id and each kind of account detail (Codex's plan type, rate-limit windows and credit balance among them) in recorded Codex frames, the scan and check:recordings pass, and the recording replays", async () => {
   const osName = os.userInfo().username;
   const home = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "sanitise-home-")));
   fs.mkdirSync(path.join(home, ".codex"), { mode: 0o700 });
@@ -586,7 +586,23 @@ test("the Codex recorder replaces the OS user name, a home path, an email, a sec
     server: "accounts",
     tool: "whoami",
     status: "completed",
-    arguments: { accountId: "acct-31f9c2", organizationId: "org-77d1e0" },
+    // A tool's arguments are JSON the schema does not describe: every other kind of account detail, as other agents name them.
+    arguments: {
+      accountId: "acct-31f9c2",
+      organizationId: "org-77d1e0",
+      subscriptionType: "ChatGPT Pro",
+      rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.82, resetsAt: 1796072400 },
+      credential_expires_at: "2026-12-16T12:44:44.039Z",
+      tokenExpiresAt: 1796000000123,
+      pid: 2294915,
+      tmp: "/var/tmp/opencode/session.1YX2c84S/codex",
+      socketPath: "/run/user/1000/codex-2294915.sock",
+      shell: "/usr/bin/zsh",
+      providers: [
+        { id: "openai", isAuthenticated: true },
+        { id: "azure-openai", signedIn: false },
+      ],
+    },
     result: { content: [{ type: "text", text: `${osName} asked from ${home}/notes, as ari-recorder-user@example.org, with ${secret} and /home/someone-else/x` }], structuredContent: null },
     error: null,
     durationMs: 3,
@@ -618,13 +634,25 @@ test("the Codex recorder replaces the OS user name, a home path, an email, a sec
     assert.ok(!text.includes(outcome.workspace), `${outcome.scenario}: the workspace path`);
     assert.ok(!text.includes(home), `${outcome.scenario}: the HOME`);
     assert.deepEqual(wholeWordsOf(osName, frames, CODEX_PROTOCOL_WORDS), [], `${outcome.scenario}: the OS user name is nowhere in the recording but in protocol words`);
-    for (const leaked of ["ari-recorder-user@example.org", secret, "someone-else", "acct-31f9c2", "org-77d1e0", '"pro"', '"usedPercent":37', '"usedPercent":81', "1796072400", "1796500000", "1693.25", "250.00", "90.17", "1796600000", "workspace_member_usage_limit_reached", "(fake)"]) {
+    for (const leaked of ["ari-recorder-user@example.org", secret, "someone-else", "acct-31f9c2", "org-77d1e0", "ChatGPT Pro", "0.82", "2026-12-16", "1796000000123", "2294915", "session.1YX2c84S", "codex-2294915", "zsh", "azure-openai", '"pro"', '"usedPercent":37', '"usedPercent":81', "1796072400", "1796500000", "1693.25", "250.00", "90.17", "1796600000", "workspace_member_usage_limit_reached", "(fake)"]) {
       assert.ok(!text.includes(leaked), `${outcome.scenario}: ${leaked} is gone`);
     }
     const tool = frames.find((frame) => frame.kind === "stdout" && (messageOf(frame)["params"] as { item?: { id?: string } } | undefined)?.item?.id === "call_planted")!;
     const item = (messageOf(tool)["params"] as { item: typeof toolCall }).item;
     assert.equal(item.result.content[0]!.text, `${PLACEHOLDERS.user} asked from ${PLACEHOLDERS.home}/notes, as ${PLACEHOLDERS.email}, with <ARI_TEST_SERVICE_TOKEN> and ${PLACEHOLDERS.otherHome}/x`);
-    assert.deepEqual(item.arguments, { accountId: PLACEHOLDERS.accountId, organizationId: PLACEHOLDERS.orgId });
+    assert.deepEqual(item.arguments, {
+      accountId: PLACEHOLDERS.accountId,
+      organizationId: PLACEHOLDERS.orgId,
+      subscriptionType: PLACEHOLDERS.plan,
+      rate_limit_info: NEUTRAL_RATE_LIMIT_INFO,
+      credential_expires_at: NEUTRAL_TIME.iso,
+      tokenExpiresAt: NEUTRAL_TIME.milliseconds,
+      pid: NEUTRAL_PID,
+      tmp: NEUTRAL_TMP_PATH,
+      socketPath: NEUTRAL_SOCKET_PATH,
+      shell: NEUTRAL_SHELL,
+      providers: [],
+    });
     const limits = frames.find((frame) => frame.kind === "stdout" && messageOf(frame)["method"] === "account/rateLimits/updated")!;
     assert.deepEqual((messageOf(limits)["params"] as { rateLimits: unknown }).rateLimits, {
       limitId: "codex",

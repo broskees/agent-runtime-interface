@@ -7,10 +7,19 @@
 // directory the config's `sdkDirectory` names, the managed install
 // `maintenance.install` put in the instance's cache directory, and the
 // package imported by name (the loader `createClaudeDriver` was given).
-// `create()` loads nothing and spawns nothing; a missing SDK or a missing
-// native Claude Code binary shows in `status()` and `probe()` and fails
-// `openSession` with `driver_unavailable`. `probe()` spawns nothing unless
-// deep, and a deep probe runs only `claude auth status --json`.
+//
+// Every query runs the user's own Claude Code, wherever the SDK came from:
+// the configured `executablePath`, else `claude` on the host's PATH, passed
+// to the SDK as `pathToClaudeCodeExecutable`. A Claude Code binary that npm or
+// `maintenance.install` put beside the SDK is never run. Its `--version` must
+// be at least `CLAUDE_TESTED_CLAUDE_CODE_VERSION`, the Claude Code the pinned
+// SDK bundles; a newer one gets an `untested_version` advisory.
+//
+// `create()` loads nothing and spawns nothing; a missing SDK, or a Claude Code
+// that is missing, too old or prints no version, shows in `status()` and
+// `probe()` and fails `openSession` with `driver_unavailable` before any
+// Claude Code session starts. `probe()` runs only `claude --version`, and a
+// deep probe also `claude auth status --json`.
 //
 // Claude Code keeps sessions in its config directory (CLAUDE_CONFIG_DIR, by
 // default ~/.claude). The SDK's session functions (listSessions,
@@ -18,6 +27,7 @@
 // this process and read that directory as this process's environment names
 // it.
 
+import * as fs from "node:fs/promises";
 import { callErrors, toCallError } from "../../errors.ts";
 import type {
   AuthFlow,
@@ -34,7 +44,16 @@ import type {
   UpdateAdvisory,
 } from "../../generated/instance.ts";
 import type { LimitStatus } from "../../generated/usage.ts";
-import { CLAUDE_BINARY_HINT, CLAUDE_DEFAULT_SDK_REGISTRY, CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_TESTED_VERSIONS, claudeDirectoryBinaryHint } from "../../meta/claude.ts";
+import {
+  CLAUDE_CODE_INSTALL_HINT,
+  CLAUDE_CODE_UPDATE_HINT,
+  CLAUDE_DEFAULT_SDK_REGISTRY,
+  CLAUDE_INSTALL_HINT,
+  CLAUDE_SDK_PACKAGE,
+  CLAUDE_SDK_VERSION,
+  CLAUDE_TESTED_CLAUDE_CODE_VERSION,
+  CLAUDE_TESTED_VERSIONS,
+} from "../../meta/claude.ts";
 import type { ClaudeDriverConfig } from "../../meta/claude.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
@@ -132,6 +151,43 @@ export function versionAdvisory(version: string | undefined): UpdateAdvisory | n
   };
 }
 
+/** The user's Claude Code: the executable every query runs, and the version its `--version` printed. */
+interface ClaudeCode {
+  readonly path: string;
+  readonly version: string;
+}
+
+/**
+ * The version in what `claude --version` printed: `2.1.319 (Claude Code)`
+ * (Claude Code docs, code.claude.com/docs/en/setup), or the version alone.
+ * Undefined for anything else.
+ */
+export function parseClaudeCodeVersion(stdout: string): string | undefined {
+  const firstLine = stdout.trim().split(/\r?\n/)[0] ?? "";
+  return /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s+\(Claude Code\))?$/.exec(firstLine.trim())?.[1];
+}
+
+/** The advisory for a Claude Code newer than the one the driver is tested against, or null. */
+function claudeCodeAdvisory(claudeCode: ClaudeCode): UpdateAdvisory | null {
+  if (compareVersions(claudeCode.version, CLAUDE_TESTED_CLAUDE_CODE_VERSION) <= 0) return null;
+  return {
+    kind: "untested_version",
+    message: `Claude Code ${claudeCode.version} at ${claudeCode.path} is newer than ${CLAUDE_TESTED_CLAUDE_CODE_VERSION}, the version this driver is tested against: it runs, but this version is untested.`,
+    currentVersion: claudeCode.version,
+    testedRange: CLAUDE_TESTED_CLAUDE_CODE_VERSION,
+  };
+}
+
+/** What changes when a file is replaced or rewritten in place, as `claude update` does; null when it cannot be read. */
+async function fileIdentity(path: string): Promise<string | null> {
+  try {
+    const stats = await fs.stat(path);
+    return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
 async function readAll(stream: AsyncIterable<Uint8Array>): Promise<string> {
   const decoder = new TextDecoder();
   let text = "";
@@ -171,10 +227,10 @@ const TEXT_KINDS: { readonly [kind: string]: string } = {
   review_guide: "a guide for reviewing the change",
 };
 
-/** A loaded SDK and the Claude Code executable its queries run. */
+/** A loaded SDK and the user's Claude Code its queries run. */
 interface Available {
   readonly runtime: ClaudeSdkRuntime;
-  readonly executable: { readonly path: string; readonly configured: boolean };
+  readonly claudeCode: ClaudeCode;
 }
 
 export class ClaudeInstance implements Instance {
@@ -190,6 +246,8 @@ export class ClaudeInstance implements Instance {
   readonly #flows = new Map<string, string>();
   readonly #statusWaiters = new Set<() => void>();
   #runtime: Promise<ClaudeSdkRuntime> | undefined;
+  /** The last Claude Code whose version was read, kept while its file stays the same. */
+  #checkedClaudeCode: (ClaudeCode & { readonly identity: string }) | undefined;
   #catalog: ModelCatalog | undefined;
   #managed: boolean;
   #sessionCount = 0;
@@ -212,10 +270,10 @@ export class ClaudeInstance implements Instance {
   }
 
   get bindingKey(): string {
-    return `claude:${this.#config.executablePath ?? "bundled"}:${this.#managed ? `managed:${this.id}` : "ambient"}`;
+    return `claude:${this.#config.executablePath ?? "claude"}:${this.#managed ? `managed:${this.id}` : "ambient"}`;
   }
 
-  // The SDK and the binary.
+  // The SDK and the user's Claude Code.
 
   /** The loaded SDK; a failed load is not kept, so installing the SDK later works without a restart. */
   #sdk(): Promise<ClaudeSdkRuntime> {
@@ -233,7 +291,7 @@ export class ClaudeInstance implements Instance {
     return managed ?? this.#loadSdk();
   }
 
-  /** `maintenance.install` and `maintenance.update`: installs the pinned SDK and its native package from the npm registry; the next use loads them. */
+  /** `maintenance.install` and `maintenance.update`: installs the pinned SDK, and only the SDK, from the npm registry; the next use loads it. */
   async #install(): Promise<void> {
     if (this.#disposed) throw callErrors.invalidState("instance_disposed");
     await installClaudeSdk({
@@ -248,48 +306,95 @@ export class ClaudeInstance implements Instance {
   }
 
   /**
-   * The Claude Code executable queries run: the configured one, else the
-   * SDK's bundled binary. The host resolves the configured one: a bare name
-   * on PATH, a path with a directory part as it stands. Either way it must
-   * name an executable file, or the driver is unavailable.
+   * The user's Claude Code, which every query runs: the configured
+   * `executablePath`, else `claude`, as the host resolves it (a bare name on
+   * its PATH, a path with a directory part as it stands), at
+   * `CLAUDE_TESTED_CLAUDE_CODE_VERSION` or newer. Missing, printing no
+   * version, or older: the driver is unavailable, and the error names the fix.
    */
-  async #executable(runtime: ClaudeSdkRuntime): Promise<{ path: string; configured: boolean }> {
+  async #claudeCode(): Promise<ClaudeCode> {
     const configured = this.#config.executablePath;
-    if (configured !== undefined) {
-      const path = await this.#host.process.resolveExecutable(configured);
-      if (path === null) {
-        throw callErrors.driverUnavailable({ binary: configured, installHint: CLAUDE_BINARY_HINT }, `The configured Claude Code executable (${configured}) was not found.`);
+    const path = await this.#host.process.resolveExecutable(configured ?? "claude");
+    if (path === null) {
+      if (configured !== undefined) {
+        throw callErrors.driverUnavailable(
+          { binary: configured, installHint: CLAUDE_CODE_INSTALL_HINT },
+          `Claude Code is not installed at the configured executablePath: ${configured} names no executable file. ${CLAUDE_CODE_INSTALL_HINT}`,
+        );
       }
-      return { path, configured: true };
+      throw callErrors.driverUnavailable({ binary: "claude", installHint: CLAUDE_CODE_INSTALL_HINT }, `Claude Code is not installed: no claude executable was found on PATH. ${CLAUDE_CODE_INSTALL_HINT}`);
     }
-    if (runtime.bundledExecutable === null) {
-      const binaryHint = this.#config.sdkDirectory === undefined ? CLAUDE_BINARY_HINT : claudeDirectoryBinaryHint(this.#config.sdkDirectory);
+    const version = await this.#claudeCodeVersion(path);
+    if (compareVersions(version, CLAUDE_TESTED_CLAUDE_CODE_VERSION) < 0) {
       throw callErrors.driverUnavailable(
-        { package: `${CLAUDE_SDK_PACKAGE}-${process.platform}-${process.arch}`, binary: "claude", installHint: binaryHint },
-        `The Claude Agent SDK is installed, but its native Claude Code binary for ${process.platform}-${process.arch} is missing. ${binaryHint}`,
+        { binary: path, installHint: CLAUDE_CODE_UPDATE_HINT },
+        `Claude Code ${version} at ${path} is older than ${CLAUDE_TESTED_CLAUDE_CODE_VERSION}, the oldest version this driver runs (the one ${CLAUDE_SDK_PACKAGE} ${CLAUDE_SDK_VERSION} bundles). ${CLAUDE_CODE_UPDATE_HINT}`,
       );
     }
-    return { path: runtime.bundledExecutable, configured: false };
+    return { path, version };
+  }
+
+  /**
+   * The version `<path> --version` prints. It is read again whenever the file
+   * changes (`claude update` replaces it), and on every check of a file this
+   * process cannot stat.
+   */
+  async #claudeCodeVersion(path: string): Promise<string> {
+    const identity = await fileIdentity(path);
+    const checked = this.#checkedClaudeCode;
+    if (identity !== null && checked !== undefined && checked.path === path && checked.identity === identity) return checked.version;
+    const unreadable = (what: string): Error =>
+      callErrors.driverUnavailable(
+        { binary: path, installHint: CLAUDE_CODE_INSTALL_HINT },
+        `The version of the Claude Code at ${path} cannot be read: ${what}. Claude Code prints a version such as ${CLAUDE_TESTED_CLAUDE_CODE_VERSION} (Claude Code). ${CLAUDE_CODE_INSTALL_HINT}`,
+      );
+    let printed: { stdout: string; stderr: string; code: number | null; signal: string | null };
+    try {
+      const child = await this.#host.process.spawn({ command: path, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: this.#forwardedEnvironment() });
+      const [stdout, stderr] = await Promise.all([readAll(child.stdout), readAll(child.stderr)]);
+      const exit = await child.exited;
+      printed = { stdout, stderr, code: exit.code, signal: exit.signal };
+    } catch (error) {
+      throw unreadable(`${path} --version could not be started (${errorMessage(error)})`);
+    }
+    const version = parseClaudeCodeVersion(printed.stdout);
+    if (printed.code !== 0 || version === undefined) {
+      const ended = printed.code === null ? `was stopped by ${printed.signal ?? "a signal"}` : `exited with code ${printed.code}`;
+      const output = `${printed.stdout}${printed.stderr}`.trim();
+      throw unreadable(`${path} --version ${ended} and printed ${output === "" ? "nothing" : JSON.stringify(output.length > 300 ? `${output.slice(0, 300)}…` : output)}`);
+    }
+    if (identity !== null) this.#checkedClaudeCode = { path, version, identity };
+    return version;
   }
 
   async #available(): Promise<Available> {
     if (this.#disposed) throw callErrors.invalidState("instance_disposed");
     const runtime = await this.#sdk();
-    return { runtime, executable: await this.#executable(runtime) };
+    return { runtime, claudeCode: await this.#claudeCode() };
+  }
+
+  /** A failure to load the SDK or find Claude Code, as the call error `status()` and `probe()` report. */
+  #unavailable(error: unknown): NonNullable<ProbeResult["error"]> {
+    return toCallError(error) ?? callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: CLAUDE_INSTALL_HINT }, errorMessage(error)).callError;
   }
 
   // Status.
 
   async status(): Promise<InstanceStatus> {
-    const probe = await this.probe();
-    if (!probe.installed) return { state: "unavailable", installed: false, ...(probe.error === undefined ? {} : { error: probe.error }) };
+    let available: Available;
+    try {
+      available = await this.#available();
+    } catch (error) {
+      return { state: "unavailable", installed: false, error: this.#unavailable(error) };
+    }
     const auth = await this.#state();
-    const advisory = versionAdvisory(probe.version);
+    const version = available.runtime.version;
+    const advisory = versionAdvisory(version) ?? claudeCodeAdvisory(available.claudeCode);
     const limits = this.#limits.size === 0 ? undefined : limitStatusFrom(this.#limits.values());
     return {
-      state: probe.ok ? "ready" : "error",
+      state: "ready",
       installed: true,
-      ...(probe.version === undefined ? {} : { version: probe.version }),
+      ...(version === undefined ? {} : { version }),
       auth,
       ...(advisory === null ? {} : { advisory }),
       ...(limits === undefined ? {} : { limits }),
@@ -311,15 +416,14 @@ export class ClaudeInstance implements Instance {
     for (const wake of waiters) wake();
   }
 
-  /** Loads the SDK and finds the binary; a deep probe also runs `claude auth status --json`. Nothing else. */
+  /** Loads the SDK, finds the user's Claude Code and runs its `--version`; a deep probe also runs `claude auth status --json`. Nothing else. */
   async probe(options?: { deep?: boolean }): Promise<ProbeResult> {
     const checkedAt = new Date().toISOString();
     let available: Available;
     try {
       available = await this.#available();
     } catch (error) {
-      const callError = toCallError(error) ?? callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: CLAUDE_INSTALL_HINT }, errorMessage(error)).callError;
-      return { ok: false, installed: false, error: callError, checkedAt };
+      return { ok: false, installed: false, error: this.#unavailable(error), checkedAt };
     }
     const version = available.runtime.version;
     const result: ProbeResult = { ok: true, installed: true, ...(version === undefined ? {} : { version }), checkedAt };
@@ -365,7 +469,7 @@ export class ClaudeInstance implements Instance {
     if ((await this.#apiKey()) !== undefined) return { status: "configured", evidence: "passive", scope: "managed_profile" };
     let executable: string;
     try {
-      executable = (await this.#available()).executable.path;
+      executable = (await this.#available()).claudeCode.path;
     } catch {
       return { status: "unavailable", evidence: "passive", scope: "ambient" };
     }
@@ -476,9 +580,9 @@ export class ClaudeInstance implements Instance {
    * that loads no settings, MCP servers or tools and is closed at once.
    */
   async #loadCatalog(cwd: string | undefined): Promise<ModelCatalog> {
-    const { runtime, executable } = await this.#available();
+    const { runtime, claudeCode } = await this.#available();
     const input = noPrompts();
-    const query = runtime.sdk.query({ prompt: input, options: { ...(await this.#isolatedOptions(executable)), cwd: cwd ?? this.#host.paths.tmpDir } });
+    const query = runtime.sdk.query({ prompt: input, options: { ...(await this.#isolatedOptions(claudeCode)), cwd: cwd ?? this.#host.paths.tmpDir } });
     try {
       const models = await query.supportedModels();
       const catalog: ModelInfo[] = models.map((model) => ({
@@ -511,7 +615,7 @@ export class ClaudeInstance implements Instance {
   }
 
   /** Options for a query that must not act: no settings files, no MCP servers, no tools, nothing persisted. */
-  async #isolatedOptions(executable: { path: string; configured: boolean }): Promise<ClaudeQueryOptions> {
+  async #isolatedOptions(claudeCode: ClaudeCode): Promise<ClaudeQueryOptions> {
     return {
       env: await this.#queryEnvironment(),
       settingSources: [],
@@ -520,7 +624,9 @@ export class ClaudeInstance implements Instance {
       tools: [],
       persistSession: false,
       permissionMode: "dontAsk",
-      ...(executable.configured ? { pathToClaudeCodeExecutable: executable.path } : {}),
+      pathToClaudeCodeExecutable: claudeCode.path,
+      // What sdk.d.ts recommends for an app that starts its own Claude Code at or above the bundled version: MCP servers in the initialize request, never on the command line.
+      mcpServersDelivery: "initialize",
       ...(this.#config.model === undefined ? {} : { model: this.#config.model }),
     };
   }
@@ -528,15 +634,25 @@ export class ClaudeInstance implements Instance {
   invalidateCaches = async (): Promise<void> => {
     this.#catalog = undefined;
     this.#runtime = undefined;
+    this.#checkedClaudeCode = undefined;
     this.#changed();
   };
 
   maintenance = {
+    /** The same advisory `status()` gives: the SDK's, else the user's Claude Code's. A Claude Code that is unavailable gives none here; `status()` reports it. */
     advisory: async (): Promise<UpdateAdvisory | null> => {
       const runtime = await this.#sdk();
-      return versionAdvisory(runtime.version);
+      const sdkAdvisory = versionAdvisory(runtime.version);
+      if (sdkAdvisory !== null) return sdkAdvisory;
+      let claudeCode: ClaudeCode;
+      try {
+        claudeCode = await this.#claudeCode();
+      } catch {
+        return null;
+      }
+      return claudeCodeAdvisory(claudeCode);
     },
-    /** Downloads the pinned SDK and this platform's native package from the npm registry (`sdkRegistry`) into the instance's cache directory. */
+    /** Downloads the pinned SDK, and only the SDK, from the npm registry (`sdkRegistry`) into the instance's cache directory. */
     install: (): Promise<void> => this.#install(),
     /** The same as `install`: installs the version this driver pins, which a newer driver may have moved. */
     update: (): Promise<void> => this.#install(),
@@ -563,13 +679,13 @@ export class ClaudeInstance implements Instance {
     /** Claude Code runs with `tools: []`, no MCP servers and no settings files, so it cannot call a tool. */
     guarantees: { toolsDisabled: "native" as const },
     generate: async (request: TextGenerationRequest): Promise<unknown> => {
-      const { runtime, executable } = await this.#available();
+      const { runtime, claudeCode } = await this.#available();
       const what = TEXT_KINDS[request.kind] ?? `a ${request.kind.replace(/^x:/, "")}`;
       const systemPrompt = `Write ${what} for the input the user gives. Reply with it alone.`;
       const query = runtime.sdk.query({
         prompt: onePrompt(typeof request.input === "string" ? request.input : JSON.stringify(request.input, null, 2)),
         options: {
-          ...(await this.#isolatedOptions(executable)),
+          ...(await this.#isolatedOptions(claudeCode)),
           cwd: this.#host.paths.tmpDir,
           systemPrompt,
           maxTurns: 1,
@@ -637,7 +753,7 @@ export class ClaudeInstance implements Instance {
     if ((input.launch?.dynamicTools ?? []).length > 0) {
       throw callErrors.unsupported("tools.dynamicTools", "The Claude driver does not serve dynamic tools; give the host's tools as an MCP server");
     }
-    const { runtime, executable } = await this.#available();
+    const { runtime, claudeCode } = await this.#available();
     const ordinal = this.#sessionCount;
     this.#sessionCount += 1;
     const newUuid = this.#options.newUuid ?? (() => globalThis.crypto.randomUUID());
@@ -646,7 +762,7 @@ export class ClaudeInstance implements Instance {
         host: this.#host,
         config: { ...this.#config, ...pickConfig(input.config) },
         sdk: runtime.sdk,
-        executablePath: executable.configured ? executable.path : undefined,
+        executablePath: claudeCode.path,
         sessionId: sessionIdFor(this.id, ordinal),
         newUuid,
         environment: () => this.#queryEnvironment(),

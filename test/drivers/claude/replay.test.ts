@@ -466,14 +466,17 @@ function escape(text: string): string {
 test("replay leaves out exactly the ignored fields: a change to one passes, a change to its neighbour fails", async () => {
   assert.deepEqual(
     CLAUDE_IGNORED_FIELDS.map((entry) => `${entry.kind} ${entry.field}`),
-    ["query options.env.CLAUDE_AGENT_SDK_CLIENT_APP", "query options.env.ANTHROPIC_API_KEY"],
+    ["query options.env.CLAUDE_AGENT_SDK_CLIENT_APP", "query options.env.ANTHROPIC_API_KEY", "query options.pathToClaudeCodeExecutable", "query options.mcpServersDelivery"],
   );
   const recording = await recordingOf("simple");
   const index = recording.frames.findIndex((entry) => entry.frame.kind === "query");
-  const env = (frames: Frame[]): { [name: string]: string } => (frames[index]!["options"] as { env: { [name: string]: string } }).env;
+  const options = (frames: Frame[]): { [name: string]: unknown } => frames[index]!["options"] as { [name: string]: unknown };
+  const env = (frames: Frame[]): { [name: string]: string } => options(frames)["env"] as { [name: string]: string };
   const ignored = editedCopy(recording, "client-app", (frames) => {
     env(frames)["CLAUDE_AGENT_SDK_CLIENT_APP"] = "ari/99.0.0";
     env(frames)["ANTHROPIC_API_KEY"] = "<ANTHROPIC_API_KEY>";
+    options(frames)["pathToClaudeCodeExecutable"] = "<HOME>/.local/bin/claude";
+    options(frames)["mcpServersDelivery"] = "argv";
   });
   await replayClaude(ignored.file);
   const neighbour = editedCopy(recording, "auto-memory", (frames) => {

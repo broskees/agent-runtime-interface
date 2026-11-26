@@ -132,8 +132,8 @@ export interface ClaudeSessionContext {
   readonly host: HostServices<ClaudeDriverConfig>;
   readonly config: ClaudeDriverConfig;
   readonly sdk: ClaudeSdk;
-  /** `pathToClaudeCodeExecutable`, when the config names one. */
-  readonly executablePath: string | undefined;
+  /** The user's Claude Code, which every query runs (`pathToClaudeCodeExecutable`). */
+  readonly executablePath: string;
   readonly sessionId: string;
   /** A new UUID for Claude: a new thread's or fork's session id, or a prompt's id. */
   newUuid(): string;
@@ -723,7 +723,10 @@ export class ClaudeSession implements Session {
       perTaskStopAffordance: true,
       persistSession: thread.persist,
       ...identity,
-      ...(this.#context.executablePath === undefined ? {} : { pathToClaudeCodeExecutable: this.#context.executablePath }),
+      pathToClaudeCodeExecutable: this.#context.executablePath,
+      // What sdk.d.ts recommends for an app that starts its own Claude Code at or above the bundled version: MCP servers in the
+      // initialize request, never on the command line. This driver gives its servers through setMcpServers, but none ever goes on argv.
+      mcpServersDelivery: "initialize",
       abortController: abort,
       stderr: (data: string) => this.#context.host.diagnostics.log({ level: "debug", msg: `claude: ${data.trimEnd()}` }),
     };

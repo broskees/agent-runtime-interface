@@ -378,6 +378,8 @@ version in the driver's ACP `initialize` request (`clientInfo.version`).
 |---|---|---|---|
 | claude | `query` | `options.env.CLAUDE_AGENT_SDK_CLIENT_APP` | the driver sets it to ari/ followed by the ARI version, which changes with every ARI release |
 | claude | `query` | `options.env.ANTHROPIC_API_KEY` | present only when the recorder ran with ANTHROPIC_API_KEY set; a replay has no key, and a recording holds only its placeholder |
+| claude | `query` | `options.pathToClaudeCodeExecutable` | the path of the user's claude, which differs between machines (a replay names /ari-replay/claude); recordings made before the driver ran the user's Claude Code have none |
+| claude | `query` | `options.mcpServersDelivery` | the driver sets it to initialize on every query since it runs the user's Claude Code; recordings made before then have none, and test/drivers/claude/availability.test.ts checks every query sets it |
 | antigravity | `stdin` | `message.params.clientInfo.version` | the driver's ACP initialize request names the ARI version, which changes with every ARI release |
 
 ## Sanitising and the scan
@@ -1039,7 +1041,13 @@ nothing. Replay gives each turn the model the header names.
 
 You need Claude Code signed in on this machine (`claude auth status`), or an
 Anthropic API key. Recording spends your Claude quota: it runs eight short
-turns, with the `haiku` model unless you choose another.
+turns, with the `haiku` model unless you choose another. The driver runs
+your own `claude` on `PATH`, which must be at least the Claude Code the
+pinned SDK bundles (2.1.330 for SDK 0.3.330); the recorder reads its
+`--version` before it starts, and the driver refuses an older one.
+`test/drivers/claude/live-recordings.test.ts` checks that each recording's
+`vendorVersion` equals the version the pinned SDK bundles, so record with
+exactly that version.
 
 1. Run `pnpm install --frozen-lockfile`.
 2. Run `ARI_LIVE_RECORD=1 pnpm run record:claude`.

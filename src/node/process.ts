@@ -36,11 +36,19 @@
 // missing, the guard waits the whole grace.
 //
 // The owner ends a group the same way: it writes a line to the guard's pipe
-// and waits for the guard to exit (the pipe's end-of-file), so cleanup does not
-// wait a whole grace when the group empties sooner. A guard shows in `ps` as
-// `/bin/sh -c … ari-agent-guard <grace ms> …`, and costs one idle shell per
+// and waits until the group, guard included, is gone (probing with signal 0,
+// which delivers nothing), so cleanup does not wait a whole grace when the
+// group empties sooner. The owner sends a signal to a group by its id only
+// while the group's leader is its own unreaped child, or while the group
+// still exists, so the id cannot belong to anyone else. A guard shows in `ps`
+// as `/bin/sh -c … ari-agent-guard <grace ms> …`, and costs one idle shell per
 // child. If the launcher cannot start the guard, the child never runs: it
-// exits with code 126.
+// exits with code 126. Someone who kills a guard by hand leaves its child
+// unguarded.
+//
+// Under Bun the launcher is started with `Bun.spawn` rather than
+// `node:child_process`, whose extra pipes Bun 1.3.14 closes twice (see
+// `fromBunSubprocess`).
 //
 // What the launcher keeps as it was, and what it does not: spawn errors (a
 // missing or non-executable command, a missing `cwd`) reject as before,
@@ -69,6 +77,7 @@ import type { ChildProcess, StdioOptions } from "node:child_process";
 import * as fs from "node:fs";
 import { constants as osConstants } from "node:os";
 import * as path from "node:path";
+import { Readable, Writable } from "node:stream";
 import type { Duplex } from "node:stream";
 import type { AriError } from "../ari-error.ts";
 import { callErrors } from "../errors.ts";
@@ -210,20 +219,20 @@ function signalGroup(groupId: number, signal: NodeJS.Signals): boolean {
 }
 
 /**
- * Resolves once process group `groupId` is gone, or after `timeoutMs`. It
+ * True once process group `groupId` is gone, false after `timeoutMs`. It
  * probes with signal 0, which delivers nothing, so it can never harm another
  * group. It waits out members that have exited but are not reaped yet: a
  * guard is reaped by the system's reaper, not by this process.
  */
-async function groupGone(groupId: number, timeoutMs: number): Promise<void> {
+async function groupGone(groupId: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
       process.kill(-groupId, 0);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
     }
-    if (Date.now() >= deadline) return;
+    if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
   }
 }
@@ -329,59 +338,149 @@ function launcherEnvironment(environment: { readonly [name: string]: string }): 
   return launcher;
 }
 
-/** The owner's end of a guard's pipe. */
-interface GuardPipe {
-  /** True until the guard has exited (the pipe's other end closed). */
-  readonly running: boolean;
-  /** Resolves once the guard has exited. */
-  readonly gone: Promise<void>;
-  /** Asks the guard to end its group: SIGTERM, then SIGKILL after the grace. */
-  endGroup(): void;
+/** A started child, from whichever runtime started it: what `spawn` needs of it. */
+interface StartedChild {
+  readonly pid: number;
+  readonly stdin: Writable | null;
+  readonly stdout: Readable;
+  readonly stderr: Readable;
+  readonly exited: Promise<ProcessExit>;
+  /** True until the child has exited and been reaped. */
+  isRunning(): boolean;
+  /** Sends `signal` to the child alone. */
+  signal(signal: NodeJS.Signals): void;
+  /** Asks the child's guard to end its group: writes a line to the guard's pipe. Does nothing on Windows. */
+  askGuardToEndGroup(): void;
 }
 
-function watchGuardPipe(pipe: Duplex): GuardPipe {
-  let running = true;
-  let markGone: () => void = () => undefined;
-  const gone = new Promise<void>((resolve) => {
-    markGone = resolve;
-  });
-  const finish = (): void => {
-    running = false;
-    markGone();
-  };
-  pipe.on("error", () => {});
-  pipe.once("end", finish);
-  pipe.once("close", finish);
-  // Read (the guard never writes), so the guard's end-of-file is seen.
-  pipe.resume();
+/** `child`, started by `node:child_process`, with fd 3 the guard's pipe when it has one. */
+function fromChildProcess(child: ChildProcess & { pid: number }): StartedChild {
+  child.on("error", () => {});
+  child.stdin?.on("error", () => {});
+  const guardPipe = child.stdio[3] as Duplex | null | undefined;
+  guardPipe?.on("error", () => {});
   return {
-    get running() {
-      return running;
-    },
-    gone,
-    endGroup() {
-      if (running && !pipe.destroyed && pipe.writable) pipe.write("\n");
+    pid: child.pid,
+    stdin: child.stdin,
+    stdout: child.stdout!,
+    stderr: child.stderr!,
+    exited: new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal }))),
+    isRunning: () => child.exitCode === null && child.signalCode === null,
+    signal: (signal) => child.kill(signal),
+    askGuardToEndGroup: () => {
+      if (guardPipe !== null && guardPipe !== undefined && !guardPipe.destroyed && guardPipe.writable) guardPipe.write("\n");
     },
   };
 }
 
-// Process groups still running in this host process, with whether their guard
-// still runs. When the host process exits without disposing its services, the
-// groups get SIGKILL on the way out, so a host that forgets to dispose does
-// not leave agents running. Signals that end the host without running `exit`
+// The parts of Bun's own spawn API the launcher uses under Bun.
+interface BunFileSink {
+  write(chunk: Uint8Array | string): number;
+  flush(): number | Promise<number>;
+  end(): number | Promise<number>;
+}
+interface BunSubprocess {
+  readonly pid: number;
+  readonly stdin: BunFileSink | undefined;
+  readonly stdout: ReadableStream<Uint8Array>;
+  readonly stderr: ReadableStream<Uint8Array>;
+  readonly stdio: readonly (number | null | undefined)[];
+  readonly exited: Promise<number>;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+  kill(signal?: NodeJS.Signals): void;
+}
+interface BunRuntime {
+  spawn(options: {
+    cmd: string[];
+    cwd?: string;
+    env: { [name: string]: string };
+    stdio: ["pipe" | "ignore", "pipe", "pipe", "pipe"];
+    detached: boolean;
+  }): BunSubprocess;
+}
+
+/** Bun's own runtime object, when this code runs under Bun. */
+const bunRuntime = (globalThis as { Bun?: BunRuntime }).Bun;
+
+/** A Node stream over the stdin of a `Bun.spawn` child. */
+function fileSinkWritable(sink: BunFileSink): Writable {
+  return new Writable({
+    write(chunk: Uint8Array, _encoding, callback) {
+      try {
+        sink.write(chunk);
+        Promise.resolve(sink.flush()).then(
+          () => callback(),
+          (error: Error) => callback(error),
+        );
+      } catch (error) {
+        callback(error as Error);
+      }
+    },
+    final(callback) {
+      try {
+        Promise.resolve(sink.end()).then(
+          () => callback(),
+          () => callback(),
+        );
+      } catch {
+        callback();
+      }
+    },
+  });
+}
+
+/**
+ * The launcher started by `Bun.spawn`, for when this code runs under Bun.
+ * Bun's `node:child_process` wraps an extra pipe such as fd 3 in a socket that
+ * closes the descriptor, and the subprocess closes the same descriptor again
+ * once it is garbage-collected: by then that number may belong to another
+ * child's guard pipe, whose guard would see end-of-file and end a group whose
+ * owner lives (Bun 1.3.14). `Bun.spawn` leaves fd 3 a plain number the
+ * subprocess alone owns and closes, once, when it is collected; this record
+ * keeps the subprocess reachable for as long as it may write to that number.
+ */
+function fromBunSubprocess(subprocess: BunSubprocess): StartedChild {
+  const guardPipe = subprocess.stdio[3];
+  const stdin = subprocess.stdin === undefined ? null : fileSinkWritable(subprocess.stdin);
+  stdin?.on("error", () => {});
+  return {
+    pid: subprocess.pid,
+    stdin,
+    stdout: Readable.fromWeb(subprocess.stdout as never),
+    stderr: Readable.fromWeb(subprocess.stderr as never),
+    exited: subprocess.exited.then(() => ({ code: subprocess.exitCode, signal: subprocess.signalCode })),
+    isRunning: () => subprocess.exitCode === null && subprocess.signalCode === null,
+    signal: (signal) => subprocess.kill(signal),
+    askGuardToEndGroup: () => {
+      if (typeof guardPipe !== "number") return;
+      try {
+        fs.writeSync(guardPipe, "\n");
+      } catch {
+        // The guard has already exited.
+      }
+    },
+  };
+}
+
+// Process groups still running in this host process, with whether their
+// leader is still this process's unreaped child (so the group id is still
+// its). When the host process exits without disposing its services, those
+// groups get SIGKILL on the way out, so a host that forgets to dispose does not
+// leave agents running. Signals that end the host without running `exit`
 // listeners (an unhandled SIGINT, SIGKILL) skip this; the guards end the
-// groups then.
+// groups then, as they end whatever a leader that already exited left behind.
 const runningGroups = new Map<number, () => boolean>();
 let exitListenerInstalled = false;
 
 function killRunningGroupsOnExit(): void {
-  for (const [groupId, guardRunning] of runningGroups) {
-    if (guardRunning()) signalGroup(groupId, "SIGKILL");
+  for (const [groupId, leaderUnreaped] of runningGroups) {
+    if (leaderUnreaped()) signalGroup(groupId, "SIGKILL");
   }
 }
 
-function rememberRunningGroup(groupId: number, guardRunning: () => boolean): void {
-  runningGroups.set(groupId, guardRunning);
+function rememberRunningGroup(groupId: number, leaderUnreaped: () => boolean): void {
+  runningGroups.set(groupId, leaderUnreaped);
   if (exitListenerInstalled) return;
   exitListenerInstalled = true;
   process.once("exit", killRunningGroupsOnExit);
@@ -483,22 +582,44 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
     request: SpawnRequest,
     environment: { [name: string]: string },
     stdinMode: "pipe" | "ignore",
-  ): { readonly child: ChildProcess } | { readonly failure: Promise<AriError> } => {
+  ): { readonly started: StartedChild } | { readonly failure: Promise<AriError> } => {
     if (request.cwd !== undefined && typeof request.cwd !== "string") return { failure: directSpawnFailure(request, environment) };
     // Search where spawn would: relative entries and names against the child's cwd.
     const searchCwd = request.cwd === undefined ? process.cwd() : appendToPath(request.cwd, [], process.cwd());
     const searchPath = environment.PATH;
     const executable = findExecutable(request.command, searchPath, searchCwd);
     if (executable === null) return { failure: directSpawnFailure(request, environment) };
-    const launcherArgs = ["-c", LAUNCH_SCRIPT, LAUNCHER_NAME, GUARD_SCRIPT, String(killGraceMs), COUNT_OTHERS];
+    const args = ["-c", LAUNCH_SCRIPT, LAUNCHER_NAME, GUARD_SCRIPT, String(killGraceMs), COUNT_OTHERS, launchTarget(request.command, executable, searchPath), ...(request.args ?? [])];
+    const env = launcherEnvironment(environment);
     try {
-      const child = spawnChildProcess("/bin/sh", [...launcherArgs, launchTarget(request.command, executable, searchPath), ...(request.args ?? [])], {
+      if (bunRuntime !== undefined) {
+        const subprocess = bunRuntime.spawn({ cmd: ["/bin/sh", ...args], ...(request.cwd === undefined ? {} : { cwd: request.cwd }), env, stdio: [stdinMode, "pipe", "pipe", "pipe"], detached: true });
+        return { started: fromBunSubprocess(subprocess) };
+      }
+      const child = spawnChildProcess("/bin/sh", args, { cwd: request.cwd, env, stdio: [stdinMode, "pipe", "pipe", "pipe"], detached: true });
+      if (child.pid === undefined) return { failure: new Promise((resolve) => child.once("error", (error) => resolve(spawnFailure(request.command, error)))) };
+      return { started: fromChildProcess(child as ChildProcess & { pid: number }) };
+    } catch (error) {
+      return { failure: Promise.resolve(spawnFailure(request.command, error as NodeJS.ErrnoException)) };
+    }
+  };
+
+  /** Starts `request` on Windows, where there are no process groups and no guard. */
+  const startOnWindows = (
+    request: SpawnRequest,
+    environment: { [name: string]: string },
+    stdinMode: "pipe" | "ignore",
+  ): { readonly started: StartedChild } | { readonly failure: Promise<AriError> } => {
+    try {
+      const child = spawnChildProcess(request.command, request.args ?? [], {
         cwd: request.cwd,
-        env: launcherEnvironment(environment),
-        stdio: [stdinMode, "pipe", "pipe", "pipe"],
-        detached: true,
+        env: environment,
+        stdio: [stdinMode, "pipe", "pipe"] satisfies StdioOptions,
+        windowsHide: true,
       });
-      return { child };
+      // Node sets `pid` only when the process started; otherwise it emits 'error' on the next tick.
+      if (child.pid === undefined) return { failure: new Promise((resolve) => child.once("error", (error) => resolve(spawnFailure(request.command, error)))) };
+      return { started: fromChildProcess(child as ChildProcess & { pid: number }) };
     } catch (error) {
       return { failure: Promise.resolve(spawnFailure(request.command, error as NodeJS.ErrnoException)) };
     }
@@ -529,61 +650,30 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
       }
 
       const environment = buildChildEnvironment(baseEnv, envPolicy, request.env ?? {});
-      let child: ChildProcess;
-      if (isWindows) {
-        try {
-          child = spawnChildProcess(request.command, request.args ?? [], {
-            cwd: request.cwd,
-            env: environment,
-            stdio: [stdinMode, "pipe", "pipe"] satisfies StdioOptions,
-            windowsHide: true,
-          });
-        } catch (error) {
-          throw spawnFailure(request.command, error as NodeJS.ErrnoException);
-        }
-      } else {
-        const launched = launch(request, environment, stdinMode);
-        if ("failure" in launched) throw await launched.failure;
-        child = launched.child;
-      }
-      // Node sets `pid` only when the process started; otherwise it emits 'error' on the next tick.
-      if (child.pid === undefined) {
-        const failure = await new Promise<NodeJS.ErrnoException>((resolve) => child.once("error", resolve));
-        throw spawnFailure(request.command, failure);
-      }
+      const launched = isWindows ? startOnWindows(request, environment, stdinMode) : launch(request, environment, stdinMode);
+      if ("failure" in launched) throw await launched.failure;
       // From here to `return` nothing awaits, so the child is registered for
-      // cleanup before `dispose()` can run. Later 'error' events only report a
-      // failed kill, which the guard makes moot; a write to a closed stdin is
-      // reported by `write()` instead.
-      child.on("error", () => {});
-      child.stdin?.on("error", () => {});
+      // cleanup before `dispose()` can run. A write to a closed stdin is
+      // reported by `write()`.
+      const child = launched.started;
       const pid = child.pid;
-      const exited = new Promise<ProcessExit>((resolve) => {
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      });
-      const isRunning = (): boolean => child.exitCode === null && child.signalCode === null;
+      const exited = child.exited;
+      const isRunning = child.isRunning;
 
-      const guard = isWindows ? undefined : watchGuardPipe(child.stdio[3] as Duplex);
-      let endRequested = false;
       let ended: Promise<void> | undefined;
-      /** Has the guard end the group (SIGTERM, then SIGKILL after the grace) and resolves once the guard has exited and the group is gone. */
+      /**
+       * Has the guard end the group (SIGTERM, then SIGKILL after the grace)
+       * and resolves once the group, guard included, is gone. The group id
+       * stays the guard's for as long as the group exists, so the SIGKILL
+       * below, sent only while it does, reaches no other group.
+       */
       const endGroup = (): Promise<void> =>
         (ended ??= (async () => {
-          if (guard === undefined) return;
-          endRequested = true;
-          guard.endGroup();
-          if (!(await settlesWithin(guard.gone, killGraceMs + KILL_WAIT_MS))) {
-            // The guard has not finished. It still runs, so the group id is still its: end the group from here.
-            if (guard.running) signalGroup(pid, "SIGKILL");
-            await settlesWithin(guard.gone, KILL_WAIT_MS);
-          }
+          child.askGuardToEndGroup();
+          if (await groupGone(pid, killGraceMs + KILL_WAIT_MS)) return;
+          signalGroup(pid, "SIGKILL");
           await groupGone(pid, KILL_WAIT_MS);
         })());
-      // A guard that is gone while nobody asked it to end its group (it was killed, or never started):
-      // the child is not reaped yet, so its group id is still its own; end the group now rather than leave it unguarded.
-      void guard?.gone.then(() => {
-        if (!endRequested && isRunning()) signalGroup(pid, "SIGKILL");
-      });
 
       const terminate = async (): Promise<void> => {
         if (isWindows) {
@@ -594,7 +684,7 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
         await settlesWithin(exited, KILL_WAIT_MS);
       };
       terminators.add(terminate);
-      if (guard !== undefined) rememberRunningGroup(pid, () => guard.running);
+      if (!isWindows) rememberRunningGroup(pid, isRunning);
 
       // Timers cannot wait longer than 2^31 - 1 ms; a longer timeout waits that long.
       const timeoutTimer =
@@ -609,8 +699,8 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
 
       return {
         pid,
-        stdout: child.stdout!,
-        stderr: child.stderr!,
+        stdout: child.stdout,
+        stderr: child.stderr,
         exited,
 
         async write(data) {
@@ -632,7 +722,7 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
 
         /**
          * Without a signal, ends the whole process group and resolves when it is gone. With one, sends it to the
-         * group while the guard holds the group's id (the guard ignores the usual ones), else to the child alone.
+         * group (the guard ignores the usual ones) while the child is not yet reaped, so the group id is still its.
          */
         async kill(signal) {
           if (signal === undefined) {
@@ -642,9 +732,9 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
           if (typeof signal !== "string" || !Object.hasOwn(osConstants.signals, signal)) {
             throw callErrors.validation([{ path: ["signal"], message: "is not a known signal" }], `Unknown signal ${String(signal)}`);
           }
-          if (isWindows) child.kill(signal as NodeJS.Signals);
-          else if (guard?.running === true) signalGroup(pid, signal as NodeJS.Signals);
-          else if (isRunning()) child.kill(signal as NodeJS.Signals);
+          if (!isRunning()) return;
+          if (isWindows) child.signal(signal as NodeJS.Signals);
+          else signalGroup(pid, signal as NodeJS.Signals);
         },
       };
     },

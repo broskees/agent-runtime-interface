@@ -13,7 +13,7 @@
 // - a guard is a member of its agent's group, so that group id stays taken
 //   for as long as the guard runs, and the guard signals nothing outside it;
 // - while the owner lives, an idle agent and its grandchild keep running (the
-//   guard never ends a group early);
+//   guard never ends a group early), also while other children come and go;
 // - an agent that exits on its own takes its grandchild and its guard with it;
 // - every agent gets exactly one guard, and `dispose()` returns only once
 //   every guard is gone.
@@ -72,6 +72,10 @@ async function startAgent(service: ProcessService, kind: FakeAgentKind, agents: 
   const child = await service.spawn({ command: "/bin/sh", args: fakeAgentArgs(kind), purpose: "runtime" });
   const [agent] = recordAgents(agents, [{ pid: child.pid!, grandchildPid: Number(await readFirstLine(child.stdout)) }]);
   return { child, agent: agent! };
+}
+
+async function readAll(stream: AsyncIterable<Uint8Array>): Promise<void> {
+  for await (const _ of stream);
 }
 
 /** Everything of `agent` that runs while nothing has ended it. */
@@ -172,6 +176,39 @@ describe("agents end when their owner dies, and not before", () => {
       assert.deepEqual(survivorsOf(agents), everythingOf(agent), "the agent, its grandchild, its group and its guard all still run");
       await service.dispose();
       assert.deepEqual(survivorsOf(agents), [], "dispose() returns once the group and its guard are gone");
+    } finally {
+      killRecorded(agents);
+      await service.dispose();
+    }
+  });
+
+  test("while the owner lives, children that come and go and are garbage-collected never end another agent's group", async () => {
+    // Under Bun 1.3.14 a child started by node:child_process with an extra pipe closes that pipe's descriptor
+    // twice, the second time when it is garbage-collected, by which time the number may be another guard's pipe.
+    // Short-lived children and agents interleave so that freed descriptor numbers get reused by agents' pipes.
+    const service = createProcessService({ envPolicy: { stripAmbient: [] } });
+    const agents: RecordedAgent[] = [];
+    const collect = (): void => {
+      const runtime = globalThis as { Bun?: { gc(force: boolean): void }; gc?: () => void };
+      if (runtime.Bun !== undefined) runtime.Bun.gc(true);
+      else runtime.gc?.();
+    };
+    try {
+      for (let round = 0; round < 5; round += 1) {
+        await Promise.all(
+          Array.from({ length: 8 }, async () => {
+            const short = await service.spawn({ command: "/bin/sh", args: ["-c", "echo done"], purpose: "probe" });
+            await readAll(short.stdout);
+            await short.exited;
+          }),
+        );
+        for (let index = 0; index < 3; index += 1) await startAgent(service, "plain", agents);
+      }
+      for (let second = 0; second < 6; second += 1) {
+        await delay(1000);
+        collect();
+      }
+      assert.deepEqual(survivorsOf(agents), agents.flatMap(everythingOf), "every agent, grandchild, group and guard still runs");
     } finally {
       killRecorded(agents);
       await service.dispose();

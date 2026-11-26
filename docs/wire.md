@@ -291,21 +291,29 @@ How:
   sends SIGKILL to the group, itself included, and exits.
 - The guard only ever signals the group it is a member of (`kill 0`). While a
   member exists, the operating system does not give that group id to anyone
-  else, so the guard cannot reach a group ARI did not start. The owner signals
-  the group by its id only while the guard still runs.
+  else, so the guard cannot reach a group ARI did not start. The owner sends
+  a signal to a group by its id only while the group's leader is its own
+  child and not yet reaped, or, as a last resort after the grace, while the
+  group still exists.
 - The owner ends a group the same way, on dispose, a timeout, `kill()`
   without a signal, and when a child exits on its own (for what it left in
-  its group): it writes a line to the guard's pipe and waits for the guard to
-  exit. So `dispose()` returns only once every guard is gone, and waits a
-  whole grace only for a group that will not end on SIGTERM.
+  its group): it writes a line to the guard's pipe and waits until the group,
+  guard included, is gone, probing with signal 0, which delivers nothing. So
+  `dispose()` returns only once every group and its guard are gone, and waits
+  a whole grace only for a group that will not end on SIGTERM.
 - `ps` shows a guard as `/bin/sh -c … ari-agent-guard <grace ms> …`. It costs
   one idle shell per child: on Linux with bash as `/bin/sh`, about 4.2 MB
   resident, 0.4 MB of it not shared. Spawning takes about the same time as
-  before under Node and about 1 ms more under Bun. Disposing 20 children
-  took 140 to 190 ms instead of 22 ms, measured at a load average near 48.
+  before, under Node and under Bun; disposing 20 children takes about 80 to
+  95 ms instead of about 21 ms (measured at a load average near 10).
 - If the launcher cannot start the guard, the child never runs: it exits with
-  code 126. If a guard disappears while its child runs, the owner ends the
-  child's group at once.
+  code 126. Someone who kills a guard by hand leaves its child unguarded.
+- Under Bun (the standalone `ari-driver`), the launcher is started with
+  `Bun.spawn` instead of `node:child_process`: Bun 1.3.14's
+  `node:child_process` closes an extra pipe's descriptor twice, the second
+  time when the finished child is garbage-collected, by which time the number
+  can belong to another agent's guard pipe, whose guard would then end a
+  group whose owner still lives.
 
 What a caller sees stays as it was, with these exceptions. A spawn error
 rejects as before, because the command is first searched for the way spawn

@@ -94,15 +94,25 @@ and its end-to-end phase on a real Mac will check it with real `claude` and
 ## Resolution
 
 Fixed in ARI on 2026-11-25, plan `driver-death-cleanup-20261125-190011`,
-phase 1, by commits `8f0981b` ("Agents end when their driver dies: a guard
-per agent group, SIGHUP as shutdown, late delegated children killed") and
-`26f0a72` ("The guard moves into the agent's process group, started before
-the agent runs; local agents end within 1 s of shutdown; death tests measure
-from the signal"). `8f0981b` started each guard as a separate process
-outside the agent's group; review showed an owner killed between the two
-spawns left the agent unguarded, and a guard signalling a group by its
-number could hit a group ARI never started once that number was reused.
-`26f0a72` replaced it with the first approach above, in full.
+phase 1, by these commits:
+
+- `8f0981b` ("Agents end when their driver dies: a guard per agent group,
+  SIGHUP as shutdown, late delegated children killed") started each guard as
+  a separate process outside the agent's group. Review showed that an owner
+  killed between the two spawns left the agent unguarded, and that a guard
+  signalling a group by its number could hit a group ARI never started once
+  that number was reused.
+- `26f0a72` ("The guard moves into the agent's process group, started before
+  the agent runs; local agents end within 1 s of shutdown; death tests measure
+  from the signal") replaced it with the first approach above, in full.
+- `7c89550`: `dispose()` waits until each group is gone, not only its guard
+  (the guard is reaped by the system's reaper, so it can briefly stay a
+  zombie in the group); the startup-window test pauses the launcher before
+  its first command every time.
+- `e016ac5`: under Bun the launcher is started with `Bun.spawn`. Bun 1.3.14's
+  `node:child_process` closes an extra pipe's descriptor twice, the second
+  time when the finished child is garbage-collected; that stale close hit a
+  live agent's guard pipe and ended its group while its owner lived.
 
 What changed:
 
@@ -150,9 +160,10 @@ Tests:
 - `test/node/owner-death.test.ts`: a Node host using the process service
   directly is SIGKILLed, also inside the startup window, and leaves nothing
   behind within 5 s; a guard holds its group id until it exits; an idle agent
-  and its grandchild keep running for 10 s while the owner lives; an agent
-  that exits on its own takes its grandchild and guard with it; 20 agents get
-  one guard each, and `dispose()` leaves no guard.
+  and its grandchild keep running for 10 s while the owner lives, and while
+  other children come and go and are garbage-collected; an agent that exits
+  on its own takes its grandchild and guard with it; 20 agents get one guard
+  each, and `dispose()` leaves no guard.
 - `test/node/process.test.ts`: the launcher keeps spawn errors, argv and the
   environment as a direct spawn gives them, apart from the documented
   differences.

@@ -37,8 +37,8 @@ import type { Scenario, ScenarioName } from "../scenarios.ts";
 import { claudeNativeAnswers } from "./frames.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "./protocol-words.ts";
 import type { ClaudeRuntime } from "./frames.ts";
-import { DEFAULT_RECORD_MODEL, createClaudeLayout, runClaudeScenario } from "./run.ts";
-import type { ClaudeLayout } from "./run.ts";
+import { CLAUDE_STAND_IN_PATH, DEFAULT_RECORD_MODEL, createClaudeLayout, runClaudeScenario } from "./run.ts";
+import type { ClaudeCodeOnPath, ClaudeLayout } from "./run.ts";
 import { tapClaudeSdk } from "./tap.ts";
 
 export const CLAUDE_SDK_NAME = "@anthropic-ai/claude-agent-sdk";
@@ -58,6 +58,12 @@ export interface RecordClaudeOptions {
   readonly env: { readonly [name: string]: string | undefined };
   /** Loads the SDK for one scenario: the real SDK when live, a fake when testing. */
   readonly loadSdk: (scenario: Scenario, layout: ClaudeLayout) => Promise<ClaudeRuntime>;
+  /**
+   * The user's Claude Code, which the driver runs: when live, the `claude`
+   * on PATH and what its `--version` printed. Left out (a fake SDK), a
+   * stand-in path at the version the SDK reports bundling; nothing runs it.
+   */
+  readonly claudeCode?: ClaudeCodeOnPath;
   /** How long a scenario waits for any one thing. */
   readonly timeoutMs?: number;
   readonly log?: (line: string) => void;
@@ -185,6 +191,7 @@ async function recordOne(scenario: Scenario, options: RecordClaudeOptions): Prom
       ({ run } = await runClaudeScenario({
         scenario,
         runtime: { ...runtime, sdk: tap.sdk },
+        claudeCode: options.claudeCode ?? { path: CLAUDE_STAND_IN_PATH, version: runtime.claudeCodeVersion ?? "unknown" },
         layout,
         sourceEnv: options.env,
         model,

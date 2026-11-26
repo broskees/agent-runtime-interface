@@ -17,7 +17,7 @@ import * as path from "node:path";
 import { after, test } from "node:test";
 import { installClaudeSdk } from "../../../src/drivers/claude/install.ts";
 import { CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION } from "../../../src/meta/claude.ts";
-import { fixtureRegistryEntries, startFixtureRegistry } from "./sdk-fixture.ts";
+import { fixtureSdkEntry, startFixtureRegistry } from "./sdk-fixture.ts";
 
 const temporary: string[] = [];
 after(() => {
@@ -30,17 +30,17 @@ test("a downloaded tarball that changes on disk while it is unpacked fails the e
   const cacheDir = path.join(root, "cache");
   const tmpDir = path.join(root, "tmp");
   nodeFs.mkdirSync(tmpDir);
-  const entries = fixtureRegistryEntries(root, CLAUDE_SDK_VERSION, "fixture native claude");
-  // A whole, valid tarball of another native package, so only the driver's own check can tell (a flipped byte would already fail gzip's CRC).
-  const replacement = fixtureRegistryEntries(root, CLAUDE_SDK_VERSION, "a different native claude").native.tarball;
-  const registry = await startFixtureRegistry([entries.sdk, entries.native]);
+  const entry = fixtureSdkEntry(root, CLAUDE_SDK_VERSION);
+  // A whole, valid tarball of another SDK package, so only the driver's own check can tell (a flipped byte would already fail gzip's CRC).
+  const replacement = fixtureSdkEntry(root, CLAUDE_SDK_VERSION, "a different SDK tarball").tarball;
+  const registry = await startFixtureRegistry([entry]);
   const realMkdir = nodeFs.promises.mkdir;
   let changedDuringExtraction = false;
   // The installer creates its staging directory after the driver's last check and before it reads any tarball.
   nodeFs.promises.mkdir = (async (target: nodeFs.PathLike, options?: nodeFs.MakeDirectoryOptions | nodeFs.Mode | null) => {
     if (String(target).includes(`${path.sep}.staging-`) && !changedDuringExtraction) {
       const [download] = nodeFs.readdirSync(tmpDir);
-      nodeFs.writeFileSync(path.join(tmpDir, download!, "0.tgz"), replacement);
+      nodeFs.writeFileSync(path.join(tmpDir, download!, "sdk.tgz"), replacement);
       changedDuringExtraction = true;
     }
     return realMkdir(target, options as nodeFs.MakeDirectoryOptions);
@@ -50,7 +50,7 @@ test("a downloaded tarball that changes on disk while it is unpacked fails the e
     await assert.rejects(installClaudeSdk({ cacheDir, tmpDir, registry: registry.url }), (error: { callError?: { code: string; detail?: string; message: string } }) => {
       assert.deepEqual(
         { code: error.callError?.code, detail: error.callError?.detail, message: error.callError?.message },
-        { code: "protocol", detail: "integrity_mismatch", message: `The downloaded tarball of ${entries.native.pkg}@${CLAUDE_SDK_VERSION} changed on disk after it was verified` },
+        { code: "protocol", detail: "integrity_mismatch", message: `The downloaded tarball of ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION} changed on disk after it was verified` },
       );
       return true;
     });

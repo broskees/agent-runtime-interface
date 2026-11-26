@@ -11,7 +11,7 @@ import type { ClaudeRuntime } from "../../recordings/claude/frames.ts";
 import type { Scenario } from "../../recordings/scenarios.ts";
 import { FakeClaudeWorld, entryPrompt } from "./fake-sdk.ts";
 import type { FakeTurn } from "./fake-sdk.ts";
-import { FAKE_CLAUDE_BINARY, FAKE_SDK_VERSION } from "./harness.ts";
+import { FAKE_SDK_VERSION } from "./harness.ts";
 
 export interface PuppetOptions {
   /** Runs at the start of each native turn, before the puppet acts. */
@@ -84,7 +84,7 @@ export function startPuppet(scenario: Scenario, options: PuppetOptions = {}): Pu
 
 /** The runtime the driver's `loadSdk` returns for a puppet's world. */
 export function puppetRuntime(puppet: Puppet): ClaudeRuntime {
-  return { sdk: puppet.world.sdk, version: FAKE_SDK_VERSION, claudeCodeVersion: "2.1.330", bundledExecutable: FAKE_CLAUDE_BINARY };
+  return { sdk: puppet.world.sdk, version: FAKE_SDK_VERSION, claudeCodeVersion: "2.1.330" };
 }
 
 /** Rewrites the credential copy in the query's Claude config dir, as Claude Code does when it refreshes a token. */

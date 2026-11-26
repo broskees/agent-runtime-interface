@@ -24,8 +24,10 @@ export interface ClaudeRigOptions {
   readonly environment?: { [name: string]: string };
   readonly host?: Partial<FakeHostOptions<ClaudeDriverConfig>>;
   readonly writeTranscripts?: boolean;
-  /** Overrides what the loader reports (for example another SDK version, or a missing binary). */
-  readonly runtime?: { version?: string; bundledExecutable?: string | null };
+  /** Overrides what the loader reports (for example another SDK version). */
+  readonly runtime?: { version?: string };
+  /** What the fake `claude --version` prints; the Claude Code the pinned SDK bundles when left out. */
+  readonly claudeVersionLine?: string;
   readonly loadSdk?: ClaudeSdkLoader;
 }
 
@@ -95,13 +97,12 @@ export async function openClaudeRig(options: ClaudeRigOptions = {}): Promise<Cla
         sdk: world.sdk,
         version: options.runtime?.version ?? FAKE_SDK_VERSION,
         claudeCodeVersion: "2.1.330",
-        bundledExecutable: options.runtime?.bundledExecutable === undefined ? FAKE_CLAUDE_BINARY : options.runtime.bundledExecutable,
       })),
     newUuid: () => world.newUuid(),
   });
   const host = createFakeHost<ClaudeDriverConfig>({
     paths: instanceDirectories(root, "claude-test"),
-    spawn: fakeClaudeSpawn(world),
+    spawn: fakeClaudeSpawn(world, options.claudeVersionLine),
     resolveExecutable: async (name) => (name === "claude" ? FAKE_CLAUDE_BINARY : null),
     envScrubPrefixes: driver.cliManifest?.envScrubPrefixes ?? [],
     ...(options.managedKey === undefined ? {} : { secrets: [{ namespace: "claude", key: "api-key", value: options.managedKey }] }),

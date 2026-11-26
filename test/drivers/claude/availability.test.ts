@@ -4,9 +4,12 @@
 // the driver unavailable naming the package, and openSession rejects with
 // driver_unavailable; with the SDK present (the pinned devDependency),
 // status() reports its version; a version outside the tested range gets an
-// advisory; a missing native Claude Code binary, bundled or at the configured
-// path, is reported unavailable, not a crash. The child-process checks run the driver's real loader, with
-// every child_process entry point trapped so nothing can start Claude Code.
+// advisory. Every query runs the user's own Claude Code (the configured
+// executablePath, else claude on PATH) with MCP servers delivered in the
+// initialize request; a missing one, on PATH or at the configured path, is
+// reported unavailable, not a crash. The child-process checks run the
+// driver's real loader, with every child_process entry point trapped so
+// nothing can start Claude Code.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -14,7 +17,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, test } from "node:test";
-import { nativeBinaryCandidates } from "../../../src/drivers/claude/index.ts";
 import type { ClaudeDriverConfig } from "../../../src/drivers/claude/index.ts";
 import { CLAUDE_TESTED_VERSIONS } from "../../../src/meta/claude.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
@@ -61,10 +63,20 @@ process.stdout.write(JSON.stringify({ resolved, spawned, result }));
   return JSON.parse(output) as { resolved: string[]; spawned: string[]; result: unknown };
 }
 
+// The user's claude is a stand-in the host finds and answers \`--version\` for in memory, so nothing is started.
 const createInstance = `
 const { claudeDriver } = await load("src/drivers/claude/index.ts");
 const { createFakeHost } = await load("src/conformance/fake-host.ts");
-const host = createFakeHost({});
+const { createMemoryProcess } = await load("src/conformance/index.ts");
+const host = createFakeHost({
+  resolveExecutable: async (name) => (name === "claude" ? "/fake-user-bin/claude" : null),
+  spawn: async (request) => {
+    if ((request.args ?? []).join(" ") !== "--version") throw new Error("only --version is answered");
+    const child = createMemoryProcess({ onStdin: () => undefined, onStdinClosed: () => undefined, onKill: () => undefined });
+    queueMicrotask(() => { child.stdout("2.1.330 (Claude Code)\\n"); child.exit(0, null); });
+    return child.process;
+  },
+});
 const instance = await claudeDriver.create(host, { instanceId: "availability", config: claudeDriver.defaultConfig(), environment: { PATH: "/usr/bin" } });
 `;
 
@@ -101,21 +113,23 @@ result = { status, probe: { ok: probe.ok, installed: probe.installed, error: pro
     assert.equal(result.hostSpawns, 0);
   });
 
-  test("with the pinned SDK present, status() reports its version and the bundled binary, with no advisory, and nothing starts Claude Code", () => {
+  test("with the pinned SDK present, status() reports its version, with no advisory, and nothing starts Claude Code", () => {
     const run = inChild(
       `${createInstance}
 const { loadClaudeSdk } = await load("src/drivers/claude/sdk.ts");
 const runtime = await loadClaudeSdk();
 const status = await instance.status();
 const advisory = await instance.maintenance.advisory();
-result = { version: runtime.version, claudeCodeVersion: runtime.claudeCodeVersion, bundledExecutable: runtime.bundledExecutable, functions: ["query", "getSessionInfo", "getSessionMessages", "listSessions", "deleteSession", "archiveSession"].filter((name) => typeof runtime.sdk[name] === "function"), status: { state: status.state, installed: status.installed, version: status.version, advisory: status.advisory ?? null }, advisory };`,
+result = { runtime: Object.keys(runtime).sort(), version: runtime.version, claudeCodeVersion: runtime.claudeCodeVersion, functions: ["query", "getSessionInfo", "getSessionMessages", "listSessions", "deleteSession", "archiveSession"].filter((name) => typeof runtime.sdk[name] === "function"), status: { state: status.state, installed: status.installed, version: status.version, advisory: status.advisory ?? null }, advisory, spawned: host.spawns.map((spawn) => [spawn.command, ...(spawn.args ?? [])].join(" ")) };`,
       { hideSdk: false },
     );
     assert.deepEqual(run.spawned, []);
-    const result = run.result as { version: string; claudeCodeVersion: string; bundledExecutable: string; functions: string[]; status: { state: string; installed: boolean; version: string; advisory: unknown }; advisory: unknown };
+    const result = run.result as { runtime: string[]; version: string; claudeCodeVersion: string; functions: string[]; status: { state: string; installed: boolean; version: string; advisory: unknown }; advisory: unknown; spawned: string[] };
+    // The loader finds no Claude Code binary beside the SDK: the driver runs the user's.
+    assert.deepEqual(result.runtime, ["claudeCodeVersion", "sdk", "version"]);
     assert.equal(result.version, "0.3.330");
     assert.equal(result.claudeCodeVersion, "2.1.330");
-    assert.match(result.bundledExecutable, /claude-agent-sdk-(linux|darwin|win32)-[a-z0-9]+(-musl)?[\\/]claude(\.exe)?$/);
+    assert.ok(result.spawned.length > 0 && result.spawned.every((line) => line === "/fake-user-bin/claude --version" || line === "/fake-user-bin/claude auth status --json"), result.spawned.join("\n"));
     assert.deepEqual(result.functions, ["query", "getSessionInfo", "getSessionMessages", "listSessions", "deleteSession", "archiveSession"]);
     assert.deepEqual(result.status, { state: "ready", installed: true, version: "0.3.330", advisory: null });
     assert.equal(result.advisory, null);
@@ -138,36 +152,63 @@ result = { version: runtime.version, claudeCodeVersion: runtime.claudeCodeVersio
     }
   });
 
-  test("a missing native Claude Code binary is reported unavailable, naming the platform package, and openSession refuses", async () => {
-    const rig = await openClaudeRig({ runtime: { bundledExecutable: null } }).catch((error: unknown) => error);
+  test("an untested SDK does not hide the advisory about a newer Claude Code", async () => {
+    const rig = await openClaudeRig({ runtime: { version: "0.3.400" }, claudeVersionLine: "2.1.400 (Claude Code)" });
+    try {
+      const status = await rig.instance.status();
+      assert.equal(status.state, "ready");
+      assert.equal(status.advisory?.kind, "untested_version");
+      assert.match(status.advisory!.message, /@anthropic-ai\/claude-agent-sdk 0\.3\.400 is outside the versions this driver is tested against/);
+      assert.match(status.advisory!.message, /Claude Code 2\.1\.400 .* newer than 2\.1\.330.*this version is untested/);
+      assert.deepEqual(await rig.instance.maintenance!.advisory(), status.advisory);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("with no claude on PATH, status() says Claude Code is not installed and how to install it, and openSession refuses before any query", async () => {
+    const rig = await openClaudeRig({ host: { resolveExecutable: async () => null } }).catch((error: unknown) => error);
     // The rig opens a session, which must refuse; build the instance by hand instead.
     assert.ok(rig instanceof Error && (rig as { callError?: { code: string } }).callError?.code === "driver_unavailable", `openSession did not refuse: ${String(rig)}`);
     const { createClaudeDriver } = await import("../../../src/drivers/claude/index.ts");
     const { createFakeHost } = await import("../../../src/conformance/fake-host.ts");
     const { FakeClaudeWorld } = await import("./fake-sdk.ts");
     const world = new FakeClaudeWorld();
-    const driver = createClaudeDriver({ loadSdk: async () => ({ sdk: world.sdk, version: "0.3.330", claudeCodeVersion: "2.1.330", bundledExecutable: null }) });
-    const instance = await driver.create(createFakeHost({}), { instanceId: "no-binary", config: {}, environment: {} });
+    const driver = createClaudeDriver({ loadSdk: async () => ({ sdk: world.sdk, version: "0.3.330", claudeCodeVersion: "2.1.330" }) });
+    const host = createFakeHost({});
+    const instance = await driver.create(host, { instanceId: "no-claude", config: {}, environment: {} });
     const status = await instance.status();
     assert.equal(status.state, "unavailable");
     assert.equal(status.installed, false);
     assert.equal(status.error?.code, "driver_unavailable");
-    assert.deepEqual([(status.error as { package?: string }).package, (status.error as { binary?: string }).binary], [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`, "claude"]);
-    assert.match(status.error!.message, /without --omit=optional/);
+    assert.deepEqual([(status.error as { package?: string }).package, (status.error as { binary?: string }).binary], [undefined, "claude"]);
+    assert.match(status.error!.message, /^Claude Code is not installed: no claude executable was found on PATH\. Install Claude Code 2\.1\.330 or newer/);
+    assert.match(status.error!.message, /curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash/);
+    assert.match(status.error!.message, /set executablePath in the driver config/);
     assert.equal((await instance.probe()).installed, false);
-    await assert.rejects(instance.openSession({}), (error: { callError?: { code: string } }) => error.callError?.code === "driver_unavailable");
+    await assert.rejects(instance.openSession({}), (error: { callError?: { code: string; message: string } }) => error.callError?.code === "driver_unavailable" && error.callError.message === status.error?.message);
     assert.equal(world.queries.length, 0);
+    assert.deepEqual(host.spawns, [], "nothing was run");
     // A configured executable that is not on PATH is reported the same way, naming it.
     const configured = await driver.create(createFakeHost({}), { instanceId: "custom", config: { executablePath: "claude-nightly" }, environment: {} });
     const configuredStatus = await configured.status();
     assert.equal(configuredStatus.error?.code, "driver_unavailable");
     assert.equal((configuredStatus.error as { binary?: string }).binary, "claude-nightly");
+    assert.match(configuredStatus.error!.message, /^Claude Code is not installed at the configured executablePath: claude-nightly names no executable file\./);
+  });
+
+  test("a claude older than the minimum, with the SDK the driver's loader gives, is refused before any query", async () => {
+    const rig = await openClaudeRig({ claudeVersionLine: "2.1.329 (Claude Code)" }).catch((error: unknown) => error);
+    const callError = (rig as { callError?: { code: string; message: string; binary?: string } }).callError;
+    assert.equal(callError?.code, "driver_unavailable", `openSession did not refuse: ${String(rig)}`);
+    assert.equal(callError?.binary, "/fake-user-bin/claude");
+    assert.match(callError?.message ?? "", /^Claude Code 2\.1\.329 at \/fake-user-bin\/claude is older than 2\.1\.330, the oldest version this driver runs \(the one @anthropic-ai\/claude-agent-sdk 0\.3\.330 bundles\)\. Update Claude Code to 2\.1\.330 or newer \(run claude update/);
   });
 
   test("an explicit executablePath that names no executable file is reported unavailable, naming it, and openSession refuses", async () => {
     const { createClaudeDriver } = await import("../../../src/drivers/claude/index.ts");
     const { createFakeHost } = await import("../../../src/conformance/fake-host.ts");
-    const { resolveExecutable } = await import("../../../src/node/process.ts");
+    const { createProcessService, resolveExecutable } = await import("../../../src/node/process.ts");
     const { FakeClaudeWorld } = await import("./fake-sdk.ts");
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "ari-claude-executable-"));
     try {
@@ -175,11 +216,12 @@ result = { version: runtime.version, claudeCodeVersion: runtime.claudeCodeVersio
       const notExecutable = path.join(home, "claude-notes");
       fs.writeFileSync(notExecutable, "not a program\n", { mode: 0o644 });
       const present = path.join(home, "claude");
-      fs.writeFileSync(present, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      fs.writeFileSync(present, "#!/bin/sh\necho '2.1.330 (Claude Code)'\n", { mode: 0o755 });
       const world = new FakeClaudeWorld();
-      // The node host's own lookup, as a real host resolves the configured path.
-      const host = createFakeHost<ClaudeDriverConfig>({ resolveExecutable: (name) => resolveExecutable(name, "/usr/bin:/bin") });
-      const driver = createClaudeDriver({ loadSdk: async () => ({ sdk: world.sdk, version: "0.3.330", claudeCodeVersion: "2.1.330", bundledExecutable: null }), newUuid: () => world.newUuid() });
+      // The node host's own lookup and spawn, as a real host resolves the configured path and runs its --version.
+      const processes = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH: "/usr/bin:/bin" } });
+      const host = createFakeHost<ClaudeDriverConfig>({ resolveExecutable: (name) => resolveExecutable(name, "/usr/bin:/bin"), spawn: (request) => processes.spawn(request) });
+      const driver = createClaudeDriver({ loadSdk: async () => ({ sdk: world.sdk, version: "0.3.330", claudeCodeVersion: "2.1.330" }), newUuid: () => world.newUuid() });
       for (const configured of [missing, notExecutable]) {
         const instance = await driver.create(host, { instanceId: path.basename(configured), config: { executablePath: configured }, environment: {} });
         const status = await instance.status();
@@ -199,16 +241,36 @@ result = { version: runtime.version, claudeCodeVersion: runtime.claudeCodeVersio
       assert.equal(world.queries.at(-1)?.options.pathToClaudeCodeExecutable, present);
       await session.close();
       await instance.dispose();
+      await processes.dispose();
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
 
-  test("the native binary is looked for in the SDK's own platform packages, in the SDK's order", () => {
-    assert.deepEqual(nativeBinaryCandidates("linux", "x64", false), ["@anthropic-ai/claude-agent-sdk-linux-x64/claude", "@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude"]);
-    assert.deepEqual(nativeBinaryCandidates("linux", "arm64", true), ["@anthropic-ai/claude-agent-sdk-linux-arm64-musl/claude", "@anthropic-ai/claude-agent-sdk-linux-arm64/claude"]);
-    assert.deepEqual(nativeBinaryCandidates("darwin", "arm64", false), ["@anthropic-ai/claude-agent-sdk-darwin-arm64/claude"]);
-    assert.deepEqual(nativeBinaryCandidates("win32", "x64", false), ["@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe"]);
+  test("every query runs the user's claude, with MCP servers delivered in the initialize request: new, resumed and forked threads, the catalog and text generation", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.thread();
+      await rig.simpleTurn(thread.id, "First.");
+      const { session } = await rig.openAnother();
+      await session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy() });
+      await rig.session.forkThread!({ threadId: thread.id, at: { type: "latest" } });
+      await rig.instance.catalog!.list();
+      const text = rig.instance.textGeneration!.generate({ kind: "title", input: "the thread" });
+      const turn = await rig.world.nextTurn();
+      await turn.completeWith({ text: "A title" });
+      assert.equal(await text, "A title");
+      const options = rig.world.queries.map((query) => query.options);
+      assert.ok(options.length >= 5, `only ${options.length} queries`);
+      assert.ok(options.some((option) => option.resume === thread.handle && option.forkSession !== true), "a resume ran");
+      assert.ok(options.some((option) => option.forkSession === true), "a fork ran");
+      assert.ok(options.some((option) => Array.isArray(option.tools) && option.tools.length === 0), "an isolated query ran");
+      for (const option of options) {
+        assert.deepEqual([option.pathToClaudeCodeExecutable, option.mcpServersDelivery], ["/fake-user-bin/claude", "initialize"]);
+      }
+    } finally {
+      await rig.cleanup();
+    }
   });
 
   test("create() reads only whether the instance keeps its own API key", async () => {

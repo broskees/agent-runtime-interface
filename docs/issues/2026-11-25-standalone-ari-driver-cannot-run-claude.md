@@ -84,3 +84,64 @@ standalone `ari-driver` for the owner's platform (SHA-256 pinned) and offers
 "Claude Code on <machine>" and "Codex on <machine>" in CoChat. Until this is
 fixed, a release build of Companion can offer only Codex. Its end-to-end phase
 on a real Mac checks both.
+
+## Resolution
+
+Fixed by approach 2 plus a managed install (plan
+`standalone-claude-20261125-190353`, phase 1): commit `f1a8db3`, then
+`2a29185`, which tightens the install's integrity checks, lays the install
+out as npm does and adds its repair. Approach 1 was ruled out: the
+SDK's licence is Anthropic's ("SEE LICENSE IN README.md"), not MIT, so ARI
+does not redistribute it.
+
+- **`sdkDirectory`**, a new `claude` config field, names a directory where
+  `npm install @anthropic-ai/claude-agent-sdk` ran. The driver imports
+  `<sdkDirectory>/node_modules/@anthropic-ai/claude-agent-sdk` by its entry
+  module's file URL, which a Bun-compiled executable can load (Bun 1.3.14,
+  checked by hand), and finds the native binary beside it as the SDK does.
+- **`maintenance.install` and `maintenance.update`**, now declared and
+  implemented, download the pinned SDK 0.3.330 and the platform's native
+  package from an npm registry (`sdkRegistry`, by default
+  `https://registry.npmjs.org`) and unpack them with `ari/node`'s installer
+  into the instance's cache directory, as one directory laid out as npm lays
+  it out, so the SDK finds its native binary by itself. No Node or npm is
+  needed. Only a sha512, sha384 or sha256 `dist.integrity` is accepted; both
+  tarballs are checked before either is unpacked, and again as they are
+  unpacked. A record of every file lets `status()` report a damaged install,
+  naming `maintenance.install` and `sdkDirectory`, and `maintenance.install`
+  repair it. The SDK's `sdk.mjs` imports only Node built-ins, so no peer
+  package is installed.
+- **Status names a real step.** Without an SDK, the standalone executable
+  names `maintenance.install` and `sdkDirectory` only; under Node the
+  message still names `npm install @anthropic-ai/claude-agent-sdk` too.
+- **No SDK code ships.** `check:package` fails on a shipped file holding
+  `CLAUDE_CODE_SDK_READS_SESSION_STATE`, a string unique to the SDK's
+  `sdk.mjs`, and the end-to-end test checks the executable for it.
+
+Tests:
+
+- `test/standalone/claude-sdk.e2e.ts` (run by `pnpm run test:binary`): with
+  no `node` or `bun` on `PATH`, the standalone `ari-driver` loads a fake SDK
+  from `sdkDirectory` and completes a turn; installs it with
+  `maintenance.install` from a local registry and completes a turn; reports
+  `driver_unavailable` naming `maintenance.install` and `sdkDirectory` and no
+  `npm install`; and holds no SDK code. The first two also run through
+  `ari-driver` under Node.
+- `test/drivers/claude/sdk-install.test.ts`: the same routes in process, a
+  tampered SDK or native tarball that installs nothing, the digests a
+  manifest must offer (sha1 and `shasum` refused), a download changed on disk
+  after it was checked, two concurrent installs that end with one intact
+  install, the default registry, the repair of six kinds of damage, the
+  release targets' native packages, and the SDK's run-time imports.
+  `test/drivers/claude/sdk-install-node.test.ts` changes a download while it
+  is unpacked. The e2e test also repairs a missing `sdk.mjs` and a truncated
+  native binary through the standalone `ari-driver`.
+- `test/node/installer.test.ts`: the installer's `prepare` and `isIntact`
+  hooks and `npmRegistryFetch`'s `strongIntegrityOnly`.
+- `test/drivers/claude/availability.test.ts`: under Node without the package,
+  the message names `npm install @anthropic-ai/claude-agent-sdk`.
+- `test/package.test.ts`: the package check fails a staged or packed package
+  that ships the SDK's `sdk.mjs`.
+
+The live check against the real SDK and Claude Code through the standalone
+binary is phase 2 of the same plan.

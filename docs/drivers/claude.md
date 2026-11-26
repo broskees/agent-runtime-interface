@@ -22,6 +22,81 @@ The SDK carries the native Claude Code binary in a platform package
 (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>`, an optional dependency).
 A package manager that skips optional dependencies leaves it out.
 
+### Without Node: the standalone `ari-driver`
+
+The standalone `ari-driver` executable (built with `bun build --compile`)
+cannot import a package by name: Bun resolves a bare specifier against the
+executable's embedded file system, never against a `node_modules` on disk.
+So `npm install` next to it does not help. A host that ships only the
+executable provides the SDK in one of two ways:
+
+- **`maintenance.install`** (or `maintenance.update`) on the instance
+  downloads SDK **0.3.330** (`CLAUDE_SDK_VERSION`) and the native package for
+  the host's platform (`@anthropic-ai/claude-agent-sdk-<os>-<arch>`, glibc
+  before musl on Linux, the order the SDK itself uses) from an npm registry,
+  `https://registry.npmjs.org` unless the config's `sdkRegistry` names
+  another. It needs no Node and no `npm`. The result is one directory, laid
+  out as npm lays the SDK out:
+
+  ```
+  <cacheDir>/adapters/@anthropic-ai/claude-agent-sdk/0.3.330/
+    package.json, sdk.mjs, ...                                the SDK
+    node_modules/@anthropic-ai/claude-agent-sdk-<os>-<arch>/  its native binary
+    .ari-install.json                                         each file's size and sha256
+  ```
+
+  So the SDK finds its native binary by itself, exactly as in an npm install,
+  and the driver never names it in `pathToClaudeCodeExecutable`. Naming it
+  would change two SDK defaults: a resume would start Claude Code without
+  `--await-initialize`, and MCP servers given in `Options.mcpServers` would
+  draw the `CLAUDE_SDK_MCP_SERVERS_ARGV_DEPRECATED` warning. `ari/node`'s
+  installer publishes the directory with one rename, under a lock per
+  version, so it holds both packages or neither, and two installs at once
+  end with one whole install.
+- **Integrity.** The install accepts only a `dist.integrity` in sha512,
+  sha384 or sha256 (the W3C Subresource Integrity algorithms; npm publishes
+  sha512), and when several are listed the strongest decides. A manifest
+  that offers only a sha1 integrity or the sha1 `shasum`, or no digest, is
+  refused with `protocol` / `no_integrity`. Both tarballs are downloaded and
+  checked before either is unpacked, so a tarball that does not match
+  (`protocol` / `integrity_mismatch`) leaves nothing installed. What is
+  unpacked is exactly what was checked: each download is checked again
+  against the digest taken while it was verified, just before unpacking and
+  once more as its bytes stream into the extractor.
+- **Repair.** `.ari-install.json`, written before the directory is
+  published, lists every file with its size and sha256. Loading the SDK
+  checks that every listed file is there with its size, and the sha256 of
+  the SDK's own files, the JavaScript the driver imports; the 381 MB native
+  binary is checked by size only. An install that fails the check (a missing
+  `sdk.mjs`, a missing or truncated binary, a changed `sdk.mjs`, no record)
+  is reported unavailable with `Run maintenance.install on this instance to
+  repair it, or set sdkDirectory in the driver config ...`.
+  `maintenance.install` checks every file's sha256, so it also finds a
+  same-size change to the binary, and reinstalls a directory that is not
+  whole. A whole install is not downloaded again; `update` installs the
+  version this driver pins, which a newer ARI may have moved. Nothing
+  removes older versions yet.
+- **`sdkDirectory`** in the driver config names a directory where
+  `npm install @anthropic-ai/claude-agent-sdk` ran (for example
+  `npm install --prefix /opt/claude-agent-sdk @anthropic-ai/claude-agent-sdk`,
+  then `sdkDirectory: "/opt/claude-agent-sdk"`). The driver loads
+  `<sdkDirectory>/node_modules/@anthropic-ai/claude-agent-sdk` from there.
+
+Either way the driver imports the SDK's entry module by its file URL. The
+SDK's `sdk.mjs` imports only Node built-ins (it bundles everything else; its
+peers `zod`, `@anthropic-ai/sdk` and `@modelcontextprotocol/sdk` serve its
+type declarations), so the SDK and its native package are all it needs. The
+driver looks in this order: `sdkDirectory`, then a managed install, then the
+package by name (under Node). Under Node all three work.
+
+**Why ARI does not bundle the SDK.** The SDK's licence is Anthropic's
+("SEE LICENSE IN README.md", Anthropic's legal agreements), not MIT. ARI
+redistributes none of it: the npm tarball and the standalone executable hold
+no SDK code, and `check:package` and `test/standalone/claude-sdk.e2e.ts`
+check both for `CLAUDE_CODE_SDK_READS_SESSION_STATE`, a string unique to the
+SDK's `sdk.mjs`. The user's machine downloads the SDK from the npm registry,
+as `npm install` would.
+
 ## How the driver runs Claude Code
 
 - **Loading.** Importing the driver or its metadata loads no vendor code and
@@ -31,9 +106,17 @@ A package manager that skips optional dependencies leaves it out.
   SDK does (its platform packages, glibc before musl on Linux).
 - **Missing runtime.** Without the SDK, `status()` and `probe()` report
   `installed: false` with a `driver_unavailable` error naming
-  `@anthropic-ai/claude-agent-sdk`, and `openSession` rejects with it. Without
-  the native binary, the error names the platform package and the binary and
-  says to reinstall without `--omit=optional` or to set `executablePath`. A
+  `@anthropic-ai/claude-agent-sdk`, and `openSession` rejects with it. Under
+  Node the message names `npm install @anthropic-ai/claude-agent-sdk`,
+  `maintenance.install` and `sdkDirectory`; in the standalone `ari-driver`
+  (recognized by its modules' `/$bunfs/` or `B:/~BUN/` URLs) it names only
+  `maintenance.install` and `sdkDirectory`, the two steps that work there. A
+  `sdkDirectory` without the SDK is reported with the path the driver read.
+  A managed install that is not whole names `maintenance.install`, which
+  repairs it, and `sdkDirectory` (see "Repair" above). Without the native
+  binary, the error names the platform package and the binary and says to
+  reinstall without `--omit=optional` (in the `sdkDirectory`, when one is
+  set), to run `maintenance.install`, or to set `executablePath`. A
   configured `executablePath` goes through the host's
   `process.resolveExecutable` (a bare name on `PATH`, a path with a directory
   part as it stands); when it names no executable file, `status()` reports
@@ -226,7 +309,8 @@ live thread can switch to it), and the `plan` interaction mode to `plan`.
 ## The 44 optional members
 
 `test/drivers/claude/capabilities.test.ts` lists each with its outcome and
-exercises every supported one against the fake SDK.
+exercises every supported one against the fake SDK, except the two
+`maintenance` members that download the SDK.
 
 | Member | Outcome | Why, when left out |
 |---|---|---|
@@ -237,9 +321,9 @@ exercises every supported one against the fake SDK.
 | `Session.mcpApps.*` | absent | See MCP apps above |
 | `Session.contextWindow`, `canReuseContextUsage` | absent | `ModelInfo` reports no context window |
 | `Session.uploadFeedback` | absent | The SDK has no feedback upload |
+| `Instance.maintenance.install`, `.update` | supported | Download the SDK (above); tested against a local npm registry in `sdk-install.test.ts` and `test/standalone/claude-sdk.e2e.ts` |
 | `Instance.invalidateCaches`, `maintenance.advisory`, `auth.methods`, `.state`, `.reportRuntimeFailure`, `.start`, `.respond`, `.cancel`, `.logout`, `catalog.refresh`, `limits.current`, `.accountKey`, `textGeneration.generate`, `nativeSessions.list`, `.delete`, `.archive` | supported | |
 | `Instance.auth.complete` | rejects `unsupported{auth.complete}` | Sign-in runs in `claude auth login`; no callback comes back |
-| `Instance.maintenance.install`, `.update` | absent | The SDK is the host's npm dependency |
 | `Instance.auth.transferProfile`, `.transferSession` | absent | Claude has no credential handover |
 | `Instance.workspace.snapshot` | absent | Commands and skills come only from a running query |
 | `Instance.limits.consumeResetCredit` | absent | The SDK has no reset credits |
@@ -334,6 +418,21 @@ SDK (`sdk-types.ts`, which `sdk-types.test.ts` also compiles with planted
 mistakes to show each is caught), the conformance harness and suite, and the tests for
 the driver's quirks, launch context, availability, capability honesty and
 metadata. `SOURCES.md` lists the vendor sources and pinned versions.
+
+`sdk-install.test.ts` covers loading the SDK from `sdkDirectory` and
+`maintenance.install` against a fake SDK on disk (`fixture-sdk/sdk.mjs`,
+plain JavaScript like the real `sdk.mjs`, and a shell-script native
+`claude`, laid out by `sdk-fixture.ts`) and a local npm registry: the
+install and its layout, a tampered tarball that installs nothing, which
+digests a manifest must offer, a download changed on disk after it was
+checked, two installs at once, the default registry, the repair of six kinds
+of damage, and that the pinned SDK needs nothing else at run time.
+`sdk-install-node.test.ts` (Node only) changes a download while it is being
+unpacked. `test/standalone/claude-sdk.e2e.ts` runs the same fixture through
+the standalone `ari-driver` with no `node` or `bun` on `PATH`, and through
+`ari-driver` under Node: both routes, the repair of a missing `sdk.mjs` and
+of a truncated binary, the message with no SDK, and that the executable holds
+no SDK code.
 
 `replay.test.ts` and `recorder.test.ts` cover the native recorder
 (`pnpm run record:claude`): they record the six recording scenarios from the

@@ -478,6 +478,79 @@ describe("ari/node adapter installer", () => {
     }
   });
 
+  test("with strongIntegrityOnly, the npm registry fetch takes a sha512, sha384 or sha256 integrity and refuses sha1 and the shasum", async () => {
+    const tarball = await fs.readFile(packedTarball);
+    const digest = (algorithm: string, encoding: "base64" | "hex"): string => createHash(algorithm).update(tarball).digest(encoding);
+    // Each version's manifest publishes one kind of digest, all of them matching the tarball.
+    const dists: Record<string, { integrity?: string; shasum?: string }> = {
+      "1.0.512": { integrity: `sha512-${digest("sha512", "base64")}` },
+      "1.0.384": { integrity: `sha384-${digest("sha384", "base64")}` },
+      "1.0.256": { integrity: `sha256-${digest("sha256", "base64")}` },
+      "1.0.1": { integrity: `sha1-${digest("sha1", "base64")}`, shasum: digest("sha1", "hex") },
+      "1.0.0": { shasum: digest("sha1", "hex") },
+    };
+    const fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/tarball.tgz")) return new Response(tarball);
+      const version = url.slice(url.lastIndexOf("/") + 1);
+      return Response.json({ dist: { tarball: "http://registry.test/tarball.tgz", ...dists[version] } });
+    }) as typeof globalThis.fetch;
+    const strict = createAdapterInstaller({ cacheDir: await newCacheDir(), fetchTarball: npmRegistryFetch({ registry: "http://registry.test", fetch, strongIntegrityOnly: true }) });
+    for (const version of ["1.0.512", "1.0.384", "1.0.256"]) await assertCompleteInstall((await strict.install(PKG, version)).dir);
+    for (const version of ["1.0.1", "1.0.0"]) {
+      await assert.rejects(strict.install(PKG, version), (error: unknown) => isAriError(error, "protocol") && (error as { callError: { detail?: string } }).callError.detail === "no_integrity");
+      assert.equal(await exists(strict.pathFor(PKG, version)), false);
+    }
+    // Without the option, the shasum still counts, as before.
+    const lenient = createAdapterInstaller({ cacheDir: await newCacheDir(), fetchTarball: npmRegistryFetch({ registry: "http://registry.test", fetch }) });
+    await assertCompleteInstall((await lenient.install(PKG, "1.0.0")).dir);
+  });
+
+  test("prepare adds files to the staging directory before the rename, and a prepare that fails installs nothing", async () => {
+    const cacheDir = await newCacheDir();
+    const seen: string[] = [];
+    const installer = createAdapterInstaller({
+      cacheDir,
+      fetchTarball: fromFile(packedTarball),
+      prepare: async (staging) => {
+        seen.push(staging.dir);
+        assert.equal(await exists(installer.pathFor(PKG, staging.version)), false, "prepare runs before the version is published");
+        if (staging.version === "6.6.6") throw new Error("prepare failed");
+        await fs.writeFile(`${staging.dir}/prepared.txt`, `${staging.pkg}@${staging.version}`);
+      },
+    });
+    const installed = await installer.install(PKG, "1.0.0");
+    await assertCompleteInstall(installed.dir);
+    assert.equal(await fs.readFile(`${installed.dir}/prepared.txt`, "utf8"), `${PKG}@1.0.0`);
+    assert.match(path.basename(seen[0]!), /^\.staging-/);
+    await assert.rejects(installer.install(PKG, "6.6.6"), /prepare failed/);
+    assert.deepEqual(await packageEntries(path.dirname(installed.dir)), ["1.0.0"], "the failed staging directory is gone, and 6.6.6 is not installed");
+  });
+
+  test("isIntact replaces an install it calls broken and keeps a whole one; without it an existing directory counts as installed", async () => {
+    const cacheDir = await newCacheDir();
+    let fetches = 0;
+    const counting: TarballFetch = (request) => {
+      fetches += 1;
+      return fromFile(packedTarball)(request);
+    };
+    const whole = async (installed: { dir: string }): Promise<boolean> => exists(`${installed.dir}/bin/agent.js`);
+    const installer = createAdapterInstaller({ cacheDir, fetchTarball: counting, isIntact: whole });
+    const installed = await installer.install(PKG, "1.0.0");
+    await installer.install(PKG, "1.0.0");
+    assert.equal(fetches, 1, "a whole install is kept");
+    await fs.rm(`${installed.dir}/bin/agent.js`);
+    // An installer without isIntact takes the broken directory as it is.
+    const plain = createAdapterInstaller({ cacheDir, fetchTarball: counting });
+    await plain.install(PKG, "1.0.0");
+    assert.equal(fetches, 1);
+    assert.equal(await exists(`${installed.dir}/bin/agent.js`), false);
+    await installer.install(PKG, "1.0.0");
+    assert.equal(fetches, 2, "the broken install was fetched again");
+    await assertCompleteInstall(installed.dir);
+    assert.deepEqual(await packageEntries(path.dirname(installed.dir)), ["1.0.0"], "the broken directory was removed");
+  });
+
   test("package names and versions that could leave the adapters directory are refused", async () => {
     const installer = createAdapterInstaller({ cacheDir: await newCacheDir(), fetchTarball: fromFile(packedTarball) });
     for (const [pkg, version] of [

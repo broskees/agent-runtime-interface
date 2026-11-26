@@ -91,7 +91,10 @@ result = { status, probe: { ok: probe.ok, installed: probe.installed, error: pro
     assert.equal(result.status.installed, false);
     assert.equal(result.status.error.code, "driver_unavailable");
     assert.equal(result.status.error.package, "@anthropic-ai/claude-agent-sdk");
+    // Under Node all three steps work: the package by name, a managed install, or a directory.
     assert.match(result.status.error.message, /npm install @anthropic-ai\/claude-agent-sdk/);
+    assert.match(result.status.error.message, /maintenance\.install/);
+    assert.match(result.status.error.message, /sdkDirectory/);
     assert.deepEqual([result.probe.ok, result.probe.installed, result.probe.error.code, result.probe.error.package], [false, false, "driver_unavailable", "@anthropic-ai/claude-agent-sdk"]);
     assert.equal(result.opened.code, "driver_unavailable");
     assert.equal(result.opened.package, "@anthropic-ai/claude-agent-sdk");

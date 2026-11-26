@@ -2,7 +2,8 @@
 // ESM; a tarball, packed as it is published (scripts/pack.ts), that installs
 // into a fresh project and imports; a package-contents check that fails on
 // stray files, missing build output, a published export condition or bin that
-// names an unshipped file, and an oversized root export; and the two release
+// names an unshipped file, an oversized root export, and any code of the
+// Claude Agent SDK (which ARI never redistributes); and the two release
 // guards: packing the repository directly is refused, and a non-empty
 // `dependencies` fails scripts/check-dependencies.ts.
 
@@ -13,7 +14,7 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { checkManifest, checkPackage, checkPublishedManifest, checkTarball, publishedContents, tarballContents } from "../scripts/check-package.ts";
+import { CLAUDE_SDK_CODE_MARKER, checkManifest, checkPackage, checkPublishedManifest, checkTarball, publishedContents, tarballContents, vendorCodeProblems } from "../scripts/check-package.ts";
 import type { PackageJson } from "../scripts/check-package.ts";
 import { packedFiles } from "../scripts/check-rules.ts";
 import { REFUSE_REPOSITORY_PACK_MESSAGE, packPackage, publishedManifest } from "../scripts/pack.ts";
@@ -161,6 +162,29 @@ describe("the package-contents check", () => {
     assert.ok(problems.some((problem) => problem.includes('exports["./meta/*"] condition browser sends 12 of 12 subpaths')), problems.join("\n"));
     assert.ok(problems.some((problem) => problem.includes("bin ari-driver is ./dist/wire/missing-cli.js")), problems.join("\n"));
     assert.ok(problems.some((problem) => problem.includes('"dependencies" must be empty')), problems.join("\n"));
+  });
+
+  test("finds no code of the Claude Agent SDK in the real package, and fails a package, staged or packed, that ships the SDK's sdk.mjs", async () => {
+    requireBuild();
+    // The string the check looks for: the environment variable the SDK sets for every Claude Code process it starts.
+    assert.equal(CLAUDE_SDK_CODE_MARKER, "CLAUDE_CODE_SDK_READS_SESSION_STATE");
+    const sdkModule = path.join(fs.realpathSync(path.join(REPO_ROOT, "node_modules", "@anthropic-ai", "claude-agent-sdk")), "sdk.mjs");
+    assert.ok(fs.readFileSync(sdkModule).includes(CLAUDE_SDK_CODE_MARKER), "the pinned SDK's sdk.mjs contains the string");
+    const real = publishedContents(REPO_ROOT);
+    assert.deepEqual(vendorCodeProblems(real), []);
+    assert.ok(real.filesContaining("cannot load a package by name").includes("dist/drivers/claude/sdk.js"), "the check reads every shipped file");
+    const root = tempDir("ari-vendored-");
+    for (const part of ["package.json", "README.md", "LICENSE", "dist", "json-schema", "src", "scripts"]) {
+      fs.cpSync(path.join(REPO_ROOT, part), path.join(root, part), { recursive: true });
+    }
+    fs.mkdirSync(path.join(root, "dist", "vendor"));
+    fs.copyFileSync(sdkModule, path.join(root, "dist", "vendor", "sdk.js"));
+    const { problems } = await checkPackage(root);
+    assert.ok(problems.some((problem) => problem.startsWith("dist/vendor/sdk.js holds code of @anthropic-ai/claude-agent-sdk")), problems.join("\n"));
+    const { tarball } = packPackage(root, tempDir("ari-vendored-pack-"));
+    assert.deepEqual(vendorCodeProblems(tarballContents(tarball)), [
+      `${path.basename(tarball)} holds code of @anthropic-ai/claude-agent-sdk (it contains ${CLAUDE_SDK_CODE_MARKER}, a string unique to the SDK's sdk.mjs); ARI must not redistribute the SDK`,
+    ]);
   });
 });
 

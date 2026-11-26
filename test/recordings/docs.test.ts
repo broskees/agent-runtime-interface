@@ -144,7 +144,23 @@ test("the docs name the file the Codex recorder copies for the sign-in, with the
   assert.match(signIn, /So the recorder copies only that file/);
   assert.match(signIn, /refresh token rotates/);
   const setup = section("How the Codex recorder keeps the user's setup out");
-  for (const variable of ["CODEX_HOME", "HOME", "TMPDIR"]) assert.ok(tableRows(setup).some((row) => row[0] === `\`${variable}\``), `the table names ${variable}`);
-  for (const source of ["`/etc/codex/config.toml`", "`/etc/codex/requirements.toml`", "macOS managed preferences", "cloud-managed configuration"]) assert.ok(setup.includes(source), `the Codex section names ${source}`);
+  for (const variable of ["CODEX_HOME", "HOME", "TMPDIR", "DBUS_SESSION_BUS_ADDRESS"]) assert.ok(tableRows(setup).some((row) => row[0] === `\`${variable}\``), `the table names ${variable}`);
+  for (const source of ["`/etc/codex/config.toml`", "`/etc/codex/requirements.toml`", "`/etc/codex/managed_config.toml`", "macOS managed preferences", "cloud-managed configuration"]) assert.ok(setup.includes(source), `the Codex section names ${source}`);
   assert.match(setup, /strips every variable whose name starts with `CODEX_` or\s+`OPENAI_`/);
+  assert.match(setup, /`cli_auth_credentials_store = "file"` and `mcp_oauth_credentials_store = "file"`/);
+  assert.match(setup, /`Authorization: Bearer none`/);
+});
+
+test("the docs say where the Codex recorder reads the sign-in's store from, which file wins, how it takes Codex's own auth.lock with the pinned source line, and the window that remains", () => {
+  const signIn = section("How Codex finds the sign-in");
+  const order = ["`/etc/codex/requirements.toml`", "`/etc/codex/managed_config.toml`", "the user's `config.toml` in the\n  Codex home", "`/etc/codex/config.toml`"].map((source) => signIn.indexOf(source));
+  assert.ok(order.every((at) => at !== -1), `the section names the four files the store comes from: ${JSON.stringify(order)}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order, "in the order they win");
+  assert.match(signIn, /the first that sets it winning/);
+  assert.match(signIn, /lock on `auth\.lock` in its home/);
+  assert.match(signIn, /`File::lock` \(`storage\.rs:189–212`/);
+  assert.match(signIn, /On Linux, Rust's `File::lock` is\s+`flock\(2\)`/);
+  assert.match(signIn, /Node 22\.23\.1 and 24\.18\.0, two of the versions CI runs, have no `node:ffi`/);
+  assert.match(signIn, /The window that remains:/);
+  assert.match(signIn, /never breaks the lock/);
 });

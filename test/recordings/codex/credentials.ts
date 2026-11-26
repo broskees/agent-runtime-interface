@@ -35,3 +35,17 @@ export function userSignInFile(env: { readonly [name: string]: string | undefine
 export function workspaceSignInFile(codexHome: string): string {
   return path.join(codexHome, CODEX_SIGN_IN_FILE);
 }
+
+/**
+ * The recorded codex's own `config.toml`, in its Codex home: it keeps the CLI
+ * sign-in in `auth.json` and an MCP server's OAuth credentials in
+ * `.credentials.json` there, never in the OS keyring
+ * (codex-rs/config/src/types.rs:136–166; `mcp_oauth_credentials_store`
+ * would default to `auto`, which tries the keyring first). Two system files
+ * rank above it: a requirement and the legacy managed configuration in
+ * /etc/codex. The recorder stops before it starts codex when either sets
+ * `cli_auth_credentials_store` to anything but `file` (./credential-store.ts),
+ * and its tool server needs no OAuth credentials (CODEX_RECORDER_TOOL_SERVER,
+ * ./run.ts).
+ */
+export const CODEX_RECORDER_CONFIG = 'cli_auth_credentials_store = "file"\nmcp_oauth_credentials_store = "file"\n';

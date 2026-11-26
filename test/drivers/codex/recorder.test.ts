@@ -182,8 +182,18 @@ function seedHome(): { home: string; env: { [name: string]: string }; files: Map
   return { home, env, files, signIn };
 }
 
-/** Records `scenarios` with the recorder's own process service, against a fresh fake `codex` on PATH. */
-async function recordWithFake(env: { [name: string]: string }, scenarios: readonly ScenarioName[], options: { source?: "fake" | "live"; outDir?: string } = {}): Promise<{ outDir: string; outcomes: CodexRecordOutcome[]; fake: FakeCodex; log: string[] }> {
+/** The config.toml the recorder gives the recorded codex in its own Codex home. */
+const RECORDER_CONFIG = 'cli_auth_credentials_store = "file"\nmcp_oauth_credentials_store = "file"\n';
+
+/** A directory to stand in for /etc/codex, holding `files`; none of the system's own files reach a test. */
+function systemConfigDir(files: { readonly [name: string]: string } = {}): string {
+  const directory = fs.mkdtempSync(path.join(DIRECTORY, "etc-codex-"));
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(directory, name), text);
+  return directory;
+}
+
+/** Records `scenarios` with the recorder's own process service, against a fresh fake `codex` on PATH, with an empty stand-in for /etc/codex unless `systemConfigDir` names one. */
+async function recordWithFake(env: { [name: string]: string }, scenarios: readonly ScenarioName[], options: { source?: "fake" | "live"; outDir?: string; systemConfigDir?: string } = {}): Promise<{ outDir: string; outcomes: CodexRecordOutcome[]; fake: FakeCodex; log: string[] }> {
   const fake = fakeCodexOnPath(DIRECTORY);
   const outDir = options.outDir ?? fs.mkdtempSync(path.join(DIRECTORY, "out-"));
   const log: string[] = [];
@@ -194,6 +204,7 @@ async function recordWithFake(env: { [name: string]: string }, scenarios: readon
     env: { PATH: `${fake.bin}${path.delimiter}${process.env["PATH"] ?? "/usr/bin:/bin"}`, USER: "ari-test-user", ...fake.env, ...env },
     timeoutMs: 20_000,
     log: (line) => log.push(line),
+    systemConfigDir: options.systemConfigDir ?? systemConfigDir(),
   });
   return { outDir, outcomes, fake, log };
 }
@@ -210,6 +221,7 @@ test("the fake codex, given the user's own environment, loads every seeded setti
 
 test("the recorder starts codex with a CODEX_HOME, HOME, XDG directories, TMPDIR and working directory inside its own temp dir and none of the user's CODEX_ or OPENAI_ variables: nothing of the user's Codex setup reaches codex or the recording, and every seeded file is byte-identical afterwards", async () => {
   const { home, env, files, signIn } = seedHome();
+  const codexHomeBefore = fs.readdirSync(path.dirname(signIn)).sort();
   const { outDir, outcomes, fake } = await recordWithFake(env, SCENARIO_NAMES);
   assert.deepEqual(
     outcomes.map((outcome) => [outcome.scenario, outcome.error?.message]),
@@ -236,9 +248,10 @@ test("the recorder starts codex with a CODEX_HOME, HOME, XDG directories, TMPDIR
       ["CODEX_HOME"],
       `${started.args.join(" ")}: none of the user's CODEX_ or OPENAI_ variables, only the recorder's CODEX_HOME`,
     );
+    assert.equal(started.env["DBUS_SESSION_BUS_ADDRESS"], `unix:path=${path.join(workspace, "no-session-bus")}`, `${started.args.join(" ")}: a session bus where nothing listens, not the user's`);
     if (started.args[0] !== "app-server") continue;
     for (const source of codexSetupSources(started.env, started.cwd)) assert.ok(!source.startsWith(`${home}${path.sep}`), `codex would read ${source}`);
-    assert.deepEqual(started.loaded, [], "codex loaded nothing of the user's setup");
+    assert.deepEqual(started.loaded, [`${path.join(workspace, "codex-home", "config.toml")}: ${RECORDER_CONFIG}`], "codex loaded nothing of the user's setup, only the recorder's own config");
     assert.equal(started.signIn, SIGN_IN, "codex got the user's sign-in");
     assert.equal(started.signInFile, workspaceSignInFile(path.join(workspace, "codex-home")));
   }
@@ -250,7 +263,14 @@ test("the recorder starts codex with a CODEX_HOME, HOME, XDG directories, TMPDIR
     assert.ok(!fs.existsSync(outcome.workspace), `${outcome.scenario}: the temp dir is removed`);
     await replayCodex(outcome.file!);
   }
+  // Every thread/resume names the recorder's tool server with an Authorization header, so Codex's MCP client looks up no OAuth credentials for it in any store before it connects.
+  const resumes = (await readRecording(outcomes.find((outcome) => outcome.scenario === "resume")!.file!)).frames
+    .map(({ frame }) => frame["message"] as { method?: string; params?: { config?: { [key: string]: unknown } } } | undefined)
+    .filter((message) => message?.method === "thread/resume");
+  assert.ok(resumes.length > 0, "the resume scenario resumed a thread");
+  for (const message of resumes) assert.deepEqual(message!.params?.config?.["mcp_servers.ari-recorder-tools"], { url: "http://127.0.0.1:9/ari-recorder/no-tools", http_headers: { Authorization: "Bearer none" } });
   for (const [file, bytes] of files) assert.ok(fs.readFileSync(file).equals(bytes), `${file} changed`);
+  assert.deepEqual(fs.readdirSync(path.dirname(signIn)).sort(), codexHomeBefore, "the recorder added nothing to the user's Codex home, not even Codex's lock file: nothing was refreshed");
   assert.ok(!fs.existsSync(recoveryFileFor(signIn)), "no recovery file: nothing was refreshed");
   fs.rmSync(outDir, { recursive: true, force: true });
 });
@@ -258,12 +278,15 @@ test("the recorder starts codex with a CODEX_HOME, HOME, XDG directories, TMPDIR
 test("codex's environment is the recorder's less HOME, the XDG directories and TMPDIR, plus the workspace's; the host then strips every CODEX_ and OPENAI_ variable", () => {
   const layout = createCodexLayout("ari-codex-environment-");
   try {
-    const user = { PATH: "/usr/bin", LANG: "C.UTF-8", HOME: "/home/someone", XDG_CONFIG_HOME: "/home/someone/.config", XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/var/tmp/someone", CODEX_HOME: "/home/someone/.codex", CODEX_SQLITE_HOME: "/home/someone/.codex", OPENAI_API_KEY: "key", OPENAI_BASE_URL: "https://example.invalid", CODEX_ACCESS_TOKEN: "token", CODEX_API_KEY: "key" };
+    const user = { PATH: "/usr/bin", LANG: "C.UTF-8", HOME: "/home/someone", XDG_CONFIG_HOME: "/home/someone/.config", XDG_RUNTIME_DIR: "/run/user/1000", TMPDIR: "/var/tmp/someone", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus", CODEX_HOME: "/home/someone/.codex", CODEX_SQLITE_HOME: "/home/someone/.codex", OPENAI_API_KEY: "key", OPENAI_BASE_URL: "https://example.invalid", CODEX_ACCESS_TOKEN: "token", CODEX_API_KEY: "key" };
     const environment = codexEnvironment(layout, user);
     assert.equal(environment["LANG"], "C.UTF-8");
     assert.equal(environment["HOME"], layout.home);
     assert.equal(environment["XDG_RUNTIME_DIR"], layout.runtimeDir);
     assert.equal(environment["TMPDIR"], layout.tmp);
+    assert.equal(environment["DBUS_SESSION_BUS_ADDRESS"], `unix:path=${path.join(layout.root, "no-session-bus")}`, "the user's session bus, and the Secret Service of their keyring on it, is out of reach");
+    assert.ok(!fs.existsSync(path.join(layout.root, "no-session-bus")), "nothing listens there");
+    assert.equal(fs.readFileSync(path.join(layout.codexHome, "config.toml"), "utf8"), RECORDER_CONFIG, "codex's own config keeps the CLI sign-in and MCP credentials in files of its own home");
     const child = buildChildEnvironment(environment, CODEX_RECORDER_ENV_POLICY);
     assert.deepEqual(Object.keys(child).filter((name) => /^(CODEX_|OPENAI_)/.test(name)), []);
     assert.equal(child["PATH"], "/usr/bin");
@@ -426,6 +449,100 @@ test("a live run without the user's sign-in file stops before it starts codex, n
   assert.ok(!fs.existsSync(outcomes[0]!.workspace));
 });
 
+// Where the user's Codex keeps its sign-in: cli_auth_credentials_store.
+
+/** Puts `line` at the top of the user's config.toml, before its first table, where Codex reads top-level settings. */
+function setTopLevel(configToml: string, line: string): void {
+  fs.writeFileSync(configToml, `${line}\n${fs.readFileSync(configToml, "utf8")}`);
+}
+
+/** What a run that must stop at the store check shows: it stopped at once with a CodexCredentialStoreError naming `file` and `setting`, started no codex, recorded nothing and changed none of the user's files. */
+function assertStoppedAtStore(run: { outcomes: CodexRecordOutcome[]; fake: FakeCodex; outDir: string }, files: Map<string, Buffer>, file: string, setting: string, change: RegExp): void {
+  assert.equal(run.outcomes.length, 1, "the run stopped");
+  const error = run.outcomes[0]!.error;
+  assert.equal(error?.name, "CodexCredentialStoreError", error?.message);
+  assert.ok(error!.message.startsWith(`${file}, `), error!.message);
+  assert.ok(error!.message.includes(`sets ${setting}, so your Codex keeps its sign-in `), error!.message);
+  assert.ok(/ The recorder copies only \S+auth\.json and never reads your keyring, so it stopped before it started codex\. /.test(error!.message), error!.message);
+  assert.match(error!.message, change);
+  assert.deepEqual(run.fake.processes(), [], "codex never started");
+  assert.deepEqual(fs.readdirSync(run.outDir), [], "nothing recorded");
+  assert.ok(!fs.existsSync(run.outcomes[0]!.workspace), "the workspace is removed");
+  for (const [each, bytes] of files) assert.ok(fs.readFileSync(each).equals(bytes), `${each} changed`);
+}
+
+test("with auth.json present, cli_auth_credentials_store = keyring, auto or ephemeral in the user's config.toml stops the run before it starts codex, naming the setting, the file and what to do; file, or no setting, records", async () => {
+  for (const store of ["keyring", "auto", "ephemeral"]) {
+    const { env, files, signIn } = seedHome();
+    const config = path.join(path.dirname(signIn), "config.toml");
+    setTopLevel(config, `cli_auth_credentials_store = "${store}"`);
+    files.set(config, fs.readFileSync(config));
+    const run = await recordWithFake(env, ["simple", "multi_turn"]);
+    assertStoppedAtStore(run, files, config, `cli_auth_credentials_store = "${store}"`, new RegExp(`To record, set cli_auth_credentials_store = "file" in ${escape(config)}, or remove the line, and sign in again with \`codex login\`, then record again\\.`));
+    assert.ok(run.outcomes[0]!.error!.message.includes(`The recorder copies only ${signIn} and never reads your keyring`), run.outcomes[0]!.error!.message);
+    if (store === "auto") assert.ok(run.outcomes[0]!.error!.message.includes(`keeps its sign-in in your OS keyring, and in ${signIn} only when the keyring fails`), run.outcomes[0]!.error!.message);
+  }
+  for (const line of ['cli_auth_credentials_store = "file"', "# cli_auth_credentials_store is not set"]) {
+    const { env, signIn } = seedHome();
+    setTopLevel(path.join(path.dirname(signIn), "config.toml"), line);
+    const { outcomes, fake } = await recordWithFake(env, ["simple"]);
+    assert.equal(outcomes[0]!.error, undefined, `${line}: ${outcomes[0]!.error?.message}`);
+    assert.ok(fake.processes().length > 0, `${line}: codex started`);
+  }
+});
+
+test("the system's /etc/codex files set the store too: a keyring or auto there stops the run before it starts codex, file records, and a requirement and the legacy managed_config.toml rank above the user's config.toml, the system config.toml below it", async () => {
+  const roles = { "config.toml": "the system configuration", "requirements.toml": "a system requirement", "managed_config.toml": "the legacy managed configuration" } as const;
+  for (const [name, role] of Object.entries(roles)) {
+    for (const store of ["keyring", "auto"]) {
+      const { env, files } = seedHome();
+      const etc = systemConfigDir({ [name]: `# managed\ncli_auth_credentials_store = '${store}' # the machine's\n\n[otel]\nexporter = "none"\n` });
+      const run = await recordWithFake(env, ["simple", "multi_turn"], { systemConfigDir: etc });
+      assertStoppedAtStore(run, files, path.join(etc, name), `cli_auth_credentials_store = "${store}"`, new RegExp(`To record, set cli_auth_credentials_store = "file" in ${escape(path.join(etc, name))}, or remove the line \\(the file is the machine's, not yours: that needs root\\), and sign in again with \`codex login\`, then record again\\.`));
+      assert.ok(run.outcomes[0]!.error!.message.includes(`${path.join(etc, name)}, ${role}, sets`), run.outcomes[0]!.error!.message);
+    }
+    const { env } = seedHome();
+    const { outcomes, fake } = await recordWithFake(env, ["simple"], { systemConfigDir: systemConfigDir({ [name]: 'cli_auth_credentials_store = "file"\n' }) });
+    assert.equal(outcomes[0]!.error, undefined, `${name} = file: ${outcomes[0]!.error?.message}`);
+    assert.ok(fake.processes().length > 0, `${name} = file: codex started`);
+  }
+  // Which file wins: the requirement over the user's config.toml, the user's config.toml over the system config.toml, the legacy managed_config.toml over the user's.
+  const ranked: Array<{ user: string; system: { [name: string]: string }; stopsAt?: string }> = [
+    { user: "keyring", system: { "requirements.toml": 'cli_auth_credentials_store = "file"\n' } },
+    { user: "file", system: { "config.toml": 'cli_auth_credentials_store = "keyring"\n' } },
+    { user: "file", system: { "managed_config.toml": 'cli_auth_credentials_store = "keyring"\n' }, stopsAt: "managed_config.toml" },
+    { user: "file", system: { "requirements.toml": 'cli_auth_credentials_store = "auto"\n', "managed_config.toml": 'cli_auth_credentials_store = "file"\n' }, stopsAt: "requirements.toml" },
+  ];
+  for (const each of ranked) {
+    const { env, signIn } = seedHome();
+    setTopLevel(path.join(path.dirname(signIn), "config.toml"), `cli_auth_credentials_store = "${each.user}"`);
+    const etc = systemConfigDir(each.system);
+    const { outcomes, fake } = await recordWithFake(env, ["simple"], { systemConfigDir: etc });
+    const label = JSON.stringify(each);
+    if (each.stopsAt === undefined) {
+      assert.equal(outcomes[0]!.error, undefined, `${label}: ${outcomes[0]!.error?.message}`);
+      assert.ok(fake.processes().length > 0, `${label}: codex started`);
+    } else {
+      assert.equal(outcomes[0]!.error?.name, "CodexCredentialStoreError", `${label}: ${outcomes[0]!.error?.message}`);
+      assert.ok(outcomes[0]!.error!.message.startsWith(`${path.join(etc, each.stopsAt)}, `), `${label}: ${outcomes[0]!.error!.message}`);
+      assert.deepEqual(fake.processes(), [], `${label}: codex never started`);
+    }
+  }
+});
+
+test("without flock on PATH, which takes Codex's own sign-in lock, the recorder stops before it starts codex and records nothing", async () => {
+  const { env, files } = seedHome();
+  const empty = fs.mkdtempSync(path.join(DIRECTORY, "no-flock-"));
+  const run = await recordWithFake({ ...env, PATH: empty }, ["simple", "multi_turn"]);
+  assert.equal(run.outcomes.length, 1, "the run stopped");
+  const error = run.outcomes[0]!.error;
+  assert.equal(error?.name, "CodexSignInLockError", error?.message);
+  assert.match(error!.message, /the recorder could not run flock \(.+\), which it needs to take Codex's own lock, auth\.lock, when it puts a refreshed sign-in back; it stopped before it started codex\. Install util-linux's flock on PATH/);
+  assert.deepEqual(run.fake.processes(), [], "codex never started");
+  assert.deepEqual(fs.readdirSync(run.outDir), []);
+  for (const [each, bytes] of files) assert.ok(fs.readFileSync(each).equals(bytes), `${each} changed`);
+});
+
 test("a temp workspace inside the user's home stops the run before it starts codex", async () => {
   // A home that holds the system temp directory, and so every workspace the recorder makes.
   const home = path.dirname(fs.realpathSync(os.tmpdir()));
@@ -525,7 +642,12 @@ test("the recorded codex works in the root of a Git repository of its own: Codex
     const toplevel = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: layout.cwd, encoding: "utf8", env: { PATH: process.env["PATH"] ?? "", HOME: layout.home, GIT_CONFIG_NOSYSTEM: "1" } });
     assert.equal(toplevel.status, 0, toplevel.stderr);
     assert.equal(toplevel.stdout.trim(), layout.cwd);
-    assert.deepEqual(loadedCodexSetup({ HOME: layout.home, CODEX_HOME: layout.codexHome }, layout.cwd), [], "nothing above the workspace's cwd/ is read");
+    const loaded = loadedCodexSetup({ HOME: layout.home, CODEX_HOME: layout.codexHome }, layout.cwd);
+    assert.deepEqual(
+      loaded.filter((entry) => !entry.startsWith(`${layout.codexHome}${path.sep}`)),
+      [],
+      "nothing above the workspace's cwd/ is read (the workspace's Codex home holds the recorder's own config)",
+    );
   } finally {
     fs.rmSync(layout.root, { recursive: true, force: true });
   }

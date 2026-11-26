@@ -9,15 +9,19 @@
 // assertions.
 //
 // The user's Codex setup stays out and unchanged: `codex` gets its own
-// CODEX_HOME (holding only the copied sign-in), HOME, XDG directories and
-// TMPDIR inside the workspace, and none of the user's CODEX_ or OPENAI_
-// variables, so it reads none of the user's config, MCP servers, plugins,
-// memories, skills, rules, sessions or goals. It works in the workspace's
-// `cwd/`, the root of its own Git repository, so it reads no AGENTS.md,
-// `.codex/` or `.agents/` of the folders above; and the recorder stops before
-// it starts `codex` when the workspace lies in the user's home or below a
-// folder holding one of those. A sign-in `codex` refreshed during the run
-// (Codex rotates a ChatGPT refresh token) goes back to the user's file, or,
+// CODEX_HOME (holding the recorder's config.toml and the copied sign-in),
+// HOME, XDG directories and TMPDIR inside the workspace, an unreachable
+// session bus, and none of the user's CODEX_ or OPENAI_ variables, so it reads
+// none of the user's config, MCP servers, plugins, memories, skills, rules,
+// sessions or goals, and keeps every credential in files of its own home,
+// never in the user's keyring. It works in the workspace's `cwd/`, the root
+// of its own Git repository, so it reads no AGENTS.md, `.codex/` or `.agents/`
+// of the folders above; and the recorder stops before it starts `codex` when
+// the workspace lies in the user's home or below a folder holding one of
+// those. It also stops before it starts `codex` unless the user's Codex keeps
+// its sign-in in the file it copies (./credential-store.ts). A sign-in
+// `codex` refreshed during the run (Codex rotates a ChatGPT refresh token)
+// goes back to the user's file under Codex's own lock (./sign-in-lock.ts), or,
 // when it cannot, into this run's recovery file beside it
 // (../credential-file.ts). The workspace is removed after every scenario,
 // also after one that fails, unless it holds the only copy of a refreshed
@@ -34,12 +38,15 @@ import type { Frame, RecordingSource } from "../format.ts";
 import { writeRecording } from "../format.ts";
 import { copyCredentialFile, returnCredentialFile } from "../credential-file.ts";
 import type { CopiedCredentialFile } from "../credential-file.ts";
-import { CredentialsKeptError, RecordingNotWrittenError } from "../recovery.ts";
+import { CredentialsKeptError, CredentialsNotSavedError, RecordingNotWrittenError, keepRefreshedCredentials, recoveryFileFor } from "../recovery.ts";
 import { createSanitiser } from "../sanitiser.ts";
 import { SCENARIOS, checkScenario } from "../scenarios.ts";
 import type { Scenario, ScenarioName } from "../scenarios.ts";
 import { tapProcess } from "../stdio/tap.ts";
-import { CODEX_SIGN_IN_FILE, userSignInFile, workspaceSignInFile } from "./credentials.ts";
+import { CODEX_SYSTEM_CONFIG_DIR, CodexCredentialStoreError, checkCodexCredentialStore } from "./credential-store.ts";
+import { CODEX_SIGN_IN_FILE, userCodexHome, userSignInFile, workspaceSignInFile } from "./credentials.ts";
+import { CODEX_SIGN_IN_LOCK, CodexSignInLockError, checkFlockRuns, takeCodexSignInLock } from "./sign-in-lock.ts";
+import type { HeldCodexSignInLock } from "./sign-in-lock.ts";
 import { codexNativeAnswers } from "./frames.ts";
 import { CODEX_PROTOCOL_WORDS } from "./protocol-words.ts";
 import { CODEX_RECORDER_ENV_POLICY, CODEX_RECORDER_INSTANCE_ID, codexRecorderConfig, codexRecorderHost, createCodexLayout, runCodexScenario } from "./run.ts";
@@ -50,15 +57,18 @@ export const CODEX_VENDOR_NAME = "codex-cli";
 export const CODEX_SDK_NAME = "codex-app-server";
 export const CODEX_MODEL_VARIABLE = "ARI_RECORD_CODEX_MODEL";
 
-/** The variables of the recorder's environment `codex` does not get: its own HOME, XDG directories and TMPDIR replace them. Every CODEX_ and OPENAI_ variable goes too, by the host's rule (CODEX_RECORDER_ENV_POLICY). */
+/** The variables of the recorder's environment `codex` does not get: its own HOME, XDG directories, TMPDIR and session bus replace them. Every CODEX_ and OPENAI_ variable goes too, by the host's rule (CODEX_RECORDER_ENV_POLICY). */
 export function droppedFromAgent(name: string): boolean {
-  return name === "HOME" || name === "TMPDIR" || name.startsWith("XDG_");
+  return name === "HOME" || name === "TMPDIR" || name === "DBUS_SESSION_BUS_ADDRESS" || name.startsWith("XDG_");
 }
 
 /**
  * The environment `codex` starts from, before the host strips every CODEX_
  * and OPENAI_ variable: the recorder's own, without the variables
- * `droppedFromAgent` names, plus the workspace's directories.
+ * `droppedFromAgent` names, plus the workspace's directories, and a session
+ * bus address where nothing listens, so the Secret Service of the user's
+ * keyring is out of reach even if a setting the recorder does not control
+ * sends codex there.
  */
 export function codexEnvironment(layout: CodexLayout, env: { readonly [name: string]: string | undefined }): { [name: string]: string } {
   const base: { [name: string]: string } = {};
@@ -72,6 +82,7 @@ export function codexEnvironment(layout: CodexLayout, env: { readonly [name: str
     XDG_CACHE_HOME: layout.cacheHome,
     XDG_RUNTIME_DIR: layout.runtimeDir,
     TMPDIR: layout.tmp,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(layout.root, "no-session-bus")}`,
   };
 }
 
@@ -179,6 +190,8 @@ export interface RecordCodexOptions {
   readonly date?: string;
   /** The OS user name the sanitiser replaces; os.userInfo().username when left out. */
   readonly user?: string;
+  /** Where the recorder reads the system's Codex files (CODEX_SYSTEM_CONFIG_DIR, `/etc/codex`, when left out): a seam for tests, which never write /etc. scripts/record-codex.ts leaves it out. */
+  readonly systemConfigDir?: string;
 }
 
 export interface CodexRecordOutcome {
@@ -271,6 +284,53 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** How long the copy-back waits for another codex to let go of auth.lock. Codex holds it only while it commits a sign-in, never across a network request (codex-rs/login/src/auth/storage_commit.rs:1–2). */
+export const CODEX_SIGN_IN_LOCK_WAIT_MS = 30_000;
+
+/** Keeps the refreshed copy in the recovery file beside the user's file, as ../credential-file.ts does, and throws CredentialsKeptError naming it; CredentialsNotSavedError when even that file cannot take it. */
+function keepRefreshedSignIn(credential: CopiedCredentialFile, why: string): never {
+  const recoveryFile = recoveryFileFor(credential.real);
+  try {
+    keepRefreshedCredentials(recoveryFile, [{ id: credential.id, value: fs.readFileSync(credential.copy, "utf8") }]);
+  } catch (error) {
+    throw new CredentialsNotSavedError(
+      `${why}, and the recorder could not keep the refreshed sign-in in ${recoveryFile} either (${error instanceof Error ? error.message : String(error)}). The refreshed sign-in is only in the recorder's copy, ${credential.copy}.`,
+      credential.copy,
+      recoveryFile,
+    );
+  }
+  throw new CredentialsKeptError(`${why}; it kept the refreshed sign-in in ${recoveryFile}, readable only by you. Write its newest value over ${credential.real}, or sign in again.`, recoveryFile);
+}
+
+/**
+ * Puts a sign-in the recorded codex refreshed back over the user's file
+ * (returnCredentialFile, ../credential-file.ts) while it holds Codex's own
+ * lock, auth.lock in the user's Codex home (./sign-in-lock.ts), from before
+ * it reads the user's file until after it replaced it: another codex commits
+ * a sign-in only under that lock, so none lands between the recorder's
+ * comparison and its replace. An unchanged copy needs no lock. The recorder
+ * never breaks the lock: when another codex holds it for `waitMs`, or the
+ * recorder cannot take it, the refreshed sign-in goes to the recovery file
+ * instead. Throws as returnCredentialFile does.
+ */
+export async function returnCodexSignIn(credential: CopiedCredentialFile, env: { readonly [name: string]: string | undefined }, waitMs: number = CODEX_SIGN_IN_LOCK_WAIT_MS): Promise<void> {
+  if (!fs.existsSync(credential.copy) || fs.readFileSync(credential.copy).equals(credential.original)) return;
+  const codexHome = path.dirname(credential.real);
+  const lockFile = path.join(codexHome, CODEX_SIGN_IN_LOCK);
+  let lock: HeldCodexSignInLock | undefined;
+  try {
+    lock = await takeCodexSignInLock(codexHome, waitMs, env);
+  } catch (error) {
+    keepRefreshedSignIn(credential, `the recorder could not take Codex's lock ${lockFile} to write the sign-in codex refreshed back to ${credential.real} (${error instanceof Error ? error.message : String(error)})`);
+  }
+  if (lock === undefined) keepRefreshedSignIn(credential, `another codex held its lock ${lockFile} for ${waitMs / 1000} s, so the recorder did not write the sign-in codex refreshed back to ${credential.real}`);
+  try {
+    returnCredentialFile(credential, "codex");
+  } finally {
+    await lock.release();
+  }
+}
+
 async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promise<CodexRecordOutcome> {
   const log = options.log ?? (() => undefined);
   const layout = createCodexLayout(`ari-codex-record-${scenario.name}-`);
@@ -294,6 +354,9 @@ async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promi
     const above = customizationsAbove(layout.root);
     if (above.length > 0) throw new CodexWorkspaceCustomizedError(layout.root, above);
     const real = userSignInFile(options.env);
+    checkCodexCredentialStore(userCodexHome(options.env), options.systemConfigDir ?? CODEX_SYSTEM_CONFIG_DIR, real ?? `~/.codex/${CODEX_SIGN_IN_FILE}`);
+    // A sign-in to copy may come back refreshed, under Codex's lock, which the recorder takes with flock.
+    if (real !== undefined && fs.existsSync(real)) checkFlockRuns(options.env);
     credential = real === undefined ? undefined : copyCredentialFile(real, workspaceSignInFile(layout.codexHome), CODEX_SIGN_IN_FILE);
     if (options.source === "live" && credential === undefined) throw new CodexSignInMissingError(real);
     service = codexProcessService(layout, options.env);
@@ -313,7 +376,7 @@ async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promi
     await service?.dispose().catch(failed);
     if (credential !== undefined) {
       try {
-        returnCredentialFile(credential, "codex");
+        await returnCodexSignIn(credential, options.env);
       } catch (reason) {
         failed(reason);
         // Kept in the recovery file: the copy can go. Anything else: the copy may hold the only refreshed sign-in.
@@ -368,11 +431,13 @@ async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promi
 
 /**
  * Records each scenario in turn. A failed scenario does not stop the others,
- * but six failures stop them all: a temp workspace inside the user's home, a
- * temp workspace below a folder holding AGENTS.md, AGENTS.override.md, .codex
- * or .agents, no sign-in file to copy, a model Codex does not list, a
- * refreshed sign-in the recorder could keep nowhere but in the workspace, and
- * a recording it could not write.
+ * but eight failures stop them all: a temp workspace inside the user's home,
+ * a temp workspace below a folder holding AGENTS.md, AGENTS.override.md,
+ * .codex or .agents, a Codex setup that keeps the sign-in elsewhere than the
+ * file the recorder copies, no `flock` to take Codex's lock with, no sign-in
+ * file to copy, a model Codex does not list, a refreshed sign-in the recorder
+ * could keep nowhere but in the workspace, and a recording it could not
+ * write.
  */
 export async function recordCodex(options: RecordCodexOptions): Promise<CodexRecordOutcome[]> {
   const names = options.scenarios ?? SCENARIOS.map((scenario) => scenario.name);
@@ -385,6 +450,8 @@ export async function recordCodex(options: RecordCodexOptions): Promise<CodexRec
     const stops = (failure: Error): boolean =>
       failure instanceof CodexWorkspaceInHomeError ||
       failure instanceof CodexWorkspaceCustomizedError ||
+      failure instanceof CodexCredentialStoreError ||
+      failure instanceof CodexSignInLockError ||
       failure instanceof CodexSignInMissingError ||
       failure instanceof CodexModelChoiceError ||
       failure instanceof RecordingNotWrittenError;

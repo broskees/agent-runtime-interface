@@ -1130,16 +1130,29 @@ thread's directory, and the directory `codex` runs in), `codex-home/`,
 `xdg-runtime/`, `tmp/` and `instances/` (the host's directories). The driver
 uses the ambient account, so it starts `codex app-server` and
 `codex login status` with no variables of its own. The recorder's host starts
-them with the recorder's own environment, less `HOME`, `TMPDIR` and every
-`XDG_*` variable, strips every variable whose name starts with `CODEX_` or
-`OPENAI_`, and then adds:
+them with the recorder's own environment, less `HOME`, `TMPDIR`,
+`DBUS_SESSION_BUS_ADDRESS` and every `XDG_*` variable,
+strips every variable whose name starts with `CODEX_` or `OPENAI_`, and then
+adds:
 
 | Variable | Value | Why |
 |---|---|---|
-| `CODEX_HOME` | `<workspace>/codex-home`, holding only the copy of the user's `auth.json` | Codex keeps the user's config, MCP servers, plugins, memories, skills, rules, sessions and goals in its home (above); added after the stripping, on every spawn |
+| `CODEX_HOME` | `<workspace>/codex-home`, holding the recorder's `config.toml` and the copy of the user's `auth.json` | Codex keeps the user's config, MCP servers, plugins, memories, skills, rules, sessions and goals in its home (above); added after the stripping, on every spawn |
 | `HOME` | `<workspace>/user-home`, empty | Codex reads `~/.agents/skills`, and `~/.codex` without `CODEX_HOME` |
 | `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` | `<workspace>/xdg-config`, `xdg-data`, `xdg-state`, `xdg-cache`, `xdg-runtime` | the XDG base directories |
 | `TMPDIR` | `<workspace>/tmp` | so a temp path `codex` reports is inside the workspace |
+| `DBUS_SESSION_BUS_ADDRESS` | `unix:path=<workspace>/no-session-bus`, where nothing listens | the Secret Service of the user's keyring is on the session bus; out of reach even if a setting the recorder does not control sends `codex` to the keyring |
+
+The recorder's `config.toml` in `<workspace>/codex-home` holds only
+`cli_auth_credentials_store = "file"` and `mcp_oauth_credentials_store = "file"`:
+the recorded Codex keeps its CLI sign-in in `auth.json` and an MCP server's
+OAuth credentials in `.credentials.json` there, never in the OS keyring
+(`codex-rs/config/src/types.rs:136–166`). Without the second,
+`mcp_oauth_credentials_store` is `auto`, which tries the keyring first.
+Codex's MCP client on Linux reads the keyring through the kernel keyring as
+well as the Secret Service (`keyring` with `linux-native-async-persistent`,
+`codex-rs/rmcp-client/Cargo.toml:88`), so the session bus alone would not keep
+it out.
 
 Codex reads many `CODEX_` and `OPENAI_` variables: its home and state
 database (`CODEX_HOME`, `CODEX_SQLITE_HOME`), sign-ins (`OPENAI_API_KEY`,
@@ -1165,7 +1178,12 @@ fails the resume when the host has none. The recorder's host names
 `ari-recorder-tools`, an HTTP MCP server at
 `http://127.0.0.1:9/ari-recorder/no-tools`: on the loopback discard port
 nothing listens on an ordinary machine, so Codex's connection is refused and
-the session gets no tools. A new thread gets no MCP server at all.
+the session gets no tools. A new thread gets no MCP server at all. The server
+carries the header `Authorization: Bearer none`, so Codex's MCP client looks
+up no OAuth credentials for it, in the keyring or a file, before it tries to
+connect. It skips that lookup for a server whose headers hold an
+`Authorization` (`codex-rs/rmcp-client/src/rmcp_client.rs:1459–1470`, and
+`auth_status.rs:161–164` for the server's sign-in status).
 
 `test/drivers/codex/recorder.test.ts` seeds a home with a `config.toml` (with
 an MCP entry and an enabled plugin), the plugin, a memory, `AGENTS.md`,
@@ -1175,15 +1193,22 @@ an MCP entry and an enabled plugin), the plugin, a memory, `AGENTS.md`,
 `CODEX_ACCESS_TOKEN`. It records all six scenarios against a fake `codex`
 (`test/drivers/codex/fake-codex-cli.ts`) that loads them where Codex does
 (`test/drivers/codex/user-setup.ts`), and shows every `codex` started with
-`CODEX_HOME`, `HOME`, the XDG directories, `TMPDIR` and its working directory
-in the workspace and no other `CODEX_` or `OPENAI_` variable, none of the
-markers reached the recording, and every seeded file is unchanged.
+`CODEX_HOME`, `HOME`, the XDG directories, `TMPDIR`, the unreachable session
+bus and its working directory in the workspace and no other `CODEX_` or
+`OPENAI_` variable, that it loaded only the recorder's `config.toml`, that
+none of the markers reached the recording, that every `thread/resume` named
+the tool server with its `Authorization` header, and that every seeded file
+is unchanged and nothing was added to the user's Codex home.
 
 Not isolated: the machine's system configuration (`/etc/codex/config.toml`,
-`/etc/codex/requirements.toml`, the system skills in `/etc/codex/skills`),
+`/etc/codex/requirements.toml`, the legacy `/etc/codex/managed_config.toml`
+that Linux and macOS still read, the system skills in `/etc/codex/skills`),
 macOS managed preferences, and a ChatGPT enterprise workspace's
 cloud-managed configuration (`codex-rs/config/src/loader/README.md`, "Layering
-model"). A machine or account that has them records under them.
+model"; `codex-rs/config/src/loader/layer_io.rs:22, 223–232` for
+`managed_config.toml`). A machine or account that has them records under
+them. Of these files the recorder reads one setting, the store of the CLI
+sign-in, before it starts `codex` ("How Codex finds the sign-in").
 
 ### How Codex finds the sign-in
 
@@ -1194,14 +1219,40 @@ model"). A machine or account that has them records under them.
   (`storage.rs:263–271`, `let auth_file = get_auth_file(&self.codex_home);`). The home is `CODEX_HOME`, else `~/.codex`,
   so the user's file is `~/.codex/auth.json`, or `auth.json` in the
   `CODEX_HOME` of the recorder's environment. That is file storage, Codex's
-  default when `config.toml` sets no `cli_auth_credentials_store`
-  (`codex-rs/config/src/types.rs:139–149`,
-  `codex-rs/core/src/config/mod.rs:4792–4797`); with `keyring` or `auto`
-  there, Codex keeps the sign-in in the OS keyring instead.
+  default when no configuration sets `cli_auth_credentials_store`
+  (`codex-rs/config/src/types.rs:136–149`,
+  `codex-rs/core/src/config/mod.rs:4792–4797`). With `keyring` or `auto`,
+  Codex keeps the sign-in in the OS keyring (`auto` reads the file only when
+  the keyring holds none or fails, `storage.rs:593–620`); with `ephemeral`,
+  only in the memory of each process. An `auth.json` is then no proof that it
+  holds the sign-in Codex uses.
+- So before it starts `codex`, the recorder reads `cli_auth_credentials_store`,
+  and nothing else, from the four files Codex 0.172.0 on Linux takes it from,
+  the first that sets it winning (`test/recordings/codex/credential-store.ts`):
+  `/etc/codex/requirements.toml`, a system requirement that overrides any
+  `config.toml` (`codex-rs/config/src/loader/mod.rs:775–777`,
+  `codex-rs/core/src/config/auth_keyring.rs:71–73`); the legacy
+  `/etc/codex/managed_config.toml`, a config layer above all others
+  (`loader/layer_io.rs:22, 223–232`, `loader/mod.rs:459–484`; its reading as
+  requirements covers only `approval_policy`, `approvals_reviewer` and
+  `sandbox_mode`, `loader/mod.rs:1000–1037`); the user's `config.toml` in the
+  Codex home; and `/etc/codex/config.toml` (`loader/mod.rs:83, 275–292`). It
+  reads only the key's top-level value, with a TOML reader of its own that
+  reads strings, arrays and inline tables as TOML does, and never copies
+  anything of those files into a recording. Unless the winner says `file`,
+  or none sets the key, the run stops before it starts `codex`: the error
+  names the setting, the file that set it, and what to do (set it to `file`
+  or remove it, which a system file needs root for, then `codex login`). A
+  file it cannot read, or whose text is no TOML it can read, stops the run
+  too. It does not read macOS managed preferences, a `--profile` file or
+  cloud-managed configuration (whose requirements cannot set the store,
+  `codex-rs/config/src/requirements_layers/layer.rs:13–19`). A local
+  development build of Codex (version 0.0.0) would take `keyring` and `auto`
+  for `file` (`core/src/config/mod.rs:307–318`); the recorder stops anyway.
 - So the recorder copies only that file, into `<workspace>/codex-home/auth.json`,
-  mode 0600 in a directory only the user can enter. The workspace's Codex
-  home holds no `config.toml`, so the recorded Codex uses file storage. The
-  recorder reads nothing else of the user's, and never the keyring.
+  mode 0600 in a directory only the user can enter, beside its own
+  `config.toml` (`cli_auth_credentials_store = "file"`). The recorder reads
+  nothing else of the user's, and never the keyring.
 - A ChatGPT sign-in's refresh token rotates: Codex writes the refreshed
   tokens back to `auth.json`, as a new file renamed over the old one
   (`FileAuthStorage::save`, `storage.rs:274–295`). After each scenario, also
@@ -1213,12 +1264,51 @@ model"). A machine or account that has them records under them.
   `{ "id": "auth.json", "value" }`, with `olderValues` when a later scenario
   kept a newer one), and reports the scenario failed
   (`test/recordings/credential-file.ts`, `test/recordings/recovery.ts`).
+- Another `codex` of the user's may save its own refresh at the same time.
+  Codex 0.172.0 commits a sign-in (a refresh, a login, a logout, a workspace
+  switch) only while it holds an exclusive lock on `auth.lock` in its home,
+  around the whole read, compare and write: `lock_for_write` opens the file
+  read-write, creating it and never truncating it, and calls Rust's
+  `File::lock` (`storage.rs:189–212`; taken at
+  `login/src/auth/manager.rs:1023, 1090, 1261, 1768` and
+  `manager/workspace_switching.rs:344`). It waits as long as another holder
+  has it, and never removes the file. Each save also takes `auth.json.lock`,
+  but only inside `auth.lock` (`login/src/auth/storage_commit.rs:29–68`), so
+  holding `auth.lock` keeps every Codex commit out. Network requests hold
+  neither (`storage_commit.rs:1–2`). The recorder's copy-back holds the same
+  `auth.lock` from before it reads the user's file until after its rename
+  replaced it, waits up to 30 s for another holder, and never breaks the lock:
+  after 30 s it leaves the user's file and keeps the refreshed sign-in in the
+  recovery file (`returnCodexSignIn` in `test/recordings/codex/record.ts`). A
+  copy `codex` did not change takes no lock, and adds nothing to the user's
+  Codex home.
+- How the recorder takes that lock. On Linux, Rust's `File::lock` is
+  `flock(2)`, a lock on the open file that the kernel drops when its holder
+  closes the file or exits, so it is never left stale. Checked with rustc
+  1.97.1: while a program holding `File::lock` ran, `flock -n` on the same
+  file was refused and a POSIX `lockf` on it was granted (they are separate
+  locks on Linux); while `flock` held it, `File::try_lock` said
+  `WouldBlock`. Node cannot take a `flock(2)` lock itself: `node:fs` has no
+  such call, and `node:ffi` is in Node 26 only, as an experimental module;
+  Node 22.23.1 and 24.18.0, two of the versions CI runs, have no `node:ffi`
+  (`ERR_UNKNOWN_BUILTIN_MODULE`). Bun's `node:fs` has none either. So the
+  recorder holds the lock through util-linux's `flock` command
+  (`test/recordings/codex/sign-in-lock.ts`), from Node and Bun alike. When
+  `flock` does not run, the recorder stops before it starts `codex`.
+- The window that remains: a program that writes `auth.json` without taking
+  `auth.lock` (a Codex release other than 0.172.0, if one commits without
+  it, which the recorder did not check; an editor; a script) can still write
+  between the copy-back's comparison and its rename, and that write is lost.
+  That window is one read, one write and one rename of a small file long.
+  `test/drivers/codex/sign-in-copy-back-node.test.ts` makes another codex save
+  at exactly that moment through the lock: it waits, then finds the newer
+  sign-in and keeps it, and neither refresh is lost.
 - When the recovery file cannot take the value either, the workspace's copy
   holds the only copy. The recorder then keeps that workspace, stops the run,
   and names the workspace and the copy in the error and in the run's last
   lines.
-- When the user has no `auth.json` (the sign-in is in the keyring, or there is
-  none), a live run stops before it starts `codex`, naming the file. To
+- When the user has no `auth.json` (there is no sign-in, or it is in the
+  keyring), a live run stops before it starts `codex`, naming the file. To
   record, sign in with file storage (`codex login` with no
   `cli_auth_credentials_store` set).
 

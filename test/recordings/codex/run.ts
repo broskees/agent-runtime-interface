@@ -13,10 +13,12 @@
 //                   project root, the nearest folder holding `.git`, and stops
 //                   there (codex-rs/core/src/agents_md.rs:7–18), so it reads
 //                   none of the workspace's parents
-//   codex-home/     CODEX_HOME for `codex`: only the copy of the user's
-//                   sign-in, `auth.json`; Codex keeps its config, plugins,
-//                   memories, skills, rules, sessions and state database
-//                   (thread goals) here, so none of the user's reach it
+//   codex-home/     CODEX_HOME for `codex`: the recorder's `config.toml`
+//                   (CODEX_RECORDER_CONFIG, ./credentials.ts) and the copy
+//                   of the user's sign-in, `auth.json`; Codex keeps its
+//                   config, plugins, memories, skills, rules, sessions and
+//                   state database (thread goals) here, so none of the
+//                   user's reach it
 //   user-home/      HOME for `codex`, empty (not "home/": a path under it would
 //                   read <WORKSPACE>/home/..., which the scan takes for a path
 //                   starting /home/); Codex reads `~/.agents/skills` from it
@@ -39,6 +41,7 @@ import { codexDriver } from "../../../src/drivers/codex/index.ts";
 import type { CodexDriverConfig } from "../../../src/drivers/codex/index.ts";
 import type { HostServices, Session } from "../../../src/runtime.ts";
 import { runScenario } from "../scenarios.ts";
+import { CODEX_RECORDER_CONFIG } from "./credentials.ts";
 import type { NativeProgress, Scenario, ScenarioRun } from "../scenarios.ts";
 
 export const CODEX_RECORDER_INSTANCE_ID = "codex-recorder";
@@ -68,7 +71,7 @@ function makeOwnRepository(directory: string): void {
   fs.writeFileSync(path.join(git, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
 }
 
-/** A fresh temp workspace, by its real path, whose `cwd/` is the root of its own Git repository. */
+/** A fresh temp workspace, by its real path, whose `cwd/` is the root of its own Git repository, with the recorder's config in its Codex home. */
 export function createCodexLayout(prefix: string): CodexLayout {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   const instance = path.join(root, "instances", CODEX_RECORDER_INSTANCE_ID);
@@ -89,6 +92,7 @@ export function createCodexLayout(prefix: string): CodexLayout {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   }
   makeOwnRepository(layout.cwd);
+  fs.writeFileSync(path.join(layout.codexHome, "config.toml"), CODEX_RECORDER_CONFIG, { mode: 0o600 });
   return layout;
 }
 
@@ -136,8 +140,18 @@ export interface CodexScenarioResult {
  * session gets no tools. The Codex driver asks the host for a thread's server
  * on every `thread/resume` and passes it in the request's config (its
  * `mcp_servers.<name>`), and fails the resume when the host has none.
+ *
+ * The server carries an Authorization header of its own, so Codex's MCP
+ * client looks up no OAuth credentials for it in any store, keyring or file,
+ * before it connects: it skips the lookup when the server's headers hold an
+ * Authorization (codex-rs/rmcp-client/src/rmcp_client.rs:1459–1470, and
+ * auth_status.rs:161–164 for the server's sign-in status).
  */
-export const CODEX_RECORDER_TOOL_SERVER: HostToolServer = { name: "ari-recorder-tools", config: { name: "ari-recorder-tools", transport: "http", url: "http://127.0.0.1:9/ari-recorder/no-tools" }, alwaysLoad: false };
+export const CODEX_RECORDER_TOOL_SERVER: HostToolServer = {
+  name: "ari-recorder-tools",
+  config: { name: "ari-recorder-tools", transport: "http", url: "http://127.0.0.1:9/ari-recorder/no-tools", headers: { Authorization: "Bearer none" } },
+  alwaysLoad: false,
+};
 
 /** A host with the recorder's process service, and a tool server for threads that serves nothing (CODEX_RECORDER_TOOL_SERVER). */
 export function codexRecorderHost(layout: CodexLayout, process: HostServices["process"]): HostServices<CodexDriverConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[] } {

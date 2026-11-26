@@ -21,10 +21,11 @@
 // Like `codex`, `app-server` loads the user's setup from where its
 // environment and working directory say (./user-setup.ts), and repeats every
 // setup file it loaded in its replies, so a test sees in the recording what
-// leaked. It appends what it saw to the JSON lines file in
-// ARI_FAKE_CODEX_REPORT: its process id, arguments, environment and
-// directory, what it loaded, and the sign-in it found. Variables steer it in
-// a test:
+// leaked; all but a config.toml that holds exactly the recorder's own
+// (CODEX_RECORDER_CONFIG), which it only reports. It appends what it saw to
+// the JSON lines file in ARI_FAKE_CODEX_REPORT: its process id, arguments,
+// environment and directory, what it loaded, and the sign-in it found.
+// Variables steer it in a test:
 //   ARI_FAKE_CODEX_ROTATE      at its first turn, Codex refreshes the sign-in:
 //                              the refresh token in its auth.json becomes this
 //                              value (written to a new file renamed over the
@@ -48,6 +49,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { CODEX_RECORDER_CONFIG } from "../../recordings/codex/credentials.ts";
 import { FakeCodexStore, FakeCodexWorld } from "./fake-app-server.ts";
 import type { FakeCodexStoreSnapshot } from "./fake-app-server.ts";
 import { FAKE_CODEX_CLI_VERSION, FAKE_CODEX_RECORDER_MODELS } from "./fake-codex.ts";
@@ -114,6 +116,9 @@ function appServer(args: readonly string[]): void {
   const codexHome = codexHomeOf(env);
   const signInFile = codexHome === undefined ? undefined : path.join(codexHome, SIGN_IN_FILE);
   const loaded = loadedCodexSetup(env, process.cwd());
+  // The recorder's own config.toml in the Codex home it made holds none of the user's setup: reported, but not repeated in replies, which stay as they were without it.
+  const recorderConfig = codexHome === undefined ? undefined : `${path.join(codexHome, "config.toml")}: ${CODEX_RECORDER_CONFIG}`;
+  const usersSetup = loaded.filter((entry) => entry !== recorderConfig);
   report({ loaded, signIn: signInFile !== undefined && fs.existsSync(signInFile) ? fs.readFileSync(signInFile, "utf8") : null, ...(signInFile === undefined ? {} : { signInFile }) });
 
   const models = env["ARI_FAKE_CODEX_MODELS"] === undefined ? FAKE_CODEX_RECORDER_MODELS : (JSON.parse(env["ARI_FAKE_CODEX_MODELS"]) as typeof FAKE_CODEX_RECORDER_MODELS);
@@ -149,7 +154,7 @@ function appServer(args: readonly string[]): void {
 
   const planted = env["ARI_FAKE_CODEX_PLANT"] === undefined ? undefined : (JSON.parse(env["ARI_FAKE_CODEX_PLANT"]) as NonNullable<CodexPuppetOptions["planted"]>[number] | NonNullable<CodexPuppetOptions["planted"]>);
   const puppet: CodexPuppetOptions = {
-    extraText: loaded.join("\n"),
+    extraText: usersSetup.join("\n"),
     ...(env["ARI_FAKE_CODEX_REPLY"] === undefined ? {} : { reply: env["ARI_FAKE_CODEX_REPLY"] }),
     ...(env["ARI_FAKE_CODEX_OUTPUT"] === undefined ? {} : { commandOutput: env["ARI_FAKE_CODEX_OUTPUT"] }),
     ...(planted === undefined ? {} : { planted: Array.isArray(planted) ? planted : [planted] }),

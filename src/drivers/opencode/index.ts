@@ -29,8 +29,11 @@ export {
   OPENCODE_DRIVER_KIND,
   OPENCODE_PASSWORD_VARIABLES,
   OPENCODE_TESTED_VERSIONS,
+  OPENCODE_UPDATE_STEP,
+  OPENCODE_V1_MINIMUM_VERSION,
   OPENCODE_V1_SDK_PACKAGE,
   OPENCODE_V1_TESTED_VERSIONS,
+  OPENCODE_V2_MINIMUM_VERSION,
   OPENCODE_V2_SDK_PACKAGE,
   OPENCODE_V2_TESTED_VERSIONS,
   SERVER_PASSWORD_SECRET,
@@ -41,7 +44,7 @@ export { IDENTITY_VERSION, PERMISSION_RULES_EXTENSION, opencodeCapabilities } fr
 export type { ServerShape } from "./capabilities.ts";
 export { testedRangeFor, versionAdvisory } from "./instance.ts";
 export { collidingName, grantCouldReachMcpResources, isolationRules, modeRules, sanitizeMcpName, sessionRules, shellPermission } from "./rules.ts";
-export { generationOf, parseVersion, versionInRange } from "./server.ts";
+export { belowMinimum, generationOf, minimumVersionFor, parseVersion, versionInRange } from "./server.ts";
 export type { OpencodeSdkLoaders, V1Client, V1Sdk, V2Client, V2Sdk } from "./sdk.ts";
 export type { NativeRule } from "./native.ts";
 

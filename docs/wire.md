@@ -240,6 +240,11 @@ member) or a call error.
   host), the host starts the driver's children. `host/process.resolveExecutable`
   asks the host too.
 
+When a lookup includes `env`, the process owner applies those additions as
+for `spawn` and uses its own environment name rules. If `env` is absent,
+`path` still overrides the default search path. A driver can send `path`
+alongside `env` as a fallback for older hosts that only read `path`.
+
 In delegated mode:
 
 1. `host/process.spawn` takes the `SpawnRequest` plus a `processId` the

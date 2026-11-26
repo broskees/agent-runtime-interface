@@ -34,8 +34,33 @@ off under `approval_required`, on under `full_access`
 
 Kiro CLI `>=3.0.0 <4.0.0` (the ACP registry lists Kiro CLI 3.0.0 with this
 launch; V3 settles turns from the `session/prompt` response, which is ACP
-v1). `status()` reports the version `kiro-cli --version` prints and an
-`untested_version` advisory outside that range.
+v1). `status()` reports the version `kiro-cli --version` prints, an
+`untested_version` advisory above that range, and `driver_unavailable` below
+it (next section).
+
+## The user's own `kiro-cli`, and its minimum
+
+ARI runs the `kiro-cli` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. The minimum is
+Kiro CLI 3.0.0, the lower bound of the tested range `>=3.0.0 <4.0.0`. With an
+older `kiro-cli`, `status()` is `unavailable` with `driver_unavailable` (with
+`installed: true` and the version found), and `openSession` rejects with the
+same error before any agent starts: the only process that runs is `kiro-cli
+--version`. The error names the version found, the path, the minimum and
+Kiro's update step:
+
+```text
+Kiro 2.40.1 (/usr/local/bin/kiro-cli) is older than 3.0.0, the oldest version this driver supports. Update Kiro CLI with `kiro-cli update`.
+```
+
+The update step is Kiro's own. Kiro documents `kiro-cli update` as "Update
+Kiro CLI to the latest version"; for a Kiro CLI a package manager installed,
+it prints how to update with that package manager
+([Kiro CLI commands, `kiro-cli update`](https://kiro.dev/docs/reference/cli-commands/#kiro-cli-update)). A
+`kiro-cli` above the tested range still runs, with an `untested_version`
+advisory. `kiro-cli --version` prints `kiro-cli <version>`, such as `kiro-cli
+2.13.0` (`test/fixtures/cli-version-output/kiro-cli.txt`; Kiro CLI is closed
+source, and the fixtures' `SOURCES.md` cites where the format comes from).
 
 ## Resuming conversations ARI did not create
 

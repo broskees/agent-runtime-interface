@@ -28,7 +28,38 @@ nothing. `create()` only reads which managed credential the instance holds.
 | `reasoningEffort` | The reasoning effort for new turns; the model's default when unset. |
 
 `ari/meta/codex` exports the label, the icon, `CODEX_CONFIG_SCHEMA`,
-`CODEX_FORM_HINTS`, `codexDefaultConfig()` and `CODEX_TESTED_VERSIONS`.
+`CODEX_FORM_HINTS`, `codexDefaultConfig()`, `CODEX_TESTED_VERSIONS`,
+`CODEX_MINIMUM_VERSION` and `CODEX_UPDATE_STEP`.
+
+## The user's own `codex`, and its minimum
+
+ARI runs the `codex` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. Lookup and
+`codex --version` use the same instance environment additions. The process
+owner interprets `PATH` (including spellings such as `Path` on Windows).
+The minimum is
+Codex CLI 0.172.0, the lower bound of the tested range `>=0.172.0 <0.173.0`.
+With an older `codex`, `status()` is `unavailable` with `driver_unavailable`
+(with `installed: true` and the version found), and `openSession` rejects with
+the same error before any app-server starts: the only process that runs is
+`codex --version`. The error names the version found, the path, the minimum
+and Codex's update step:
+
+```text
+Codex CLI 0.100.0 (/usr/local/bin/codex) is older than 0.172.0, the oldest version this driver supports. Update Codex using your installation method (npm: `npm install -g @openai/codex`; Homebrew: `brew upgrade --cask codex`). For the standalone installer, rerun the installer from https://learn.chatgpt.com/docs/codex/cli. For a manually downloaded release binary, replace it with the appropriate binary from https://github.com/openai/codex/releases/latest. For other package managers, update with the manager that installed it.
+```
+
+OpenAI's [Codex CLI setup](https://learn.chatgpt.com/docs/codex/cli) gives the
+update commands for npm, Homebrew and the standalone installers (macOS/Linux
+and Windows). Its [GitHub quickstart](https://github.com/openai/codex#quickstart)
+points to the [latest release](https://github.com/openai/codex/releases/latest)
+for manual installs. The error does not assume a release or an installation
+method supports self-update; OpenAI's [`codex update` documentation](https://learn.chatgpt.com/docs/developer-commands#cli-codex-update)
+qualifies that command, and [Codex 0.100.0](https://github.com/openai/codex/blob/rust-v0.100.0/codex-rs/cli/src/main.rs#L54-L145)
+does not have it.
+A `codex` above the tested range still runs, with an `untested_version`
+advisory. `codex --version` prints `codex-cli 0.172.0`
+(`test/fixtures/cli-version-output/codex.txt`).
 
 ## How it runs
 
@@ -155,7 +186,7 @@ from `thread/tokenUsage/updated`; and the extensions below.
 | `ext` | supported (the five extensions below) |
 | `invalidateCaches`, `catalog.refresh` | supported (`model/list`) |
 | `maintenance.advisory` | supported: an `untested_version` advisory outside `>=0.172.0 <0.173.0` |
-| `maintenance.install`, `maintenance.update` | absent: updating the user's Codex belongs to the installer that owns it (Codex ships `codex update`) |
+| `maintenance.install`, `maintenance.update` | absent: updating the user's Codex belongs to the installer that owns it |
 | `auth.methods`, `.state`, `.reportRuntimeFailure`, `.start`, `.complete`, `.respond`, `.cancel`, `.logout`, `.transferProfile` | supported |
 | `auth.transferSession` | absent: Codex has no request that moves a thread to another account |
 | `workspace.snapshot` | absent: not built in this version |

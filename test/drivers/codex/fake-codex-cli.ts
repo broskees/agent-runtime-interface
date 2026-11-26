@@ -3,7 +3,7 @@
 // a test puts on PATH (./fake-codex.ts). It answers the three commands the
 // driver runs, with the fake app-server of ./fake-app-server.ts in this
 // process:
-//   - `--version` prints `codex-cli 0.172.0-fake`;
+//   - `--version` prints `codex-cli 0.172.0`;
 //   - `login status` says what Codex says for the sign-in file it finds,
 //     `auth.json` in the Codex home (CODEX_HOME, else ~/.codex): `Logged in
 //     using ChatGPT` for one holding tokens, `API key configured` for one

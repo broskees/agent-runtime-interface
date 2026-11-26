@@ -198,7 +198,7 @@ export function createWireHostServices(options: WireHostServicesOptions): HostSe
           envPolicy: options.envPolicy,
           spawn: (spawnRequest: SpawnRequest) => processes.children.spawn(connection, instanceId, spawnRequest),
           resolveExecutable: (name, resolveOptions) =>
-            request<string | null>("host/process.resolveExecutable", resolveOptions?.path === undefined ? { name } : { name, path: resolveOptions.path }),
+            request<string | null>("host/process.resolveExecutable", { ...resolveOptions, name }),
         }
       : {
           envPolicy: options.envPolicy,

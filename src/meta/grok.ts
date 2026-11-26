@@ -29,6 +29,13 @@ export const GROK_CONFIG_SCHEMA: JsonSchema = {
 export const GROK_DEFAULT_CONFIG: GrokConfig = { command: "grok", ...ACP_BASE_DEFAULTS };
 
 /**
+ * The Grok CLI's own update step (https://docs.x.ai/build/overview#update),
+ * named when `grok` is older than the tested range. ARI never installs or
+ * updates `grok`.
+ */
+export const GROK_UPDATE_STEP = "Update the Grok CLI with `grok update`.";
+
+/**
  * The interactive Grok CLI, for a host's terminal fallback. `XAI_` variables
  * (such as `XAI_API_KEY`) are scrubbed: the instance uses the Grok login it
  * was set up with, never a key it happened to inherit.

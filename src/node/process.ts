@@ -133,7 +133,8 @@ export function buildChildEnvironment(
 /** The value of variable `name`, matched case-insensitively on Windows. */
 function environmentValue(environment: Environment, name: string): string | undefined {
   if (!isWindows) return environment[name];
-  const match = Object.keys(environment).find((candidate) => candidate.toUpperCase() === name);
+  // Node's spawn keeps the lexicographically first key when casing differs.
+  const match = Object.keys(environment).sort().find((candidate) => candidate.toUpperCase() === name);
   return match === undefined ? undefined : environment[match];
 }
 
@@ -173,7 +174,7 @@ function firstExecutable(candidates: readonly string[]): string | null {
  *     set), then the entries of `searchPath` split on `;`, with empty entries
  *     skipped and quotes removed. In each directory: the exact name when it
  *     has an extension, then the name plus `.com`, then plus `.exe`. The test
- *     suite runs on Linux and does not exercise this branch.
+ *     suite models this branch on POSIX; it does not run it on native Windows.
  *
  * `cwd` defaults to this process's current directory, which is where spawn
  * looks when a request has no `cwd`.
@@ -749,11 +750,13 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
   return {
     envPolicy,
 
-    /** Searches the given `path`, or else the PATH a child would get, the way `spawn` does for a request without `cwd`. */
+    /** Searches as `spawn` does for a request without `cwd`, unless only an explicit `path` is supplied. */
     async resolveExecutable(name, resolveOptions) {
-      const childPath = environmentValue(buildChildEnvironment(baseEnv, envPolicy), "PATH");
+      const additions = resolveOptions?.env;
+      const childPath = environmentValue(buildChildEnvironment(baseEnv, envPolicy, additions), "PATH");
       // On Windows, spawn falls back to this process's own PATH when the child environment has none.
-      const searchPath = resolveOptions?.path ?? childPath ?? (isWindows ? environmentValue(process.env, "PATH") : undefined);
+      const explicitPath = additions === undefined ? resolveOptions?.path : undefined;
+      const searchPath = explicitPath ?? childPath ?? (isWindows ? environmentValue(process.env, "PATH") : undefined);
       return resolveExecutable(name, searchPath);
     },
 

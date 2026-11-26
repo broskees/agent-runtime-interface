@@ -152,8 +152,9 @@ describe("agents end when their owner dies, and not before", () => {
       assert.equal(processGroupOf(guard), agent.groupId, "the guard runs in the agent's group");
       // Hold the guard still, then end every other member by pid, not by group.
       process.kill(guard, "SIGSTOP");
-      process.kill(agent.grandchildPid!, "SIGKILL");
+      // The agent first: killed after its grandchild, the agent could exit on its own before its SIGKILL lands.
       process.kill(agent.pid, "SIGKILL");
+      process.kill(agent.grandchildPid!, "SIGKILL");
       assert.equal((await child.exited).signal, "SIGKILL");
       const deadline = Date.now() + 5000;
       while (isRunning(agent.grandchildPid!)) {
@@ -248,8 +249,9 @@ describe("agents end when their owner dies, and not before", () => {
         }
         return realKill(pid, signal);
       }) as typeof process.kill;
-      realKill(agent.grandchildPid!, "SIGKILL");
+      // The agent first: killed after its grandchild, the agent could exit on its own before its SIGKILL lands.
       realKill(agent.pid, "SIGKILL");
+      realKill(agent.grandchildPid!, "SIGKILL");
       assert.equal((await child.exited).signal, "SIGKILL", "the leader was killed by its pid, and is now reaped");
 
       // The owner asks the stopped guard to end the group, and waits the grace and its 5 s margin in vain.

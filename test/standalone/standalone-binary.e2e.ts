@@ -26,9 +26,11 @@ import * as path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { firstPartyDrivers } from "../../scripts/build-binary.ts";
+import { createFakeHost } from "../../src/conformance/index.ts";
 import type { AriEvent, Request } from "../../src/index.ts";
 import { createCoordination, createNodeHostServices } from "../../src/node/index.ts";
 import { startAriDriver } from "../../src/wire/index.ts";
+import { createSymlinkedRoot } from "../helpers/symlinked-root.ts";
 import { assertEndedEverything, runDeathInStartupWindow, runDriverDeath } from "../wire/driver-death-scenario.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -36,6 +38,7 @@ const BUILD = path.join(ROOT, "build", "standalone", "linux-x64");
 const ARI_DRIVER = path.join(BUILD, "ari-driver");
 const FAKE_PI = path.join(BUILD, "fakes", "pi");
 const FAKE_ACP_AGENT = path.join(BUILD, "fakes", "standalone-acp-agent");
+const NODE_SEMANTICS_DRIVER = path.join(ROOT, "test", "standalone", "fixtures", "node-semantics-driver.ts");
 
 const temporary: string[] = [];
 after(() => {
@@ -130,6 +133,38 @@ test("the standalone ari-driver is one native executable that holds every first-
   const held = /It holds: (.*)\n/.exec(unknown.stderr)?.[1]?.split(", ") ?? [];
   assert.deepEqual(held, firstPartyDrivers(ROOT));
   assert.ok(held.includes("pi") && held.includes("acp"));
+});
+
+test("the standalone ari-driver follows symlinks before `..` and searches an empty PATH entry", async () => {
+  requireBinaries();
+  const where = nodeFreeRoot();
+  const layout = await createSymlinkedRoot("ari-standalone-symlink-");
+  temporary.push(layout.root);
+  // Both spellings exist, so returning the lexically collapsed path is wrong
+  // even if realpath succeeds. The command exists in both PATH locations too.
+  fs.mkdirSync(layout.collapsed("host"));
+  for (const [directory, output] of [[where.project, "1.2.3"], [where.bin, "9.9.9"]] as const) {
+    fs.writeFileSync(path.join(directory, "ari-standalone-path-probe"), `#!/bin/sh\necho ${output}\n`, { mode: 0o755 });
+  }
+  const env = { ...where.env, PATH: `:${where.bin}` };
+  assert.deepEqual(javascriptRuntimesOn(`${where.project}:${where.bin}`), []);
+  const connection = await startAriDriver({ driver: NODE_SEMANTICS_DRIVER, command: [ARI_DRIVER], env, cwd: where.project, envPolicy: { stripAmbient: [] } });
+  try {
+    const instanceId = "node-semantics";
+    const expectedStateDir = layout.real(`host/instances/${instanceId}/state`);
+    const config = { hostRoot: layout.throughSymlink("host"), expectedStateDir };
+    const instance = await connection.driver.create(createFakeHost({ config }), { instanceId, config, environment: {} });
+    try {
+      const probe = await instance.probe();
+      assert.equal(probe.version, "1.2.3", "the current directory wins over the later PATH entry");
+      assert.ok(fs.statSync(expectedStateDir).isDirectory());
+      assert.deepEqual(fs.readdirSync(layout.collapsed("host")), [], "no directories were created in the lexical host root");
+    } finally {
+      await instance.dispose();
+    }
+  } finally {
+    await connection.close();
+  }
 });
 
 for (const { name, run } of RUNS) {

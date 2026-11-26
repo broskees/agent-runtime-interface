@@ -2,9 +2,8 @@
 // executable from scripts/build-binary.ts) runs the real Claude Code. With no
 // `node` and no `bun` on its PATH it:
 //   1. runs `maintenance.install` on a `claude` instance, which downloads the
-//      pinned Claude Agent SDK and this platform's native Claude Code package
-//      from the npm registry (https://registry.npmjs.org, the driver default)
-//      and verifies them;
+//      pinned Claude Agent SDK, and only the SDK, from the npm registry
+//      (https://registry.npmjs.org, the driver default) and verifies it;
 //   2. prints `instance/status`, which must report the pinned SDK version;
 //   3. runs one turn, "Reply with exactly the word: ok", on the `haiku` model
 //      with the user's Claude sign-in, and prints every event.
@@ -17,7 +16,7 @@
 //              (`pnpm run build:binary` builds it)
 //   --no-turn  steps 1 and 2 only: install and status, no turn and so no quota spent
 // Environment:
-//   TMPDIR                   where the workspace goes, the 381 MB install with it; it must be outside HOME
+//   TMPDIR                   where the workspace goes, the SDK install with it; it must be outside HOME
 //   ARI_RECORD_CLAUDE_MODEL  the model; Claude Code's `haiku` alias by default
 //
 // The session is kept apart from the user's own Claude setup exactly as the
@@ -183,10 +182,10 @@ async function main(argv: readonly string[]): Promise<number> {
         await instance.maintenance!.install!();
         log(`maintenance.install finished in ${((Date.now() - started) / 1000).toFixed(1)} s`);
         const installed = managedClaudeSdkDirectory(host.paths.cacheDir);
-        const record = JSON.parse(fs.readFileSync(path.join(installed, CLAUDE_INSTALL_RECORD), "utf8")) as { files: Array<{ path: string; size: number; mode: number; sha256: string }> };
+        const record = JSON.parse(fs.readFileSync(path.join(installed, CLAUDE_INSTALL_RECORD), "utf8")) as { files: Array<{ path: string; size: number; sha256: string }> };
         log(`installed in ${installed}: ${record.files.length} files`);
-        for (const file of record.files.filter((each) => each.path === "package.json" || each.path === "sdk.mjs" || /^node_modules\/[^/]+\/[^/]+\/claude(\.exe)?$/.test(each.path))) {
-          log(`  ${file.path}: ${file.size} bytes, mode 0${file.mode.toString(8)}, sha256 ${file.sha256}`);
+        for (const file of record.files.filter((each) => each.path === "package.json" || each.path === "sdk.mjs")) {
+          log(`  ${file.path}: ${file.size} bytes, sha256 ${file.sha256}`);
         }
         const status = await instance.status();
         log(`instance/status after the install: ${printable(status)}`);

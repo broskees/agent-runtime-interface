@@ -142,7 +142,7 @@ describe("claude driver: ari.goal from what Claude Code confirms", () => {
       deleteSession: real.deleteSession,
       archiveSession: real.archiveSession,
     };
-    const rig = await openClaudeRig({ loadSdk: async () => ({ sdk, version: "0.3.330", claudeCodeVersion: "2.1.330", bundledExecutable: "/opt/claude/bin/claude" }) });
+    const rig = await openClaudeRig({ loadSdk: async () => ({ sdk, version: "0.3.330", claudeCodeVersion: "2.1.330" }) });
     try {
       const policy = { mode: "approval_required", interaction: "default", cwd } as const;
       const resumed = await rig.session.resumeThread({ native: { handle: setId }, purpose: "history", policy });

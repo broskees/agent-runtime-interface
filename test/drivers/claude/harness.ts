@@ -2,8 +2,9 @@
 // Each rig is a fresh fake Claude Code installation (`FakeClaudeWorld`):
 // its transcript store, its processes, and the puppet that moves them. The
 // driver is built with `createClaudeDriver({ loadSdk })` around the fake
-// SDK, and spawns through the host only `claude auth status --json`, which
-// the fake host hands to the fake's answer.
+// SDK. The fake host finds the user's `claude` at FAKE_CLAUDE_BINARY, and the
+// driver spawns through the host only `claude --version` and `claude auth
+// status --json`, which the fake host answers.
 //
 // This file is test glue, not the fake: it may use the driver's id and
 // option naming to translate between the kit's terms and the driver's, as
@@ -19,8 +20,11 @@ import { createConformanceWorkspace, instanceDirectories, watchInstanceFiles } f
 import { FakeClaudeWorld, entryPrompt } from "./fake-sdk.ts";
 import type { FakeAmbientAuth, FakeApprovalHandle, FakeNativeAnswer, FakeTurn } from "./fake-sdk.ts";
 
-/** Where the fake SDK says its bundled native binary is. Only `claude auth status --json` ever runs it, through the host. */
-export const FAKE_CLAUDE_BINARY = "/fake-node-modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude";
+/** Where the fake host finds the user's `claude` on PATH. Only `--version` and `auth status --json` ever run it, through the host. */
+export const FAKE_CLAUDE_BINARY = "/fake-user-bin/claude";
+
+/** What the fake `claude --version` prints by default: the Claude Code the pinned SDK bundles, the oldest the driver runs. */
+export const FAKE_CLAUDE_VERSION_LINE = "2.1.330 (Claude Code)";
 
 /** The SDK version the fake reports: the pinned devDependency it is typed against. */
 export const FAKE_SDK_VERSION = "0.3.330";
@@ -57,14 +61,15 @@ export function kitTurn(turn: FakeTurn): NativeTurn {
   };
 }
 
-/** A fake `claude` process: it answers `claude auth status --json` and nothing else. */
-export function fakeClaudeSpawn(world: FakeClaudeWorld): (request: FakeSpawnRequest) => Promise<SpawnedProcess> {
+/** A fake `claude` process: it answers `claude --version` with `versionLine` and `claude auth status --json` with the world's sign-in, and nothing else. */
+export function fakeClaudeSpawn(world: FakeClaudeWorld, versionLine: string = FAKE_CLAUDE_VERSION_LINE): (request: FakeSpawnRequest) => Promise<SpawnedProcess> {
   return async (request) => {
     const args = request.args ?? [];
-    if (request.command !== FAKE_CLAUDE_BINARY || args.join(" ") !== "auth status --json") {
-      throw new Error(`the fake claude binary only answers \`claude auth status --json\`, not ${request.command} ${args.join(" ")}`);
+    const asked = args.join(" ");
+    if (request.command !== FAKE_CLAUDE_BINARY || (asked !== "auth status --json" && asked !== "--version")) {
+      throw new Error(`the fake claude binary only answers \`claude --version\` and \`claude auth status --json\`, not ${request.command} ${asked}`);
     }
-    const answer = world.authStatus();
+    const answer = asked === "--version" ? { stdout: `${versionLine}\n`, stderr: "", code: 0 } : world.authStatus();
     const child = createMemoryProcess({ onStdin: () => undefined, onStdinClosed: () => undefined, onKill: () => undefined });
     queueMicrotask(() => {
       if (answer.stdout !== "") child.stdout(answer.stdout);
@@ -125,7 +130,7 @@ export function claudeHarness(): ClaudeHarness {
       const world = new FakeClaudeWorld({ ambientAuth: request.ambientAuth as FakeAmbientAuth });
       worlds.push(world);
       const driver = createClaudeDriver({
-        loadSdk: async () => ({ sdk: world.sdk, version: FAKE_SDK_VERSION, claudeCodeVersion: "2.1.330", bundledExecutable: FAKE_CLAUDE_BINARY }),
+        loadSdk: async () => ({ sdk: world.sdk, version: FAKE_SDK_VERSION, claudeCodeVersion: "2.1.330" }),
         newUuid: () => world.newUuid(),
       });
       const spawn = fakeClaudeSpawn(world);

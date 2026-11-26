@@ -18,9 +18,12 @@ export type ClaudeSettingSource = (typeof CLAUDE_SETTING_SOURCES)[number];
 /** The Claude driver's config. Every field is optional; `{}` runs Claude Code with its own defaults. */
 export interface ClaudeDriverConfig {
   /**
-   * A Claude Code executable to run instead of the one the SDK bundles
-   * (`Options.pathToClaudeCodeExecutable`): a name looked up on PATH, or a
-   * path. Leave it out to use the bundled native binary.
+   * The user's Claude Code executable every query runs
+   * (`Options.pathToClaudeCodeExecutable`): a name looked up on the host's
+   * PATH, or a path. Leave it out to run the `claude` on the host's PATH. It
+   * must be Claude Code `CLAUDE_TESTED_CLAUDE_CODE_VERSION` or newer. The
+   * driver never runs a Claude Code binary that npm or `maintenance.install`
+   * put beside the SDK.
    */
   readonly executablePath?: string;
   /** The model new threads start with, for example `sonnet` or `claude-opus-4-8`; Claude Code's default when unset. */
@@ -33,10 +36,10 @@ export interface ClaudeDriverConfig {
    * An absolute path to a directory where `@anthropic-ai/claude-agent-sdk` is
    * installed: the directory `npm install @anthropic-ai/claude-agent-sdk` ran
    * in, which holds `node_modules/@anthropic-ai/claude-agent-sdk`. The driver
-   * loads the SDK from there by file URL, and its native Claude Code binary
-   * from the platform package beside it, instead of importing the package by
-   * name. The standalone `ari-driver` cannot import a package by name, so it
-   * needs this field or `maintenance.install`.
+   * loads the SDK from there by file URL instead of importing the package by
+   * name; a native Claude Code package npm put beside it is never run. The
+   * standalone `ari-driver` cannot import a package by name, so it needs this
+   * field or `maintenance.install`.
    */
   readonly sdkDirectory?: string;
   /** The npm registry `maintenance.install` and `maintenance.update` download the SDK from; `https://registry.npmjs.org` when unset. */
@@ -44,7 +47,7 @@ export interface ClaudeDriverConfig {
 }
 
 export const CLAUDE_LABEL = "Claude";
-export const CLAUDE_DESCRIPTION = "Runs Claude Code through the Claude Agent SDK (@anthropic-ai/claude-agent-sdk).";
+export const CLAUDE_DESCRIPTION = "Runs the user's Claude Code through the Claude Agent SDK (@anthropic-ai/claude-agent-sdk).";
 
 /** The ARI driver kind. */
 export const CLAUDE_DRIVER_KIND = "claude";
@@ -54,10 +57,22 @@ export const CLAUDE_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
 
 /**
  * The SDK version `maintenance.install` and `maintenance.update` install: the
- * pinned devDependency, inside `CLAUDE_TESTED_VERSIONS`. Its native packages
- * carry the same version.
+ * pinned devDependency, inside `CLAUDE_TESTED_VERSIONS`.
  */
 export const CLAUDE_SDK_VERSION = "0.3.330";
+
+/**
+ * The Claude Code version the pinned SDK bundles (its package.json
+ * `claudeCodeVersion`). It is the version this driver is tested against and
+ * the oldest it runs: the SDK's docs require "the Claude Code bundled with
+ * this SDK or newer" of an app that starts its own Claude Code. A `claude`
+ * older than this leaves the driver unavailable; a newer one runs, with an
+ * `untested_version` advisory.
+ */
+export const CLAUDE_TESTED_CLAUDE_CODE_VERSION = "2.1.330";
+
+/** Anthropic's Claude Code setup page, which the install and update hints name. */
+export const CLAUDE_CODE_SETUP_URL = "https://code.claude.com/docs/en/setup";
 
 /** The npm registry the driver installs the SDK from when `sdkRegistry` is unset. */
 export const CLAUDE_DEFAULT_SDK_REGISTRY = "https://registry.npmjs.org";
@@ -79,24 +94,24 @@ export const CLAUDE_STANDALONE_INSTALL_HINT = `Run maintenance.install on this i
  */
 export const CLAUDE_REPAIR_HINT = `Run maintenance.install on this instance to repair it, or set sdkDirectory in the driver config to a directory where ${CLAUDE_SDK_PACKAGE} is installed.`;
 
-/** What a host tells the user when the SDK is present but its native Claude Code binary is not. */
-export const CLAUDE_BINARY_HINT =
-  `Reinstall ${CLAUDE_SDK_PACKAGE} without --omit=optional (its platform package carries the native Claude Code binary), run maintenance.install on this instance, or set executablePath in the driver config.`;
+/**
+ * What a host tells the user when no Claude Code is found: Anthropic's
+ * native installer (code.claude.com/docs/en/setup), or `executablePath`.
+ * The driver never downloads Claude Code itself.
+ */
+export const CLAUDE_CODE_INSTALL_HINT =
+  `Install Claude Code ${CLAUDE_TESTED_CLAUDE_CODE_VERSION} or newer (macOS, Linux and WSL: curl -fsSL https://claude.ai/install.sh | bash; Windows PowerShell: irm https://claude.ai/install.ps1 | iex; see ${CLAUDE_CODE_SETUP_URL}), or set executablePath in the driver config to the path of a Claude Code executable.`;
 
-/** The same, when the SDK came from the config's `sdkDirectory`. */
-export function claudeDirectoryBinaryHint(directory: string): string {
-  return `Reinstall it there without --omit=optional (npm install --prefix ${directory} ${CLAUDE_SDK_PACKAGE}), remove sdkDirectory from the driver config and run maintenance.install, or set executablePath in the driver config.`;
-}
+/** What a host tells the user when the Claude Code found is older than `CLAUDE_TESTED_CLAUDE_CODE_VERSION`. */
+export const CLAUDE_CODE_UPDATE_HINT =
+  `Update Claude Code to ${CLAUDE_TESTED_CLAUDE_CODE_VERSION} or newer (run claude update, or the upgrade command of the package manager that installed it; see ${CLAUDE_CODE_SETUP_URL}), or set executablePath in the driver config to a newer Claude Code.`;
 
 /**
  * The Claude Agent SDK versions this driver is tested against, as a semver
  * range: the pinned devDependency whose types the fake SDK is checked
- * against. It bundles Claude Code 2.1.330.
+ * against. It bundles Claude Code `CLAUDE_TESTED_CLAUDE_CODE_VERSION`.
  */
 export const CLAUDE_TESTED_VERSIONS = ">=0.3.330 <0.3.331";
-
-/** The Claude Code version the tested SDK bundles. */
-export const CLAUDE_TESTED_CLAUDE_CODE_VERSION = "2.1.330";
 
 export const CLAUDE_DOCS_URL = "https://docs.claude.com/en/docs/agent-sdk/typescript";
 
@@ -121,7 +136,7 @@ export const CLAUDE_CONFIG_SCHEMA: JsonSchema = {
     executablePath: {
       type: "string",
       minLength: 1,
-      description: "A Claude Code executable to run instead of the SDK's bundled binary: a name looked up on PATH, or a path.",
+      description: `The Claude Code executable to run: a name looked up on PATH, or a path. The claude on PATH when unset. It must be Claude Code ${CLAUDE_TESTED_CLAUDE_CODE_VERSION} or newer.`,
     },
     model: { type: "string", minLength: 1, description: "The model new threads start with. Claude Code's default when unset." },
     effort: { enum: [...CLAUDE_EFFORT_LEVELS], description: "The reasoning effort new threads start with. The model's default when unset." },
@@ -167,7 +182,7 @@ export const CLAUDE_FORM_HINTS: { readonly [field in keyof ClaudeDriverConfig]-?
   },
   executablePath: {
     label: "Claude Code executable",
-    help: "Leave empty to use the binary the SDK bundles.",
+    help: `Leave empty to run the claude on PATH. It must be Claude Code ${CLAUDE_TESTED_CLAUDE_CODE_VERSION} or newer.`,
     placeholder: "claude",
     widget: "path",
     advanced: true,

@@ -1,9 +1,12 @@
-// `ari/drivers/claude`: the Claude driver. It runs Claude Code through the
-// Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`, an optional peer),
-// which it loads with a dynamic `import()` the first time an instance needs
-// it. Importing this module loads no vendor code and spawns nothing, and
-// `create()` does neither: a missing SDK or native binary shows in
-// `status()` and fails `openSession` with `driver_unavailable`.
+// `ari/drivers/claude`: the Claude driver. It runs the user's own Claude Code
+// (the configured `executablePath`, else `claude` on PATH, at least the
+// version the pinned SDK bundles) through the Claude Agent SDK
+// (`@anthropic-ai/claude-agent-sdk`, an optional peer), which it loads with a
+// dynamic `import()` the first time an instance needs it. ARI never downloads
+// or runs a Claude Code of its own. Importing this module loads no vendor code
+// and spawns nothing, and `create()` does neither: a missing SDK, or a Claude
+// Code that is missing or too old, shows in `status()` and fails
+// `openSession` with `driver_unavailable`.
 //
 // Where no package can be imported by name (the standalone `ari-driver`),
 // the SDK comes from the directory the config's `sdkDirectory` names, or
@@ -50,7 +53,7 @@ export {
   threadIdFor,
   turnIdFor,
 } from "./mapping.ts";
-export { loadClaudeSdk, nativeBinaryCandidates } from "./sdk.ts";
+export { loadClaudeSdk } from "./sdk.ts";
 export { CLAUDE_TESTED_VERSIONS };
 
 /**

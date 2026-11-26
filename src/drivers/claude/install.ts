@@ -1,36 +1,36 @@
 // Managed installs of the Claude Agent SDK, for hosts that cannot install it
 // with npm: above all the standalone `ari-driver`, which cannot import a
 // package by name. `maintenance.install` and `maintenance.update` download the
-// pinned SDK and this platform's native Claude Code package from an npm
-// registry and install them with `ari/node`'s adapter installer as one
-// directory, laid out as npm lays them out:
+// pinned SDK, and only the SDK, from an npm registry and install it with
+// `ari/node`'s adapter installer:
 //
 //   <cacheDir>/adapters/@anthropic-ai/claude-agent-sdk/<version>/
-//     package.json, sdk.mjs, ...                                the SDK
-//     node_modules/@anthropic-ai/claude-agent-sdk-<os>-<arch>/  its native binary
-//     .ari-install.json                                         each file's size, mode and sha256
+//     package.json, sdk.mjs, ...   the SDK
+//     .ari-install.json            each file's size and sha256
 //
-// So the SDK finds its native binary by itself, as in an npm install, and the
-// driver never names it in `pathToClaudeCodeExecutable` (which would change
-// SDK defaults: no `--await-initialize` on a resume, and a deprecation warning
-// for MCP servers given in `Options.mcpServers`). The installer publishes the
-// directory with one rename, so it holds both packages or neither.
+// ARI never downloads Claude Code: every query runs the user's own `claude`
+// (instance.ts), so the SDK's native Claude Code packages are never fetched.
+// The installer publishes the directory with one rename, so it holds the
+// whole SDK or nothing.
 //
 // Integrity: only a sha512, sha384 or sha256 `dist.integrity` is accepted
 // (W3C Subresource Integrity's algorithms; npm publishes sha512), never sha1
-// or the `shasum`. Both tarballs are downloaded and checked before either is
-// unpacked, checked again just before unpacking, and once more as they stream
-// into the extractor, so what is installed is exactly what was verified.
+// or the `shasum`. The tarball is downloaded and checked, checked again just
+// before it is unpacked, and once more as it streams into the extractor, so
+// what is installed is exactly what was verified.
 //
 // Repair: `.ari-install.json`, written before the rename, records every file.
-// Loading checks each file's size and execute bits and the sha256 of the SDK's
-// own files (the JavaScript this process imports); `maintenance.install`
-// checks every sha256 too and reinstalls a directory that is not whole.
+// Loading checks each file's size and the sha256 of every file (the
+// JavaScript this process imports); `maintenance.install` does the same and
+// reinstalls a directory that is not whole. An install whose record lists a
+// `node_modules/` file was made by an ARI that also installed a native Claude
+// Code package there; it counts as not whole, so `maintenance.install`
+// replaces it with the SDK alone.
 //
 // The SDK's `sdk.mjs` bundles everything it runs and imports only Node
 // built-ins; its peers (`zod`, `@anthropic-ai/sdk`,
-// `@modelcontextprotocol/sdk`) serve its type declarations. So the two
-// packages are the whole install, and no Node or npm is needed.
+// `@modelcontextprotocol/sdk`) serve its type declarations. So the SDK is the
+// whole install, and no Node or npm is needed.
 
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -39,31 +39,11 @@ import { callErrors } from "../../errors.ts";
 import { CLAUDE_REPAIR_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION } from "../../meta/claude.ts";
 import { createAdapterInstaller, npmRegistryFetch } from "../../node/installer.ts";
 import type { TarballFetch } from "../../node/installer.ts";
-import { extractTarball } from "../../node/tar.ts";
-import { findBundledExecutable, importClaudeSdkPackage, nativeBinaryCandidates, prefersMusl } from "./sdk.ts";
+import { importClaudeSdkPackage } from "./sdk.ts";
 import type { ClaudeSdkRuntime } from "./sdk.ts";
 
 /** The file in a managed install that records what was installed. */
 export const CLAUDE_INSTALL_RECORD = ".ari-install.json";
-
-/** One package of a managed install. */
-export interface ClaudeManagedPackage {
-  readonly pkg: string;
-  readonly version: string;
-}
-
-/**
- * The packages a managed install of the pinned SDK holds on this platform:
- * the native package (the one the SDK itself prefers here, glibc before musl
- * on Linux), then the SDK.
- */
-export function claudeManagedPackages(platform: string, arch: string, preferMusl: boolean): ClaudeManagedPackage[] {
-  const candidate = nativeBinaryCandidates(platform, arch, preferMusl)[0]!;
-  return [
-    { pkg: candidate.slice(0, candidate.lastIndexOf("/")), version: CLAUDE_SDK_VERSION },
-    { pkg: CLAUDE_SDK_PACKAGE, version: CLAUDE_SDK_VERSION },
-  ];
-}
 
 async function exists(file: string): Promise<boolean> {
   try {
@@ -105,39 +85,26 @@ async function filesUnder(root: string): Promise<string[]> {
 }
 
 interface InstallRecord {
-  /** `mode` is the file's permission bits as installed (`0o755` for the native binary). */
-  readonly files: ReadonlyArray<{ readonly path: string; readonly size: number; readonly mode: number; readonly sha256: string }>;
+  readonly files: ReadonlyArray<{ readonly path: string; readonly size: number; readonly sha256: string }>;
 }
 
-/** Records every file under `dir` with its size, permission bits and sha256 in `.ari-install.json`. */
+/** Records every file under `dir` with its size and sha256 in `.ari-install.json`. */
 async function writeInstallRecord(dir: string): Promise<void> {
-  const files: Array<{ path: string; size: number; mode: number; sha256: string }> = [];
+  const files: Array<{ path: string; size: number; sha256: string }> = [];
   for (const path of await filesUnder(dir)) {
-    const stats = await fs.stat(`${dir}/${path}`);
-    files.push({ path, size: stats.size, mode: stats.mode & 0o777, sha256: await fileDigest(`${dir}/${path}`, "sha256") });
+    files.push({ path, size: (await fs.stat(`${dir}/${path}`)).size, sha256: await fileDigest(`${dir}/${path}`, "sha256") });
   }
   await fs.writeFile(`${dir}/${CLAUDE_INSTALL_RECORD}`, `${JSON.stringify({ files } satisfies InstallRecord, null, 2)}\n`);
 }
 
-/** Every recorded file's sha256 is checked (what `maintenance.install` does). */
-const EVERY_FILE = (): boolean => true;
-/** Only the SDK's own files, the JavaScript this process imports, have their sha256 checked; the native package's files only their size. */
-const SDK_FILES = (path: string): boolean => !path.startsWith("node_modules/");
-
-function octalMode(mode: number): string {
-  return `0${mode.toString(8).padStart(3, "0")}`;
-}
-
 /**
  * What is wrong with the managed install in `dir`, or null when it is whole:
- * every file `.ari-install.json` lists is there with its recorded size, keeps
- * every execute bit it was installed with (the SDK cannot start a native
- * binary that lost them), and, for each file `checkDigest` picks, has its
- * recorded sha256. A directory without a readable record was never finished;
- * a record without modes (written before they were recorded) counts as
- * malformed, so `maintenance.install` replaces that install once.
+ * every file `.ari-install.json` lists is there with its recorded size and
+ * sha256. A directory without a readable record was never finished. A record
+ * that lists a file under `node_modules/` belongs to an install that also
+ * holds a native Claude Code package, which this driver never runs.
  */
-export async function managedInstallProblem(dir: string, checkDigest: (path: string) => boolean): Promise<string | null> {
+export async function managedInstallProblem(dir: string): Promise<string | null> {
   let record: InstallRecord;
   try {
     record = JSON.parse(await fs.readFile(`${dir}/${CLAUDE_INSTALL_RECORD}`, "utf8")) as InstallRecord;
@@ -147,17 +114,16 @@ export async function managedInstallProblem(dir: string, checkDigest: (path: str
   if (!Array.isArray(record.files) || record.files.length === 0) return `${CLAUDE_INSTALL_RECORD} lists no files`;
   for (const file of record.files) {
     const safe = typeof file?.path === "string" && file.path.split("/").every((part: string) => part !== "" && part !== "." && part !== "..");
-    if (!safe || typeof file.size !== "number" || typeof file.mode !== "number" || typeof file.sha256 !== "string") return `${CLAUDE_INSTALL_RECORD} is malformed`;
-    let stats: { size: number; mode: number };
+    if (!safe || typeof file.size !== "number" || typeof file.sha256 !== "string") return `${CLAUDE_INSTALL_RECORD} is malformed`;
+    if (file.path.startsWith("node_modules/")) return `it holds ${file.path}, part of a native Claude Code package an earlier ARI installed; the driver runs your own Claude Code instead`;
+    let size: number;
     try {
-      stats = await fs.stat(`${dir}/${file.path}`);
+      size = (await fs.stat(`${dir}/${file.path}`)).size;
     } catch {
       return `${file.path} is missing`;
     }
-    if (stats.size !== file.size) return `${file.path} has ${stats.size} bytes, not the ${file.size} it was installed with`;
-    const lostExecuteBits = file.mode & 0o111 & ~stats.mode;
-    if (lostExecuteBits !== 0) return `${file.path} is not executable: its mode is ${octalMode(stats.mode & 0o777)}, and it was installed with ${octalMode(file.mode)}`;
-    if (checkDigest(file.path) && (await fileDigest(`${dir}/${file.path}`, "sha256")) !== file.sha256) return `${file.path} has changed since it was installed`;
+    if (size !== file.size) return `${file.path} has ${size} bytes, not the ${file.size} it was installed with`;
+    if ((await fileDigest(`${dir}/${file.path}`, "sha256")) !== file.sha256) return `${file.path} has changed since it was installed`;
   }
   return null;
 }
@@ -172,18 +138,15 @@ export async function loadManagedClaudeSdk(cacheDir: string): Promise<ClaudeSdkR
   if (!(await exists(dir))) return null;
   const damaged = (detail: string): Error =>
     callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: CLAUDE_REPAIR_HINT }, `The managed Claude Agent SDK install in ${dir} is damaged: ${detail}. ${CLAUDE_REPAIR_HINT}`);
-  const problem = await managedInstallProblem(dir, SDK_FILES);
+  const problem = await managedInstallProblem(dir);
   if (problem !== null) throw damaged(problem);
-  const loaded = await importClaudeSdkPackage(dir, damaged);
-  const bundledExecutable = await findBundledExecutable(loaded.entryFile);
-  if (bundledExecutable === null) throw damaged(`it holds no native Claude Code package for ${process.platform}-${process.arch}`);
-  return { sdk: loaded.sdk, version: loaded.version, claudeCodeVersion: loaded.claudeCodeVersion, bundledExecutable };
+  return importClaudeSdkPackage(dir, damaged);
 }
 
 export interface ClaudeSdkInstallOptions {
   /** The instance's cache directory; the install goes under `<cacheDir>/adapters`. */
   readonly cacheDir: string;
-  /** The instance's temp directory; downloads wait there until both are verified. */
+  /** The instance's temp directory; the download waits there until it is verified. */
   readonly tmpDir: string;
   /** The npm registry to download from. */
   readonly registry: string;
@@ -198,19 +161,19 @@ interface Download {
   readonly sha512: string;
 }
 
-/** Downloads `pkg@version` into `file`; `download` fails at the end of the stream unless the bytes match the registry's integrity. */
-async function downloadVerified(download: TarballFetch, { pkg, version }: ClaudeManagedPackage, file: string): Promise<Download> {
+/** Downloads the pinned SDK into `file`; `download` fails at the end of the stream unless the bytes match the registry's integrity. */
+async function downloadVerified(download: TarballFetch, file: string): Promise<Download> {
   const hash = createHash("sha512");
   const handle = await fs.open(file, "w");
   try {
-    for await (const chunk of await download({ pkg, version })) {
+    for await (const chunk of await download({ pkg: CLAUDE_SDK_PACKAGE, version: CLAUDE_SDK_VERSION })) {
       hash.update(chunk);
       await handle.write(chunk);
     }
   } finally {
     await handle.close();
   }
-  return { label: `${pkg}@${version}`, file, sha512: hash.digest("hex") };
+  return { label: `${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}`, file, sha512: hash.digest("hex") };
 }
 
 function changedOnDisk(download: Download): Error {
@@ -227,44 +190,26 @@ async function* verifiedRead(download: Download): AsyncGenerator<Uint8Array> {
   if (hash.digest("hex") !== download.sha512) throw changedOnDisk(download);
 }
 
-/**
- * Installs the pinned SDK with this platform's native package, unless a whole
- * install is there; repairs one that is not whole. Resolves with the two
- * packages.
- */
-export async function installClaudeSdk(options: ClaudeSdkInstallOptions): Promise<ClaudeManagedPackage[]> {
-  const [native, sdk] = claudeManagedPackages(process.platform, process.arch, prefersMusl()) as [ClaudeManagedPackage, ClaudeManagedPackage];
+/** Installs the pinned SDK, unless a whole install is there; repairs one that is not whole. */
+export async function installClaudeSdk(options: ClaudeSdkInstallOptions): Promise<void> {
   const dir = managedClaudeSdkDirectory(options.cacheDir);
-  if ((await exists(dir)) && (await managedInstallProblem(dir, EVERY_FILE)) === null) return [native, sdk];
+  if ((await exists(dir)) && (await managedInstallProblem(dir)) === null) return;
 
-  const download = npmRegistryFetch({ registry: options.registry, strongIntegrityOnly: true, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) });
-  const downloads = new Map<string, Download>();
-  const downloaded = (pkg: string): Download => {
-    const found = downloads.get(pkg);
-    if (found === undefined) throw callErrors.invalidState("not_downloaded", `${pkg} was not downloaded`);
-    return found;
-  };
-  const installer = createAdapterInstaller({
-    cacheDir: options.cacheDir,
-    fetchTarball: () => verifiedRead(downloaded(sdk.pkg)),
-    // The native package goes where npm puts it, so the SDK finds its binary by itself; then the record of every file.
-    prepare: async (staging) => {
-      const nativeDirectory = `${staging.dir}/node_modules/${native.pkg}`;
-      await fs.mkdir(nativeDirectory, { recursive: true });
-      await extractTarball(verifiedRead(downloaded(native.pkg)), nativeDirectory, { strip: 1 });
-      await writeInstallRecord(staging.dir);
-    },
-    isIntact: async (installed) => (await managedInstallProblem(installed.dir, EVERY_FILE)) === null,
-  });
+  const fetchTarball = npmRegistryFetch({ registry: options.registry, strongIntegrityOnly: true, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) });
   const scratch = `${options.tmpDir}/claude-sdk-download-${randomUUID()}`;
   try {
     await fs.mkdir(scratch, { recursive: true, mode: 0o700 });
-    for (const [index, entry] of [native, sdk].entries()) downloads.set(entry.pkg, await downloadVerified(download, entry, `${scratch}/${index}.tgz`));
-    // Both again, just before either is unpacked: a tarball changed since its download installs nothing.
-    for (const verified of downloads.values()) if ((await fileDigest(verified.file, "sha512")) !== verified.sha512) throw changedOnDisk(verified);
-    await installer.install(sdk.pkg, sdk.version);
+    const verified = await downloadVerified(fetchTarball, `${scratch}/sdk.tgz`);
+    // Again, just before it is unpacked: a tarball changed since its download installs nothing.
+    if ((await fileDigest(verified.file, "sha512")) !== verified.sha512) throw changedOnDisk(verified);
+    const installer = createAdapterInstaller({
+      cacheDir: options.cacheDir,
+      fetchTarball: () => verifiedRead(verified),
+      prepare: async (staging) => writeInstallRecord(staging.dir),
+      isIntact: async (installed) => (await managedInstallProblem(installed.dir)) === null,
+    });
+    await installer.install(CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION);
   } finally {
     await fs.rm(scratch, { recursive: true, force: true });
   }
-  return [native, sdk];
 }

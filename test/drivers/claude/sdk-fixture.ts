@@ -1,13 +1,20 @@
-// Fake installs of the Claude Agent SDK on disk, and a local npm registry
-// that serves them, for the tests that make the claude driver load its SDK
-// from a directory (`sdkDirectory`) or install it (`maintenance.install`).
+// Fake installs of the Claude Agent SDK on disk, a fake of the user's own
+// Claude Code, and a local npm registry that serves the SDK, for the tests
+// that make the claude driver load its SDK from a directory (`sdkDirectory`),
+// install it (`maintenance.install`), or import it by name.
 //
 // The fake SDK package is laid out as the real one is: its own package.json
 // (with `exports["."].default` naming `sdk.mjs`, and `claudeCodeVersion`),
-// and fixture-sdk/sdk.mjs as the entry module. The fake native package is
-// this platform's `@anthropic-ai/claude-agent-sdk-<os>-<arch>` with an
-// executable `claude`: a POSIX shell script that answers `--version` with a
-// text the test chooses and `auth status --json` with a signed-out report.
+// and fixture-sdk/sdk.mjs as the entry module.
+//
+// The fake Claude Code (`writeFakeClaude`) is a POSIX shell script that uses
+// only shell built-ins, so it runs with no PATH at all. It appends each
+// invocation's arguments to `<its path>.log`, and answers `--version` with a
+// line the test chooses, `auth status --json` with a signed-out report, and a
+// launch (the SDK's first argument, `--output-format`) with a greeting the
+// fixture SDK quotes in its reply. The same script, put where npm puts the
+// SDK's native Claude Code package, is the decoy the driver must never run.
+//
 // Tarballs are npm's format (gzip-compressed tar, files under `package/`),
 // made with the system `tar`. Nothing here reaches the network.
 
@@ -18,16 +25,68 @@ import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { nativeBinaryCandidates, prefersMusl } from "../../../src/drivers/claude/sdk.ts";
-import { CLAUDE_SDK_PACKAGE } from "../../../src/meta/claude.ts";
+import { CLAUDE_SDK_PACKAGE, CLAUDE_TESTED_CLAUDE_CODE_VERSION } from "../../../src/meta/claude.ts";
 
 /** The fake SDK's entry module. */
 export const FIXTURE_SDK_MODULE = fileURLToPath(new URL("./fixture-sdk/sdk.mjs", import.meta.url));
 
-/** The platform package the SDK prefers on this machine, and its binary's file name. */
-export function hostNativePackage(): { pkg: string; binary: string } {
-  const candidate = nativeBinaryCandidates(process.platform, process.arch, prefersMusl())[0]!;
-  return { pkg: candidate.slice(0, candidate.lastIndexOf("/")), binary: candidate.slice(candidate.lastIndexOf("/") + 1) };
+/** What a Claude Code at the minimum the driver runs prints for `--version`. */
+export const MINIMUM_VERSION_LINE = `${CLAUDE_TESTED_CLAUDE_CODE_VERSION} (Claude Code)`;
+
+export interface FakeClaudeOptions {
+  /** What `--version` prints, for example `2.1.330 (Claude Code)`. */
+  readonly versionLine: string;
+  /** The exit code of `--version`; 0 when left out. */
+  readonly versionExitCode?: number;
+  /** What a launch prints; the fixture SDK quotes it in its reply. */
+  readonly greeting: string;
+}
+
+/** `text` as one single-quoted shell word. */
+function shellWord(text: string): string {
+  return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/** Writes a fake Claude Code at `file` (see the top of this file) and returns `file`. */
+export function writeFakeClaude(file: string, options: FakeClaudeOptions): string {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const script = [
+    "#!/bin/sh",
+    "# A fake Claude Code: it logs each invocation, answers --version, auth status and a launch, and nothing else.",
+    `printf '%s\\n' "$*" >> "$0.log"`,
+    'case "$1" in',
+    `  --version) printf '%s\\n' ${shellWord(options.versionLine)}; exit ${options.versionExitCode ?? 0} ;;`,
+    `  auth) printf '%s\\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}' ;;`,
+    `  --output-format) printf '%s\\n' ${shellWord(options.greeting)} ;;`,
+    '  *) echo "the fake claude answers only --version, auth status and a launch" >&2; exit 2 ;;',
+    "esac",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, script, { mode: 0o755 });
+  return file;
+}
+
+/** Each invocation of the fake Claude Code at `file`, as its arguments joined by spaces, in order. */
+export function fakeClaudeInvocations(file: string): string[] {
+  const log = `${file}.log`;
+  return fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter((line) => line !== "") : [];
+}
+
+/** The invocations of the fake at `file` that started a Claude Code session: a launch, not `--version` or `auth status`. */
+export function fakeClaudeSessions(file: string): string[] {
+  return fakeClaudeInvocations(file).filter((line) => line.startsWith("--output-format"));
+}
+
+/**
+ * The platform package the SDK would run its native Claude Code from on this
+ * machine, as the pinned SDK's sdk.mjs picks it (glibc before musl on Linux),
+ * and its binary's file name: where a test puts the decoy.
+ */
+export function sdkNativePackage(): { pkg: string; binary: string } {
+  const report = typeof process.report?.getReport === "function" ? (process.report.getReport() as { header?: { glibcVersionRuntime?: string } }) : undefined;
+  const musl = process.platform === "linux" && report !== undefined && report.header?.glibcVersionRuntime === undefined;
+  const platform = process.platform === "linux" ? `linux-${process.arch}${musl ? "-musl" : ""}` : `${process.platform}-${process.arch}`;
+  return { pkg: `${CLAUDE_SDK_PACKAGE}-${platform}`, binary: process.platform === "win32" ? "claude.exe" : "claude" };
 }
 
 /** Writes the fake SDK package into `packageDirectory`. */
@@ -39,40 +98,52 @@ export function writeFixtureSdkPackage(packageDirectory: string, version: string
     type: "module",
     main: "sdk.mjs",
     exports: { ".": { types: "./sdk.d.ts", default: "./sdk.mjs" } },
-    claudeCodeVersion: "2.1.330",
+    claudeCodeVersion: CLAUDE_TESTED_CLAUDE_CODE_VERSION,
   };
   fs.writeFileSync(path.join(packageDirectory, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   fs.copyFileSync(FIXTURE_SDK_MODULE, path.join(packageDirectory, "sdk.mjs"));
 }
 
-/** Writes this platform's fake native package into `packageDirectory`; its `claude --version` prints `answer`. */
-export function writeFixtureNativePackage(packageDirectory: string, version: string, answer: string): string {
-  const { pkg, binary } = hostNativePackage();
-  fs.mkdirSync(packageDirectory, { recursive: true });
-  fs.writeFileSync(path.join(packageDirectory, "package.json"), `${JSON.stringify({ name: pkg, version, os: [process.platform], cpu: [process.arch] }, null, 2)}\n`);
-  const script = [
-    "#!/bin/sh",
-    "# The fixture's native Claude Code binary: it answers --version and auth status, and nothing else.",
-    'case "$1" in',
-    `  --version) echo '${answer.replaceAll("'", "")}' ;;`,
-    `  auth) echo '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}' ;;`,
-    '  *) echo "the fixture claude answers only --version and auth status" >&2; exit 2 ;;',
-    "esac",
-    "",
-  ].join("\n");
-  const executable = path.join(packageDirectory, binary);
-  fs.writeFileSync(executable, script, { mode: 0o755 });
-  return executable;
+/**
+ * The decoy: this platform's native Claude Code package, where npm installs
+ * it beside the SDK under `nodeModules`, holding a fake Claude Code at the
+ * minimum version that greets with `greeting`. Returns its binary.
+ */
+export function writeDecoyNativePackage(nodeModules: string, greeting: string): string {
+  const { pkg, binary } = sdkNativePackage();
+  const directory = path.join(nodeModules, ...pkg.split("/"));
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, "package.json"), `${JSON.stringify({ name: pkg, version: "0.3.330", os: [process.platform], cpu: [process.arch] }, null, 2)}\n`);
+  return writeFakeClaude(path.join(directory, binary), { versionLine: MINIMUM_VERSION_LINE, greeting });
+}
+
+/**
+ * Makes the managed install in `installed` look as an ARI that also
+ * downloaded the native Claude Code package left it: that package in the
+ * SDK's `node_modules`, and `.ari-install.json` listing its files (with the
+ * `mode` that ARI recorded).
+ */
+export function addNativePackageAsAnEarlierAri(installed: string): void {
+  const binary = writeDecoyNativePackage(path.join(installed, "node_modules"), "a native package an earlier ARI installed");
+  const file = path.join(installed, ".ari-install.json");
+  const record = JSON.parse(fs.readFileSync(file, "utf8")) as { files: Array<{ path: string; size: number; mode?: number; sha256: string }> };
+  for (const added of [binary, path.join(path.dirname(binary), "package.json")]) {
+    const bytes = fs.readFileSync(added);
+    record.files.push({ path: path.relative(installed, added).split(path.sep).join("/"), size: bytes.length, mode: fs.statSync(added).mode & 0o777, sha256: createHash("sha256").update(bytes).digest("hex") });
+  }
+  record.files.sort((a, b) => (a.path < b.path ? -1 : 1));
+  fs.writeFileSync(file, JSON.stringify(record));
 }
 
 /**
  * A directory as `npm install @anthropic-ai/claude-agent-sdk` leaves it:
- * `<root>/node_modules/@anthropic-ai/claude-agent-sdk` and the platform
- * package beside it. Returns the path of the native binary.
+ * `<root>/node_modules/@anthropic-ai/claude-agent-sdk` and, beside it, the
+ * decoy native package whose Claude Code greets with `decoyGreeting`.
+ * Returns the decoy's binary.
  */
-export function writeFixtureSdkDirectory(root: string, version: string, answer: string): string {
+export function writeFixtureSdkDirectory(root: string, version: string, decoyGreeting: string): string {
   writeFixtureSdkPackage(path.join(root, "node_modules", ...CLAUDE_SDK_PACKAGE.split("/")), version);
-  return writeFixtureNativePackage(path.join(root, "node_modules", ...hostNativePackage().pkg.split("/")), version, answer);
+  return writeDecoyNativePackage(path.join(root, "node_modules"), decoyGreeting);
 }
 
 /** The npm tarball of the package in `packageDirectory`: its files under `package/`, gzip-compressed. */
@@ -166,14 +237,11 @@ export async function startFixtureRegistry(
   };
 }
 
-/** Registry entries for the fake SDK and this platform's fake native package, both at `version`. */
-export function fixtureRegistryEntries(scratch: string, version: string, answer: string): { sdk: RegistryEntry; native: RegistryEntry } {
+/** The registry entry of the fake SDK at `version`, published as `CLAUDE_SDK_PACKAGE`; `marker` goes into its package.json, so two entries can differ in their bytes alone. */
+export function fixtureSdkEntry(scratch: string, version: string, marker = "fixture"): RegistryEntry {
   const sdkDirectory = fs.mkdtempSync(path.join(scratch, "sdk-package-"));
-  const nativeDirectory = fs.mkdtempSync(path.join(scratch, "native-package-"));
   writeFixtureSdkPackage(sdkDirectory, version);
-  writeFixtureNativePackage(nativeDirectory, version, answer);
-  return {
-    sdk: { pkg: CLAUDE_SDK_PACKAGE, version, tarball: npmTarball(sdkDirectory, scratch) },
-    native: { pkg: hostNativePackage().pkg, version, tarball: npmTarball(nativeDirectory, scratch) },
-  };
+  const manifestFile = path.join(sdkDirectory, "package.json");
+  fs.writeFileSync(manifestFile, `${JSON.stringify({ ...(JSON.parse(fs.readFileSync(manifestFile, "utf8")) as object), description: marker }, null, 2)}\n`);
+  return { pkg: CLAUDE_SDK_PACKAGE, version, tarball: npmTarball(sdkDirectory, scratch) };
 }

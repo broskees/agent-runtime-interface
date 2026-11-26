@@ -15,8 +15,7 @@
 // sdk.d.ts at 0.3.330 and https://docs.claude.com/en/docs/agent-sdk/typescript.
 
 import * as fs from "node:fs/promises";
-import { createRequire } from "node:module";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { callErrors } from "../../errors.ts";
 import { CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_STANDALONE_INSTALL_HINT } from "../../meta/claude.ts";
 
@@ -119,6 +118,8 @@ export type ClaudeQueryOptions = {
   resumeSessionAt?: string;
   pathToClaudeCodeExecutable?: string;
   mcpServers?: Record<string, ClaudeMcpServerConfig>;
+  /** How `mcpServers` reach Claude Code: on its command line (`argv`, the SDK's default) or in the initialize request over stdin. */
+  mcpServersDelivery?: "argv" | "initialize";
   strictMcpConfig?: boolean;
   tools?: string[];
   maxTurns?: number;
@@ -289,19 +290,17 @@ export type ClaudeSdk = {
   readonly archiveSession: (sessionId: string, options?: { dir?: string }) => Promise<void>;
 };
 
-/** A loaded SDK and what the driver found beside it. */
+/**
+ * A loaded SDK. Its queries run the user's Claude Code, which the instance
+ * finds and checks; a Claude Code binary installed beside the SDK is never
+ * looked for or run.
+ */
 export interface ClaudeSdkRuntime {
   readonly sdk: ClaudeSdk;
   /** The SDK package version, from its package.json. */
   readonly version: string | undefined;
   /** The Claude Code version the SDK bundles (its package.json `claudeCodeVersion`). */
   readonly claudeCodeVersion: string | undefined;
-  /**
-   * The bundled native Claude Code binary, or null when the SDK's platform
-   * package is missing. The SDK finds the same file by itself, so queries do
-   * not name it.
-   */
-  readonly bundledExecutable: string | null;
 }
 
 /** Loads the SDK. Rejects with `driver_unavailable` naming the package when it is not installed. */
@@ -317,28 +316,6 @@ function isModuleNotFound(error: unknown): boolean {
   return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND" || code === "ERR_PACKAGE_PATH_NOT_EXPORTED";
 }
 
-/** The platform packages the SDK looks in for its native binary, in the SDK's own order (sdk.mjs, 0.3.330). */
-export function nativeBinaryCandidates(platform: string, arch: string, preferMusl: boolean): string[] {
-  const base = CLAUDE_SDK_PACKAGE;
-  const extension = platform === "win32" ? ".exe" : "";
-  const packages =
-    platform === "android"
-      ? [`${base}-linux-${arch}-android`]
-      : platform === "linux"
-        ? preferMusl
-          ? [`${base}-linux-${arch}-musl`, `${base}-linux-${arch}`]
-          : [`${base}-linux-${arch}`, `${base}-linux-${arch}-musl`]
-        : [`${base}-${platform}-${arch}`];
-  return packages.map((name) => `${name}/claude${extension}`);
-}
-
-/** True on Linux when this process runs on musl, decided as the SDK decides it: the process report names no glibc version. */
-export function prefersMusl(): boolean {
-  if (process.platform !== "linux") return false;
-  const report = typeof process.report?.getReport === "function" ? (process.report.getReport() as { header?: { glibcVersionRuntime?: string } }) : undefined;
-  return report !== undefined && report.header?.glibcVersionRuntime === undefined;
-}
-
 /**
  * True when `moduleUrl` lies in a Bun standalone executable's embedded file
  * system: `/$bunfs/` on Linux and macOS, `B:/~BUN/` on Windows (Bun's
@@ -348,25 +325,6 @@ export function prefersMusl(): boolean {
  */
 export function isStandaloneExecutableModule(moduleUrl: string): boolean {
   return /^file:\/\/\/(?:\$bunfs\/|[A-Za-z]:\/~BUN\/)/.test(moduleUrl);
-}
-
-/**
- * The native binary the SDK whose entry module is `entryFile` would run: the
- * first of its platform packages that resolves from that file, as the SDK
- * resolves them (`createRequire` on its own module). Null when none does.
- */
-export async function findBundledExecutable(entryFile: string): Promise<string | null> {
-  const require = createRequire(entryFile);
-  for (const candidate of nativeBinaryCandidates(process.platform, process.arch, prefersMusl())) {
-    try {
-      const resolved = require.resolve(candidate);
-      await fs.access(resolved);
-      return resolved;
-    } catch {
-      continue;
-    }
-  }
-  return null;
 }
 
 /** The SDK package's version, bundled Claude Code version and entry module, from its package.json. */
@@ -393,7 +351,7 @@ function readSdkManifest(text: string): { version: string | undefined; claudeCod
 export async function importClaudeSdkPackage(
   packageDirectory: string,
   unavailable: (detail: string) => Error,
-): Promise<{ sdk: ClaudeSdk; version: string | undefined; claudeCodeVersion: string | undefined; entryFile: string }> {
+): Promise<ClaudeSdkRuntime> {
   let manifest: ReturnType<typeof readSdkManifest>;
   try {
     manifest = readSdkManifest(await fs.readFile(`${packageDirectory}/package.json`, "utf8"));
@@ -407,30 +365,28 @@ export async function importClaudeSdkPackage(
   } catch (error) {
     throw unavailable(`${entryFile} failed to load: ${errorText(error)}`);
   }
-  return { sdk, version: manifest.version, claudeCodeVersion: manifest.claudeCodeVersion, entryFile };
+  return { sdk, version: manifest.version, claudeCodeVersion: manifest.claudeCodeVersion };
 }
 
 /**
  * Loads the SDK from `directory`, a directory `npm install
  * @anthropic-ai/claude-agent-sdk` ran in (the `sdkDirectory` config field):
  * `<directory>/node_modules/@anthropic-ai/claude-agent-sdk`, imported by file
- * URL, and the native binary from the platform package beside it, which the
- * SDK finds by itself too.
+ * URL. The native Claude Code package npm installs beside it is not used.
  */
 export async function loadClaudeSdkFromDirectory(directory: string): Promise<ClaudeSdkRuntime> {
   const hint = `Install it there (npm install --prefix ${directory} ${CLAUDE_SDK_PACKAGE}), or remove sdkDirectory from the driver config and run maintenance.install.`;
-  const loaded = await importClaudeSdkPackage(`${directory.replace(/[\\/]+$/, "")}/node_modules/${CLAUDE_SDK_PACKAGE}`, (detail) =>
+  return importClaudeSdkPackage(`${directory.replace(/[\\/]+$/, "")}/node_modules/${CLAUDE_SDK_PACKAGE}`, (detail) =>
     callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: hint }, `The Claude Agent SDK cannot be loaded from sdkDirectory ${directory}: ${detail}. ${hint}`),
   );
-  return { sdk: loaded.sdk, version: loaded.version, claudeCodeVersion: loaded.claudeCodeVersion, bundledExecutable: await findBundledExecutable(loaded.entryFile) };
 }
 
 /**
  * The default loader: `import("@anthropic-ai/claude-agent-sdk")`, then the
- * SDK's package.json for its version, then the native binary the SDK would
- * run, found the way the SDK finds it. Nothing is spawned. In the standalone
- * executable a package cannot be imported by name, so there it reports the
- * SDK missing at once, naming the two steps that work there.
+ * SDK's package.json for its version. Nothing is spawned, and the native
+ * Claude Code package npm installs beside the SDK is not used. In the
+ * standalone executable a package cannot be imported by name, so there it
+ * reports the SDK missing at once, naming the two steps that work there.
  */
 export async function loadClaudeSdk(): Promise<ClaudeSdkRuntime> {
   if (isStandaloneExecutableModule(import.meta.url)) {
@@ -456,7 +412,7 @@ export async function loadClaudeSdk(): Promise<ClaudeSdkRuntime> {
   } catch {
     version = undefined;
   }
-  return { sdk, version, claudeCodeVersion, bundledExecutable: await findBundledExecutable(fileURLToPath(entry)) };
+  return { sdk, version, claudeCodeVersion };
 }
 
 function errorText(error: unknown): string {

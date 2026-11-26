@@ -42,7 +42,7 @@ dependencies. In the registry index of 2026-11-23 (46 agents), for
 `subProviders.set` refuses the others with `invalid_state`
 (`distribution_unsupported`) and says why, before downloading anything; a
 build without a sha256 is refused too. Antigravity has its own driver
-([antigravity.md](antigravity.md)), which installs the CLI's tar.gz release
+([antigravity.md](antigravity.md)), which runs the `agy` the user installed
 instead of the registry's zip.
 
 ## Config

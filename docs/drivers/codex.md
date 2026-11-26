@@ -28,7 +28,30 @@ nothing. `create()` only reads which managed credential the instance holds.
 | `reasoningEffort` | The reasoning effort for new turns; the model's default when unset. |
 
 `ari/meta/codex` exports the label, the icon, `CODEX_CONFIG_SCHEMA`,
-`CODEX_FORM_HINTS`, `codexDefaultConfig()` and `CODEX_TESTED_VERSIONS`.
+`CODEX_FORM_HINTS`, `codexDefaultConfig()`, `CODEX_TESTED_VERSIONS`,
+`CODEX_MINIMUM_VERSION` and `CODEX_UPDATE_STEP`.
+
+## The user's own `codex`, and its minimum
+
+ARI runs the `codex` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. The minimum is
+Codex CLI 0.172.0, the lower bound of the tested range `>=0.172.0 <0.173.0`.
+With an older `codex`, `status()` is `unavailable` with `driver_unavailable`
+(with `installed: true` and the version found), and `openSession` rejects with
+the same error before any app-server starts: the only process that runs is
+`codex --version`. The error names the version found, the path, the minimum
+and Codex's update step:
+
+```text
+Codex CLI 0.171.0 (/usr/local/bin/codex) is older than 0.172.0, the oldest version this driver supports. Update the Codex CLI with `codex update`.
+```
+
+The update step is Codex's own. Codex documents `codex update` as "Check for
+and apply a Codex CLI update when the installed release supports self-update"
+([Codex developer commands, `codex update`](https://learn.chatgpt.com/docs/developer-commands#cli-codex-update)).
+A `codex` above the tested range still runs, with an `untested_version`
+advisory. `codex --version` prints `codex-cli 0.172.0`
+(`test/fixtures/cli-version-output/codex.txt`).
 
 ## How it runs
 

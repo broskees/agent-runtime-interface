@@ -31,6 +31,13 @@ export const FX_CONFIG_SCHEMA: JsonSchema = {
 
 export const FX_DEFAULT_CONFIG: FxConfig = { command: "fx", ...ACP_BASE_DEFAULTS, configDependencies: FX_CONFIG_DEPENDENCIES };
 
+/**
+ * fx's own update step (https://github.com/vercel-labs/fx#install: "`fx
+ * upgrade` installs the latest release right away"), named when `fx` is older
+ * than the tested range. ARI never installs or updates `fx`.
+ */
+export const FX_UPDATE_STEP = "Update fx with `fx upgrade`.";
+
 export const FX_CLI_MANIFEST: CliLaunchManifest = { binary: "fx", args: { fresh: [] } };
 
 export const meta: DriverMeta = {

@@ -20,7 +20,7 @@ import type { PiConfig } from "./config.ts";
 import { PiInstance } from "./instance.ts";
 import { PI_ICON } from "./icon.ts";
 
-export { PI_CLI_MANIFEST, PI_CONFIG_SCHEMA, PI_CREDENTIAL_VARIABLES, PI_DRIVER_KIND, PI_TESTED_VERSIONS, defaultPiConfig } from "./config.ts";
+export { PI_CLI_MANIFEST, PI_CONFIG_SCHEMA, PI_CREDENTIAL_VARIABLES, PI_DRIVER_KIND, PI_MINIMUM_VERSION, PI_TESTED_VERSIONS, PI_UPDATE_STEP, defaultPiConfig } from "./config.ts";
 export type { PiConfig } from "./config.ts";
 export { piCapabilities } from "./capabilities.ts";
 export { PI_AUTH_METHODS, PI_POISON_MS, versionAdvisory, versionInRange } from "./instance.ts";

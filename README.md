@@ -325,6 +325,36 @@ A host never has to wait on an ARI release:
    `pnpm.overrides`) or a patch (`pnpm patch`, `patch-package`) cover an
    urgent fix until it is released.
 
+## Vendor CLIs
+
+ARI runs the vendor CLI the user installed and never downloads, installs or
+updates one. Each CLI driver finds its CLI on `PATH`, or at the path its
+config names, and asks it for its version. The minimum is the lower bound of
+the driver's tested range. With a CLI older than that, `status()` is
+`unavailable` with `driver_unavailable`, and `openSession` rejects with the
+same error before any agent starts. The error names the version found, the
+path, the minimum and the vendor's own update step, for example:
+
+```text
+Codex CLI 0.171.0 (/usr/local/bin/codex) is older than 0.172.0, the oldest version this driver supports. Update the Codex CLI with `codex update`.
+```
+
+A CLI above the tested range still runs, with an `untested_version` advisory.
+
+| Driver | CLI | Minimum | Update step |
+|---|---|---|---|
+| `antigravity` | `agy` | 1.5.0 | `agy update` |
+| `codex` | `codex` | 0.172.0 | `codex update` |
+| `fx` | `fx` | 0.0.13 | `fx upgrade` |
+| `grok` | `grok` | 1.0.70 | `grok update` |
+| `kiro` | `kiro-cli` | 3.0.0 | `kiro-cli update` |
+| `muse` | `muse` | 1.4.25 | run the installer again: `curl -fsSL https://dev.meta.ai/install.sh \| bash` |
+| `opencode` | `opencode` | 1.19.6 for 1.x, 2.1.2 for 2.x | `opencode upgrade` |
+| `pi` | `pi` | 1.6.0 | `pi update` |
+
+Each driver's page in [`docs/drivers/`](docs/drivers/) cites the vendor's
+documentation for its update step.
+
 ## Versions
 
 ARI keeps three version axes apart:
@@ -337,7 +367,8 @@ ARI keeps three version axes apart:
 
 Each driver declares the vendor versions it is tested against and reports a
 version advisory in `status()` when the installed SDK or CLI is outside that
-range.
+range; a vendor CLI older than the range is refused instead (see
+[Vendor CLIs](#vendor-clis)).
 
 ## More documentation
 

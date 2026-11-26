@@ -6,6 +6,15 @@
   `@opencode-ai/sdk` (tested with 1.19.6) and 2.x servers through
   `@opencode/client` (tested with 2.1.2), both optional peers loaded with a
   dynamic `import()`.
+- Runs the `opencode` the user installed and never downloads, installs or
+  updates one. An `opencode` older than its generation's minimum, 1.19.6 for
+  1.x or 2.1.2 for 2.x (the lower bounds of the tested ranges), is refused,
+  and so is an external server that old: `status()` is `unavailable` with
+  `driver_unavailable` and `openSession` and `catalog.list` reject with it
+  before any server starts, naming the version found, its path (or the
+  server's URL), the minimum and the update step, `opencode upgrade`. Above
+  the tested ranges an `opencode` still runs, with an `untested_version`
+  advisory.
 - Chooses the runtime by the server's version: `opencode --version`, or an
   external server's `GET /api/info` (2.x) or `GET /global/health` (1.x).
 - Session models: `process_per_thread` (1.x, one `opencode serve` per thread),

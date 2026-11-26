@@ -311,11 +311,38 @@ has no ARI `auth` group: `status()` reports no auth state, and sign-in happens
 in OpenCode (`opencode auth login`). A server password for an external server
 is the instance secret `opencode/server-password`.
 
+## The user's own `opencode`, and its minimum
+
+ARI runs the `opencode` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. The minimums are
+OpenCode 1.19.6 for 1.x and 2.1.2 for 2.x, the lower bounds of the tested
+ranges `>=1.19.6 <2.0.0` and `>=2.1.2 <2.2.0`; a release from before 1.x
+counts as older than the 1.x minimum. With an older `opencode`, `status()` is
+`unavailable` with `driver_unavailable` (with `installed: true` and the
+version found), and `openSession` rejects with the same error before any
+server starts: the only process that runs is `opencode --version`.
+`catalog.list` rejects with it too when it would start a local server.
+The error names the version found, the path, the minimum and OpenCode's
+update step:
+
+```text
+OpenCode 2.0.21 (/usr/local/bin/opencode) is older than 2.1.2, the oldest version this driver supports. Update OpenCode with `opencode upgrade`.
+```
+
+The update step is OpenCode's own: `opencode upgrade` "Upgrades OpenCode to
+the latest or a specific version" ([OpenCode CLI commands,
+`upgrade`](https://opencode.ai/docs/cli/commands/#upgrade)). An `opencode`
+above the tested range still runs, with an `untested_version` advisory.
+`opencode --version` prints `opencode v2.1.2` for 2.x and the bare version,
+such as `1.19.6`, for 1.x (`test/fixtures/cli-version-output/opencode-2.txt`
+and `opencode-1.txt`).
+
 ## Probes and status
 
 `probe()` runs only `opencode --version`, or reads an external server's info
 route; it starts no server and writes nothing. `status()` reports the version
-and an `untested_version` advisory outside the generation's tested range.
+and an `untested_version` advisory above the generation's tested range, and
+`driver_unavailable` below its minimum.
 Without `opencode`, `status()` is `unavailable` with a `driver_unavailable`
 error naming the binary. Without the SDK the server's generation needs, it is
 `unavailable` with a `driver_unavailable` error naming `@opencode-ai/sdk` or

@@ -8,7 +8,14 @@ First version of the Codex driver.
   app-server JSON-RPC protocol with a client generated from the protocol's
   JSON Schema, vendored at Codex tag `rust-v0.172.0` (commit
   `3d86e43b075adeba2193ec5c22ac92f55afd82e6`). Tested against Codex CLI
-  `>=0.172.0 <0.173.0`; other versions get an `untested_version` advisory.
+  `>=0.172.0 <0.173.0`; a newer `codex` gets an `untested_version` advisory.
+- Runs the `codex` the user installed and never downloads, installs or updates
+  one. A `codex` older than the minimum, 0.172.0 (the lower bound of the
+  tested range), is refused: `status()` is `unavailable` with
+  `driver_unavailable` and `openSession` rejects with it before any app-server
+  starts, naming the version found, its path, the minimum and the update step,
+  `codex update`. Above the tested range a `codex` still runs, with an
+  `untested_version` advisory.
 - Threads: create, resume (with `session.replaced` when the thread is missing
   or held by another process; the replacement keeps that resume's launch
   context), snapshot, fork from a turn or into another directory, roll back,

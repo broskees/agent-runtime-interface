@@ -11,8 +11,9 @@ code and spawns nothing.
 The driver is tested against Muse Code and `@muse-code/sdk` `>=1.4.25 <1.4.26`
 (`MUSE_TESTED_VERSIONS`). The SDK versions in lockstep with Muse Code
 (`@muse-code/sdk` X.Y.Z pairs with Muse Code X.Y.Z, its README says), so one
-range covers both. A CLI or SDK outside it gets an `untested_version` advisory
-in `status()` and `maintenance.advisory()`.
+range covers both. An SDK outside it, or a `muse` above it, gets an
+`untested_version` advisory in `status()` and `maintenance.advisory()`; a
+`muse` below it is refused (see "The user's own `muse`, and its minimum").
 
 Muse's public documentation is thin (the proposal's §14), so the protocol
 record is the SDK's published types (`dist/src/msp.d.ts`), the SDK's
@@ -34,8 +35,35 @@ it.
 | `providerId` | The provider routing for new threads and model changes. Muse's default when unset. |
 | `reasoningEffort` | The reasoning effort for new turns (`none` ... `ultra`). The model's default when unset. |
 
-`ari/meta/muse` holds the config schema, form hints, label, icon and the tested
-range, with no Node built-in.
+`ari/meta/muse` holds the config schema, form hints, label, icon, the tested
+range, `MUSE_MINIMUM_VERSION` and `MUSE_CLI_UPDATE_STEP`, with no Node
+built-in.
+
+## The user's own `muse`, and its minimum
+
+ARI runs the `muse` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. The minimum is
+Muse Code 1.4.25, the lower bound of the tested range `>=1.4.25 <1.4.26`. With
+an older `muse`, `status()` is `unavailable` with `driver_unavailable` (with
+`installed: true` and the version found), and `openSession` rejects with the
+same error before any `muse serve` starts: the only process that runs is `muse
+--version`. The error names the version found, the path, the minimum and Muse
+Code's update step:
+
+```text
+Muse Code 1.4.7 (/home/me/.local/bin/muse) is older than 1.4.25, the oldest version this driver supports. Update Muse Code by running its installer again: `curl -fsSL https://dev.meta.ai/install.sh | bash`.
+```
+
+The update step is Muse Code's own: its changelog says "For install and
+upgrade steps, see the Muse Code overview" ([Muse Code
+changelog](https://dev.meta.ai/docs/muse-code/changelog)), and the overview's
+step is the one-line installer, `curl -fsSL https://dev.meta.ai/install.sh |
+bash` ([Muse Code, Install](https://dev.meta.ai/docs/muse-code#install)).
+`muse --help` 1.4.7 lists no update command. A `muse` above the tested range
+still runs, with an `untested_version` advisory. The SDK's version is not held
+to the minimum: an SDK outside the range gets only the advisory. `muse
+--version` prints `Muse Code 1.4.7 (1.4.7-R6101.1)`
+(`test/fixtures/cli-version-output/muse.txt`).
 
 ## How it runs
 

@@ -27,11 +27,22 @@ export const CODEX_DRIVER_KIND = "codex";
 export const CODEX_INSTALL_HINT = "Install the Codex CLI: npm install -g @openai/codex";
 
 /**
+ * The oldest Codex CLI the driver runs: the lower bound of
+ * `CODEX_TESTED_VERSIONS`. An older `codex` is refused with
+ * `driver_unavailable` naming `CODEX_UPDATE_STEP`; ARI never installs or
+ * updates `codex`.
+ */
+export const CODEX_MINIMUM_VERSION = "0.172.0";
+
+/**
  * The Codex CLI versions this driver is tested against, as a semver range:
  * the release whose app-server protocol schema is vendored under
  * vendor-schemas/codex/ (tag rust-v0.172.0).
  */
-export const CODEX_TESTED_VERSIONS = ">=0.172.0 <0.173.0";
+export const CODEX_TESTED_VERSIONS = `>=${CODEX_MINIMUM_VERSION} <0.173.0`;
+
+/** The Codex CLI's own update step (https://learn.chatgpt.com/docs/developer-commands#cli-codex-update), named when `codex` is older than the minimum. */
+export const CODEX_UPDATE_STEP = "Update the Codex CLI with `codex update`.";
 
 export const CODEX_ICON: Icon = {
   type: "svg",

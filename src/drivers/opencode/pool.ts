@@ -19,16 +19,17 @@
 // name another thread holds there is refused, because OpenCode keeps one entry
 // per name and the second would replace the first.
 
+import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
 import { callErrors } from "../../errors.ts";
 import type { HostServices } from "../../runtime.ts";
 import type { ServerShape } from "./capabilities.ts";
-import { OPENCODE_PASSWORD_VARIABLES, SERVER_PASSWORD_SECRET } from "./config.ts";
+import { OPENCODE_PASSWORD_VARIABLES, OPENCODE_UPDATE_STEP, SERVER_PASSWORD_SECRET } from "./config.ts";
 import type { OpencodeConfig } from "./config.ts";
 import type { NativeRuntime } from "./native.ts";
 import { collidingName } from "./rules.ts";
 import { loadSdk } from "./sdk.ts";
 import type { OpencodeSdkLoaders } from "./sdk.ts";
-import { basicAuthorization, cliVersion, externalEndpoint, generationOf, serverVersion, startServer } from "./server.ts";
+import { basicAuthorization, belowMinimum, cliVersion, externalEndpoint, generationOf, minimumVersionFor, serverVersion, startServer } from "./server.ts";
 import type { Generation, ServerEndpoint } from "./server.ts";
 import { V1Runtime } from "./v1.ts";
 import { V2Runtime } from "./v2.ts";
@@ -107,7 +108,10 @@ export class ServerPool {
     return callErrors.driverUnavailable({ binary: this.#config.binary, installHint: "Install OpenCode (https://opencode.ai) and make sure `opencode` is on PATH, or set the driver's binary config." }, `OpenCode is not installed: ${this.#config.binary} was not found`);
   }
 
-  /** Finds the server generation and version. Starts nothing and writes nothing: `opencode --version`, or a read of the external server's info. */
+  /**
+   * Finds the server generation and version. Starts nothing and writes nothing: `opencode --version`, or a read of the
+   * external server's info. A local CLI older than its generation's minimum throws `CliTooOldError`, so it never starts.
+   */
   async detect(): Promise<Detected> {
     if (this.external) {
       const url = this.#config.serverUrl!;
@@ -118,9 +122,14 @@ export class ServerPool {
     const executable = await this.#host.process.resolveExecutable(this.#config.binary);
     if (executable === null) throw this.unavailableBinary();
     const found = await cliVersion(this.#host, executable);
+    if (found.ok && found.version !== undefined && belowMinimum(found.version)) throw this.#tooOld(found.version, executable);
     const generation = found.version === undefined ? undefined : generationOf(found.version);
     if (!found.ok || found.version === undefined || generation === undefined) throw callErrors.protocol("unknown_version", `Could not tell the OpenCode version from \`${this.#config.binary} --version\`: ${JSON.stringify(found.output)}`);
     return { generation, version: found.version, external: false, executable };
+  }
+
+  #tooOld(version: string, where: string): CliTooOldError {
+    return new CliTooOldError({ name: "OpenCode", binary: this.#config.binary, version, path: where, minimum: minimumVersionFor(version), updateStep: OPENCODE_UPDATE_STEP });
   }
 
   async #runtime(endpoint: ServerEndpoint): Promise<NativeRuntime> {

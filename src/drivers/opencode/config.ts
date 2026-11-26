@@ -24,11 +24,24 @@ export const OPENCODE_DRIVER_KIND = "opencode";
 
 export const OPENCODE_DOCS_URL = "https://opencode.ai/docs/server/";
 
+/**
+ * The oldest OpenCode of each generation the driver runs: the lower bounds of
+ * the two tested ranges. An older `opencode` is
+ * refused with `driver_unavailable` naming `OPENCODE_UPDATE_STEP`; a version
+ * before 1.x counts as older than the 1.x minimum. ARI never installs or
+ * updates `opencode`.
+ */
+export const OPENCODE_V1_MINIMUM_VERSION = "1.19.6";
+export const OPENCODE_V2_MINIMUM_VERSION = "2.1.2";
+
 /** The OpenCode 1.x servers this driver is tested against: the API of OpenCode 1.19.6 (`@opencode-ai/sdk` 1.19.6). */
-export const OPENCODE_V1_TESTED_VERSIONS = ">=1.19.6 <2.0.0";
+export const OPENCODE_V1_TESTED_VERSIONS = `>=${OPENCODE_V1_MINIMUM_VERSION} <2.0.0`;
 
 /** The OpenCode 2.x servers this driver is tested against: the API of OpenCode 2.1.2 (`@opencode/client` 2.1.2). */
-export const OPENCODE_V2_TESTED_VERSIONS = ">=2.1.2 <2.2.0";
+export const OPENCODE_V2_TESTED_VERSIONS = `>=${OPENCODE_V2_MINIMUM_VERSION} <2.2.0`;
+
+/** OpenCode's own update step (https://opencode.ai/docs/cli/commands/#upgrade: "Upgrades OpenCode to the latest or a specific version"), named when `opencode` is older than its generation's minimum. */
+export const OPENCODE_UPDATE_STEP = "Update OpenCode with `opencode upgrade`.";
 
 /** Both ranges, as `ari/meta/opencode` shows them. */
 export const OPENCODE_TESTED_VERSIONS = `${OPENCODE_V1_TESTED_VERSIONS} || ${OPENCODE_V2_TESTED_VERSIONS}`;

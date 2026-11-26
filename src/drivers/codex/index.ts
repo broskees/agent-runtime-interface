@@ -5,11 +5,12 @@
 //
 // Importing this module loads no vendor code and spawns nothing: `create()`
 // only reads which managed credential the instance holds. A missing `codex`
-// binary shows in `status()` and fails `openSession` with
-// `driver_unavailable`.
+// binary, or one older than CODEX_MINIMUM_VERSION, shows in `status()` and
+// fails `openSession` with `driver_unavailable`. ARI never installs or
+// updates `codex`.
 
 import type { CliLaunchManifest } from "../../generated/driver.ts";
-import { CODEX_CONFIG_SCHEMA, CODEX_DRIVER_KIND, CODEX_METADATA, CODEX_TESTED_VERSIONS, codexDefaultConfig } from "../../meta/codex.ts";
+import { CODEX_CONFIG_SCHEMA, CODEX_DRIVER_KIND, CODEX_METADATA, CODEX_MINIMUM_VERSION, CODEX_TESTED_VERSIONS, CODEX_UPDATE_STEP, codexDefaultConfig } from "../../meta/codex.ts";
 import type { CodexDriverConfig } from "../../meta/codex.ts";
 import type { Driver } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
@@ -31,7 +32,7 @@ export {
 } from "./instance.ts";
 export { CODEX_IDENTITY_VERSION, codexPolicy, decisionOptionId, itemIdFor, requestIdFor, subagentIdFor, taskIdFor, threadIdFor, turnIdFor } from "./mapping.ts";
 export { CODEX_PROTOCOL_SOURCE } from "./generated/protocol.ts";
-export { CODEX_TESTED_VERSIONS };
+export { CODEX_MINIMUM_VERSION, CODEX_TESTED_VERSIONS, CODEX_UPDATE_STEP };
 
 /**
  * How a host runs the Codex CLI itself in a terminal: `codex`, `codex resume

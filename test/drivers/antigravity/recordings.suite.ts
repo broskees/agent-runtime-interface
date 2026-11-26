@@ -83,6 +83,11 @@ function escape(text: string): string {
 
 type Message = { [key: string]: unknown };
 const messageOf = (frame: Frame): Message => frame["message"] as Message;
+const isAcpOutput = (frame: Frame): boolean => frame.kind === "stdout" && frame["message"] !== undefined;
+
+function acpSpawns(frames: readonly Frame[]): Frame[] {
+  return frames.filter((frame) => frame.kind === "spawn" && (frame["args"] as string[])[0] === "acp");
+}
 
 test("the Antigravity recording function records all six scenarios from the fake ACP agent run as agy acp, through the process tap, each to its own file with source fake", async () => {
   const { outcomes, fake } = await recordAll();
@@ -111,12 +116,24 @@ test("the Antigravity recording function records all six scenarios from the fake
 test("each Antigravity recording holds the spawn request with the names, never the values, of its variables, every stdin and stdout line in order, the stderr lines and the exit", async () => {
   const { outcomes, fake, env } = await recordAll();
   const recordings = await Promise.all(outcomes.map((outcome) => readRecording(outcome.file!)));
-  const all = recordings.flatMap((recording) => recording.frames.map((entry) => entry.frame));
+  const all: Frame[] = [];
   for (const recording of recordings) {
     const frames = recording.frames.map((entry) => entry.frame);
     const spawns = frames.filter((frame) => frame.kind === "spawn");
-    assert.equal(spawns.length, recording.header.scenario === "resume" ? 2 : 1, recording.header.scenario);
-    for (const spawn of spawns) {
+    const runtime = acpSpawns(frames);
+    const count = recording.header.scenario === "resume" ? 2 : 1;
+    assert.equal(runtime.length, count, recording.header.scenario);
+    assert.equal(spawns.length, count * 2, "one probe and one ACP spawn per session");
+    for (const [index, spawn] of runtime.entries()) {
+      const probe = spawns[index * 2]!;
+      const probeProc = probe["proc"];
+      assert.equal(spawns[index * 2 + 1], spawn, "the probe precedes its ACP spawn");
+      assert.deepEqual(frames.filter((frame) => frame["proc"] === probeProc), [
+        { dir: "out", kind: "spawn", proc: probeProc, command: "agy", args: ["--version"], envNames: ["AGY_CLI_DISABLE_AUTO_UPDATE"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000 },
+        { dir: "in", kind: "stdout", proc: probeProc, text: FAKE_AGY_VERSION },
+        { dir: "in", kind: "exit", proc: probeProc, code: 0, signal: null },
+      ]);
+      assert.ok(frames.indexOf(spawn) > frames.findIndex((frame) => frame["proc"] === probeProc && frame.kind === "exit"), "agy acp starts after the probe exits");
       assert.deepEqual(spawn, {
         dir: "out",
         kind: "spawn",
@@ -138,6 +155,7 @@ test("each Antigravity recording holds the spawn request with the names, never t
       assert.ok(own.some((frame) => frame.kind === "kill"), "the driver's kill is recorded");
       assert.deepEqual(own.filter((frame) => frame.kind === "stderr").map((frame) => frame["text"]), [`fake agy ${FAKE_AGY_VERSION}: serving ACP on stdio`]);
     }
+    all.push(...frames.filter((frame) => runtime.some((spawn) => frame["proc"] === spawn["proc"])));
   }
   // Every line on the pipes, as the agent's side saw it, after the recorder's sanitiser, in order: what the driver wrote, what the agent wrote back.
   const sanitise = createSanitiser({ workspace: path.join(DIRECTORY, "no-such-workspace"), env, protocolWords: ACP_PROTOCOL_WORDS, recordedModel: "fake-flash" });
@@ -264,8 +282,9 @@ for (const name of SCENARIO_NAMES) {
 
   test(`${name}: Antigravity replay fails, naming the file, the line and both frames, when the scenario ends with recorded frames the driver never sent or took`, async () => {
     const recording = await recordingOf(name);
-    const extra: Frame = { dir: "out", kind: "stdin", proc: 1, message: { jsonrpc: "2.0", id: 99, method: "session/close", params: { sessionId: "sess-never" } } };
-    const answer: Frame = { dir: "in", kind: "stdout", proc: 1, message: { jsonrpc: "2.0", id: 99, result: {} } };
+    const proc = acpSpawns(recording.frames.map((entry) => entry.frame))[0]!["proc"];
+    const extra: Frame = { dir: "out", kind: "stdin", proc, message: { jsonrpc: "2.0", id: 99, method: "session/close", params: { sessionId: "sess-never" } } };
+    const answer: Frame = { dir: "in", kind: "stdout", proc, message: { jsonrpc: "2.0", id: 99, result: {} } };
     const line = recording.frames.at(-1)!.line + 1;
     const last = recording.frames.at(-1)!;
     // A request the driver never sends.
@@ -281,7 +300,7 @@ for (const name of SCENARIO_NAMES) {
     // the agent's stdout ends, waits for it. Replay stalls where the driver waited, and names the line the pipe waits for.
     const answered = editedCopy(recording, "appended-with-answer", (frames) => frames.push(extra, answer));
     const copy = await readRecording(answered.file);
-    const exit = copy.frames.findIndex((entry) => entry.frame.kind === "exit" && entry.frame["proc"] === 1);
+    const exit = copy.frames.findIndex((entry) => entry.frame.kind === "exit" && entry.frame["proc"] === proc);
     const waiting = copy.frames[exit + 1]!;
     assert.equal(waiting.frame.dir, "out", "the driver's next frame after the first agy's exit: the appended request, or the resume's second spawn");
     await assert.rejects(replayAntigravity(answered.file, { timeoutMs: 2_000 }), (error: unknown) => {
@@ -290,7 +309,7 @@ for (const name of SCENARIO_NAMES) {
       assert.ok(error.message.startsWith(`${answered.file}:${waiting.line}: replay stalled: the ${name} scenario waited 2000 ms for the ${name === "resume" ? "first " : ""}session to close\n`), shown);
       assert.ok(error.message.includes(`\n  next recorded (line ${waiting.line}): ${showFrame(waiting.frame)}\n`), shown);
       assert.ok(error.message.includes(`\n  last replayed (line ${waiting.line - 1}): ${showFrame(copy.frames[exit]!.frame)}`), shown);
-      assert.ok(error.message.endsWith(`\n  held open: the stdout of process 1, which exited, ends after its line ${line + 1}: ${showFrame(answer)}`), shown);
+      assert.ok(error.message.endsWith(`\n  held open: the stdout of process ${proc}, which exited, ends after its line ${line + 1}: ${showFrame(answer)}`), shown);
       return true;
     });
   });
@@ -318,7 +337,7 @@ for (const name of SCENARIO_NAMES) {
 
 /** The ACP tool call a stdout frame is about: a session/update's toolCallId, or a permission request's tool call's. */
 function toolCallOf(frame: Frame): string | undefined {
-  if (frame.kind !== "stdout") return undefined;
+  if (!isAcpOutput(frame)) return undefined;
   const params = messageOf(frame)["params"] as { update?: { toolCallId?: string }; toolCall?: { toolCallId?: string } } | undefined;
   return params?.update?.toolCallId ?? params?.toolCall?.toolCallId;
 }
@@ -330,7 +349,7 @@ function checkError(file: string, check: string, dependedOn: { line: number; fra
 
 test("approval_allowed: Antigravity replay fails when the stdout frame with the command's result is removed, naming the file, the command's last recorded frame and the frame replayed last", async () => {
   const recording = await recordingOf("approval_allowed");
-  const index = recording.frames.findIndex((entry) => entry.frame.kind === "stdout" && JSON.stringify(entry.frame["message"]).includes('"status":"completed","content"'));
+  const index = recording.frames.findIndex((entry) => isAcpOutput(entry.frame) && JSON.stringify(entry.frame["message"]).includes('"status":"completed","content"'));
   assert.ok(index !== -1, "the recording holds the command's result");
   const call = toolCallOf(recording.frames[index]!.frame)!;
   const { file } = editedCopy(recording, "removed-tool-result", (frames) => frames.splice(index, 1));
@@ -347,7 +366,7 @@ test("approval_allowed: Antigravity replay fails when the stdout frame with the 
 
 test("approval_denied: Antigravity replay fails when the stdout frame that fails the declined command is removed, naming the file, the command's last recorded frame and the frame replayed last", async () => {
   const recording = await recordingOf("approval_denied");
-  const index = recording.frames.findIndex((entry) => entry.frame.kind === "stdout" && JSON.stringify(entry.frame["message"]).includes('"status":"failed"'));
+  const index = recording.frames.findIndex((entry) => isAcpOutput(entry.frame) && JSON.stringify(entry.frame["message"]).includes('"status":"failed"'));
   assert.ok(index !== -1, "the recording holds the declined command's end");
   const call = toolCallOf(recording.frames[index]!.frame)!;
   const { file } = editedCopy(recording, "removed-tool-failure", (frames) => frames.splice(index, 1));
@@ -379,7 +398,7 @@ function turnCheckError(file: string, check: string, turn: number, frames: Retur
   return `${file}:${frames.response.line}: ${check}\n  depended on (line ${frames.response.line}, the response that ended turn ${turn}, requested at line ${frames.request.line}): ${showFrame(frames.response.frame)}\n  last replayed (line ${last.line}): ${showFrame(last.frame)}`;
 }
 
-const isReplyChunk = (frame: Frame): boolean => frame.kind === "stdout" && (messageOf(frame)["params"] as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === "agent_message_chunk";
+const isReplyChunk = (frame: Frame): boolean => isAcpOutput(frame) && (messageOf(frame)["params"] as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === "agent_message_chunk";
 
 test("simple: when every frame of the reply is removed, Antigravity replay fails naming the file, the response that ended the turn and the frame replayed last", async () => {
   const recording = await recordingOf("simple");
@@ -494,8 +513,8 @@ test("every scenario check that fails names the turns it looked at, and each of 
 test("replay ends a process's pipes once its exit came and the lines recorded right after it were handed over: a line recorded after the exit still reaches the driver", async () => {
   const recording = await recordingOf("simple");
   const frames = recording.frames.map((entry) => entry.frame);
-  const exit = frames.findIndex((frame) => frame.kind === "exit");
   const stderr = frames.findIndex((frame) => frame.kind === "stderr");
+  const exit = frames.findIndex((frame) => frame.kind === "exit" && frame["proc"] === frames[stderr]!["proc"]);
   // The process's stderr line arrives after its exit, as when a process exits before its reader took the last chunk.
   const { file } = editedCopy(recording, "stderr-after-exit", (copy) => {
     const [line] = copy.splice(stderr, 1);
@@ -508,25 +527,27 @@ test("replay ends a process's pipes once its exit came and the lines recorded ri
 test("a stderr line of the first agy recorded after the driver started the second replays: the ACP driver drains stderr apart from the exit, and the pipe stays open until its own last recorded line", async () => {
   const recording = await recordingOf("resume");
   const frames = recording.frames.map((entry) => entry.frame);
-  const stderr = frames.findIndex((frame) => frame.kind === "stderr" && frame["proc"] === 1);
-  const secondSpawn = frames.findIndex((frame) => frame.kind === "spawn" && frame["proc"] === 2);
+  const [first, second] = acpSpawns(frames);
+  const stderr = frames.findIndex((frame) => frame.kind === "stderr" && frame["proc"] === first!["proc"]);
+  const secondSpawn = frames.indexOf(second!);
   // The first process's stderr line now comes right after the driver started the second process.
   const { file, frames: edited } = editedCopy(recording, "stderr-after-next-spawn", (copy) => {
     const [line] = copy.splice(stderr, 1);
     copy.splice(secondSpawn, 0, line!);
   });
-  const moved = edited.findIndex((frame) => frame.kind === "stderr" && frame["proc"] === 1);
+  const moved = edited.findIndex((frame) => frame.kind === "stderr" && frame["proc"] === first!["proc"]);
   assert.equal(edited[moved - 1]!.kind, "spawn");
-  assert.equal(edited[moved - 1]!["proc"], 2);
+  assert.equal(edited[moved - 1]!["proc"], second!["proc"]);
   const { replay } = await replayAntigravity(file);
   assert.ok(replay.sequencer.done());
 });
 
 test("what replay does not detect: a stdout or stderr line added right after its process's exit, which the driver reads to the end of its pipe and ignores", async () => {
   const recording = await recordingOf("simple");
+  const proc = acpSpawns(recording.frames.map((entry) => entry.frame))[0]!["proc"];
   const { file } = editedCopy(recording, "late-lines", (frames) => {
-    frames.push({ dir: "in", kind: "stdout", proc: 1, message: { jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-1", update: { sessionUpdate: "usage_update", used: 1, size: 2 } } } });
-    frames.push({ dir: "in", kind: "stderr", proc: 1, text: "a late line" });
+    frames.push({ dir: "in", kind: "stdout", proc, message: { jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-1", update: { sessionUpdate: "usage_update", used: 1, size: 2 } } } });
+    frames.push({ dir: "in", kind: "stderr", proc, text: "a late line" });
   });
   const { replay } = await replayAntigravity(file);
   assert.ok(replay.sequencer.done(), "the driver took both lines");
@@ -662,7 +683,7 @@ test("the Antigravity recorder replaces the OS user name, a home path, an email,
     for (const leaked of ["ari-recorder-user@example.org", secret, "someone-else", "acct-31f9c2", "org-77d1e0", "g1-pro-tier", "Google AI Pro", "0.82", "1796072400", "2026-12-16", "1796000000000", "2294915", "session.1YX2c84S", "agy-2294915", "zsh", "fake-argon", "Fake Argon"]) {
       assert.ok(!text.includes(leaked), `${outcome.scenario}: ${leaked} is gone`);
     }
-    const thought = frames.find((frame) => frame.kind === "stdout" && (messageOf(frame)["params"] as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === "agent_thought_chunk")!;
+    const thought = frames.find((frame) => isAcpOutput(frame) && (messageOf(frame)["params"] as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === "agent_thought_chunk")!;
     const update = (messageOf(thought)["params"] as { update: { content: { text: string }; _meta: { [key: string]: unknown } } }).update;
     assert.equal(update.content.text, `${PLACEHOLDERS.user} asked from ${PLACEHOLDERS.home}/notes, as ${PLACEHOLDERS.email}, with <ARI_TEST_SERVICE_TOKEN> and ${PLACEHOLDERS.otherHome}/x`);
     assert.deepEqual(update._meta["ari.test/account"], {
@@ -679,7 +700,7 @@ test("the Antigravity recorder replaces the OS user name, a home path, an email,
       shell: NEUTRAL_SHELL,
     });
     // The model picker keeps the recorded model and the one the agent had selected, which the driver compares before it changes the model.
-    const created = frames.find((frame) => frame.kind === "stdout" && Array.isArray((messageOf(frame)["result"] as { configOptions?: unknown } | undefined)?.configOptions))!;
+    const created = frames.find((frame) => isAcpOutput(frame) && Array.isArray((messageOf(frame)["result"] as { configOptions?: unknown } | undefined)?.configOptions))!;
     const option = ((messageOf(created)["result"] as { configOptions: Array<{ currentValue: string; options: Array<{ value: string }> }> }).configOptions)[0]!;
     assert.equal(option.currentValue, "fake-pro-high");
     assert.deepEqual(option.options.map((entry) => entry.value), ["fake-pro-high", "fake-flash"]);
@@ -719,7 +740,7 @@ test("the Antigravity recorder replaces each kind of account detail as agy's ACP
     const text = fs.readFileSync(outcome.file!, "utf8");
     for (const leaked of ["3271", "131072", "0.02187", "0.239", '"412"', "2026-11-26T03", "18307", "1693", "google-workspace", "Google Workspace", "vertex-ai", "Vertex AI"]) assert.ok(!text.includes(leaked), `${outcome.scenario}: ${leaked} is gone`);
     const updates = (await readRecording(outcome.file!)).frames.flatMap((entry) => {
-      const params = entry.frame.kind === "stdout" ? (messageOf(entry.frame)["params"] as { update?: { sessionUpdate?: string } } | undefined) : undefined;
+      const params = isAcpOutput(entry.frame) ? (messageOf(entry.frame)["params"] as { update?: { sessionUpdate?: string } } | undefined) : undefined;
       return params?.update === undefined ? [] : [params.update];
     });
     // The planted report, and the one the fake agent sends at the end of every turn (1200 of 200000 tokens).

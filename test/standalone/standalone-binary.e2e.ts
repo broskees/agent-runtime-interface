@@ -6,6 +6,13 @@
 // `acp` driver runs the fake ACP agent by its path (over ACP v1 and v2), and
 // each completes a turn whose approval the host answers through `respond`.
 //
+// The binary also keeps the promise that agents end when `ari-driver` dies:
+// serving the agent-group fixture driver (loaded from disk by module path),
+// it is SIGKILLed, or gets SIGHUP, while two agents run, and within 5 s every
+// agent, grandchild, process group and guard must be gone
+// (test/wire/driver-death-scenario.ts, which test/wire/driver-death.test.ts
+// runs under Node).
+//
 // The gate runs it after the binary build (`pnpm run test:binary`); it is not
 // matched by `pnpm run test`, which runs before the binary exists.
 
@@ -20,6 +27,7 @@ import { firstPartyDrivers } from "../../scripts/build-binary.ts";
 import type { AriEvent, Request } from "../../src/index.ts";
 import { createCoordination, createNodeHostServices } from "../../src/node/index.ts";
 import { startAriDriver } from "../../src/wire/index.ts";
+import { assertEndedEverything, runDriverDeath } from "../wire/driver-death-scenario.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BUILD = path.join(ROOT, "build", "standalone", "linux-x64");
@@ -176,5 +184,17 @@ for (const { name, run } of RUNS) {
     }
     // The fake pi keeps its sessions under the driver's state directory, never in the user's ~/.pi.
     assert.equal(fs.existsSync(path.join(where.home, ".pi")), false);
+  });
+}
+
+for (const { death, how } of [
+  { death: "SIGKILL", how: "is SIGKILLed" },
+  { death: "SIGHUP", how: "gets SIGHUP, disposes and exits 0" },
+] as const) {
+  test(`when the standalone ari-driver ${how}, without Node, every agent, grandchild, process group and guard is gone within 5 s`, async () => {
+    requireBinaries();
+    const where = nodeFreeRoot();
+    const outcome = await runDriverDeath({ command: [ARI_DRIVER], death, env: where.env, cwd: where.project });
+    assertEndedEverything(outcome, death);
   });
 }

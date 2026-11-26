@@ -14,9 +14,27 @@
 // process groups; there `taskkill /T` ends the child's process tree instead
 // (not exercised by the test suite, which runs on Linux).
 //
+// When the owner dies: the process that created the service (the owner, for
+// example `ari-driver`) may end without running any of that cleanup: SIGKILL,
+// a crash, an out-of-memory kill, or a signal that skips `exit` listeners. On
+// Linux and macOS every child's process group still ends within about
+// `killGraceMs` plus a fraction of a second. Each child gets a guard: a
+// `/bin/sh` process started right after the child, in a session of its own so
+// no signal sent to the child's group or the owner's group reaches it. The
+// guard blocks reading a pipe whose other end only the owner holds and never
+// writes to. When the owner dies the operating system closes that end, the
+// read ends, and the guard sends SIGTERM to the child's process group, waits
+// up to `killGraceMs` for it to empty, sends SIGKILL to what is left, and
+// exits. While the owner lives the guard only waits. Once the child's group is
+// gone, the owner closes the pipe itself and the guard exits at once, so
+// `dispose()` returns only after every guard is gone too. A guard shows in
+// `ps` as `/bin/sh -c … ari-agent-guard <group id> <grace ms>`, and costs one
+// idle shell per child. A child whose guard cannot start is ended at once and
+// its spawn rejects.
+//
 // Disposal: a child is registered for cleanup in the same synchronous step
 // that starts it, so `dispose()` always sees it and returns only once the
-// process group of every child it spawned is gone.
+// process group of every child it spawned, and that child's guard, is gone.
 //
 // Output: `stdout` and `stderr` are pipes. Read both, or a child that writes a
 // lot may block once a pipe buffer is full.
@@ -183,11 +201,81 @@ async function terminateTreeOnWindows(pid: number): Promise<void> {
   });
 }
 
+/** True when `promise` settles within `ms`. The timer keeps the event loop alive while it waits. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => true), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The guard's program, run as `/bin/sh -c GUARD_SCRIPT ari-agent-guard <group
+// id> <grace ms>` with its stdin the pipe only the owner holds. `read` returns
+// only at end-of-file, since the owner never writes. Then: SIGTERM to the
+// group (nothing to do if it is already gone), poll every 0.1 s until the
+// group is empty, and SIGKILL it once the grace has passed. POSIX sh only, so
+// it runs under bash, dash and macOS's sh alike.
+const GUARD_SCRIPT = [
+  "while read -r _; do :; done",
+  'kill -s TERM -- "-$1" 2>/dev/null || exit 0',
+  "waited=0",
+  'while kill -s 0 -- "-$1" 2>/dev/null; do if [ "$waited" -ge "$2" ]; then kill -s KILL -- "-$1" 2>/dev/null; exit 0; fi; sleep 0.1; waited=$((waited + 100)); done',
+].join("; ");
+
+/** The guard's `$0`, which `ps` shows. */
+const GUARD_NAME = "ari-agent-guard";
+
+interface Guard {
+  /** Closes the owner's end of the pipe and resolves once the guard has exited. Call it only once the child's group is gone. */
+  release(): Promise<void>;
+}
+
+/** Starts the guard of process group `groupId`, or returns undefined when `/bin/sh` cannot start. */
+function startGuard(groupId: number, graceMs: number): Guard | undefined {
+  let guard: ChildProcess;
+  try {
+    guard = spawnChildProcess("/bin/sh", ["-c", GUARD_SCRIPT, GUARD_NAME, String(groupId), String(graceMs)], {
+      stdio: ["pipe", "ignore", "ignore"],
+      // A session of its own: signals sent to the child's group, or to the owner's group, never reach it.
+      detached: true,
+      cwd: "/",
+      // The guard needs only `sleep`. It gets nothing else of the owner's environment.
+      env: { PATH: ["/usr/bin", "/bin", process.env.PATH].filter((entry) => entry !== undefined && entry !== "").join(":") },
+    });
+  } catch {
+    return undefined;
+  }
+  guard.on("error", () => {});
+  if (guard.pid === undefined || guard.stdin === null) return undefined;
+  const pipe = guard.stdin;
+  pipe.on("error", () => {});
+  const exited = new Promise<void>((resolve) => {
+    if (guard.exitCode !== null || guard.signalCode !== null) resolve();
+    else guard.once("exit", () => resolve());
+  });
+  let released: Promise<void> | undefined;
+  return {
+    release: () =>
+      (released ??= (async () => {
+        // End-of-file for the guard: it finds the group gone and exits.
+        pipe.destroy();
+        if (await settlesWithin(exited, KILL_WAIT_MS)) return;
+        guard.kill("SIGKILL");
+        await settlesWithin(exited, KILL_WAIT_MS);
+      })()),
+  };
+}
+
 // Process groups still running in this host process. When the host process
 // exits without disposing its services, they get SIGKILL on the way out, so a
 // host that forgets to dispose does not leave agents running. Signals that end
 // the host without running `exit` listeners (an unhandled SIGINT, SIGKILL)
-// skip this; hosts should dispose on shutdown.
+// skip this; each child's guard ends its group then.
 const runningGroups = new Set<number>();
 let exitListenerInstalled = false;
 
@@ -317,12 +405,23 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
       });
       const isRunning = (): boolean => child.exitCode === null && child.signalCode === null;
 
+      // Ends the child's group if this process dies without cleaning up. A child that cannot be guarded does not run.
+      const guard = isWindows ? undefined : startGuard(pid, killGraceMs);
+      if (!isWindows && guard === undefined) {
+        signalGroup(pid, "SIGKILL");
+        throw callErrors.invalidState("spawn_failed", `Cannot spawn ${request.command}: /bin/sh did not start the guard that ends its process group if this process dies`);
+      }
+      const releaseGuard = async (): Promise<void> => {
+        await guard?.release();
+      };
+
       const terminate = async (): Promise<void> => {
         if (isWindows) {
           if (isRunning()) await terminateTreeOnWindows(pid);
           return;
         }
         await terminateGroup(pid, killGraceMs);
+        await releaseGuard();
       };
       terminators.add(terminate);
       if (!isWindows) rememberRunningGroup(pid);
@@ -334,8 +433,12 @@ export function createProcessService(options: ProcessServiceOptions): ProcessSer
         clearTimeout(timeoutTimer);
         terminators.delete(terminate);
         if (isWindows) return;
-        // End anything the child left behind in its group, then forget the group.
-        void track(terminateGroup(pid, killGraceMs).finally(() => runningGroups.delete(pid)));
+        // End anything the child left behind in its group, forget the group, then let its guard go.
+        void track(
+          terminateGroup(pid, killGraceMs)
+            .finally(() => runningGroups.delete(pid))
+            .then(releaseGuard),
+        );
       });
 
       return {

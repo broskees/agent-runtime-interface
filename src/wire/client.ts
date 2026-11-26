@@ -323,6 +323,12 @@ class WireClient {
     }
     this.#usedProcessIds.add(processId);
     const child = await host.process.spawn(without(params, "instanceId", "processId") as never);
+    if (this.connection.closed) {
+      // The connection closed while the host was spawning, and the close handler has already
+      // killed every registered child. Nobody would ever kill this one, so end it now.
+      await child.kill().catch(() => undefined);
+      throw callErrors.transport(`The ari/wire connection closed while the host was spawning process ${processId}; the process was killed`);
+    }
     this.#processes.set(processId, { child, instanceId: params.instanceId as string });
     this.connection.afterResponse(context, () => void this.#pumpProcess(processId, child));
     return child.pid === undefined ? {} : { pid: child.pid };

@@ -31,10 +31,12 @@ ari-driver ./drivers.js --export mine  # a module with several drivers
 - **Stdout is the protocol.** Before the driver loads, `ari-driver` points
   `console` and `process.stdout.write` at stderr, so a driver that logs
   cannot corrupt a frame. Diagnostics go to stderr.
-- **Lifetime.** It serves until stdin closes, or until SIGTERM or SIGINT, then
-  disposes every instance (which closes their sessions and ends their child
-  processes) and exits 0. Cleanup gets at most 10 seconds. A load failure
-  prints the reason to stderr and exits 1; a usage error exits 2.
+- **Lifetime.** It serves until stdin closes, or until SIGTERM, SIGINT or
+  SIGHUP, then disposes every instance (which closes their sessions and ends
+  their child processes) and exits 0. Cleanup gets at most 10 seconds. A load
+  failure prints the reason to stderr and exits 1; a usage error exits 2. If
+  it dies without that cleanup, its agents still end: see
+  [Agents end when `ari-driver` dies](#agents-end-when-ari-driver-dies).
 
 ## Framing
 
@@ -244,10 +246,48 @@ In delegated mode:
    the instance and the `processId`; a child that instance did not spawn
    answers `not_found`.
 5. When the connection closes, the host kills the children it started for
-   the driver.
+   the driver. A spawn that was still in progress then is killed as soon as it
+   resolves, and never registered.
 
 The driver drops output or an exit for a `processId` that is not running,
 and `ari-driver` reports it on stderr.
+
+### Agents end when `ari-driver` dies
+
+On Linux and macOS, every process `ari/node`'s process service starts (the
+agents `ari-driver` spawns locally, and the children a TypeScript host using
+`createNodeHostServices` spawns in delegated mode) ends, with everything in
+its process group, within about the kill grace (2 seconds by default) plus a
+fraction of a second after the process that owns the service ends, however it
+ends: dispose, SIGTERM, SIGINT, SIGHUP, SIGKILL, a crash or an
+out-of-memory kill. Windows keeps ending a child's tree with `taskkill /T`,
+and only while the owner lives.
+
+How:
+
+- Each child leads its own process group, so one `kill(-group)` reaches
+  everything it started.
+- While the owner lives, it ends groups itself: on dispose, a timeout,
+  `kill()` without a signal, and, when a child exits on its own, whatever it
+  left in its group. It sends SIGTERM, then SIGKILL after the grace.
+- Beside each child it starts a guard: a `/bin/sh` in a session of its own,
+  so no signal to the child's group or to the owner's group reaches it. The
+  guard blocks reading a pipe whose other end only the owner holds and never
+  writes. When the owner dies, the operating system closes that end; the
+  guard then sends SIGTERM to the child's group, waits up to the grace for it
+  to empty, sends SIGKILL to what is left, and exits. Once a group is gone
+  while the owner lives, the owner closes the pipe and the guard exits at
+  once, so `dispose()` returns only after every guard is gone too.
+- `ps` shows a guard as `/bin/sh -c … ari-agent-guard <group id> <grace ms>`.
+  Its environment holds only `PATH`, for `sleep`. It costs one idle shell per
+  child: on Linux with bash as `/bin/sh`, about 3.8 MB resident, 0.35 MB of it
+  not shared, and under 1 ms more per spawn.
+- A child whose guard cannot start is ended at once, and its spawn rejects
+  with `invalid_state` (`spawn_failed`).
+
+A host in another language that runs `ari-driver` gets this for free: it only
+has to end `ari-driver` (closing its stdin lets it dispose cleanly). A host
+that runs the children itself in delegated mode owns their cleanup.
 
 ## Synchronous members
 

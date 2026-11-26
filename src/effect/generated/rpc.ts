@@ -645,8 +645,10 @@ export const HostProcessResolveExecutableParamsSchema: Effect.Schema.Codec<Wire.
   Schema.Struct({
     instanceId: Schema.String,
     name: Schema.String,
-    /** A PATH-style list of directories to search instead of the host default. */
+    /** A PATH-style list of directories to search instead of the host default when `env` is not supplied. */
     path: Schema.optional(Schema.String),
+    /** Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`. */
+    env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   }),
   [kit.OtherFields],
 ).annotate({ identifier: "HostProcessResolveExecutableParams" });

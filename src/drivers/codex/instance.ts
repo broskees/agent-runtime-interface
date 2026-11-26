@@ -242,9 +242,8 @@ export class CodexInstance implements Instance {
     const checkedAt = new Date().toISOString();
     const binary = this.#config.binaryPath;
     const env = this.#forwardedEnvironment();
-    // Use the same PATH for lookup and spawn, on the host that owns the process.
-    const searchPath = env["PATH"];
-    const path = await this.#host.process.resolveExecutable(binary, searchPath === undefined ? undefined : { path: searchPath });
+    // The process owner interprets env as for spawn. Keep path for older hosts.
+    const path = await this.#host.process.resolveExecutable(binary, { env, ...(env["PATH"] === undefined ? {} : { path: env["PATH"] }) });
     if (path === null) return { ok: false, installed: false, error: this.#unavailable().callError, checkedAt };
     let version: string | undefined;
     let ok = false;

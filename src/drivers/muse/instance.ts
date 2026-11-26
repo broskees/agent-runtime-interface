@@ -203,9 +203,8 @@ export class MuseInstance implements Instance {
       return { ok: false, installed: false, error: toCallError(error) ?? callErrors.transport(String(error)).callError, checkedAt };
     }
     const env = this.#forwardedEnvironment();
-    // Use the same PATH for lookup and spawn, on the host that owns the process.
-    const searchPath = env["PATH"];
-    const path = await this.#host.process.resolveExecutable(this.#config.binaryPath, searchPath === undefined ? undefined : { path: searchPath });
+    // The process owner interprets env as for spawn. Keep path for older hosts.
+    const path = await this.#host.process.resolveExecutable(this.#config.binaryPath, { env, ...(env["PATH"] === undefined ? {} : { path: env["PATH"] }) });
     if (path === null) return { ok: false, installed: false, error: this.#cliMissing().callError, checkedAt };
     let version: string | undefined;
     let ok = false;

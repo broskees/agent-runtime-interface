@@ -85,7 +85,7 @@ export interface FakeHostOptions<Config = ConfigValues> {
   /** Starts a process. Without it, every spawn rejects with `not_found`. */
   readonly spawn?: (request: FakeSpawnRequest) => Promise<SpawnedProcess>;
   /** Finds an executable. Without it, every lookup returns null. */
-  readonly resolveExecutable?: (name: string, options?: { path?: string }) => Promise<string | null>;
+  readonly resolveExecutable?: HostServices["process"]["resolveExecutable"];
   /** Secrets stored before the driver starts. */
   readonly secrets?: ReadonlyArray<{ readonly namespace: string; readonly key: string; readonly value: Uint8Array | string }>;
   /** Readable attachments by reference; any other reference resolves to null. */

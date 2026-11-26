@@ -34,8 +34,10 @@ nothing. `create()` only reads which managed credential the instance holds.
 ## The user's own `codex`, and its minimum
 
 ARI runs the `codex` the user installed, found on `PATH` or at the path the
-config names, and never downloads, installs or updates one. If the instance
-supplies `environment.PATH`, both lookup and `codex --version` use it. The minimum is
+config names, and never downloads, installs or updates one. Lookup and
+`codex --version` use the same instance environment additions. The process
+owner interprets `PATH` (including spellings such as `Path` on Windows).
+The minimum is
 Codex CLI 0.172.0, the lower bound of the tested range `>=0.172.0 <0.173.0`.
 With an older `codex`, `status()` is `unavailable` with `driver_unavailable`
 (with `installed: true` and the version found), and `openSession` rejects with

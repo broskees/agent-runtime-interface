@@ -41,7 +41,7 @@ import type { AriEvent } from "../generated/events.ts";
 import type { EnvPolicy, ProcessExit } from "../generated/host.ts";
 import type { InitializeParams, InitializeResult } from "../generated/handshake.ts";
 import type { AuthMethod, InstanceStatus } from "../generated/instance.ts";
-import type { InstanceDescriptor, SessionDescriptor } from "../generated/rpc.ts";
+import type { HostProcessResolveExecutableParams, InstanceDescriptor, SessionDescriptor } from "../generated/rpc.ts";
 import type { RespondResult } from "../generated/session.ts";
 import type { SubagentOutcome } from "../generated/subagent.ts";
 import type { UsageRecord } from "../generated/usage.ts";
@@ -274,8 +274,13 @@ class WireClient {
         return host.secrets.delete(params.namespace as string, params.key as string);
       case "host/process.spawn":
         return this.#spawn(host, params, context);
-      case "host/process.resolveExecutable":
-        return host.process.resolveExecutable(params.name as string, params.path === undefined ? undefined : { path: params.path as string });
+      case "host/process.resolveExecutable": {
+        const { name, path, env } = params as HostProcessResolveExecutableParams;
+        return host.process.resolveExecutable(name, path === undefined && env === undefined ? undefined : {
+          ...(path === undefined ? {} : { path }),
+          ...(env === undefined ? {} : { env }),
+        });
+      }
       case "host/process.write":
         return this.#process(params).write(base64ToBytes(params.data as string));
       case "host/process.closeStdin":

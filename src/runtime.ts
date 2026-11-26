@@ -25,6 +25,7 @@ import type {
   Lease,
   McpServerForOptions,
   ProcessExit,
+  ResolveExecutableInput,
   SpawnRequest,
 } from "./generated/host.ts";
 import type {
@@ -274,7 +275,8 @@ export interface HostServices<Config = ConfigValues> {
     /** Ambient environment variables removed before every spawn. */
     readonly envPolicy: EnvPolicy;
     spawn(request: SpawnRequest): Promise<SpawnedProcess>;
-    resolveExecutable(name: string, options?: { path?: string }): Promise<string | null>;
+    /** Search as for a spawn with `env`, or use an explicit `path` when `env` is absent. */
+    resolveExecutable(name: string, options?: Omit<ResolveExecutableInput, "name">): Promise<string | null>;
   };
   attachments: {
     /** Null when the bytes cannot be had; the driver must then tell the agent. */

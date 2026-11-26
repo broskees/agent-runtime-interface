@@ -12,9 +12,10 @@ import { isAriError } from "../../../src/index.ts";
 import { connectDriver, serveDriver } from "../../../src/wire/index.ts";
 import { memoryTransportPair } from "../../wire/helpers.ts";
 
-const [command, root] = process.argv.slice(2);
+const [command, root, scenario] = process.argv.slice(2);
 assert.ok(command === "codex" || command === "muse");
 assert.ok(root);
+assert.ok(scenario === "Path override" || scenario === "case collision");
 const driver = command === "codex" ? codexDriver : museDriver;
 const [old, minimum] = command === "codex" ? ["0.100.0", "0.172.0"] : ["1.4.7", "1.4.25"];
 const hostBin = path.join(root, "host-bin");
@@ -58,14 +59,17 @@ const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv:
   XDG_CACHE_HOME: path.join(root, "cache"),
   XDG_RUNTIME_DIR: path.join(root, "run"),
 } });
-const config = driver.defaultConfig();
+const config = { ...driver.defaultConfig() };
 const host = { ...createFakeHost({ config }), process: service };
 const [driverSide, hostSide] = memoryTransportPair();
 const server = serveDriver(driver, driverSide);
 try {
   const connection = await connectDriver(hostSide, { delegateProcesses: true });
   assert.equal(await service.resolveExecutable(command), supportedBinary);
-  const instance = await connection.driver.create(host, { instanceId: "win32-owner", config, environment: { Path: instanceBin } });
+  // In the collision case the merged env has Path first but PAth sorts
+  // earlier, so the spawn and lookup must choose PAth, not insertion order.
+  const key = scenario === "case collision" ? "PAth" : "Path";
+  const instance = await connection.driver.create(host, { instanceId: "win32-owner", config, environment: { [key]: instanceBin } });
   try {
     const status = await instance.status();
     assert.equal(status.state, "unavailable");

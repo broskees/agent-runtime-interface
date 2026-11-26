@@ -91,6 +91,7 @@ import { AsyncQueue } from "../../../src/conformance/util.ts";
 import type {
   CommandExecutionApprovalDecision,
   FileChangeApprovalDecision,
+  Model,
   RateLimitSnapshot,
   SandboxPolicy,
   Thread,
@@ -103,6 +104,12 @@ import type { SpawnedProcess } from "../../../src/index.ts";
 import { CodexFrameValidator } from "./schema-validator.ts";
 
 export const FAKE_CODEX_VERSION = "0.172.0";
+
+/** What `model/list` answers unless a test names other models. */
+export const FAKE_CODEX_MODELS: readonly Model[] = [
+  { id: "fake-large", model: "fake-large", displayName: "Fake large", description: "The default fake model.", hidden: false, isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }, { reasoningEffort: "medium", description: "Balanced" }] },
+  { id: "fake-small", model: "fake-small", displayName: "Fake small", description: "", hidden: false, isDefault: false, defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }] },
+];
 export const FAKE_MCP_SERVER = "fake-tools";
 export const FAKE_MCP_TOOL = "echo";
 export const FAKE_MCP_RESOURCE = "fake://readme";
@@ -209,6 +216,13 @@ export interface StoredThread {
   readonly launches: JsonObject[];
 }
 
+/** A store as JSON: what a fake `codex` process (fake-codex-cli.ts) keeps in its Codex home between processes, as Codex keeps rollouts and its state database there. */
+export interface FakeCodexStoreSnapshot {
+  readonly threads: readonly StoredThread[];
+  readonly account: FakeCodexStore["account"];
+  readonly counts: { readonly threads: number; readonly turns: number; readonly items: number; readonly processes: number };
+}
+
 /** The threads under one Codex home. */
 export class FakeCodexStore {
   readonly home: string;
@@ -244,6 +258,23 @@ export class FakeCodexStore {
     this.#processCount += 1;
     return String(1000 + this.#processCount);
   }
+
+  /** The store as JSON. Writer locks are not kept: they belong to the live processes. */
+  snapshot(): FakeCodexStoreSnapshot {
+    return { threads: [...this.threads.values()], account: this.account, counts: { threads: this.#threadCount, turns: this.#turnCount, items: this.#itemCount, processes: this.#processCount } };
+  }
+
+  /** A store under `home` holding what `snapshot` gave, so its ids go on where they stopped. */
+  static restore(home: string, snapshot: FakeCodexStoreSnapshot): FakeCodexStore {
+    const store = new FakeCodexStore(home);
+    for (const thread of snapshot.threads) store.threads.set(thread.id, thread);
+    store.account = snapshot.account;
+    store.#threadCount = snapshot.counts.threads;
+    store.#turnCount = snapshot.counts.turns;
+    store.#itemCount = snapshot.counts.items;
+    store.#processCount = snapshot.counts.processes;
+    return store;
+  }
 }
 
 /** One turn as the puppet drives it. */
@@ -274,6 +305,8 @@ interface PendingServerRequest {
 export interface NativeApprovalMapping {
   /** The decision Codex offers for each of the kit's option ids. */
   readonly nativeDecisions: { readonly [kitOptionId: string]: CommandExecutionApprovalDecision | FileChangeApprovalDecision };
+  /** The item the approval is about: Codex reports the command or file change under the same id. */
+  readonly itemId: string;
 }
 
 /** The Codex-only puppet steps, on top of the kit's `NativeTurn`. */
@@ -526,13 +559,7 @@ export class FakeAppServer {
       case "account/rateLimitResetCredit/consume":
         return { outcome: "reset" };
       case "model/list":
-        return {
-          data: [
-            { id: "fake-large", model: "fake-large", displayName: "Fake large", description: "The default fake model.", hidden: false, isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }, { reasoningEffort: "medium", description: "Balanced" }] },
-            { id: "fake-small", model: "fake-small", displayName: "Fake small", description: "", hidden: false, isDefault: false, defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }] },
-          ],
-          nextCursor: null,
-        };
+        return { data: [...(this.world.options.models ?? FAKE_CODEX_MODELS)], nextCursor: null };
       case "thread/start":
         return this.#startThread(params);
       case "thread/resume":
@@ -1037,6 +1064,8 @@ export interface FakeCodexOptions {
   readonly version?: string;
   /** The model meets a goal in the first turn Codex starts for it. Off: each goal turn waits in `autonomousTurns`. */
   readonly goalAutopilot?: boolean;
+  /** What `model/list` answers; FAKE_CODEX_MODELS when left out. */
+  readonly models?: readonly Model[];
 }
 
 /** Everything one rig's fake Codex holds: stores, processes, the puppet queues and what was served. */
@@ -1409,16 +1438,17 @@ export class FakeCodexWorld {
         };
         const command = [...(approval.command ?? ["git", "status"])];
         const mapped = pinnedApproval(approval, command);
-        const handle = {
-          nextReply: () => (replies.length > 0 ? Promise.resolve(replies[0]!) : new Promise<string>((resolve) => waiters.push(resolve))),
-          replies: async () => [...replies],
-          nativeDecisions: Object.fromEntries(mapped.byKit),
-        };
         // Under approval policy `never` Codex sends no ordinary approval at all (core/src/exec_policy.rs:907–911): there is nothing to ask, and no reply to report.
         if (approval.kind === "command" && thread.settings.approvalPolicy === "never") {
           throw new Error("Codex sends no approval under approval policy never: the command runs unasked, so there is no approval to answer");
         }
         const itemId = store.newItemId("call");
+        const handle = {
+          nextReply: () => (replies.length > 0 ? Promise.resolve(replies[0]!) : new Promise<string>((resolve) => waiters.push(resolve))),
+          replies: async () => [...replies],
+          nativeDecisions: Object.fromEntries(mapped.byKit),
+          itemId,
+        };
         let pending: Promise<unknown>;
         if (approval.kind === "command") {
           pending = server.request("item/commandExecution/requestApproval", {

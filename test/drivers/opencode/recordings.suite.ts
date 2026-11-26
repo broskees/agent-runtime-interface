@@ -18,6 +18,7 @@ import * as zlib from "node:zlib";
 import { scanRecordingText } from "../../../scripts/check-recordings.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { encodeRecording, readRecording } from "../../recordings/format.ts";
+import { wholeWordsOf } from "../../recordings/whole-words.ts";
 import type { Frame, Recording } from "../../recordings/format.ts";
 import { OPENCODE_IGNORED_FIELDS, opencodeNativeAnswers } from "../../recordings/opencode/frames.ts";
 import { OPENCODE_PROTOCOL_WORDS } from "../../recordings/opencode/protocol-words.ts";
@@ -445,23 +446,6 @@ for (const [recordedAs, replayedAs] of [
   });
 }
 
-/** Every place in a recording where `name` is a whole word, other than a protocol word of its key or a frame's format field. */
-function wholeWordsOf(name: string, frames: readonly Frame[]): string[] {
-  const word = new RegExp(`(?<![A-Za-z0-9_])${escape(name)}(?![A-Za-z0-9_])`);
-  const found: string[] = [];
-  const walk = (value: unknown, key: string | undefined, at: string): void => {
-    if (typeof value === "string") {
-      if (key !== undefined && OPENCODE_PROTOCOL_WORDS[key]?.includes(value)) return;
-      if (word.test(value)) found.push(`${at}: ${JSON.stringify(value)}`);
-    } else if (Array.isArray(value)) value.forEach((each, index) => walk(each, key, `${at}[${index}]`));
-    else if (typeof value === "object" && value !== null) for (const [field, entry] of Object.entries(value)) walk(entry, field, `${at}.${field}`);
-  };
-  frames.forEach((frame, index) => {
-    for (const [field, entry] of Object.entries(frame)) if (!FRAME_FORMAT_FIELDS.has(field) || typeof entry === "object") walk(entry, field, `frame ${index + 2}.${field}`);
-  });
-  return found;
-}
-
 test("the OpenCode recorder sanitises what it writes: no workspace path, no HOME, no OS user name in command output or replies, and the scan passes", async () => {
   const osName = os.userInfo().username;
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-opencode-sanitise-")));
@@ -478,7 +462,7 @@ test("the OpenCode recorder sanitises what it writes: no workspace path, no HOME
       assert.ok(text.includes("<WORKSPACE>/cwd"), `${outcome.scenario}: the workspace placeholder`);
       assert.ok(!text.includes(home), `${outcome.scenario}: the HOME`);
       const frames = (await readRecording(outcome.file!)).frames.map((entry) => entry.frame);
-      assert.deepEqual(wholeWordsOf(osName, frames), [], `${outcome.scenario}: the OS user name is nowhere in the recording but in protocol words`);
+      assert.deepEqual(wholeWordsOf(osName, frames, OPENCODE_PROTOCOL_WORDS), [], `${outcome.scenario}: the OS user name is nowhere in the recording but in protocol words`);
       assert.deepEqual(scanRecordingText(text, outcome.file!, { home }), [], outcome.scenario);
       if (outcome.scenario === "simple") assert.ok(text.includes("<USER> said ok, from <HOME>/notes and <EMAIL>."), "the reply, sanitised");
       if (outcome.scenario === "approval_allowed") assert.ok(text.includes("drwx------ 2 <USER> <USER> 4096"), "the command output, sanitised");

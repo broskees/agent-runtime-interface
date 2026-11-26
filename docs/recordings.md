@@ -471,11 +471,17 @@ another type than the rule's stays as it is. The code is
 | any other usage percentage | `usedPercent`, `remainingPercent` (a number) | `0` |
 | whether the account reached a limit: Codex's `rateLimitReachedType` and `spendControlReached` | `rateLimitReachedType` (a string), `spendControlReached` (a boolean) | `null`, `false` |
 | the client's machine in a user agent: Codex's `initialize` answer names the operating system, its version, the architecture and the terminal after the product (`codex_cli_rs/0.172.0 (<system>; x86_64) <terminal>`) | `userAgent` (a string with a space) | the product and its version alone, `codex_cli_rs/0.172.0` |
+| the Codex remote-control host and installation | inbound `remoteControl/status/changed` parameters `serverName` and `installationId` (strings) | `<SERVER_NAME>` and `<INSTALLATION_ID>` |
+| a Codex project identifier | `projectId` (a nonempty string on an inbound Codex `Thread`) | `<PROJECT_ID>` |
+| native Codex token counts | `contentTokenCount`, and the counts under `tokenUsage.total` and `tokenUsage.last` (numbers) | `0`; `modelContextWindow` still describes the model |
+| a numeric process identifier serialized as a string, as in Codex command execution | `pid`, `ppid`, `processId` | `"1000"` |
 
 Codex's plan type (`planType`, in a rate-limit snapshot and in
 `account/updated`) is a plan name, `<PLAN>`, by the first rule. The Codex
 driver reads none of these but the windows and the credit balance, which it
 turns into a `limits.updated` event.
+
+The driver also reads the neutral turn token counts as usage events.
 
 Three more account details have a shape rather than one field:
 
@@ -1392,6 +1398,49 @@ When the variable names a model Codex does not list, or it is not set and
 Codex lists no such model, the recorder stops before the first prompt, lists
 the models, and records nothing. Replay starts the thread with the model the
 header names.
+
+### What the live Codex tapes add to the fake
+
+The six Codex 0.172.0 recordings use `gpt-6-luna`. Replay keeps the observed
+frames. References are relative to `test/drivers/codex/recordings/`.
+
+- The live handshake announces remote-control status even when disabled.
+  It also announces account state, built-in MCP startup, moderation,
+  read state and rate limits. The six-scenario fake does not emit these on
+  its own (`simple.ndjson:10,14,18–19,24,27–28`). The built-in `codex_apps`
+  server appears in startup status, but no scenario calls it.
+- The live approval follows the command's `item/started`. It offers an
+  exec-policy amendment as well as accept and cancel. The host accepts just
+  once or cancels; it never takes the amendment. The fake puppet asks first,
+  then emits the command item, and offers no amendment in these scenarios
+  (`approval_allowed.ndjson:39–44`, `approval_denied.ndjson:39–43`). The live
+  command reports its marker in the completed item, without the fake's
+  command output delta (`approval_allowed.ndjson:44`).
+- Real turn replies vary in delta size and timing. The interrupted turn can
+  end without a separate completion for the assistant message that was
+  streaming (`interrupt.ndjson:22–30`).
+- The live resume carries history cursors and clears a goal on the resumed
+  thread, and the explicit no-tools server in the recorder fails to connect
+  on the loopback discard port (`resume.ndjson:43–53,58–62`). Those are not
+  simulated as live network behavior by the fake. The failed server does not
+  prevent the second turn from completing (`resume.ndjson:74`).
+
+The live recorder allows only one approval for the exact marker command in
+the isolated working directory. It refuses a different command, a different
+working directory, any other kind of approval, or a second request.
+
+#### Replaying the pre-admission captures
+
+The six original live tapes predate the driver's `codex --version` session
+admission probe. Only the live replay test opts in to compatibility. The
+adapter checks each file's body checksum and pins that checksum and the
+original header metadata. It supplies a test-only successful version probe
+using the observed version from the header, just before the recorded login
+at line 2, and again at line 36 of `resume.ndjson`. It runs no executable.
+The probe response is not captured traffic. Wrong or extra spawns still fail,
+and the existing sequencer matches every original frame in order at its
+original file line. Default replay has no adapter: new tapes must record
+their own admission probes, and a changed or missing probe fails replay.
 
 ## How to record
 

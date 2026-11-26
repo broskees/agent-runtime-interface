@@ -157,6 +157,8 @@ export interface ScenarioHost {
   /** How long the runner waits for any one thing before it reports a stall. */
   readonly timeoutMs: number;
   readonly native?: NativeProgress;
+  /** When supplied, a live host may approve only requests this predicate accepts. */
+  readonly mayApprove?: (request: Request) => boolean;
 }
 
 export interface HostRequest {
@@ -230,8 +232,10 @@ export async function runScenario(scenario: Scenario, host: ScenarioHost): Promi
     if (body.type === "request.upsert" && body.request.status === "pending" && body.request.kind !== undefined && !requests.has(body.request.id)) {
       const request = body.request as Request;
       const options = request.options ?? [];
+      const wantsApproval = scenario.host.answer === "allow_once";
+      const refused = wantsApproval && host.mayApprove !== undefined && !host.mayApprove(request);
       const option =
-        scenario.host.answer === "allow_once"
+        wantsApproval && !refused
           ? options.find((each) => each.decision === "accept" && (each.scope === undefined || each.scope === "once"))
           : (options.find((each) => each.decision === "decline") ?? options.find((each) => each.decision === "cancel"));
       requests.set(request.id, { request, ...(option === undefined ? {} : { optionId: option.optionId }) });
@@ -240,6 +244,7 @@ export async function runScenario(scenario: Scenario, host: ScenarioHost): Promi
         return;
       }
       pending.push(current.respond({ requestId: request.id, responseKey: `${scenario.name}-host-${requests.size}`, optionId: option.optionId }).catch(fail));
+      if (refused) fail(new Error(`${scenario.name}: refused a request outside the approved test command`));
     }
     interruptOnText(current, event);
   };

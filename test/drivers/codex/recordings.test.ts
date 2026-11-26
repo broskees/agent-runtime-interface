@@ -295,6 +295,7 @@ test("Codex replay reports first-spawn drift when the session admission probe is
       return true;
     });
   }
+  await assert.rejects(replayCodex(recording.file, { preAdmissionLiveCapture: true }), /only for the six pinned live Codex captures/);
 });
 
 test("Codex replay refuses a prerelease reported by the admission probe even when the header names a supported release", async () => {

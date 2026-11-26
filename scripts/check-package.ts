@@ -15,7 +15,10 @@
 //     condition points at src/, so the published manifest must leave it
 //     out), or has runtime dependencies;
 //   - the root export, bundled and minified for a neutral platform, exceeds
-//     the byte budget in scripts/size-budget.json.
+//     the byte budget in scripts/size-budget.json;
+//   - a shipped file holds code of the Claude Agent SDK, found by a string
+//     unique to its sdk.mjs (CLAUDE_SDK_CODE_MARKER). The SDK's licence is
+//     Anthropic's, not MIT, so ARI never redistributes it.
 //
 // Usage: node scripts/check-package.ts [--root <dir>] [--tarball <file.tgz>]
 //   --tarball checks that tarball's own package.json and file list instead of
@@ -25,8 +28,17 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { build } from "esbuild";
 import { stagedContents } from "./pack.ts";
+
+/**
+ * A string unique to the Claude Agent SDK's sdk.mjs: the environment variable
+ * it sets for every Claude Code process it starts. ARI's own code never names
+ * it, so a shipped file (or the standalone `ari-driver`) that contains it
+ * holds the SDK's code.
+ */
+export const CLAUDE_SDK_CODE_MARKER = "CLAUDE_CODE_SDK_READS_SESSION_STATE";
 
 const ALLOWED_EXACT = ["package.json", "README.md", "LICENSE", "CHANGELOG.md"];
 const REQUIRED_EXACT = ["package.json", "README.md", "LICENSE"];
@@ -227,12 +239,22 @@ export async function rootBundleBytes(root: string, pkg: PackageJson): Promise<n
 export interface PackageContents {
   readonly manifest: PackageJson;
   readonly files: readonly string[];
+  /** The shipped files whose bytes contain `text` (for a packed tarball, the tarball itself). */
+  readonly filesContaining: (text: string) => string[];
 }
 
 /** What the package at `root` ships as scripts/pack.ts stages it: the published package.json and the tarball's file list. */
 export function publishedContents(root: string): PackageContents {
   const { manifest, files } = stagedContents(root);
-  return { manifest: manifest as PackageJson, files };
+  // The stage copies these files from `root` unchanged, except package.json, which holds no code.
+  return { manifest: manifest as PackageJson, files, filesContaining: (text) => files.filter((file) => fs.readFileSync(path.join(root, file)).includes(text)) };
+}
+
+/** Problems from shipped files that hold the Claude Agent SDK's code. */
+export function vendorCodeProblems(contents: PackageContents): string[] {
+  return contents.filesContaining(CLAUDE_SDK_CODE_MARKER).map(
+    (file) => `${file} holds code of @anthropic-ai/claude-agent-sdk (it contains ${CLAUDE_SDK_CODE_MARKER}, a string unique to the SDK's sdk.mjs); ARI must not redistribute the SDK`,
+  );
 }
 
 /**
@@ -242,7 +264,7 @@ export function publishedContents(root: string): PackageContents {
  */
 export async function checkPackage(root: string, contents: PackageContents = publishedContents(root)): Promise<{ problems: string[]; bytes: number; budget: number }> {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as PackageJson;
-  const problems = [...checkManifest(pkg), ...checkTarball(root, pkg, contents.files), ...checkPublishedManifest(contents.manifest, contents.files)];
+  const problems = [...checkManifest(pkg), ...checkTarball(root, pkg, contents.files), ...checkPublishedManifest(contents.manifest, contents.files), ...vendorCodeProblems(contents)];
   const { rootExportMinifiedBytes: budget } = JSON.parse(fs.readFileSync(path.join(root, "scripts", "size-budget.json"), "utf8")) as {
     rootExportMinifiedBytes: number;
   };
@@ -268,7 +290,9 @@ export function tarballContents(tarball: string): PackageContents {
     .map((entry) => entry.slice("package/".length))
     .sort();
   const manifest = JSON.parse(tar(["-xzOf", tarball, "package/package.json"])) as PackageJson;
-  return { manifest, files };
+  // A tar archive stores each file's bytes in one piece, so searching the unpacked archive finds a text inside any file.
+  const archive = gunzipSync(fs.readFileSync(tarball));
+  return { manifest, files, filesContaining: (text) => (archive.includes(text) ? [path.basename(tarball)] : []) };
 }
 
 async function main(argv: string[]): Promise<number> {

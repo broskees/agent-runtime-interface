@@ -84,7 +84,7 @@
     "test:bun": "node scripts/test-bun.ts",
     "check:package": "node scripts/check-package.ts",
     "build:binary": "node scripts/build-binary.ts --fakes",
-    "test:binary": "node --test test/standalone/standalone-binary.e2e.ts",
+    "test:binary": "node --test \"test/standalone/*.e2e.ts\"",
     "test:rust": "cd clients/rust && CARGO_BUILD_JOBS=4 cargo test --locked",
     "test:python": "cd clients/python && uv run --locked pytest",
     "test:go": "cd clients/go && go test -count=1 ./...",

@@ -29,7 +29,7 @@ npm install ari
 
 | You use | Also install |
 |---|---|
-| `ari/drivers/claude` | `@anthropic-ai/claude-agent-sdk` |
+| `ari/drivers/claude` | `@anthropic-ai/claude-agent-sdk`, or nothing: `maintenance.install` downloads it (the only way in the standalone `ari-driver`, besides `sdkDirectory`) |
 | `ari/drivers/cursor` | `@cursor/sdk` |
 | `ari/drivers/opencode` | the `opencode` CLI, plus `@opencode-ai/sdk` for an OpenCode 1.x server or `@opencode/client` for 2.x |
 | `ari/drivers/muse` | `@muse-code/sdk` and the `muse` CLI |
@@ -60,6 +60,20 @@ The package also installs the `ari-driver` bin, which serves a driver over
 release also carries a standalone `ari-driver` executable for linux-x64,
 linux-arm64, darwin-x64, darwin-arm64 and windows-x64, so a host written in
 another language needs no Node installed.
+
+The standalone executable cannot import a package by name, so `npm install`
+beside it does not give the `claude` driver its SDK. A host that ships only
+the executable provides `@anthropic-ai/claude-agent-sdk` in one of two ways:
+call `maintenance.install` on the instance, which downloads the pinned SDK and
+its native Claude Code package for the platform from the npm registry (or the
+config's `sdkRegistry`) into the instance's cache directory, checked against
+the registry's sha512 (or sha384, sha256) integrity, with no Node or npm
+needed, and repairs an install that is no longer whole; or set
+`sdkDirectory` in the driver config to a directory where
+`npm install @anthropic-ai/claude-agent-sdk` ran. ARI does not bundle the SDK
+because its licence is Anthropic's, not MIT; the npm package and the
+executable contain none of its code.
+[docs/drivers/claude.md](docs/drivers/claude.md) has the details.
 
 Each driver has a page in [`docs/drivers/`](docs/drivers/) and a changelog in
 [`changelogs/`](changelogs/).

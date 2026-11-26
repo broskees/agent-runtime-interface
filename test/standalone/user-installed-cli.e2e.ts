@@ -99,11 +99,13 @@ async function withInstance(
   cli: FakeCli,
   config: { readonly [field: string]: unknown },
   body: (instance: Awaited<ReturnType<Awaited<ReturnType<typeof startAriDriver>>["driver"]["create"]>>) => Promise<void>,
+  options: { environment?: { readonly [name: string]: string }; delegateProcesses?: boolean } = {},
 ): Promise<void> {
   assert.ok(fs.existsSync(ARI_DRIVER), `${path.relative(ROOT, ARI_DRIVER)} is missing; run \`pnpm run build:binary\` first`);
   const host = await createNodeHostServices<typeof config>({
     hostRoot: path.join(cli.root, "host"),
     instanceId: `${driver}-user-cli`,
+    baseEnv: cli.env,
     config: { get: async () => ({ config }) },
     attachments: { resolve: async () => null },
     hostTools: {
@@ -117,9 +119,9 @@ async function withInstance(
   });
   // A host that builds its environment policy from the CLI manifest, as Antigravity's driver requires.
   const stripAmbient = driver === "antigravity" ? (ANTIGRAVITY_CLI_MANIFEST.envScrubPrefixes ?? []).map((prefix) => `${prefix}*`) : [];
-  const connection = await startAriDriver({ driver, command: [ARI_DRIVER], env: cli.env, cwd: cli.project, envPolicy: { stripAmbient } });
+  const connection = await startAriDriver({ driver, command: [ARI_DRIVER], env: cli.env, cwd: cli.project, envPolicy: { stripAmbient }, delegateProcesses: options.delegateProcesses ?? false });
   try {
-    const instance = await connection.driver.create(host, { instanceId: `${driver}-user-cli`, config, environment: {} });
+    const instance = await connection.driver.create(host, { instanceId: `${driver}-user-cli`, config, environment: options.environment ?? {} });
     try {
       await body(instance);
     } finally {
@@ -196,6 +198,24 @@ for (const each of CASES) {
     }
   });
 }
+
+test("standalone Codex probes the instance PATH in both local and delegated process modes", async () => {
+  for (const delegateProcesses of [false, true]) {
+    const host = fakeCli("codex", "codex-cli 0.172.0");
+    const old = fakeCli("codex", "codex-cli 0.100.0");
+    await withInstance("codex", host, { binaryPath: "codex" }, async (instance) => {
+      const status = await instance.status();
+      assert.equal(status.state, "unavailable");
+      assert.equal(status.installed, true);
+      assert.equal(status.version, "0.100.0");
+      assert.equal(status.error?.code, "driver_unavailable");
+      assert.ok(status.error.message.includes(`(${old.executable})`), status.error.message);
+      await assert.rejects(instance.openSession({}), (error: unknown) => isAriError(error, "driver_unavailable") && error.message === status.error?.message);
+    }, { environment: { PATH: old.env["PATH"]! }, delegateProcesses });
+    assert.deepEqual(old.invocations(), ["--version", "--version"]);
+    assert.deepEqual(host.invocations(), []);
+  }
+});
 
 test("the standalone ari-driver's antigravity instance has no maintenance member, and refuses a config that names the old installation setting", async () => {
   const cli = fakeCli("agy", "1.5.17");

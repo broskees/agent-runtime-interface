@@ -112,7 +112,12 @@ describe("a missing Codex CLI fails loudly only when used", () => {
       const error = status.error as { message: string; binary?: string; installHint?: string };
       assert.equal(error.message, `Codex CLI ${version} (/usr/local/bin/codex) is older than ${CODEX_MINIMUM_VERSION}, the oldest version this driver supports. ${CODEX_UPDATE_STEP}`);
       assert.equal(error.binary, "codex");
-      assert.equal(error.installHint, "Update the Codex CLI with `codex update`.");
+      const hint = error.installHint ?? "";
+      assert.match(hint, /npm: `npm install -g @openai\/codex`/);
+      assert.match(hint, /Homebrew: `brew upgrade --cask codex`/);
+      assert.match(hint, /standalone installer.*https:\/\/learn\.chatgpt\.com\/docs\/codex\/cli/);
+      assert.match(hint, /release binary.*https:\/\/github\.com\/openai\/codex\/releases\/latest/);
+      assert.doesNotMatch(hint, /`codex update`/, "even old releases without self-update get an applicable update step");
       const probe = await rig.instance.probe();
       assert.equal(probe.installed, true);
       assert.equal(probe.version, version);

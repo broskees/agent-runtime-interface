@@ -1,7 +1,7 @@
 // The installer tests' fixture: a throwaway package that `npm pack` turns
 // into a tarball, so the installer reads the format npm publishes, and the
 // helpers that check what an install left behind. test/node/installer.test.ts
-// and test/node/node-semantics.test.ts share it.
+// and the installer cases of the runtime semantics tests share it.
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";

@@ -335,9 +335,10 @@ const LAUNCHER_NAME = "ari-agent-launch";
  * The word the launcher `exec`s for `command`, found at `executable`. A command
  * with a `/` runs as given (relative to the child's cwd, as spawn runs it); a
  * bare name runs by name, so argv[0] is the name and the shell searches the
- * same PATH spawn would. Without a PATH (the shell would search its own
- * default, not spawn's), or with a leading `-` (which `exec` would read as an
- * option), it runs by the full path the search found.
+ * same PATH Node's spawn would (including empty entries). Bun only spawns
+ * the absolute launcher path, never the bare name. Without a PATH (the
+ * shell would search its own default, not spawn's), or with a leading `-`
+ * (which `exec` would read as an option), it runs by the full path found.
  */
 function launchTarget(command: string, executable: string, searchPath: string | undefined): string {
   if (command.startsWith("-")) return executable;

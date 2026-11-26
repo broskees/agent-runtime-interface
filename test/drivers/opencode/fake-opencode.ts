@@ -619,6 +619,10 @@ export class FakeServer {
   alive = true;
   url = "";
 
+  get subscriberCount(): number {
+    return this.#subscribers.size;
+  }
+
   constructor(world: FakeWorld, password: string | undefined) {
     this.world = world;
     this.number = world.nextServer();

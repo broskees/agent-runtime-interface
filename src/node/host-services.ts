@@ -17,6 +17,7 @@
 //   - dispose: ends every process the instance spawned, with its process group.
 
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { EnvPolicy } from "../generated/host.ts";
 import type { HostServices } from "../runtime.ts";
 import type { Coordination } from "./coordination.ts";
@@ -61,10 +62,23 @@ export type NodeHostServices<Config> = HostServices<Config> & {
   dispose(): Promise<void>;
 };
 
+/** Canonicalizes the host root by following links before applying any `..`. */
+async function canonicalHostRoot(directory: string): Promise<string> {
+  if (process.platform === "win32" || !process.versions.bun) return fs.realpath(directory);
+
+  // Bun 1.3.14 normalizes the input to realpath before following links. Give
+  // it only a prefix at a time, so each parent is taken from the link's target.
+  let prefix = directory.startsWith("/") ? "" : process.cwd();
+  for (const component of directory.split("/")) {
+    if (component === "..") prefix = path.posix.dirname(await fs.realpath(prefix || "/"));
+    else if (component !== "") prefix = `${prefix === "/" ? "" : prefix}/${component}`;
+  }
+  return fs.realpath(prefix || "/");
+}
+
 export async function createNodeHostServices<Config>(options: NodeHostServicesOptions<Config>): Promise<NodeHostServices<Config>> {
   await fs.mkdir(options.hostRoot, { recursive: true, mode: 0o700 });
-  // fs/promises realpath asks the operating system, which follows each link before any `..`.
-  const paths = instancePaths(await fs.realpath(options.hostRoot), options.instanceId);
+  const paths = instancePaths(await canonicalHostRoot(options.hostRoot), options.instanceId);
   await createInstanceDirectories(paths);
   const diagnostics = createDiagnostics(
     options.maxDiagnosticEntryBytes === undefined

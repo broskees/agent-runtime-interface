@@ -25,7 +25,7 @@ export interface CodexPuppetOptions {
   readonly commandOutput?: string;
   /** The answer of the simple scenario; `ok` when left out. */
   readonly reply?: string;
-  /** Notifications the app-server sends first in every turn, as they are: a test plants values the sanitiser must replace. */
+  /** Notifications the app-server sends first in every turn, as they are (a `threadId` or `turnId` of null becomes the turn's): a test plants values the sanitiser must replace. */
   readonly planted?: ReadonlyArray<{ readonly method: string; readonly params: { readonly [key: string]: unknown } }>;
 }
 
@@ -63,7 +63,8 @@ export async function playCodexTurn(world: FakeCodexWorld, turn: CodexNativeTurn
   const extra = options.extraText === undefined || options.extraText === "" ? "" : `\n${options.extraText}`;
   const say = (text: string): Promise<void> => turn.say(`${text}${extra}`);
   const server = world.turn(turn.nativeTurnId)?.server;
-  for (const planted of options.planted ?? []) server?.notify(planted.method, { ...planted.params });
+  // A planted notification's `threadId` or `turnId` given as null is this turn's.
+  for (const planted of options.planted ?? []) server?.notify(planted.method, { ...planted.params, ...(planted.params["threadId"] === null ? { threadId: turn.nativeThreadId } : {}), ...(planted.params["turnId"] === null ? { turnId: turn.nativeTurnId } : {}) });
   const index = scenario.prompts.findIndex((each) => turn.prompt.endsWith(each));
   switch (scenario.name) {
     case "simple":
@@ -80,10 +81,12 @@ export async function playCodexTurn(world: FakeCodexWorld, turn: CodexNativeTurn
     }
     case "approval_allowed":
     case "approval_denied": {
-      const command = scenario.command!;
+      const argv = ["/bin/sh", "-c", scenario.command!];
+      // The command as the approval request shows it.
+      const shown = argv.join(" ");
       const approval = await turn.requestApproval({
         kind: "command",
-        command: ["/bin/sh", "-c", command],
+        command: argv,
         options: [
           { optionId: "allow", label: "Allow", decision: "accept" },
           { optionId: "deny", label: "Deny", decision: "decline" },
@@ -92,10 +95,10 @@ export async function playCodexTurn(world: FakeCodexWorld, turn: CodexNativeTurn
       const reply = await approval.nextReply();
       if (reply !== "allow") {
         // `cancel`: Codex declines the command and aborts the turn.
-        commandItem(world, turn, approval.itemId, `/bin/sh -c ${JSON.stringify(command)}`, "declined");
+        commandItem(world, turn, approval.itemId, shown, "declined");
         return turn.finishCancelled();
       }
-      commandItem(world, turn, approval.itemId, `/bin/sh -c ${JSON.stringify(command)}`, { output: options.commandOutput ?? `${scenario.marker!}\n` });
+      commandItem(world, turn, approval.itemId, shown, { output: options.commandOutput ?? `${scenario.marker!}\n` });
       await say("done");
       return turn.complete();
     }

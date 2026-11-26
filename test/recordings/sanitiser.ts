@@ -117,6 +117,22 @@ export const NEUTRAL_SOCKET_PATH = "/tmp/ari-recording/agent.sock";
 export const NEUTRAL_SHELL = "/bin/sh";
 /** The neutral rate-limit report (Claude Code's `rate_limit_event` rate_limit_info, `SDKRateLimitInfo`): allowed, nothing used, resetting at NEUTRAL_TIME. */
 export const NEUTRAL_RATE_LIMIT_INFO = { status: "allowed", rateLimitType: "five_hour", utilization: 0, resetsAt: NEUTRAL_TIME.seconds } as const;
+/**
+ * The neutral rate-limit windows of a Codex rate-limit snapshot
+ * (`RateLimitWindow`, under `primary` and `secondary`): nothing used, resetting
+ * at NEUTRAL_TIME, a 5-hour primary and a weekly secondary window, the two the
+ * Codex driver names (`5h`, `weekly`).
+ */
+export const NEUTRAL_RATE_LIMIT_WINDOWS = {
+  primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: NEUTRAL_TIME.seconds },
+  secondary: { usedPercent: 0, windowDurationMins: 10_080, resetsAt: NEUTRAL_TIME.seconds },
+} as const;
+/** The neutral credit balance of a Codex rate-limit snapshot (`CreditsSnapshot`, under `credits`): none, not unlimited, a balance of "0". */
+export const NEUTRAL_CODEX_CREDITS = { hasCredits: false, unlimited: false, balance: "0" } as const;
+/** The neutral spend-control limit of a Codex rate-limit snapshot (`SpendControlLimitSnapshot`, under `individualLimit`). */
+export const NEUTRAL_SPEND_CONTROL_LIMIT = { limit: "0", remainingPercent: 0, resetsAt: NEUTRAL_TIME.seconds, used: "0" } as const;
+/** The neutral reset credits of a Codex usage read (`RateLimitResetCreditsSummary`, under `rateLimitResetCredits`). */
+export const NEUTRAL_RESET_CREDITS = { availableCount: 0, credits: [] } as const;
 
 /** A key that says whether the user is signed in to a provider, compared without case, `-` or `_`. */
 const SIGN_IN_STATUS_KEY = /^(?:is)?(?:signedin|loggedin|authenticated)$/;
@@ -129,6 +145,15 @@ function neutralTime(value: unknown): unknown {
 /** A figure as 0 of the same type: the number 0, or "0" for a number written as a string (a protobuf int64 in JSON). */
 function neutralFigure(value: unknown): unknown {
   return typeof value === "number" ? 0 : typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value) ? "0" : value;
+}
+
+function isRecord(value: unknown): value is { readonly [key: string]: unknown } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A Codex rate-limit window (an object with a number `usedPercent`) as the neutral window of its place, `primary` or `secondary`. */
+function neutralWindow(which: "primary" | "secondary"): (value: unknown) => unknown {
+  return (value) => (isRecord(value) && typeof value["usedPercent"] === "number" ? { ...NEUTRAL_RATE_LIMIT_WINDOWS[which] } : value);
 }
 
 /**
@@ -150,6 +175,20 @@ export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonl
   { what: "quota reset time", key: /^(?:quota)?resets?(?:time|at)$/, neutral: neutralTime },
   // A credit balance, as the binary names its credit figures (`usedPromptCredits`, `availableFlowCredits`, `monthlyPromptCredits`, `consumedCredits`, `availableCredits`): 0.
   { what: "credit balance", key: /credits$/, neutral: neutralFigure },
+  // Codex's credit balance, a rate-limit snapshot's `credits` (CreditsSnapshot: hasCredits, unlimited, balance): replaced whole.
+  { what: "Codex credit balance", key: /^credits$/, neutral: (value) => (isRecord(value) && typeof value["hasCredits"] === "boolean" ? { ...NEUTRAL_CODEX_CREDITS } : value) },
+  // Codex's rate-limit windows, a rate-limit snapshot's `primary` and `secondary` (RateLimitWindow: usedPercent, windowDurationMins, resetsAt): replaced whole.
+  { what: "Codex rate-limit window", key: /^primary$/, neutral: neutralWindow("primary") },
+  { what: "Codex rate-limit window", key: /^secondary$/, neutral: neutralWindow("secondary") },
+  // Codex's spend-control limit (SpendControlLimitSnapshot: limit, remainingPercent, resetsAt, used): replaced whole.
+  { what: "Codex spend-control limit", key: /^individuallimit$/, neutral: (value) => (isRecord(value) && typeof value["remainingPercent"] === "number" ? { ...NEUTRAL_SPEND_CONTROL_LIMIT } : value) },
+  // Codex's rate-limit reset credits (RateLimitResetCreditsSummary: availableCount, credits): none.
+  { what: "Codex reset credits", key: /^ratelimitresetcredits$/, neutral: (value) => (isRecord(value) && typeof value["availableCount"] === "number" ? { ...NEUTRAL_RESET_CREDITS, credits: [] } : value) },
+  // A usage percentage anywhere else (Codex's usedPercent and remainingPercent): 0.
+  { what: "usage percentage", key: /^(?:used|remaining)percent$/, neutral: neutralFigure },
+  // Whether the account reached a limit (Codex's rateLimitReachedType, spendControlReached): not reached.
+  { what: "limit reached", key: /^ratelimitreachedtype$/, neutral: (value) => (typeof value === "string" ? null : value) },
+  { what: "limit reached", key: /^spendcontrolreached$/, neutral: (value) => (typeof value === "boolean" ? false : value) },
   // Whether the user is signed in to a provider (the binary's `isAuthenticated`; `signedIn`, `loggedIn`): always true.
   { what: "sign-in status", key: SIGN_IN_STATUS_KEY, neutral: (value) => (typeof value === "boolean" ? true : value) },
   // Whether a provider still needs the user to sign in (the binary's `needs_auth`): always false.
@@ -161,6 +200,8 @@ export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonl
   { what: "socket path", key: /socket(?:path|file)$/, neutral: (value) => (typeof value === "string" ? NEUTRAL_SOCKET_PATH : value) },
   // OpenCode's `shell.created` event: the path of the shell the command ran in, the user's login shell.
   { what: "shell", key: /^shell$/, neutral: (value) => (typeof value === "string" && /^(?:[/\\]|[A-Za-z]:[/\\])/.test(value) ? NEUTRAL_SHELL : value) },
+  // Codex's `initialize` answer names the client's operating system, its version, the architecture and the terminal after the product (`codex_cli_rs/0.172.0 (Arch Linux Rolling; x86_64) xterm-256color`): only the product and its version stay.
+  { what: "user agent", key: /^useragent$/, neutral: (value) => (typeof value === "string" && /\s/.test(value.trim()) ? value.trim().split(/\s+/)[0] : value) },
 ];
 
 /** The fields of a model list entry a driver reads (the OpenCode driver's `models()`: enabled, providerID, modelID, name, limit.context). */

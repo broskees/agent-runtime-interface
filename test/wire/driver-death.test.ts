@@ -2,7 +2,7 @@
 // (`dist/wire/cli.js`, run by Node) serves a driver whose two agents each run
 // a grandchild in their process group; the grandchild ignores SIGHUP and
 // never reads stdin, and one agent ignores SIGTERM too. `ari-driver` then
-// ends one of five ways, and within 5 s every agent, grandchild, process group
+// ends one of four ways, and within 5 s every agent, grandchild, process group
 // and guard it started must be gone:
 //
 // - SIGKILL and a crash (`process.abort()` inside the driver) run no cleanup
@@ -12,7 +12,8 @@
 //   dispose takes longer than 5 s does not hold its agents up: `ari-driver`
 //   ends them 2 s after the shutdown began (LOCAL_PROCESSES_END_AFTER_MS),
 //   while that dispose still runs, and exits 0 when it ends. A driver whose
-//   dispose ends within those 2 s finishes it with its agents untouched.
+//   dispose ends within those 2 s finishes it with its agents untouched; that
+//   case closes `ari-driver`'s stdin, the host's clean shutdown.
 //
 // What is left is sampled from the moment of the signal, not after
 // `ari-driver` exits. And `ari-driver` SIGKILLed between an agent's spawn and
@@ -49,7 +50,6 @@ const DEATHS: Array<{ death: DriverDeath; how: string }> = [
   { death: "abort", how: "crashes (process.abort() in the driver)" },
   { death: "SIGHUP", how: "gets SIGHUP, disposes and exits 0" },
   { death: "SIGTERM", how: "gets SIGTERM, disposes and exits 0" },
-  { death: "EOF", how: "has its stdin closed by the host, disposes and exits 0" },
 ];
 
 for (const { death, how } of DEATHS) {

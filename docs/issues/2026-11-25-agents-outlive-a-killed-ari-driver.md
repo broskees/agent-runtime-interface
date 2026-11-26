@@ -164,14 +164,15 @@ Tests:
 - `test/wire/driver-death.test.ts`: the built `ari-driver` under Node serves
   a driver whose two agents each run a grandchild that ignores SIGHUP and
   never reads stdin (one agent also ignores SIGTERM). `ari-driver` is
-  SIGKILLed, crashes with `process.abort()`, gets SIGHUP, gets SIGTERM, or
-  has its stdin closed; each time every agent, grandchild, group and guard is
-  gone within 5 s of the signal (sampled from the signal on), and after
-  SIGHUP, SIGTERM and the closed stdin `ari-driver` exits 0. The same holds
-  for SIGTERM when the driver's dispose takes 6 s, and for a SIGKILL that
-  lands after an agent's spawn returned but before its guard started (a
-  preload freezes Node inside `child_process.spawn` there). A driver whose
-  dispose takes 1.8 s finishes it with its agents untouched.
+  SIGKILLed, crashes with `process.abort()`, gets SIGHUP, or gets SIGTERM;
+  each time every agent, grandchild, group and guard is gone within 5 s of
+  the signal (sampled from the signal on), and after SIGHUP and SIGTERM
+  `ari-driver` exits 0. The same holds for SIGTERM when the driver's dispose
+  takes 6 s, and for a SIGKILL that lands after an agent's spawn returned
+  but before its guard started (a preload freezes Node inside
+  `child_process.spawn` there). When the host closes its stdin, a driver
+  whose dispose takes 1.8 s finishes it with its agents untouched, and then
+  everything is gone within 5 s.
 - `test/standalone/standalone-binary.e2e.ts` (run by `pnpm run test:binary`):
   the SIGKILL, SIGHUP and startup-window cases against the Bun-built
   standalone `ari-driver`, with no `node` or `bun` on `PATH`.

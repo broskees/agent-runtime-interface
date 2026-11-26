@@ -5,7 +5,8 @@
 //   two threads, so two fake agents run, each with a grandchild in its group
 //   (one agent ignores SIGTERM, so only SIGKILL ends it). The test records
 //   every agent pid, grandchild pid, group id and guard pid, ends `ari-driver`
-//   one of five ways, and from that moment on samples what is left: all of it
+//   one of five ways (a signal, a crash or a closed stdin), and from that moment
+//   on samples what is left: all of it
 //   must be gone within 5 s, whenever `ari-driver` itself exits.
 // - `runDeathInStartupWindow`: `ari-driver` is SIGKILLed after an agent's
 //   spawn returned but before that agent's guard exists, and the agent's

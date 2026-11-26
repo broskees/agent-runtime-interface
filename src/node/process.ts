@@ -65,8 +65,8 @@
 // is run by its full path (argv[0] is that path), and for its first few
 // milliseconds the pid shows the launcher's command line, until the launcher
 // `exec`s the child (while that `exec` runs, Linux shows no arguments at all).
-// `PWD` and `OLDPWD` are put back as the child's
-// environment had them. With bash as `/bin/sh`, an environment without
+// `PWD` and `OLDPWD` are put back as the child's environment had them.
+// With bash as `/bin/sh`, an environment without
 // `SHLVL` gains `SHLVL=0`. On macOS, a file the user may execute that is not
 // a program (no `#!` line) is run by `/bin/sh` instead of failing with
 // ENOEXEC; on Linux spawn already runs it so.

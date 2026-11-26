@@ -13,7 +13,10 @@
 // member and its path for an instance member.
 //
 // When the connection closes, every instance is disposed (which closes its
-// sessions), local child processes are ended, and `closed` resolves.
+// sessions), local child processes are ended, and `closed` resolves. Ending
+// the local processes waits for the instances' disposal for at most
+// `LOCAL_PROCESSES_END_AFTER_MS`, so a driver whose dispose is slow or hangs
+// cannot keep its agents running.
 
 import type { AriError } from "../ari-error.ts";
 import { callErrors } from "../errors.ts";
@@ -32,6 +35,9 @@ import { negotiateHandshake } from "./handshake.ts";
 import type { NegotiatedVersions } from "./handshake.ts";
 import { DelegatedChildren, createWireHostServices } from "./host-proxy.ts";
 import { OPTIONAL_INSTANCE_MEMBERS, OPTIONAL_SESSION_MEMBERS, defaultMethodVersions, memberAt, presentMembers } from "./methods.ts";
+
+/** How long after the connection closes local child processes are ended, even while an instance's dispose still runs. */
+export const LOCAL_PROCESSES_END_AFTER_MS = 1000;
 
 export interface ServeDriverOptions {
   /** The contract version this side speaks. Defaults to this package's. */
@@ -322,8 +328,13 @@ export function serveDriver(driver: Driver<any>, transport: WireTransport, optio
       const served = [...instances.values()];
       instances.clear();
       sessions.clear();
-      await Promise.allSettled(served.map((entry) => entry.instance.dispose()));
+      const disposing = Promise.allSettled(served.map((entry) => entry.instance.dispose()));
+      // Give the instances a head start to stop their agents their own way, then end the local processes regardless.
+      let headStart: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([disposing, new Promise<void>((resolve) => (headStart = setTimeout(resolve, LOCAL_PROCESSES_END_AFTER_MS)))]);
+      clearTimeout(headStart);
       await localProcesses?.dispose().catch(() => undefined);
+      await disposing;
       resolveClosed();
     })();
   });

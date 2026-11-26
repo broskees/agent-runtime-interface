@@ -239,9 +239,19 @@ class WireClient {
   }
 
   #process(params: Params): SpawnedProcess {
-    const entry = this.#processes.get(params.processId as string);
-    if (entry === undefined || entry.instanceId !== params.instanceId) throw callErrors.notFound({ resource: "process", id: params.processId as string });
+    return this.lookupProcess(params.instanceId as string, params.processId as string);
+  }
+
+  /** The registered child `processId` of instance `instanceId`; `not_found` when there is none. */
+  lookupProcess(instanceId: string, processId: string): SpawnedProcess {
+    const entry = this.#processes.get(processId);
+    if (entry === undefined || entry.instanceId !== instanceId) throw callErrors.notFound({ resource: "process", id: processId });
     return entry.child;
+  }
+
+  /** The `processId`s of the registered children. */
+  processIds(): string[] {
+    return [...this.#processes.keys()];
   }
 
   async #hostRequest(method: string, params: Params, context: WireRequestContext): Promise<unknown> {
@@ -709,7 +719,7 @@ export async function connectDriver(transport: WireTransport, options: ConnectDr
     defaultConfig: () => jsonCopy(defaultConfig),
     create: (host, input) => client.create(host, input),
   };
-  return {
+  const wireConnection: WireDriverConnection = {
     driver,
     negotiated,
     closed: connection.done,
@@ -718,4 +728,21 @@ export async function connectDriver(transport: WireTransport, options: ConnectDr
       await connection.done;
     },
   };
+  clients.set(wireConnection, client);
+  return wireConnection;
+}
+
+/** The client behind each connection `connectDriver` returned, for `delegatedProcessTable`. */
+const clients = new WeakMap<WireDriverConnection, WireClient>();
+
+/**
+ * The delegated children `connection`'s client has registered: their
+ * `processId`s, and the lookup `host/process.write`, `.closeStdin` and
+ * `.kill` use, which rejects `not_found` for a child it does not hold. For
+ * tests; `ari/wire` does not export it.
+ */
+export function delegatedProcessTable(connection: WireDriverConnection): { readonly processIds: string[]; lookup(instanceId: string, processId: string): SpawnedProcess } {
+  const client = clients.get(connection);
+  if (client === undefined) throw new TypeError("delegatedProcessTable: not a connection connectDriver returned");
+  return { processIds: client.processIds(), lookup: (instanceId, processId) => client.lookupProcess(instanceId, processId) };
 }

@@ -278,6 +278,60 @@ describe("ari/node process spawning", () => {
     }
   });
 
+  test("the launcher keeps what a direct spawn gives: the same errors, the same argv and the same environment, except SHLVL", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ari-launcher-"));
+    const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH: "/usr/bin:/bin" } });
+    const pathless = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: {} });
+    try {
+      await fs.writeFile(path.join(directory, "not-executable"), "data", { mode: 0o644 });
+      // Errors: a missing command, a file that is not executable, a directory, a missing cwd.
+      await assert.rejects(service.spawn({ command: "ari-no-such-command" }), (error: unknown) => isAriError(error, "not_found"));
+      await assert.rejects(service.spawn({ command: path.join(directory, "not-executable") }), (error: unknown) => isAriError(error, "permission_denied"));
+      await assert.rejects(service.spawn({ command: directory }), (error: unknown) => isAriError(error, "permission_denied"));
+      await assert.rejects(service.spawn({ command: "/bin/sh", cwd: path.join(directory, "missing") }), (error: unknown) => isAriError(error, "not_found"));
+
+      // argv: as given, whether found on PATH by name or given as a path. For its first few milliseconds the pid
+      // still runs the launcher (it starts the guard, then execs the child), so wait for the exec first.
+      const argvOf = async (spawnIn: typeof service, command: string): Promise<string> => {
+        const child = await spawnIn.spawn({ command, args: ["3600"], stdin: "ignore" });
+        const deadline = Date.now() + 5000;
+        let argv = "";
+        do {
+          argv = execFileSync("ps", ["-ww", "-o", "args=", "-p", String(child.pid)], { encoding: "utf8" }).trim();
+        } while (argv.includes("ari-agent-launch") && Date.now() < deadline);
+        await child.kill();
+        return argv;
+      };
+      assert.equal(await argvOf(service, "sleep"), "sleep 3600", "a bare name found on PATH keeps the name as argv[0]");
+      assert.equal(await argvOf(service, "/bin/sleep"), "/bin/sleep 3600");
+      // The one difference: with no PATH at all, the shell would search its own default, so the full path runs.
+      assert.equal(await argvOf(pathless, "sleep"), `${await resolveExecutable("sleep", "/usr/bin:/bin")} 3600`);
+
+      // Environment: what a direct spawn passes, PWD and OLDPWD included, set or not.
+      const environmentThrough = async (baseEnv: { [name: string]: string }): Promise<string[]> => {
+        const launched = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv });
+        try {
+          const child = await launched.spawn({ command: "/usr/bin/env", cwd: directory, stdin: "ignore" });
+          const [output] = await Promise.all([readAll(child.stdout), child.exited]);
+          return output.trim().split("\n").sort();
+        } finally {
+          await launched.dispose();
+        }
+      };
+      const directly = (baseEnv: { [name: string]: string }): string[] =>
+        execFileSync("/usr/bin/env", [], { env: baseEnv, cwd: directory, encoding: "utf8" }).trim().split("\n").sort();
+      const withShellVariables = { PATH: "/usr/bin:/bin", SHLVL: "2", PWD: "/somewhere/else", OLDPWD: "/no/such/directory", ARI_X: "1" };
+      assert.deepEqual(await environmentThrough(withShellVariables), directly(withShellVariables));
+      const withoutThem = { PATH: "/usr/bin:/bin", ARI_X: "1" };
+      const launchedWithout = (await environmentThrough(withoutThem)).filter((entry) => entry !== "SHLVL=0");
+      assert.deepEqual(launchedWithout, directly(withoutThem), "nothing but SHLVL=0 (bash) is added");
+    } finally {
+      await service.dispose();
+      await pathless.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("spawning a missing executable rejects with not_found, and a malformed request with validation", async () => {
     const service = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: { PATH: "" } });
     await assert.rejects(service.spawn({ command: "/nonexistent/ari-agent" }), (error: unknown) => isAriError(error, "not_found"));

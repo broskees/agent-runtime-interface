@@ -8,10 +8,12 @@
 //
 // The binary also keeps the promise that agents end when `ari-driver` dies:
 // serving the agent-group fixture driver (loaded from disk by module path),
-// it is SIGKILLed, or gets SIGHUP, while two agents run, and within 5 s every
-// agent, grandchild, process group and guard must be gone
-// (test/wire/driver-death-scenario.ts, which test/wire/driver-death.test.ts
-// runs under Node).
+// it is SIGKILLed, or gets SIGHUP, while two agents run, and within 5 s of the
+// signal every agent, grandchild, process group and guard must be gone. It is
+// also SIGKILLed while an agent's launcher is stopped between its spawn and
+// its guard (the driver stops it the moment the spawn returns), and that
+// agent's group must be gone within 5 s too (test/wire/driver-death-scenario.ts,
+// which test/wire/driver-death.test.ts runs under Node).
 //
 // The gate runs it after the binary build (`pnpm run test:binary`); it is not
 // matched by `pnpm run test`, which runs before the binary exists.
@@ -27,7 +29,7 @@ import { firstPartyDrivers } from "../../scripts/build-binary.ts";
 import type { AriEvent, Request } from "../../src/index.ts";
 import { createCoordination, createNodeHostServices } from "../../src/node/index.ts";
 import { startAriDriver } from "../../src/wire/index.ts";
-import { assertEndedEverything, runDriverDeath } from "../wire/driver-death-scenario.ts";
+import { assertEndedEverything, runDeathInStartupWindow, runDriverDeath } from "../wire/driver-death-scenario.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BUILD = path.join(ROOT, "build", "standalone", "linux-x64");
@@ -198,3 +200,11 @@ for (const { death, how } of [
     assertEndedEverything(outcome, death);
   });
 }
+
+test("when the standalone ari-driver is SIGKILLed after an agent's spawn returned but before its guard started, without Node, the agent's group is gone within 5 s", async () => {
+  requireBinaries();
+  const where = nodeFreeRoot();
+  const outcome = await runDeathInStartupWindow({ command: [ARI_DRIVER], pause: "driver", env: where.env, cwd: where.project });
+  assert.deepEqual(outcome.survivors, [], "every agent group, the stopped one included, ended within 5 s of the SIGKILL");
+  assert.equal(outcome.exit.signal, "SIGKILL");
+});

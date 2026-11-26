@@ -5,9 +5,15 @@
 // ari/node's process service. The turn's text names the agent's kind:
 // "plain" or "ignore-term".
 //
+// Config: `disposeDelayMs` makes `instance.dispose()` take that long, like a
+// driver whose own shutdown is slow.
+//
 // Extension `test.agents`:
 // - `agents`: `[{ pid, grandchildPid }]` for every agent this `ari-driver`
 //   started, in order.
+// - `spawnStopped`: spawns a `plain` agent and stops it with SIGSTOP as soon as
+//   the spawn returns, so its launcher halts before it starts the guard;
+//   answers `{ pid }`. The test then has an agent spawned but not yet guarded.
 // - `abort`: crashes `ari-driver` with `process.abort()`, so no cleanup runs.
 
 import { referenceCapabilities } from "../../../src/conformance/reference/driver.ts";
@@ -56,6 +62,17 @@ function createSession(host: HostServices, id: string): Session {
     close: async () => undefined,
     async ext(ns, method) {
       if (method === "agents") return agents;
+      if (method === "spawnStopped") {
+        const child = await host.process.spawn({ command: "/bin/sh", args: fakeAgentArgs("plain"), purpose: "runtime", stdin: "pipe" });
+        process.kill(child.pid!, "SIGSTOP");
+        void (async () => {
+          for await (const _ of child.stdout);
+        })();
+        void (async () => {
+          for await (const _ of child.stderr);
+        })();
+        return { pid: child.pid };
+      }
       if (method === "abort") process.abort();
       throw new Error(`unknown method ${ns}.${method}`);
     },
@@ -82,7 +99,10 @@ export const agentGroupDriver: Driver = {
         sessions += 1;
         return createSession(host, `${input.instanceId}-session-${sessions}`);
       },
-      dispose: async () => undefined,
+      dispose: async () => {
+        const delayMs = (input.config as { disposeDelayMs?: number }).disposeDelayMs ?? 0;
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      },
     };
   },
 };

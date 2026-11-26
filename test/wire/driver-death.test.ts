@@ -8,17 +8,25 @@
 // - SIGKILL and a crash (`process.abort()` inside the driver) run no cleanup
 //   at all; each agent's guard ends its group.
 // - SIGHUP and SIGTERM make `ari-driver` dispose every instance, which ends
-//   the groups, and exit 0.
+//   the groups, and exit 0. A driver whose own dispose takes longer than 5 s
+//   does not hold its agents up: `ari-driver` ends them 1 s after the
+//   shutdown began, while that dispose still runs, and exits 0 when it ends.
 //
-// test/standalone/standalone-binary.e2e.ts repeats the SIGKILL and SIGHUP cases
-// with the standalone binary.
+// What is left is sampled from the moment of the signal, not after
+// `ari-driver` exits. And `ari-driver` SIGKILLed between an agent's spawn and
+// the moment its guard is up (a preload freezes Node inside
+// `child_process.spawn` there) leaves nothing behind either.
+//
+// test/standalone/standalone-binary.e2e.ts repeats the SIGKILL, SIGHUP and
+// startup-window cases with the standalone binary.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
 import { NODE_EXECUTABLE } from "../helpers/runtime.ts";
-import { assertEndedEverything, runDriverDeath } from "./driver-death-scenario.ts";
+import assert from "node:assert/strict";
+import { PAUSE_AFTER_AGENT_SPAWN, assertEndedEverything, runDeathInStartupWindow, runDriverDeath } from "./driver-death-scenario.ts";
 import type { DriverDeath } from "./driver-death-scenario.ts";
 import { ARI_DRIVER_BIN, requireBuild } from "./helpers.ts";
 
@@ -48,3 +56,16 @@ for (const { death, how } of DEATHS) {
     assertEndedEverything(outcome, death);
   });
 }
+
+test("when ari-driver under Node gets SIGTERM while its driver's dispose takes 6 s, every agent, grandchild, process group and guard is still gone within 5 s, and ari-driver exits 0 once that dispose ends", async () => {
+  requireBuild();
+  const outcome = await runDriverDeath({ command: [NODE_EXECUTABLE, ARI_DRIVER_BIN], death: "SIGTERM", env: ENV, cwd: home, disposeDelayMs: 6000 });
+  assertEndedEverything(outcome, "SIGTERM");
+});
+
+test("when ari-driver under Node is SIGKILLed after an agent's spawn returned but before its guard started, the agent's group is gone within 5 s", async () => {
+  requireBuild();
+  const outcome = await runDeathInStartupWindow({ command: [NODE_EXECUTABLE, "--import", PAUSE_AFTER_AGENT_SPAWN, ARI_DRIVER_BIN], pause: "preload", env: ENV, cwd: home });
+  assert.deepEqual(outcome.survivors, [], "the paused agent's group ended within 5 s of the SIGKILL");
+  assert.equal(outcome.exit.signal, "SIGKILL");
+});

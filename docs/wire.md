@@ -32,10 +32,12 @@ ari-driver ./drivers.js --export mine  # a module with several drivers
   `console` and `process.stdout.write` at stderr, so a driver that logs
   cannot corrupt a frame. Diagnostics go to stderr.
 - **Lifetime.** It serves until stdin closes, or until SIGTERM, SIGINT or
-  SIGHUP, then disposes every instance (which closes their sessions and ends
-  their child processes) and exits 0. Cleanup gets at most 10 seconds. A load
-  failure prints the reason to stderr and exits 1; a usage error exits 2. If
-  it dies without that cleanup, its agents still end: see
+  SIGHUP, then disposes every instance (which closes their sessions) and ends
+  its child processes, and exits 0. The child processes are ended no later
+  than 1 second after the shutdown began, even while an instance's dispose
+  still runs. Cleanup gets at most 10 seconds. A load failure prints the
+  reason to stderr and exits 1; a usage error exits 2. If it dies without
+  that cleanup, its agents still end: see
   [Agents end when `ari-driver` dies](#agents-end-when-ari-driver-dies).
 
 ## Framing
@@ -254,36 +256,68 @@ and `ari-driver` reports it on stderr.
 
 ### Agents end when `ari-driver` dies
 
-On Linux and macOS, every process `ari/node`'s process service starts (the
-agents `ari-driver` spawns locally, and the children a TypeScript host using
-`createNodeHostServices` spawns in delegated mode) ends, with everything in
-its process group, within about the kill grace (2 seconds by default) plus a
-fraction of a second after the process that owns the service ends, however it
-ends: dispose, SIGTERM, SIGINT, SIGHUP, SIGKILL, a crash or an
-out-of-memory kill. Windows keeps ending a child's tree with `taskkill /T`,
-and only while the owner lives.
+On Linux and macOS, every process `ari/node`'s process service starts ends,
+with every process still in its process group, within about the kill grace
+(2 seconds by default) plus a fraction of a second after the process that
+owns the service ends, however it ends: dispose, SIGTERM, SIGINT, SIGHUP,
+SIGKILL, a crash or an out-of-memory kill. That covers the agents
+`ari-driver` spawns locally, and the children a TypeScript host using
+`createNodeHostServices` spawns in delegated mode (there the host is the
+owner).
+
+What it does not reach: a process that has left the child's process group,
+by calling `setsid()` or `setpgid()` (a daemon, `setsid sleep`, a job-control
+shell's background jobs). It is no longer in the group, so neither the owner
+nor the guard ends it. Windows keeps ending a child's tree with
+`taskkill /T`, and only while the owner lives.
 
 How:
 
-- Each child leads its own process group, so one `kill(-group)` reaches
-  everything it started.
-- While the owner lives, it ends groups itself: on dispose, a timeout,
-  `kill()` without a signal, and, when a child exits on its own, whatever it
-  left in its group. It sends SIGTERM, then SIGKILL after the grace.
-- Beside each child it starts a guard: a `/bin/sh` in a session of its own,
-  so no signal to the child's group or to the owner's group reaches it. The
-  guard blocks reading a pipe whose other end only the owner holds and never
-  writes. When the owner dies, the operating system closes that end; the
-  guard then sends SIGTERM to the child's group, waits up to the grace for it
-  to empty, sends SIGKILL to what is left, and exits. Once a group is gone
-  while the owner lives, the owner closes the pipe and the guard exits at
-  once, so `dispose()` returns only after every guard is gone too.
-- `ps` shows a guard as `/bin/sh -c … ari-agent-guard <group id> <grace ms>`.
-  Its environment holds only `PATH`, for `sleep`. It costs one idle shell per
-  child: on Linux with bash as `/bin/sh`, about 3.8 MB resident, 0.35 MB of it
-  not shared, and under 1 ms more per spawn.
-- A child whose guard cannot start is ended at once, and its spawn rejects
-  with `invalid_state` (`spawn_failed`).
+- Each child leads its own process group. The process service spawns it
+  through a `/bin/sh` launcher, which first starts the child's guard in the
+  background, in that same group, and then `exec`s the child in its own
+  place. The child keeps the pid the caller sees, and never runs before its
+  guard exists.
+- The guard is a `/bin/sh` with stdio on `/dev/null`, holding only the read
+  end of a pipe whose other end the owner holds; the pipe is passed at spawn,
+  so an owner that dies before the guard starts leaves it an immediate
+  end-of-file. It ignores SIGTERM, SIGHUP and SIGINT (and SIGQUIT, SIGPIPE,
+  SIGALRM, SIGUSR1, SIGUSR2), so a driver's own signal to the group reaches
+  the child but not the guard.
+- When the owner dies, or the owner writes a line to the pipe, the guard
+  sends SIGTERM to its own group, waits until no member but itself is left or
+  the grace has passed (it reads membership with `ps -A -o pid= -o ppid=
+  -o pgid=` and `awk`, at 20, 60, 140, 300 and 620 ms and then every 400 ms),
+  sends SIGKILL to the group, itself included, and exits.
+- The guard only ever signals the group it is a member of (`kill 0`). While a
+  member exists, the operating system does not give that group id to anyone
+  else, so the guard cannot reach a group ARI did not start. The owner signals
+  the group by its id only while the guard still runs.
+- The owner ends a group the same way, on dispose, a timeout, `kill()`
+  without a signal, and when a child exits on its own (for what it left in
+  its group): it writes a line to the guard's pipe and waits for the guard to
+  exit. So `dispose()` returns only once every guard is gone, and waits a
+  whole grace only for a group that will not end on SIGTERM.
+- `ps` shows a guard as `/bin/sh -c … ari-agent-guard <grace ms> …`. It costs
+  one idle shell per child: on Linux with bash as `/bin/sh`, about 4.2 MB
+  resident, 0.4 MB of it not shared. Spawning takes about the same time as
+  before under Node and about 1 ms more under Bun. Disposing 20 children
+  took 140 to 190 ms instead of 22 ms, measured at a load average near 48.
+- If the launcher cannot start the guard, the child never runs: it exits with
+  code 126. If a guard disappears while its child runs, the owner ends the
+  child's group at once.
+
+What a caller sees stays as it was, with these exceptions. A spawn error
+rejects as before, because the command is first searched for the way spawn
+searches and a command that is not found is handed to spawn itself for the
+platform's own error. The child's argv is the one spawn would give it, except
+that with no `PATH` in the child's environment a bare command name runs by
+its full path (that path is argv[0]), and that for its first few
+milliseconds the pid shows the launcher's command line, until the launcher
+`exec`s the child. `PWD` and `OLDPWD` are put back as the
+child's environment had them, but with bash as `/bin/sh` an environment
+without `SHLVL` gains `SHLVL=0`. An executable file that is not a program
+(no `#!` line) is run by `/bin/sh` instead of failing with ENOEXEC.
 
 A host in another language that runs `ari-driver` gets this for free: it only
 has to end `ari-driver` (closing its stdin lets it dispose cleanly). A host

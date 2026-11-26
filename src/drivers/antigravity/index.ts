@@ -1,8 +1,10 @@
 // `ari/drivers/antigravity`: the Google Antigravity CLI over ACP. Quirks it
 // keeps:
 // - each instance gets its own profile directory (`<stateDir>/profile`),
-//   passed as `--gemini-dir` and `GEMINI_HOME`, with file-based credential
-//   storage, so instances never share a Google sign-in;
+//   passed as `--gemini-dir`, and `agy` keeps the instance's Google sign-in
+//   in that profile's file storage, never in the OS keyring's one entry that
+//   every `agy` on the machine shares, so instances never share a Google
+//   sign-in (see ANTIGRAVITY_LAUNCH_ENVIRONMENT);
 // - ambient Google credentials are stripped through the host's
 //   `process.envPolicy`; the driver refuses to start a session when the
 //   host's policy would let one through (see ANTIGRAVITY_STRIPPED_VARIABLES);
@@ -63,6 +65,19 @@ export function antigravityExecutable(platform: string): string {
 export function antigravityProfile(host: HostServices<unknown>): string {
   return `${host.paths.stateDir}/profile`;
 }
+
+/**
+ * The variables the driver gives `agy acp`, all of which `agy` 1.5.x reads:
+ * - `AGY_CLI_FORCE_FILE_TOKEN_STORAGE`: `agy` 1.5.16 and later keep a Google
+ *   sign-in in the OS keyring's one entry (service `gemini`, account
+ *   `antigravity`), whatever `--gemini-dir` says, unless this is set; then in
+ *   `<profile>/antigravity-acp/antigravity-oauth-token` (they log "Using
+ *   file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is
+ *   set"). `AGY_ACP_FORCE_FILE_STORAGE` and `GEMINI_HOME` are not in the 1.5.x
+ *   binary.
+ * - `AGY_CLI_DISABLE_AUTO_UPDATE`: the switch of the CLI's self-updater.
+ */
+const ANTIGRAVITY_LAUNCH_ENVIRONMENT: { readonly [name: string]: string } = { AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1", AGY_CLI_DISABLE_AUTO_UPDATE: "1" };
 
 /** The required variables the host's environment policy would let through. */
 export function unstrippedVariables(stripAmbient: readonly string[]): string[] {
@@ -147,7 +162,7 @@ export function createAntigravityDriver(options: AntigravityDriverOptions = {}):
     async launch(context) {
       const profile = antigravityProfile(context.host as HostServices<unknown>);
       const args = ["acp", "--gemini-dir", profile, "--app-data-dir", "antigravity-acp"];
-      const env = { GEMINI_HOME: profile, AGY_ACP_FORCE_FILE_STORAGE: "1", AGY_CLI_DISABLE_AUTO_UPDATE: "1" };
+      const env = { ...ANTIGRAVITY_LAUNCH_ENVIRONMENT };
       if (context.config.installation === "path") return { command: context.config.command, args, env };
       const version = await managedVersion(context);
       if (version === undefined) throw callErrors.driverUnavailable({ package: ANTIGRAVITY_PACKAGE, binary: executable }, "The managed Antigravity CLI is not installed; run maintenance.install()");

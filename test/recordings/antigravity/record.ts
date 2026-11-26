@@ -9,12 +9,15 @@
 //
 // The user's Antigravity setup stays out and unchanged: `agy` gets its own
 // HOME, XDG directories, TMPDIR and profile inside the workspace, none of the
-// user's GEMINI_*, GOOGLE_*, GCLOUD_*, CLOUDSDK_* or AGY_* variables, and an
-// unreachable session bus, so it cannot reach the user's keyring and keeps its
-// sign-in in the copied file. It works in the workspace's `cwd/`, the root of
-// its own Git repository, so it reads no AGENTS.md, GEMINI.md or .agents/ of
-// the folders above; and the recorder stops before it starts `agy` when the
-// workspace lies in the user's home or below a folder holding one of those. A sign-in `agy` refreshed during the run goes
+// user's GEMINI_*, GOOGLE_*, GCLOUD_*, CLOUDSDK_* or AGY_* variables, the
+// driver's AGY_CLI_FORCE_FILE_TOKEN_STORAGE, and an unreachable session bus,
+// so it cannot reach the user's keyring and keeps its sign-in in the copied
+// file. After each scenario the recorder logs what `agy`'s own log says about
+// where it kept the sign-in (`tokenStorageLog`). It works in the workspace's
+// `cwd/`, the root of its own Git repository, so it reads no AGENTS.md,
+// GEMINI.md or .agents/ of the folders above; and the recorder stops before
+// it starts `agy` when the workspace lies in the user's home or below a folder
+// holding one of those. A sign-in `agy` refreshed during the run goes
 // back to the user's file, or, when it cannot, into this run's recovery file
 // beside it (../credential-file.ts). The workspace is removed after every
 // scenario, also after one that fails, unless it holds the only copy of a
@@ -76,27 +79,47 @@ export function antigravityEnvironment(layout: AntigravityLayout, env: { readonl
   };
 }
 
-/** Added to every spawn after the host's stripping: the name `agy` 1.5.17's binary holds for forcing its file token storage. */
-export const ANTIGRAVITY_RECORDER_ADDITIONS: { readonly [name: string]: string } = { AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1" };
-
 /**
  * The real process service the recorder starts `agy` through, before the tap:
- * the workspace's environment, the host's stripping, and
- * ANTIGRAVITY_RECORDER_ADDITIONS. A process the driver starts without a
- * working directory (the driver names none for `agy acp`) starts in the
- * workspace's `cwd/`, not in the recorder's own directory: Antigravity loads
- * workspace rules and customizations from the folder it works in and its
- * parents ("Customization discovery"), and the recorder runs in the user's
- * checkout.
+ * the workspace's environment, the host's stripping, and the variables the
+ * driver adds. A process the driver starts without a working directory (the
+ * driver names none for `agy acp`) starts in the workspace's `cwd/`, not in
+ * the recorder's own directory: Antigravity loads workspace rules and
+ * customizations from the folder it works in and its parents ("Customization
+ * discovery"), and the recorder runs in the user's checkout.
  */
 export function antigravityProcessService(layout: AntigravityLayout, env: { readonly [name: string]: string | undefined }): ProcessService {
   const service = createProcessService({ envPolicy: ANTIGRAVITY_RECORDER_ENV_POLICY, baseEnv: antigravityEnvironment(layout, env) });
   return {
     envPolicy: service.envPolicy,
     resolveExecutable: (name, options) => service.resolveExecutable(name, options),
-    spawn: (request) => service.spawn({ ...request, cwd: request.cwd ?? layout.cwd, env: { ...(request.env ?? {}), ...ANTIGRAVITY_RECORDER_ADDITIONS } }),
+    spawn: (request) => service.spawn({ ...request, cwd: request.cwd ?? layout.cwd }),
     dispose: () => service.dispose(),
   };
+}
+
+/** The lines of `agy`'s log that say where it keeps a Google sign-in: "Using file-based token storage because ..." and "... falling back to file ...". */
+const TOKEN_STORAGE_LINE = /(?:Using file-based token storage because|Failed to load stored token from keyring, falling back to file)[^\n]*/g;
+
+/**
+ * What `agy` logged, in any `*.log` file under `directory`, about where it
+ * keeps the sign-in: each distinct line TOKEN_STORAGE_LINE matches, from its
+ * first word on. `agy` 1.5.16 logs "Using file-based token storage because
+ * AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set" when the driver's variable took
+ * effect, so a live run shows that the driver, not only the unreachable
+ * session bus, kept the keyring out.
+ */
+export function tokenStorageLog(directory: string): string[] {
+  const found = new Set<string>();
+  const visit = (folder: string): void => {
+    for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+      const file = path.join(folder, entry.name);
+      if (entry.isDirectory()) visit(file);
+      else if (entry.isFile() && entry.name.endsWith(".log")) for (const match of fs.readFileSync(file, "utf8").matchAll(TOKEN_STORAGE_LINE)) found.add(match[0].trim());
+    }
+  };
+  visit(directory);
+  return [...found];
 }
 
 /** The version `<command> --version` prints, run through the recorder's own process service (not recorded), or "unknown". It runs with auto-update off, as the driver runs `agy acp`. */
@@ -159,8 +182,9 @@ export interface AntigravityRecordOutcome {
 /** No sign-in file to copy on a live run: `agy` keeps the sign-in where the recorder cannot copy it from. */
 export class AntigravitySignInMissingError extends Error {
   constructor(file: string | undefined) {
+    const geminiDirectory = file === undefined ? "~/.gemini" : path.dirname(path.dirname(file));
     super(
-      `no Antigravity sign-in file at ${file ?? "~/.gemini/antigravity-cli/antigravity-oauth-token"}. agy keeps a Google sign-in in your OS keyring, and in that file only when the keyring is bypassed or unreachable; the recorder copies only the file, and never reads your keyring. See "How Antigravity finds the sign-in" in docs/recordings.md.`,
+      `no Antigravity sign-in file at ${file ?? "~/.gemini/antigravity-cli/antigravity-oauth-token"}. agy keeps a Google sign-in in your OS keyring, and in that file only when it uses its file storage; the recorder copies only the file, and never reads your keyring. To sign in once into that file, leaving your keyring's sign-in as it is, run \`AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir ${geminiDirectory} --app-data-dir antigravity-cli\` and finish the Google sign-in it opens. See "How Antigravity finds the sign-in" in docs/recordings.md.`,
     );
     this.name = "AntigravitySignInMissingError";
   }
@@ -280,6 +304,15 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
           workspaceKept = true;
           failed(new Error(`the recorder kept the workspace ${layout.root}, with its copy of your Antigravity sign-in, ${credential.copy}, and stopped. Write that copy over ${credential.real}, then delete the workspace.`));
         }
+      }
+    }
+    // Only once an agy acp ran: the recorder can stop before it starts one.
+    if (frames.some((frame) => frame.kind === "spawn")) {
+      try {
+        const storage = tokenStorageLog(layout.root);
+        log(`${scenario.name}: agy's log ${storage.length === 0 ? "says nothing about where it keeps the sign-in" : `on where it keeps the sign-in: ${storage.join("; ")}`}`);
+      } catch (reason) {
+        log(`${scenario.name}: agy's log could not be read: ${reason instanceof Error ? reason.message : String(reason)}`);
       }
     }
     if (!workspaceKept) fs.rmSync(layout.root, { recursive: true, force: true });

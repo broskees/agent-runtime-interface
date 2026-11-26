@@ -24,3 +24,13 @@ the file digests, and `test/drivers/acp/vendor.suite.ts` checks them.
   name out of `test/`), and from the proposal's §1.3 Antigravity row.
 - `antigravity.suite.ts` builds a release tar.gz and its manifest in the test
   and serves them through a fake `fetch`.
+- The fake `agy` (`fake-agy-cli.ts`) keeps its sign-in where `agy` 1.5.16
+  does: in the OS keyring's one entry every profile shares, unless
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` is set or the session bus is
+  unreachable, and then in `<gemini dir>/<app data dir>/antigravity-oauth-token`;
+  it reads neither `GEMINI_HOME` nor `AGY_ACP_FORCE_FILE_STORAGE`. Its log
+  lines use the words `agy` 1.5.10 to 1.5.16 logged. The sources, read
+  2026-11-25, are in `docs/drivers/antigravity.md`, "Sources": the Antigravity
+  CLI's issue 1610, and the issue and pull requests of the same open-source
+  ACP client (the repository rule on host names keeps its name out of
+  `test/`), checked against 1.5.16 with a live macOS Keychain.

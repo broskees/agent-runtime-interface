@@ -848,12 +848,12 @@ directory `agy` runs in), `agy-home/`, `xdg-config/`, `xdg-data/`,
 host's directories; the driver keeps the instance's Antigravity profile in
 `instances/antigravity-recorder/state/profile`). The driver starts
 `agy acp --gemini-dir <profile> --app-data-dir antigravity-acp` with
-`GEMINI_HOME=<profile>`, `AGY_ACP_FORCE_FILE_STORAGE=1` and
-`AGY_CLI_DISABLE_AUTO_UPDATE=1` (docs/drivers/antigravity.md). The recorder's
-host starts it with the recorder's own environment, less `HOME`, `TMPDIR`,
-`DBUS_SESSION_BUS_ADDRESS` and every `XDG_*` variable, and strips every
-variable whose name starts with `GEMINI_`, `GOOGLE_`, `GCLOUD_`, `CLOUDSDK_`
-or `AGY_` (the prefixes of the driver's CLI manifest), then adds:
+`AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1` and `AGY_CLI_DISABLE_AUTO_UPDATE=1`
+(docs/drivers/antigravity.md). The recorder's host starts it with the
+recorder's own environment, less `HOME`, `TMPDIR`, `DBUS_SESSION_BUS_ADDRESS`
+and every `XDG_*` variable, and strips every variable whose name starts with
+`GEMINI_`, `GOOGLE_`, `GCLOUD_`, `CLOUDSDK_` or `AGY_` (the prefixes of the
+driver's CLI manifest), then adds these, the driver's own last:
 
 | Variable | Value | Why |
 |---|---|---|
@@ -863,7 +863,7 @@ or `AGY_` (the prefixes of the driver's CLI manifest), then adds:
 | `XDG_RUNTIME_DIR` | `<workspace>/xdg-runtime` | the user's runtime directory holds their session bus and keyring sockets |
 | `TMPDIR` | `<workspace>/tmp` | so a temp path `agy` reports is inside the workspace, and becomes `<WORKSPACE>` |
 | `DBUS_SESSION_BUS_ADDRESS` | `unix:path=<workspace>/no-session-bus`, where nothing listens | D-Bus clients find the session bus at this address (D-Bus Specification, "Well-known Message Bus Instances"); with it unreachable, `agy` cannot reach the Secret Service keyring and keeps its sign-in in its file storage (see "How Antigravity finds the sign-in") |
-| `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` | `1` | the name the `agy` 1.5.17 binary holds for forcing its file token storage; added after the stripping. Antigravity documents no meaning for it, so the unreachable session bus is what the recorder relies on |
+| `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` | `1`, from the driver | `agy` 1.5.16 and later keep the sign-in in the profile's file only with it set, and in the keyring's one entry every `agy` shares without it (docs/drivers/antigravity.md, "A profile per instance"). Antigravity does not document it, so the recorder also keeps the session bus unreachable |
 
 A process the driver starts with no working directory (the driver names none
 for `agy acp`) starts in `<workspace>/cwd`, not in the recorder's directory:
@@ -889,6 +889,15 @@ the home: with `AGENTS.md`, `GEMINI.md` and `.agents/` at the project's root
 the recorder stops before it starts `agy`; with a personal folder the
 project's `.gemini/config.json` names, `agy` loads nothing of it.
 
+After each scenario, before it removes the workspace, the recorder prints
+what `agy` logged anywhere in the workspace about where it keeps the sign-in:
+each distinct "Using file-based token storage because ..." or "Failed to load
+stored token from keyring, falling back to file ..." line of its `*.log`
+files, for example `simple: agy's log on where it keeps the sign-in: Using
+file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set`,
+or that it logged none. That line shows a live run kept the keyring out by
+the driver's variable, not only by the unreachable bus.
+
 The sources are Antigravity's docs, read 2026-11-25: "Customization
 discovery" (https://antigravity.google/docs/customization-discovery),
 "Settings" (https://antigravity.google/docs/settings), "MCP"
@@ -907,7 +916,10 @@ under them.
 - `agy` 1.5.x keeps a Google sign-in in the operating system's keyring (Apple
   Keychain, the Secret Service over D-Bus on Linux, Windows Credential
   Manager), under service `gemini` and account `antigravity`, and in a file
-  only when the keyring is bypassed or unreachable. Antigravity's
+  only when the keyring is bypassed or unreachable, or when
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` is set (1.5.16 logs "Using file-based
+  token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set"; the sources
+  are in docs/drivers/antigravity.md, "Sources"). Antigravity's
   "Authenticate" page, "Local silent keyring sign-in": "When launching `agy`
   on your local machine, the CLI attempts to access your operating system's
   native secure keyring". Its release notes (GitHub
@@ -935,15 +947,17 @@ under them.
   `NewFileTokenStorage`, `useFileIfKeyringWritesDisabled` and
   `shouldBypassKeyring` (read with `strings`, read-only, from its install
   directory).
-- `AGY_ACP_FORCE_FILE_STORAGE`, which the driver sets, does nothing in
-  `agy` 1.5.x: the 1.5.17 binary holds neither that name nor `GEMINI_HOME`,
-  and the same T3 Code issue found `AGY_ACP_FORCE_FILE_STORAGE` missing from
-  1.5.7 to 1.5.12. The binary holds `AGY_CLI_FORCE_FILE_TOKEN_STORAGE`.
+- `AGY_ACP_FORCE_FILE_STORAGE` and `GEMINI_HOME`, which earlier releases of
+  the driver set, do nothing in `agy` 1.5.x: the 1.5.15 and 1.5.17 binaries
+  hold neither name, and the same T3 Code issue found
+  `AGY_ACP_FORCE_FILE_STORAGE` missing from 1.5.7 to 1.5.12. The binaries
+  hold `AGY_CLI_FORCE_FILE_TOKEN_STORAGE`, which the driver now sets.
 - So the recorder copies only that one file: the user's
   `~/.gemini/antigravity-cli/antigravity-oauth-token` (`HOME` from the
   recorder's environment) into `<profile>/antigravity-acp/`, mode 0600 in a
-  directory only the user can enter, and makes the keyring unreachable (the
-  table above). It reads nothing else of the user's, and never the keyring.
+  directory only the user can enter, and the driver's variable and the
+  unreachable session bus keep `agy` off the keyring (the table above). It
+  reads nothing else of the user's, and never the keyring.
 - `agy` may refresh the token during a run and rewrite the copy. After each
   scenario, also one that fails, the recorder writes a changed copy back over
   the user's file, so a rotated token is never lost. When the user's file
@@ -960,12 +974,22 @@ under them.
   and names the workspace and the copy in the error and in the run's last
   lines.
 - When the user keeps the sign-in only in the keyring, there is no file to
-  copy: a live run stops before it starts `agy`, naming the file. The
-  recorder never reads the keyring. To record, the user needs the sign-in in
-  that file. By the release notes above, a sign-in made while the keyring is
-  unreachable, such as `agy acp --login` (Antigravity's ACP guide) run with
-  `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`, goes to the file; no
-  phase of this plan has signed in, so that is not verified.
+  copy: a live run stops before it starts `agy`, naming the file and the step
+  below. The recorder never reads the keyring. To record, the user signs in
+  once into that file:
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir "$HOME/.gemini" --app-data-dir antigravity-cli`,
+  then finishes the Google sign-in it opens. `--login` signs in, then exits
+  ("Log in with Google interactively, then exit (ACP terminal auth)", `agy
+  acp --help`); with the variable set, `agy` keeps that sign-in in
+  `<gemini dir>/<app data dir>/antigravity-oauth-token` and leaves the
+  keyring's sign-in as it is (T3 Code checked `acp --login` with the variable
+  against 1.5.16; docs/drivers/antigravity.md, "Sources"). Google keeps up
+  to 100 refresh tokens per Google Account and OAuth client, and a new one
+  invalidates only the oldest beyond that ("Using OAuth 2.0 to Access Google
+  APIs", "Refresh token expiration",
+  https://developers.google.com/identity/protocols/oauth2#expiration), so the
+  user's own `agy` stays signed in through the keyring. Nobody has run this
+  step for this repository yet.
 - On macOS and Windows the keyring is not on D-Bus, so the unreachable bus
   does not keep `agy` away from it there.
 
@@ -1047,15 +1071,17 @@ the version these docs were written against) and a Google sign-in in
 finds the sign-in"). Recording spends your Antigravity quota: eight short
 turns.
 
-1. Run `pnpm install --frozen-lockfile`.
-2. Run `ARI_LIVE_RECORD=1 pnpm run record:antigravity`.
-3. To record with another model, set `ARI_RECORD_ANTIGRAVITY_MODEL` to one the
+1. If that file does not exist, sign in once into it with
+   `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir "$HOME/.gemini" --app-data-dir antigravity-cli`.
+2. Run `pnpm install --frozen-lockfile`.
+3. Run `ARI_LIVE_RECORD=1 pnpm run record:antigravity`.
+4. To record with another model, set `ARI_RECORD_ANTIGRAVITY_MODEL` to one the
    agent offers; a model it does not offer stops the recorder before the
    first prompt with the list.
-4. To record some scenarios only, or to write somewhere else, use the
+5. To record some scenarios only, or to write somewhere else, use the
    arguments of `record:claude`: `-- simple resume`, `--out <dir>`.
-5. Run `pnpm run check:recordings`, then the replay tests.
-6. Read the diff of `test/drivers/antigravity/recordings/` before you commit
+6. Run `pnpm run check:recordings`, then the replay tests.
+7. Read the diff of `test/drivers/antigravity/recordings/` before you commit
    it.
 
 The recorder writes `test/drivers/antigravity/recordings/<scenario>.ndjson`,

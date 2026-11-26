@@ -25,8 +25,12 @@ export interface FakeAgyProcess {
   readonly env: { [name: string]: string };
   readonly cwd: string;
   readonly loaded?: string[];
+  /** The sign-in it found: the content of `signInFile`, or null when there was none. */
   readonly signIn?: string | null;
+  /** Where it keeps its sign-in: the profile's file, or the file standing in for the keyring. */
   readonly signInFile?: string;
+  /** Which store `signInFile` is: the profile's own file, or the keyring entry every profile shares. */
+  readonly signInStore?: "file" | "keyring";
 }
 
 export interface FakeAgy {

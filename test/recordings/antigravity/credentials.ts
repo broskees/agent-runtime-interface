@@ -5,7 +5,8 @@
 // `agy` 1.5.x keeps the sign-in in the OS keyring (Secret Service on Linux,
 // service `gemini`, account `antigravity`), and in the file
 // `antigravity-oauth-token` in its app data directory when the keyring is
-// bypassed or unreachable. The app data directory is
+// bypassed or unreachable, or when AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set,
+// as the driver sets it. The app data directory is
 // `<gemini dir>/<app data dir>`: `~/.gemini/antigravity-cli` for the user's
 // own `agy` (`--gemini-dir` defaults to `.gemini` in the home directory and
 // `--app-data-dir` to `antigravity-cli`), and

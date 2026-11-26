@@ -3,9 +3,8 @@
 // both sides are compared in the same placeholder form.
 //
 // It replaces, in every string and every object key (a frame's own format
-// fields, `dir`, `kind`, `query`, `id`, `method`, `toolName` and
-// `contentType`, stay as the tap wrote them when they hold a string, a
-// number, a boolean or null):
+// fields, `dir`, `kind`, `query`, `id`, `method` and `contentType`, stay as
+// the tap wrote them when they hold a string, a number, a boolean or null):
 //   - the recording's temp workspace (and its real path) with <WORKSPACE>;
 //   - a string that is exactly the value of PATH with <PATH> (PATH differs
 //     between the recording machine and the replay machine);
@@ -48,12 +47,18 @@
 //     LOGNAME where they differ) with <USER>. How depends on what the string
 //     is:
 //       - in an inbound frame (what the agent and the machine produced: tool
-//         output, assistant text, stderr, file contents), every whole-word
-//         occurrence, in every string value, except a value that is one of
-//         the protocol words of its key (the driver kit's `protocolWords`,
-//         for Claude derived from the pinned sdk.d.ts). So the owner column
-//         of an `ls -l` is replaced, and `type: "user"` stays on an account
-//         named `user`;
+//         output, assistant text, stderr, file contents, a tool's name),
+//         every whole-word occurrence, in every string value, except a value
+//         that is one of the protocol words of its key at its place: where
+//         the pinned types put that word at that path of keys from the frame,
+//         in the object type the object's own discriminant names (the driver
+//         kit's `protocolWords`, ./protocol-places.ts; for Claude derived from
+//         the pinned sdk.d.ts). So the owner column of an `ls -l` is
+//         replaced, `type: "user"` of an SDK message stays on an account
+//         named `user`, `name: "memory"` inside an opaque tool result goes on
+//         an account named `memory`, and `name: "web_search"` of a
+//         `tool_use` block goes on an account named `web_search` (only a
+//         `server_tool_use` block's name may be that word);
 //       - in an outbound frame (what the driver sent, built from the scenario
 //         and the host's config) and in every object key, only where the
 //         name is a whole segment of a path (/srv/<name>/x, C:\Users\<name>,
@@ -70,6 +75,8 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { FRAME_PLACE, slotAt, slotIn } from "./protocol-places.ts";
+import type { ProtocolSlot, ProtocolWords } from "./protocol-places.ts";
 
 /** The credential variables whose values never reach a recording. */
 export const SECRET_VARIABLES = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
@@ -113,6 +120,22 @@ export const NEUTRAL_SOCKET_PATH = "/tmp/ari-recording/agent.sock";
 export const NEUTRAL_SHELL = "/bin/sh";
 /** The neutral rate-limit report (Claude Code's `rate_limit_event` rate_limit_info, `SDKRateLimitInfo`): allowed, nothing used, resetting at NEUTRAL_TIME. */
 export const NEUTRAL_RATE_LIMIT_INFO = { status: "allowed", rateLimitType: "five_hour", utilization: 0, resetsAt: NEUTRAL_TIME.seconds } as const;
+/**
+ * The neutral rate-limit windows of a Codex rate-limit snapshot
+ * (`RateLimitWindow`, under `primary` and `secondary`): nothing used, resetting
+ * at NEUTRAL_TIME, a 5-hour primary and a weekly secondary window, the two the
+ * Codex driver names (`5h`, `weekly`).
+ */
+export const NEUTRAL_RATE_LIMIT_WINDOWS = {
+  primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: NEUTRAL_TIME.seconds },
+  secondary: { usedPercent: 0, windowDurationMins: 10_080, resetsAt: NEUTRAL_TIME.seconds },
+} as const;
+/** The neutral credit balance of a Codex rate-limit snapshot (`CreditsSnapshot`, under `credits`): none, not unlimited, a balance of "0". */
+export const NEUTRAL_CODEX_CREDITS = { hasCredits: false, unlimited: false, balance: "0" } as const;
+/** The neutral spend-control limit of a Codex rate-limit snapshot (`SpendControlLimitSnapshot`, under `individualLimit`). */
+export const NEUTRAL_SPEND_CONTROL_LIMIT = { limit: "0", remainingPercent: 0, resetsAt: NEUTRAL_TIME.seconds, used: "0" } as const;
+/** The neutral reset credits of a Codex usage read (`RateLimitResetCreditsSummary`, under `rateLimitResetCredits`). */
+export const NEUTRAL_RESET_CREDITS = { availableCount: 0, credits: [] } as const;
 
 /** A key that says whether the user is signed in to a provider, compared without case, `-` or `_`. */
 const SIGN_IN_STATUS_KEY = /^(?:is)?(?:signedin|loggedin|authenticated)$/;
@@ -125,6 +148,15 @@ function neutralTime(value: unknown): unknown {
 /** A figure as 0 of the same type: the number 0, or "0" for a number written as a string (a protobuf int64 in JSON). */
 function neutralFigure(value: unknown): unknown {
   return typeof value === "number" ? 0 : typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value) ? "0" : value;
+}
+
+function isRecord(value: unknown): value is { readonly [key: string]: unknown } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A Codex rate-limit window (an object with a number `usedPercent`) as the neutral window of its place, `primary` or `secondary`. */
+function neutralWindow(which: "primary" | "secondary"): (value: unknown) => unknown {
+  return (value) => (isRecord(value) && typeof value["usedPercent"] === "number" ? { ...NEUTRAL_RATE_LIMIT_WINDOWS[which] } : value);
 }
 
 /**
@@ -146,6 +178,20 @@ export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonl
   { what: "quota reset time", key: /^(?:quota)?resets?(?:time|at)$/, neutral: neutralTime },
   // A credit balance, as the binary names its credit figures (`usedPromptCredits`, `availableFlowCredits`, `monthlyPromptCredits`, `consumedCredits`, `availableCredits`): 0.
   { what: "credit balance", key: /credits$/, neutral: neutralFigure },
+  // Codex's credit balance, a rate-limit snapshot's `credits` (CreditsSnapshot: hasCredits, unlimited, balance): replaced whole.
+  { what: "Codex credit balance", key: /^credits$/, neutral: (value) => (isRecord(value) && typeof value["hasCredits"] === "boolean" ? { ...NEUTRAL_CODEX_CREDITS } : value) },
+  // Codex's rate-limit windows, a rate-limit snapshot's `primary` and `secondary` (RateLimitWindow: usedPercent, windowDurationMins, resetsAt): replaced whole.
+  { what: "Codex rate-limit window", key: /^primary$/, neutral: neutralWindow("primary") },
+  { what: "Codex rate-limit window", key: /^secondary$/, neutral: neutralWindow("secondary") },
+  // Codex's spend-control limit (SpendControlLimitSnapshot: limit, remainingPercent, resetsAt, used): replaced whole.
+  { what: "Codex spend-control limit", key: /^individuallimit$/, neutral: (value) => (isRecord(value) && typeof value["remainingPercent"] === "number" ? { ...NEUTRAL_SPEND_CONTROL_LIMIT } : value) },
+  // Codex's rate-limit reset credits (RateLimitResetCreditsSummary: availableCount, credits): none.
+  { what: "Codex reset credits", key: /^ratelimitresetcredits$/, neutral: (value) => (isRecord(value) && typeof value["availableCount"] === "number" ? { ...NEUTRAL_RESET_CREDITS, credits: [] } : value) },
+  // A usage percentage anywhere else (Codex's usedPercent and remainingPercent): 0.
+  { what: "usage percentage", key: /^(?:used|remaining)percent$/, neutral: neutralFigure },
+  // Whether the account reached a limit (Codex's rateLimitReachedType, spendControlReached): not reached.
+  { what: "limit reached", key: /^ratelimitreachedtype$/, neutral: (value) => (typeof value === "string" ? null : value) },
+  { what: "limit reached", key: /^spendcontrolreached$/, neutral: (value) => (typeof value === "boolean" ? false : value) },
   // Whether the user is signed in to a provider (the binary's `isAuthenticated`; `signedIn`, `loggedIn`): always true.
   { what: "sign-in status", key: SIGN_IN_STATUS_KEY, neutral: (value) => (typeof value === "boolean" ? true : value) },
   // Whether a provider still needs the user to sign in (the binary's `needs_auth`): always false.
@@ -157,6 +203,8 @@ export const NEUTRAL_FIELD_RULES: ReadonlyArray<{ readonly what: string; readonl
   { what: "socket path", key: /socket(?:path|file)$/, neutral: (value) => (typeof value === "string" ? NEUTRAL_SOCKET_PATH : value) },
   // OpenCode's `shell.created` event: the path of the shell the command ran in, the user's login shell.
   { what: "shell", key: /^shell$/, neutral: (value) => (typeof value === "string" && /^(?:[/\\]|[A-Za-z]:[/\\])/.test(value) ? NEUTRAL_SHELL : value) },
+  // Codex's `initialize` answer names the client's operating system, its version, the architecture and the terminal after the product (`codex_cli_rs/0.172.0 (Arch Linux Rolling; x86_64) xterm-256color`): only the product and its version stay.
+  { what: "user agent", key: /^useragent$/, neutral: (value) => (typeof value === "string" && /\s/.test(value.trim()) ? value.trim().split(/\s+/)[0] : value) },
 ];
 
 /** The fields of a model list entry a driver reads (the OpenCode driver's `models()`: enabled, providerID, modelID, name, limit.context). */
@@ -250,8 +298,8 @@ export interface SanitiserInput {
   readonly env: { readonly [name: string]: string | undefined };
   /** The OS user name; os.userInfo().username when left out. USER and LOGNAME are replaced too when they differ from it. */
   readonly user?: string;
-  /** For each object key, the values that are protocol words there; an inbound value that is one keeps the user name. */
-  readonly protocolWords?: { readonly [key: string]: readonly string[] };
+  /** The words the pinned types allow, by place (./protocol-places.ts); an inbound value that is one of its place's key's words keeps the user name. */
+  readonly protocolWords?: ProtocolWords;
   /** The `provider/model` the recording used: a model list keeps only that model. Without it, a model list stays whole. */
   readonly recordedModel?: string;
 }
@@ -271,7 +319,7 @@ export type Sanitiser = <T>(value: T, side?: FrameSide) => T;
  * object or array under one of these names (an OpenCode request's `query`,
  * which holds the request's query parameters) is sanitised like any value.
  */
-export const FRAME_FORMAT_FIELDS: ReadonlySet<string> = new Set(["dir", "kind", "query", "id", "method", "toolName", "contentType"]);
+export const FRAME_FORMAT_FIELDS: ReadonlySet<string> = new Set(["dir", "kind", "query", "id", "method", "contentType"]);
 
 function isScalar(value: unknown): boolean {
   return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
@@ -295,12 +343,50 @@ function realPath(value: string): string {
   }
 }
 
-function osUser(): string | undefined {
+/** What Bun 1.3.14's os.userInfo() reports as the user name when neither USER nor LOGNAME is set. */
+const BUN_UNKNOWN_USER = "unknown";
+
+/** The name /etc/passwd gives the user id `uid`, if the file has it (it has every local account on Linux; macOS keeps people elsewhere). */
+function passwdName(uid: number): string | undefined {
+  let text: string;
   try {
-    return os.userInfo().username;
+    text = fs.readFileSync("/etc/passwd", "utf8");
   } catch {
     return undefined;
   }
+  for (const line of text.split("\n")) {
+    const [name, , id] = line.split(":");
+    if (name !== undefined && name !== "" && id !== undefined && Number(id) === uid) return name;
+  }
+  return undefined;
+}
+
+/**
+ * The OS user's name: os.userInfo().username, except where that is Bun's
+ * "unknown" (Bun 1.3.14 takes the name from USER and LOGNAME, and reports
+ * "unknown" when a launcher strips both). Then the name the user's id has in
+ * /etc/passwd, else the name of the home directory when the user owns it.
+ */
+export function osUserName(): string | undefined {
+  let info: os.UserInfo<string> | undefined;
+  try {
+    info = os.userInfo();
+  } catch {
+    info = undefined;
+  }
+  const reported = info?.username;
+  if (reported !== undefined && reported !== "" && reported !== BUN_UNKNOWN_USER) return reported;
+  const uid = typeof process.getuid === "function" ? process.getuid() : info?.uid;
+  if (uid === undefined || uid < 0) return reported === "" ? undefined : reported;
+  const named = passwdName(uid);
+  if (named !== undefined) return named;
+  const home = info?.homedir ?? os.homedir();
+  try {
+    if (home !== "" && fs.statSync(home).uid === uid) return home.split(/[/\\]/).filter((segment) => segment !== "").at(-1) ?? reported;
+  } catch {
+    // No home to look at.
+  }
+  return reported === "" ? undefined : reported;
 }
 
 // What the scan refuses, as replacements. Each regex is global.
@@ -322,7 +408,7 @@ const PATH_TOKEN = /(?<![A-Za-z0-9._~-])(?:[A-Za-z]:[\\/]|[/\\~])[^\s"'`<>|,;()[
 
 /** The user names the sanitiser replaces: the OS user's, and USER and LOGNAME when they differ. */
 export function userNames(input: Pick<SanitiserInput, "env" | "user">): string[] {
-  const names = [input.user ?? osUser(), input.env["USER"], input.env["LOGNAME"]];
+  const names = [input.user ?? osUserName(), input.env["USER"], input.env["LOGNAME"]];
   return [...new Set(names.filter((name): name is string => name !== undefined && name !== "" && !/[/\\\s]/.test(name)))];
 }
 
@@ -358,7 +444,7 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
   const names = [...users].sort((a, b) => b.length - a.length);
   // A whole word: not next to a letter, a digit or an underscore. "joe-laptop" and "joe's" hold the word; "joey" and "joe_x" do not.
   const userWord = names.length === 0 ? undefined : new RegExp(`(?<![A-Za-z0-9_])(?:${names.map(escapeRegExp).join("|")})(?![A-Za-z0-9_])`, "g");
-  const protocolWords = new Map(Object.entries(input.protocolWords ?? {}).map(([key, words]) => [key, new Set(words)]));
+  const protocolWords: ProtocolWords = input.protocolWords ?? {};
 
   /** `word` replaces every whole-word user name (inbound values); `path` only path segments (outbound values and every key). */
   const text = (value: string, rule: "word" | "path"): string => {
@@ -382,8 +468,12 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
     return NEUTRAL_FIELD_RULES.filter((rule) => rule.key.test(plain));
   };
 
-  /** `key` is the object key the value sits under (array elements take their array's key). */
-  const walk = (value: unknown, side: FrameSide, key: string | undefined): unknown => {
+  /**
+   * `key` is the object key the value sits under (array elements take their
+   * array's key), and `slot` what the pinned types say of that key at the
+   * value's place (undefined at an opaque place).
+   */
+  const walk = (value: unknown, side: FrameSide, key: string | undefined, slot: ProtocolSlot | undefined): unknown => {
     for (const rule of neutralRules(key)) {
       const neutral = rule.neutral(value);
       if (neutral !== value) return neutral;
@@ -394,23 +484,23 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const model = input.recordedModel;
       const entries = value as readonly Entry[];
       // OpenCode 2.x GET /api/model: every model of every provider the user is signed in to.
-      if (entriesWith(value, ["providerID", "modelID"])) return entries.filter((entry) => `${String(entry["providerID"])}/${String(entry["modelID"])}` === model).map((entry) => walk(readModelFields(entry), side, key));
+      if (entriesWith(value, ["providerID", "modelID"])) return entries.filter((entry) => `${String(entry["providerID"])}/${String(entry["modelID"])}` === model).map((entry) => walk(readModelFields(entry), side, key, slot));
       // Claude Code's initializationResult().models: the models the user's plan offers, and which is the default.
-      if (entriesWith(value, ["value", "resolvedModel"])) return entries.filter((entry) => entry["value"] === model || entry["resolvedModel"] === model).map((entry) => walk(entry, side, key));
+      if (entriesWith(value, ["value", "resolvedModel"])) return entries.filter((entry) => entry["value"] === model || entry["resolvedModel"] === model).map((entry) => walk(entry, side, key, slot));
     }
     if (typeof value === "string") {
       const id = idPlaceholder(key);
       if (id !== undefined && value !== "") return id;
-      const protocolWord = key !== undefined && protocolWords.get(key)?.has(value) === true;
+      const protocolWord = slot?.words?.includes(value) === true;
       return text(value, side === "in" && !protocolWord ? "word" : "path");
     }
-    if (Array.isArray(value)) return value.map((each) => walk(each, side, key));
+    if (Array.isArray(value)) return value.map((each) => walk(each, side, key, slot));
     if (typeof value === "object" && value !== null) {
       // An ACP agent's model picker: only the recorded model and the current one stay.
       const picked = input.recordedModel !== undefined && (value as Entry)["category"] === "model" && Array.isArray((value as Entry)["options"]) ? acpModelOptionWith(value as Entry, input.recordedModel) : (value as Entry);
       const source = withNeutralAcpUsage(picked, key);
       const out: { [key: string]: unknown } = {};
-      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field);
+      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field, slotIn(protocolWords, slot, source, field));
       return out;
     }
     return value;
@@ -421,11 +511,12 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const out: { [key: string]: unknown } = {};
       for (const [field, entry] of Object.entries(value)) {
         const kept = FRAME_FORMAT_FIELDS.has(field) && isScalar(entry);
-        out[FRAME_FORMAT_FIELDS.has(field) ? field : text(field, "path")] = kept ? entry : walk(entry, value.dir, field);
+        out[FRAME_FORMAT_FIELDS.has(field) ? field : text(field, "path")] = kept ? entry : walk(entry, value.dir, field, slotAt(protocolWords, FRAME_PLACE, field));
       }
       return out as T;
     }
-    return walk(value, side ?? "in", undefined) as T;
+    // A value that is no frame has no place the pinned types describe.
+    return walk(value, side ?? "in", undefined, undefined) as T;
   };
 }
 

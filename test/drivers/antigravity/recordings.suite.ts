@@ -19,6 +19,7 @@ import { scanRecordingText } from "../../../scripts/check-recordings.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { encodeRecording, readRecording } from "../../recordings/format.ts";
+import { wholeWordsOf } from "../../recordings/whole-words.ts";
 import type { Frame, Recording } from "../../recordings/format.ts";
 import { acpNativeAnswers, acpTurnsDependedOn } from "../../recordings/acp/frames.ts";
 import { ANTIGRAVITY_IGNORED_FIELDS } from "../../recordings/antigravity/frames.ts";
@@ -591,23 +592,6 @@ for (const [recordedAs, replayedAs] of [
   });
 }
 
-/** Every place in a recording where `name` is a whole word, other than a protocol word of its key or a frame's format field. */
-function wholeWordsOf(name: string, frames: readonly Frame[]): string[] {
-  const word = new RegExp(`(?<![A-Za-z0-9_])${escape(name)}(?![A-Za-z0-9_])`);
-  const found: string[] = [];
-  const walk = (value: unknown, key: string | undefined, at: string): void => {
-    if (typeof value === "string") {
-      if (key !== undefined && ACP_PROTOCOL_WORDS[key]?.includes(value)) return;
-      if (word.test(value)) found.push(`${at}: ${JSON.stringify(value)}`);
-    } else if (Array.isArray(value)) value.forEach((each, index) => walk(each, key, `${at}[${index}]`));
-    else if (typeof value === "object" && value !== null) for (const [field, entry] of Object.entries(value)) walk(entry, field, `${at}.${field}`);
-  };
-  frames.forEach((frame, index) => {
-    for (const [field, entry] of Object.entries(frame)) if (!FRAME_FORMAT_FIELDS.has(field) || typeof entry === "object") walk(entry, field, `frame ${index + 2}.${field}`);
-  });
-  return found;
-}
-
 test("the Antigravity recorder replaces the OS user name, a home path, an email, a secret environment value, an account id and each account detail in a recorded frame, the scan and check:recordings pass, and the recording replays", async () => {
   const osName = os.userInfo().username;
   const home = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "sanitise-home-")));
@@ -658,7 +642,7 @@ test("the Antigravity recorder replaces the OS user name, a home path, an email,
     const frames = (await readRecording(outcome.file!)).frames.map((entry) => entry.frame);
     assert.ok(!text.includes(outcome.workspace), `${outcome.scenario}: the workspace path`);
     assert.ok(!text.includes(home), `${outcome.scenario}: the HOME`);
-    assert.deepEqual(wholeWordsOf(osName, frames), [], `${outcome.scenario}: the OS user name is nowhere in the recording but in protocol words`);
+    assert.deepEqual(wholeWordsOf(osName, frames, ACP_PROTOCOL_WORDS), [], `${outcome.scenario}: the OS user name is nowhere in the recording but in protocol words`);
     for (const leaked of ["ari-recorder-user@example.org", secret, "someone-else", "acct-31f9c2", "org-77d1e0", "g1-pro-tier", "Google AI Pro", "0.82", "1796072400", "2026-12-16", "1796000000000", "2294915", "session.1YX2c84S", "agy-2294915", "zsh", "fake-argon", "Fake Argon"]) {
       assert.ok(!text.includes(leaked), `${outcome.scenario}: ${leaked} is gone`);
     }

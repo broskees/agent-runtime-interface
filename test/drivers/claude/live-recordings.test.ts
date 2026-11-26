@@ -17,7 +17,7 @@ import { CLAUDE_SDK_NAME, CLAUDE_VENDOR_NAME } from "../../recordings/claude/rec
 import { replayClaude } from "../../recordings/claude/replay.ts";
 import { readRecording } from "../../recordings/format.ts";
 import { NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_SOCKET_PATH, NEUTRAL_TIME, PLACEHOLDERS, createSanitiser } from "../../recordings/sanitiser.ts";
-import { SCENARIO_NAMES } from "../../recordings/scenarios.ts";
+import { SCENARIO_NAMES, checkScenario } from "../../recordings/scenarios.ts";
 
 const RECORDINGS = path.join(REPO_ROOT, "test", "drivers", "claude", "recordings");
 
@@ -85,4 +85,17 @@ test("the live Claude recordings carry no account details: the plan, rate-limit 
   // initializationResult().models keeps only the recorded model.
   assert.ok(found["models"]!.length > 0);
   for (const models of found["models"]!) assert.deepEqual((models as Array<{ value: string }>).map((model) => model.value), ["haiku"]);
+});
+
+test("approval_denied: in the live denial Claude Code offered a decline and the host chose it, so the scenario check takes only a native decline, not a native cancel in its place", async () => {
+  const { run } = await replayClaude(path.join(RECORDINGS, "approval_denied.ndjson"));
+  const commands = run.requests.filter((entry) => entry.request.kind === "command");
+  assert.ok(commands.length > 0, "a command request reached the host");
+  for (const entry of commands) {
+    const chosen = (entry.request.options ?? []).find((option) => option.optionId === entry.optionId);
+    assert.equal(chosen?.decision, "decline", "Claude Code offered a decline, and the host chose it");
+  }
+  checkScenario(run, [{ decision: "decline" }]);
+  // A driver that turned the host's decline into a native cancel: the check names what it wanted.
+  assert.throws(() => checkScenario(run, [{ decision: "cancel" }]), /scenario approval_denied: the host's decline answer reached the native side as a recorded outbound frame \(native answers: \[\{"decision":"cancel"\}\]; the agent offered a decline, so a native cancel does not count\)/);
 });

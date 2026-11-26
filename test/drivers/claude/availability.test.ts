@@ -152,6 +152,20 @@ result = { runtime: Object.keys(runtime).sort(), version: runtime.version, claud
     }
   });
 
+  test("an untested SDK does not hide the advisory about a newer Claude Code", async () => {
+    const rig = await openClaudeRig({ runtime: { version: "0.3.400" }, claudeVersionLine: "2.1.400 (Claude Code)" });
+    try {
+      const status = await rig.instance.status();
+      assert.equal(status.state, "ready");
+      assert.equal(status.advisory?.kind, "untested_version");
+      assert.match(status.advisory!.message, /@anthropic-ai\/claude-agent-sdk 0\.3\.400 is outside the versions this driver is tested against/);
+      assert.match(status.advisory!.message, /Claude Code 2\.1\.400 .* newer than 2\.1\.330.*this version is untested/);
+      assert.deepEqual(await rig.instance.maintenance!.advisory(), status.advisory);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("with no claude on PATH, status() says Claude Code is not installed and how to install it, and openSession refuses before any query", async () => {
     const rig = await openClaudeRig({ host: { resolveExecutable: async () => null } }).catch((error: unknown) => error);
     // The rig opens a session, which must refuse; build the instance by hand instead.

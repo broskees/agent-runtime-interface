@@ -178,6 +178,15 @@ function claudeCodeAdvisory(claudeCode: ClaudeCode): UpdateAdvisory | null {
   };
 }
 
+/** The wire has one advisory slot. Keep the SDK's version fields if both are untested, but name both in the message. */
+function availabilityAdvisory(sdkVersion: string | undefined, claudeCode: ClaudeCode): UpdateAdvisory | null {
+  const sdk = versionAdvisory(sdkVersion);
+  const cli = claudeCodeAdvisory(claudeCode);
+  if (sdk === null) return cli;
+  if (cli === null) return sdk;
+  return { ...sdk, message: `${sdk.message} ${cli.message}` };
+}
+
 /** What changes when a file is replaced or rewritten in place, as `claude update` does; null when it cannot be read. */
 async function fileIdentity(path: string): Promise<string | null> {
   try {
@@ -389,7 +398,7 @@ export class ClaudeInstance implements Instance {
     }
     const auth = await this.#state();
     const version = available.runtime.version;
-    const advisory = versionAdvisory(version) ?? claudeCodeAdvisory(available.claudeCode);
+    const advisory = availabilityAdvisory(version, available.claudeCode);
     const limits = this.#limits.size === 0 ? undefined : limitStatusFrom(this.#limits.values());
     return {
       state: "ready",
@@ -639,18 +648,16 @@ export class ClaudeInstance implements Instance {
   };
 
   maintenance = {
-    /** The same advisory `status()` gives: the SDK's, else the user's Claude Code's. A Claude Code that is unavailable gives none here; `status()` reports it. */
+    /** The same version advice as `status()` when ready; `status()` reports any Claude Code availability error. */
     advisory: async (): Promise<UpdateAdvisory | null> => {
       const runtime = await this.#sdk();
-      const sdkAdvisory = versionAdvisory(runtime.version);
-      if (sdkAdvisory !== null) return sdkAdvisory;
       let claudeCode: ClaudeCode;
       try {
         claudeCode = await this.#claudeCode();
       } catch {
-        return null;
+        return versionAdvisory(runtime.version);
       }
-      return claudeCodeAdvisory(claudeCode);
+      return availabilityAdvisory(runtime.version, claudeCode);
     },
     /** Downloads the pinned SDK, and only the SDK, from the npm registry (`sdkRegistry`) into the instance's cache directory. */
     install: (): Promise<void> => this.#install(),

@@ -340,9 +340,10 @@ and `opencode-1.txt`).
 ## Probes and status
 
 `probe()` runs only `opencode --version`, or reads an external server's info
-route; it starts no server and writes nothing. `status()` reports the version
-and an `untested_version` advisory above the generation's tested range, and
-`driver_unavailable` below its minimum.
+route; it starts no server and writes nothing. `status()` reports the version.
+A local CLI below the minimum gives `driver_unavailable`. A local CLI above
+its generation's tested range, or an external server outside that range,
+gets an `untested_version` advisory.
 Without `opencode`, `status()` is `unavailable` with a `driver_unavailable`
 error naming the binary. Without the SDK the server's generation needs, it is
 `unavailable` with a `driver_unavailable` error naming `@opencode-ai/sdk` or

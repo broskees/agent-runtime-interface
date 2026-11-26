@@ -385,10 +385,11 @@ version in the driver's ACP `initialize` request (`clientInfo.version`).
 The repository is public, so every recorder sanitises each frame before it
 writes. All recorders use one sanitiser, `test/recordings/sanitiser.ts`. It
 replaces, in every string and object key (a frame's own format fields, `dir`,
-`kind`, `query`, `id`, `method`, `toolName` and `contentType`, stay as the
-recorder wrote them when they hold a string, a number, a boolean or null; an
-OpenCode request's `query` is an object of the request's query parameters,
-and is sanitised like any other value):
+`kind`, `query`, `id`, `method` and `contentType`, stay as the recorder wrote
+them when they hold a string, a number, a boolean or null; an OpenCode
+request's `query` is an object of the request's query parameters, and is
+sanitised like any other value; a Claude `can_use_tool` frame's `toolName` is
+the agent's tool name, and is sanitised like its `input`):
 
 | What | Placeholder |
 |---|---|
@@ -397,7 +398,7 @@ and is sanitised like any other value):
 | `$HOME`, and its real path | `<HOME>` |
 | the values of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` | `<ANTHROPIC_API_KEY>`, `<ANTHROPIC_AUTH_TOKEN>`, `<CLAUDE_CODE_OAUTH_TOKEN>` |
 | the value of every other variable of the recorder's environment whose name ends in `_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, when it is 8 characters or more | `<NAME>`, for example `<GEMINI_API_KEY>` |
-| the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ): in an inbound frame wherever it is a whole word, except in a protocol word; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
+| the OS user name (`os.userInfo().username`, and the values of `USER` and `LOGNAME` where they differ; under Bun, whose `os.userInfo()` says `unknown` when `USER` and `LOGNAME` are not set, the name `/etc/passwd` gives the user's id, else the name of the home directory the user owns): in an inbound frame wherever it is a whole word, except in a protocol word at its place; in an outbound frame and in object keys where it is a whole segment of a path | `<USER>` |
 | email addresses | `<EMAIL>` |
 | the string value under a key that names an account or organisation id (compared without case, `-` or `_`: a key ending in `accountid` or `accountuuid`, or in `orgid`, `organizationid`, `organisationid` or their `uuid` forms), in both directions. OpenCode 2.1.2's model list carries the user's ChatGPT account id (`chatgpt-account-id`) and OpenCode organisation id (`x-opencode-org-id`) as request headers of their models | `<ACCOUNT_ID>`, `<ORG_ID>` |
 | another home directory: `/home/<name>`, `/Users/<name>`, `/root` | `<OTHER_HOME>` |
@@ -489,10 +490,16 @@ How the user name goes depends on what the string is:
   There every whole-word occurrence of each user name is replaced in every
   string value, so the owner column of an `ls -l` loses it. A whole word is
   one not next to a letter, a digit or an underscore. The one exception is a
-  value that is one of the protocol words of its key (below): an account
-  named `user` keeps Claude Code's `type: "user"`, `role: "user"` and
-  `apiKeySource: "user"`, which the driver reads and replay needs, and an
-  account named `text` keeps OpenCode's `type: "session.text.delta"`.
+  value that is one of the protocol words of its key at its place (below):
+  an account named `user` keeps Claude Code's `type: "user"`,
+  `role: "user"` and `apiKeySource: "user"` where the SDK's types put them,
+  which the driver reads and replay needs, and an account named `text`
+  keeps OpenCode's `type: "session.text.delta"`. The same word in a value
+  the pinned types do not describe is free text: on an account named
+  `memory`, `running` or `unknown`, an opaque `tool_use_result` (the SDK
+  types it `unknown`) loses `name: "memory"`, `status: "running"` and
+  `error: "unknown"`, though the SDK allows each of them for that key
+  elsewhere.
 - **Outbound frames** hold what the driver sent, built from the scenario
   module and the host's config. There, and in every object key, the name is
   replaced only where it is a whole segment of a path: a string part that
@@ -509,64 +516,111 @@ Known limit: an outbound frame that carries inbound text back, such as a
 the request, gets only the path rule. A user name in that text as a free word
 would stay. The six scenarios send no such answer.
 
+### Protocol words by place
+
+A protocol word keeps the user name only where the pinned types put it: the
+same key and word anywhere else is free text. `test/recordings/protocol-places.ts`
+holds each kit's words by place. A place is one spot of an inbound frame the
+pinned types describe (the set of object types a value there can have),
+named by the first path of keys that reaches it from the frame: the empty
+name is the frame, `message` its `message`, `message.params` that message's `params`,
+and so on; an array's elements share the array's place. For each key of an
+object at a place, the table lists the words the types allow as the key's
+string value there and the place of the key's object value; `*` stands for
+the keys a type declares by an index signature or `additionalProperties`. A
+value with no place (a type of `unknown`, `any` or `object`, or JSON Schema
+`true`) is opaque, and nothing below it is a protocol word. The sanitiser
+walks each inbound frame and the table together. Each kit derives its table
+from its pinned sources with `placeProtocolWords`, breadth first with keys
+sorted, so the same sources give the same table;
+`test/recordings/protocol-words.test.ts` fails when a committed table and its
+derivation differ.
+
 ### Claude protocol words
 
-`test/recordings/claude/protocol-words.ts` lists, for each object key the
-pinned SDK can put in an inbound Claude frame, the string literals its types
-allow as that key's value. `test/recordings/claude/derive-protocol-words.ts`
-derives them with the TypeScript checker from
-`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` (0.3.330) and the
-`@anthropic-ai/sdk` types it imports. It starts from `SDKMessage`, the return
-types of the `Query` methods and SDK functions the driver calls, and the
-options `CanUseTool` receives, and follows every property, union member,
-array element and index signature. `test/recordings/protocol-words.test.ts`
-fails when the committed list and the derivation differ; after an SDK bump,
-run `node test/recordings/claude/derive-protocol-words.ts` and paste the result.
+`test/recordings/claude/protocol-words.ts` holds, by place, the string
+literals the pinned SDK's types allow in an inbound Claude frame.
+`test/recordings/claude/derive-protocol-words.ts` derives them with the
+TypeScript checker from `node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts`
+(0.3.330) and the `@anthropic-ai/sdk` types it imports. Its roots are the
+fields of an inbound frame: a `message` frame's `message` is `SDKMessage`; a
+`result` frame's `value` is the return type of a `Query` method or SDK
+function the driver calls; a `can_use_tool` frame's `options` are the options
+`CanUseTool` receives. A `can_use_tool` frame's `toolName` and `input` are a
+string and a `Record<string, unknown>` there, so they hold no protocol word.
+The walk follows every property, union member, array element and index
+signature, and stops at `unknown`: a user message's `tool_use_result` and a
+session message's `message` are opaque. After an SDK bump, run
+`node test/recordings/claude/derive-protocol-words.ts` and put the result in
+the file.
 
-A value is kept only when it is one of its key's words: `type: "user"` stays,
-but `error: "permission denied for <name>"` loses the name, because `error`'s
-words are its enum values (`authentication_failed`, `rate_limit`, ...). The
-52 keys are `allowed_callers`, `apiKeySource`, `apiProvider`, `behavior`, `category`, `compact_result`, `costBasis`, `destination`, `direction`, `effort`, `error`, `errorCode`, `error_code`, `fast_mode_disabled_reason`, `fast_mode_state`, `file_type`, `first_stream_post_queued_behind`, `first_text_post_queued_behind`, `fromMode`, `kind`, `level`, `limitScope`, `lost`, `media_type`, `mode`, `model`, `name`, `outcome`, `overageDisabledReason`, `overageStatus`, `oversized_image`, `permissionMode`, `priority`, `rateLimitType`, `reason`, `response_inclusion`, `role`, `scope`, `service_tier`, `speed`, `startup_failure_reason`, `state`, `status`, `stop_reason`, `subkind`, `subtype`, `supportedEffortLevels`, `terminal_reason`, `trigger`, `ttl`, `type`, `view_mode`.
+A value is kept only when it is one of its key's words at its place:
+`type: "user"` of an SDK message stays, but `error: "permission denied for
+<name>"` loses the name, because that `error`'s words are its enum values
+(`authentication_failed`, `rate_limit`, `unknown`, ...). The 52 keys holding
+words are `allowed_callers`, `apiKeySource`, `apiProvider`, `behavior`, `category`, `compact_result`, `costBasis`, `destination`, `direction`, `effort`, `error`, `errorCode`, `error_code`, `fast_mode_disabled_reason`, `fast_mode_state`, `file_type`, `first_stream_post_queued_behind`, `first_text_post_queued_behind`, `fromMode`, `kind`, `level`, `limitScope`, `lost`, `media_type`, `mode`, `model`, `name`, `outcome`, `overageDisabledReason`, `overageStatus`, `oversized_image`, `permissionMode`, `priority`, `rateLimitType`, `reason`, `response_inclusion`, `role`, `scope`, `service_tier`, `speed`, `startup_failure_reason`, `state`, `status`, `stop_reason`, `subkind`, `subtype`, `supportedEffortLevels`, `terminal_reason`, `trigger`, `ttl`, `type`, `view_mode`.
 
 ### ACP protocol words
 
-`test/recordings/acp/protocol-words.ts` lists, for each object key an ACP
-agent can put in a message to the client, the string values the vendored ACP
-schemas allow there. `test/recordings/acp/derive-protocol-words.ts` derives
-them from `vendor-schemas/acp/schema-v2.0.0-beta.3/`, the release the ACP
-drivers are built on. It starts, in `v1/schema.unstable.json` and
-`v2/schema.unstable.json`, from the `Agent` message (every request, response
-and notification an agent sends) and the `ProtocolLevel` message
-(`$/cancel_request`), follows every `$ref`, `allOf`, `anyOf`, `oneOf`,
-property, array item and additional property, and takes each `const` and
-`enum`. A JSON-RPC message's `method` holds a method name rather than a schema
-literal, so `method` gets the `clientMethods` and `protocolMethods` of each
-version's `meta.unstable.json`: the methods an agent sends.
-`test/recordings/protocol-words.test.ts` fails when the committed list and the
-derivation differ; after a schema bump, run
-`node test/recordings/acp/derive-protocol-words.ts` and paste the result.
+`test/recordings/acp/protocol-words.ts` holds, by place, the string values
+the vendored ACP schemas allow in an inbound ACP stdio frame.
+`test/recordings/acp/derive-protocol-words.ts` derives them from
+`vendor-schemas/acp/schema-v2.0.0-beta.3/`, the release the ACP drivers are
+built on. Its root is a `stdout` frame's `message`: in
+`v1/schema.unstable.json` and `v2/schema.unstable.json`, the `Agent` message
+(every request, response and notification an agent sends) and the
+`ProtocolLevel` message (`$/cancel_request`). The walk follows every `$ref`,
+`allOf`, `anyOf`, `oneOf`, property, array item and additional property, and
+takes each `const` and `enum`; an agent's `_meta` is opaque. A JSON-RPC
+message's `method` holds a method name rather than a schema literal, so the
+message's `method` gets the `clientMethods` and `protocolMethods` of each
+version's `meta.unstable.json`: the methods an agent sends. After a schema
+bump, run `node test/recordings/acp/derive-protocol-words.ts` and put the
+result in the file.
 
-The 20 keys are `apiType`, `audience`, `category`, `fileType`, `format`, `jsonrpc`, `kind`, `method`, `mode`, `operation`, `position`, `priority`, `sessionUpdate`, `severity`, `state`, `status`, `stopReason`, `supported`, `theme`, `type`.
+The 20 keys holding words are `apiType`, `audience`, `category`, `fileType`, `format`, `jsonrpc`, `kind`, `method`, `mode`, `operation`, `position`, `priority`, `sessionUpdate`, `severity`, `state`, `status`, `stopReason`, `supported`, `theme`, `type`.
 
 ### OpenCode protocol words
 
-`test/recordings/opencode/protocol-words.ts` lists, for each object key an
-OpenCode 2.x server can put in an inbound OpenCode frame, the string literals
-the types allow as that key's value. `test/recordings/opencode/derive-protocol-words.ts`
-derives them with the TypeScript checker from
-`node_modules/@opencode/client/dist/promise/index.d.ts` (2.1.2) and the
-generated types it exports. It starts from `OpenCodeEvent` (every event of
-`GET /api/event`), `ServerInfo` (the driver reads `GET /api/info` itself), the
-awaited return type of every client call the driver makes (each method of
-`V2Client` in `src/drivers/opencode/sdk.ts`, looked up by the same path in the
-client), and every error body the client declares (each exported type with a
-`_tag`), and follows every property, union member, array element and index
-signature. `test/recordings/protocol-words.test.ts` fails when the committed
-list and the derivation differ; after a client bump, or when the driver calls
-another client method, run `node test/recordings/opencode/derive-protocol-words.ts`
-and paste the result.
+`test/recordings/opencode/protocol-words.ts` holds, by place, the string
+literals the pinned client's types allow in an inbound OpenCode frame.
+`test/recordings/opencode/derive-protocol-words.ts` derives them with the
+TypeScript checker from `node_modules/@opencode/client/dist/promise/index.d.ts`
+(2.1.2) and the generated types it exports. Its roots are the fields of an
+inbound frame: an `event` frame's `event` is `OpenCodeEvent` (every event of
+`GET /api/event`); a `response` frame's `body` is `ServerInfo` (the driver
+reads `GET /api/info` itself), the awaited return type of every client call
+the driver makes (each method of `V2Client` in `src/drivers/opencode/sdk.ts`,
+looked up by the same path in the client), or an error body the client
+declares (each exported type with a `_tag`). The walk follows every property,
+union member, array element and index signature, and stops at `unknown`.
+After a client bump, or when the driver calls another client method, run
+`node test/recordings/opencode/derive-protocol-words.ts` and put the result in
+the file.
 
-The 20 keys are `_tag`, `cacheFormat`, `command`, `delivery`, `effect`, `encoding`, `event`, `exit`, `finish`, `format`, `maxTokensField`, `name`, `op`, `outcome`, `reason`, `reasoningField`, `reply`, `status`, `type`, `variant`.
+The 20 keys holding words are `_tag`, `cacheFormat`, `command`, `delivery`, `effect`, `encoding`, `event`, `exit`, `finish`, `format`, `maxTokensField`, `name`, `op`, `outcome`, `reason`, `reasoningField`, `reply`, `status`, `type`, `variant`.
+
+### Codex protocol words
+
+`test/recordings/codex/protocol-words.ts` holds, by place, the string values
+the vendored Codex app-server schema allows in an inbound Codex stdio frame.
+`test/recordings/codex/derive-protocol-words.ts` derives them from
+`vendor-schemas/codex/3d86e43b075adeba2193ec5c22ac92f55afd82e6/codex_app_server_protocol.schemas.json`
+(Codex tag `rust-v0.172.0`, the schema the driver's client is generated
+from). Its root is a `stdout` frame's `message`, which is what
+`codex app-server` writes: a server request (every variant of
+`ServerRequest`), a notification (every variant of `ServerNotification`), an
+error answer (`JSONRPCError`), or the answer to one of the requests the
+driver sends (`CLIENT_REQUESTS` of `scripts/codegen-codex.ts`), `{ id,
+result }` with that request's response type: `<X>Response` for params
+`<X>Params`, except where the schema's `hand-written-additions.json` names
+another, as the codegen reads it. The walk follows every `$ref`, `allOf`,
+`anyOf`, `oneOf`, property, array item and additional property, and takes
+each `const` and `enum`. After a schema bump, or when the driver sends
+another request, run `node test/recordings/codex/derive-protocol-words.ts`
+and put the result in the file.
+
+The 60 keys holding words are `access`, `accountRoutingOverride`, `action`, `activeFlags`, `approvalPolicy`, `approvalsReviewer`, `authMode`, `authStatus`, `availableDecisions`, `changeType`, `codexErrorInfo`, `cyber`, `daybreakAvailability`, `decisionSource`, `delivery`, `detail`, `eventName`, `executionMode`, `failureReason`, `format`, `handlerType`, `historyMode`, `inputModalities`, `itemType`, `itemsView`, `kind`, `match_type`, `method`, `mode`, `multiAgentMode`, `multiAgentVersion`, `networkAccess`, `onboardingEntrypoint`, `operation`, `outcome`, `personality`, `phase`, `planType`, `preferredModelDisplayMode`, `protocol`, `rateLimitReachedType`, `reason`, `resetType`, `riskLevel`, `role`, `runtimeStatus`, `scope`, `source`, `status`, `stream`, `subAgent`, `subject`, `summary`, `tool`, `trustedContacts`, `turnKind`, `type`, `userAuthorization`, `verifications`, `version`.
 
 `pnpm run check:recordings` (`scripts/check-recordings.ts`) is a step of both
 `gate` and `gate:bun`. It scans every file under `test/drivers/*/recordings/`,

@@ -3,9 +3,8 @@
 // both sides are compared in the same placeholder form.
 //
 // It replaces, in every string and every object key (a frame's own format
-// fields, `dir`, `kind`, `query`, `id`, `method`, `toolName` and
-// `contentType`, stay as the tap wrote them when they hold a string, a
-// number, a boolean or null):
+// fields, `dir`, `kind`, `query`, `id`, `method` and `contentType`, stay as
+// the tap wrote them when they hold a string, a number, a boolean or null):
 //   - the recording's temp workspace (and its real path) with <WORKSPACE>;
 //   - a string that is exactly the value of PATH with <PATH> (PATH differs
 //     between the recording machine and the replay machine);
@@ -48,12 +47,15 @@
 //     LOGNAME where they differ) with <USER>. How depends on what the string
 //     is:
 //       - in an inbound frame (what the agent and the machine produced: tool
-//         output, assistant text, stderr, file contents), every whole-word
-//         occurrence, in every string value, except a value that is one of
-//         the protocol words of its key (the driver kit's `protocolWords`,
-//         for Claude derived from the pinned sdk.d.ts). So the owner column
-//         of an `ls -l` is replaced, and `type: "user"` stays on an account
-//         named `user`;
+//         output, assistant text, stderr, file contents, a tool's name),
+//         every whole-word occurrence, in every string value, except a value
+//         that is one of the protocol words of its key at its place: where
+//         the pinned types put that word at that path of keys from the frame
+//         (the driver kit's `protocolWords`, ./protocol-places.ts; for
+//         Claude derived from the pinned sdk.d.ts). So the owner column of an
+//         `ls -l` is replaced, `type: "user"` of an SDK message stays on an
+//         account named `user`, and `name: "memory"` inside an opaque tool
+//         result goes on an account named `memory`;
 //       - in an outbound frame (what the driver sent, built from the scenario
 //         and the host's config) and in every object key, only where the
 //         name is a whole segment of a path (/srv/<name>/x, C:\Users\<name>,
@@ -70,6 +72,8 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { FRAME_PLACE, slotAt, slotBelow } from "./protocol-places.ts";
+import type { ProtocolSlot, ProtocolWords } from "./protocol-places.ts";
 
 /** The credential variables whose values never reach a recording. */
 export const SECRET_VARIABLES = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
@@ -250,8 +254,8 @@ export interface SanitiserInput {
   readonly env: { readonly [name: string]: string | undefined };
   /** The OS user name; os.userInfo().username when left out. USER and LOGNAME are replaced too when they differ from it. */
   readonly user?: string;
-  /** For each object key, the values that are protocol words there; an inbound value that is one keeps the user name. */
-  readonly protocolWords?: { readonly [key: string]: readonly string[] };
+  /** The words the pinned types allow, by place (./protocol-places.ts); an inbound value that is one of its place's key's words keeps the user name. */
+  readonly protocolWords?: ProtocolWords;
   /** The `provider/model` the recording used: a model list keeps only that model. Without it, a model list stays whole. */
   readonly recordedModel?: string;
 }
@@ -271,7 +275,7 @@ export type Sanitiser = <T>(value: T, side?: FrameSide) => T;
  * object or array under one of these names (an OpenCode request's `query`,
  * which holds the request's query parameters) is sanitised like any value.
  */
-export const FRAME_FORMAT_FIELDS: ReadonlySet<string> = new Set(["dir", "kind", "query", "id", "method", "toolName", "contentType"]);
+export const FRAME_FORMAT_FIELDS: ReadonlySet<string> = new Set(["dir", "kind", "query", "id", "method", "contentType"]);
 
 function isScalar(value: unknown): boolean {
   return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
@@ -396,7 +400,7 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
   const names = [...users].sort((a, b) => b.length - a.length);
   // A whole word: not next to a letter, a digit or an underscore. "joe-laptop" and "joe's" hold the word; "joey" and "joe_x" do not.
   const userWord = names.length === 0 ? undefined : new RegExp(`(?<![A-Za-z0-9_])(?:${names.map(escapeRegExp).join("|")})(?![A-Za-z0-9_])`, "g");
-  const protocolWords = new Map(Object.entries(input.protocolWords ?? {}).map(([key, words]) => [key, new Set(words)]));
+  const protocolWords: ProtocolWords = input.protocolWords ?? {};
 
   /** `word` replaces every whole-word user name (inbound values); `path` only path segments (outbound values and every key). */
   const text = (value: string, rule: "word" | "path"): string => {
@@ -420,8 +424,12 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
     return NEUTRAL_FIELD_RULES.filter((rule) => rule.key.test(plain));
   };
 
-  /** `key` is the object key the value sits under (array elements take their array's key). */
-  const walk = (value: unknown, side: FrameSide, key: string | undefined): unknown => {
+  /**
+   * `key` is the object key the value sits under (array elements take their
+   * array's key), and `slot` what the pinned types say of that key at the
+   * value's place (undefined at an opaque place).
+   */
+  const walk = (value: unknown, side: FrameSide, key: string | undefined, slot: ProtocolSlot | undefined): unknown => {
     for (const rule of neutralRules(key)) {
       const neutral = rule.neutral(value);
       if (neutral !== value) return neutral;
@@ -432,23 +440,23 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const model = input.recordedModel;
       const entries = value as readonly Entry[];
       // OpenCode 2.x GET /api/model: every model of every provider the user is signed in to.
-      if (entriesWith(value, ["providerID", "modelID"])) return entries.filter((entry) => `${String(entry["providerID"])}/${String(entry["modelID"])}` === model).map((entry) => walk(readModelFields(entry), side, key));
+      if (entriesWith(value, ["providerID", "modelID"])) return entries.filter((entry) => `${String(entry["providerID"])}/${String(entry["modelID"])}` === model).map((entry) => walk(readModelFields(entry), side, key, slot));
       // Claude Code's initializationResult().models: the models the user's plan offers, and which is the default.
-      if (entriesWith(value, ["value", "resolvedModel"])) return entries.filter((entry) => entry["value"] === model || entry["resolvedModel"] === model).map((entry) => walk(entry, side, key));
+      if (entriesWith(value, ["value", "resolvedModel"])) return entries.filter((entry) => entry["value"] === model || entry["resolvedModel"] === model).map((entry) => walk(entry, side, key, slot));
     }
     if (typeof value === "string") {
       const id = idPlaceholder(key);
       if (id !== undefined && value !== "") return id;
-      const protocolWord = key !== undefined && protocolWords.get(key)?.has(value) === true;
+      const protocolWord = slot?.words?.includes(value) === true;
       return text(value, side === "in" && !protocolWord ? "word" : "path");
     }
-    if (Array.isArray(value)) return value.map((each) => walk(each, side, key));
+    if (Array.isArray(value)) return value.map((each) => walk(each, side, key, slot));
     if (typeof value === "object" && value !== null) {
       // An ACP agent's model picker: only the recorded model and the current one stay.
       const picked = input.recordedModel !== undefined && (value as Entry)["category"] === "model" && Array.isArray((value as Entry)["options"]) ? acpModelOptionWith(value as Entry, input.recordedModel) : (value as Entry);
       const source = withNeutralAcpUsage(picked, key);
       const out: { [key: string]: unknown } = {};
-      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field);
+      for (const [field, entry] of Object.entries(source)) out[text(field, "path")] = walk(entry, side, field, slotBelow(protocolWords, slot, field));
       return out;
     }
     return value;
@@ -459,11 +467,12 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const out: { [key: string]: unknown } = {};
       for (const [field, entry] of Object.entries(value)) {
         const kept = FRAME_FORMAT_FIELDS.has(field) && isScalar(entry);
-        out[FRAME_FORMAT_FIELDS.has(field) ? field : text(field, "path")] = kept ? entry : walk(entry, value.dir, field);
+        out[FRAME_FORMAT_FIELDS.has(field) ? field : text(field, "path")] = kept ? entry : walk(entry, value.dir, field, slotAt(protocolWords, FRAME_PLACE, field));
       }
       return out as T;
     }
-    return walk(value, side ?? "in", undefined) as T;
+    // A value that is no frame has no place the pinned types describe.
+    return walk(value, side ?? "in", undefined, undefined) as T;
   };
 }
 

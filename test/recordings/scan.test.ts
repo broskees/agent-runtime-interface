@@ -15,6 +15,8 @@ import { REPO_ROOT } from "../helpers/spec.ts";
 import { encodeRecording, parseRecording, readRecording } from "./format.ts";
 import type { Frame, RecordingMetadata } from "./format.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "./claude/protocol-words.ts";
+import { ACP_PROTOCOL_WORDS } from "./acp/protocol-words.ts";
+import type { ProtocolWords } from "./protocol-places.ts";
 import { resanitiseRecording } from "./resanitise.ts";
 import { NEUTRAL_PID, NEUTRAL_RATE_LIMIT_INFO, NEUTRAL_SHELL, NEUTRAL_SOCKET_PATH, NEUTRAL_TIME, NEUTRAL_TMP_PATH, PLACEHOLDERS, createSanitiser, osUserName, secretVariablesOf, userNames } from "./sanitiser.ts";
 
@@ -198,18 +200,19 @@ test("the sanitiser replaces the value of every variable whose name ends in _KEY
   }
 });
 
-test("in an inbound frame the user name goes wherever it is a whole word, except in a protocol word of its key; in an outbound frame only from paths", () => {
+test("in an inbound frame the user name goes wherever it is a whole word, except in a protocol word of its key at its place; in an outbound frame only from paths", () => {
   for (const user of ["user", "root", "assistant", "system", "text", "default", "message", "end", "joe"]) {
     const sanitise = createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: user, LOGNAME: user }, user, protocolWords: CLAUDE_PROTOCOL_WORDS });
-    // Every key whose protocol words hold this name, set to it: those values stay.
+    // Every key of an SDK message whose protocol words there hold this name, set to it: those values stay.
     const protocol = Object.fromEntries(
-      Object.entries(CLAUDE_PROTOCOL_WORDS)
-        .filter(([, words]) => words.includes(user))
+      Object.entries(CLAUDE_PROTOCOL_WORDS["message"]!)
+        .filter(([key, slot]) => slot.words?.includes(user) === true && !["message", "error"].includes(key))
         .map(([key]) => [key, user]),
     );
+    const roles = ["user", "assistant", "system"].includes(user);
     const payload = {
       ...protocol,
-      content: [{ type: "text", text: `the ${user} ran ls as ${user}'s shell` }],
+      message: { ...(roles ? { role: user } : {}), content: [{ type: "text", text: `the ${user} ran ls as ${user}'s shell` }] },
       tool_use_result: { stdout: `drwx------ 2 ${user} ${user} 4096 Nov 24 12:00 .\n`, stderr: "" },
       error: `permission denied for ${user}`,
       file: `/var/lib/${user}/x`,
@@ -225,7 +228,7 @@ test("in an inbound frame the user name goes wherever it is a whole word, except
         query: "q1",
         message: {
           ...protocol,
-          content: [{ type: "text", text: "the <USER> ran ls as <USER>'s shell" }],
+          message: { ...(roles ? { role: user } : {}), content: [{ type: "text", text: "the <USER> ran ls as <USER>'s shell" }] },
           tool_use_result: { stdout: "drwx------ 2 <USER> <USER> 4096 Nov 24 12:00 .\n", stderr: "" },
           error: "permission denied for <USER>",
           file: "/var/lib/<USER>/x",
@@ -238,6 +241,28 @@ test("in an inbound frame the user name goes wherever it is a whole word, except
     const outbound = sanitise({ dir: "out", kind: "prompt", query: "q1", message: payload } as Frame);
     assert.deepEqual(outbound, { dir: "out", kind: "prompt", query: "q1", message: { ...payload, file: "/var/lib/<USER>/x" } }, `account ${user}, outbound: only the path changes`);
   }
+});
+
+test("a word the pinned types allow for a key at one place loses the user name at another: an opaque tool result's name, status and error, an agent's _meta, a tool's name", () => {
+  const sanitiseAs = (user: string, protocolWords: ProtocolWords) => createSanitiser({ workspace: "/tmp/ari-unused-workspace", env: { HOME: "/tmp/ari-unused-home", USER: user, LOGNAME: user }, user, protocolWords });
+  // The Claude SDK types a user message's tool_use_result as unknown: none of its fields is a protocol word, whatever the key.
+  for (const [user, typed] of [
+    ["memory", { type: "stream_event", event: { type: "content_block_start", content_block: { type: "tool_reference", tool_changes: [{ tool: { definition: { name: "memory" } } }] } } }],
+    ["unknown", { type: "assistant", error: "unknown" }],
+    ["running", { type: "system", subtype: "task_updated", patch: { status: "running" } }],
+  ] as const) {
+    const sanitise = sanitiseAs(user, CLAUDE_PROTOCOL_WORDS);
+    const opaque = { type: "user", message: { role: "user", content: [] }, tool_use_result: { name: user, status: user, error: user, type: user } };
+    assert.deepEqual(sanitise({ dir: "in", kind: "message", query: "q1", message: opaque } as Frame).message, { ...opaque, tool_use_result: { name: "<USER>", status: "<USER>", error: "<USER>", type: "<USER>" } }, `account ${user}: the opaque tool result loses it`);
+    assert.deepEqual(sanitise({ dir: "in", kind: "message", query: "q1", message: typed } as Frame).message, typed, `account ${user}: where the SDK's types put the word, it stays`);
+  }
+  // A can_use_tool frame's toolName is the agent's tool name, a string in the SDK's types: sanitised like its input.
+  const archive = sanitiseAs("archive", CLAUDE_PROTOCOL_WORDS);
+  assert.deepEqual(archive({ dir: "in", kind: "can_use_tool", id: "p1", query: "q1", toolName: "archive", input: { name: "archive" }, options: { toolUseID: "toolu_1" } } as Frame), { dir: "in", kind: "can_use_tool", id: "p1", query: "q1", toolName: "<USER>", input: { name: "<USER>" }, options: { toolUseID: "toolu_1" } });
+  // ACP: a content block's type is a protocol word; the same word in an agent's _meta is not.
+  const text = sanitiseAs("text", ACP_PROTOCOL_WORDS);
+  const update = { jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello text" }, _meta: { "ari.test/x": { type: "text" } } } } };
+  assert.deepEqual(text({ dir: "in", kind: "stdout", proc: 1, message: update } as Frame), { dir: "in", kind: "stdout", proc: 1, message: { ...update, params: { ...update.params, update: { ...update.params.update, content: { type: "text", text: "hello <USER>" }, _meta: { "ari.test/x": { type: "<USER>" } } } } } });
 });
 
 test("the user names are the OS user's (os.userInfo), and USER and LOGNAME too when they differ", () => {

@@ -42,9 +42,13 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
   installed, and `maintenance.install` and `maintenance.update` download the
   pinned SDK (0.3.330) and the platform's native package from an npm registry
   (`sdkRegistry`, by default `https://registry.npmjs.org`) into the
-  instance's cache directory. Each tarball is checked against the registry's
-  `dist.integrity` before any is unpacked. Both routes import the SDK by file
-  URL. The SDK stays out of ARI's package and executables (its licence is
+  instance's cache directory, as one directory laid out as npm lays it out,
+  so the SDK finds its native binary by itself. Only a sha512, sha384 or
+  sha256 `dist.integrity` is accepted, both tarballs are checked before
+  either is unpacked, and what is unpacked is what was checked. A record of
+  every file lets `status()` report an install that is not whole and
+  `maintenance.install` repair it. Both routes import the SDK by file URL.
+  The SDK stays out of ARI's package and executables (its licence is
   Anthropic's).
 - Without an SDK, the standalone `ari-driver` names `maintenance.install` and
   `sdkDirectory`; under Node the message also names `npm install`.

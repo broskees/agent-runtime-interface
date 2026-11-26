@@ -10,7 +10,8 @@
 // packages that resolves from this file, else it throws the real SDK's error.
 // Each query runs that binary once with `--version`, and answers each prompt
 // with an init message, one assistant message and a success result whose
-// text quotes the binary's answer, so a test sees which binary ran. It
+// text quotes the binary's answer and says how the binary was found, so a
+// test sees which binary ran and whether the driver named it. It
 // spawns nothing else and reaches no network.
 
 import { execFileSync } from "node:child_process";
@@ -53,6 +54,7 @@ const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, c
 
 export function query({ prompt, options = {} }) {
   const executable = findExecutable(options);
+  const found = options.pathToClaudeCodeExecutable === undefined ? "found by the SDK itself" : "named in pathToClaudeCodeExecutable";
   const native = execFileSync(executable, ["--version"], { encoding: "utf8", env: options.env ?? {} }).trim();
   const sessionId = options.sessionId ?? options.resume ?? randomUUID();
   const model = options.model ?? "fixture-model";
@@ -69,7 +71,7 @@ export function query({ prompt, options = {} }) {
     for await (const message of prompt) {
       if (closed) return;
       answered += 1;
-      const text = `fixture SDK reply ${answered}, from the native binary that answered: ${native}`;
+      const text = `fixture SDK reply ${answered}, from the native binary that answered: ${native} (${found})`;
       push({ type: "system", subtype: "init", uuid: randomUUID(), session_id: sessionId, cwd: options.cwd ?? process.cwd(), model, claude_code_version: native, slash_commands: [], permissionMode: options.permissionMode ?? "default", tools: [] });
       push({
         type: "assistant",

@@ -4,8 +4,13 @@
 //   - `sdkDirectory` naming a fake SDK install makes `instance/status` report
 //     the fixture's version, and a turn completes;
 //   - `maintenance.install` from a local npm registry installs the fake SDK
-//     and this platform's fake native package into the instance's cache
-//     directory, and afterwards status reports it and a turn completes;
+//     with this platform's fake native package in its `node_modules` into the
+//     instance's cache directory, and afterwards status reports it and a turn
+//     completes, the SDK finding its native binary by itself;
+//   - a managed install whose `sdk.mjs` is missing, or whose native binary is
+//     truncated, is reported in a new driver process naming
+//     `maintenance.install` and `sdkDirectory`, and `maintenance.install`
+//     repairs it;
 //   - with no SDK at all, status reports `driver_unavailable` naming
 //     `maintenance.install` and `sdkDirectory`, and no `npm install`, which
 //     the binary could not use;
@@ -166,15 +171,62 @@ for (const runtime of [STANDALONE, UNDER_NODE]) {
       assert.equal(typeof claude.instance.maintenance?.update, "function", "the driver offers maintenance.update over the wire");
       await claude.instance.maintenance!.install!();
       assert.deepEqual(registry.requests, [`/${native.pkg}/${CLAUDE_SDK_VERSION}`, "/-/tarballs/1.tgz", `/${CLAUDE_SDK_PACKAGE}/${CLAUDE_SDK_VERSION}`, "/-/tarballs/0.tgz"]);
-      const adapters = path.join(claude.host.paths.cacheDir, "adapters");
-      assert.ok(fs.existsSync(path.join(adapters, ...CLAUDE_SDK_PACKAGE.split("/"), CLAUDE_SDK_VERSION, "sdk.mjs")));
-      assert.ok(fs.existsSync(path.join(adapters, ...native.pkg.split("/"), CLAUDE_SDK_VERSION, hostNativePackage().binary)));
+      const installed = path.join(claude.host.paths.cacheDir, "adapters", ...CLAUDE_SDK_PACKAGE.split("/"), CLAUDE_SDK_VERSION);
+      assert.ok(fs.existsSync(path.join(installed, "sdk.mjs")));
+      assert.ok(fs.existsSync(path.join(installed, "node_modules", ...native.pkg.split("/"), hostNativePackage().binary)), "the native package is in the SDK's node_modules");
+      assert.deepEqual(fs.readdirSync(path.join(claude.host.paths.cacheDir, "adapters", "@anthropic-ai")), ["claude-agent-sdk"]);
       const status = await claude.instance.status();
       assert.equal(status.installed, true, JSON.stringify(status));
       assert.equal(status.version, CLAUDE_SDK_VERSION);
       const turn = await oneTurn(claude.instance, where.project);
       assert.equal(turn.status, "completed", turn.events);
-      assert.ok(turn.events.includes("from the native binary that answered: fixture native claude from the registry"), turn.events);
+      assert.ok(turn.events.includes("from the native binary that answered: fixture native claude from the registry (found by the SDK itself)"), turn.events);
+    } finally {
+      await claude.close();
+      await registry.close();
+    }
+  });
+}
+
+const DAMAGES: Array<{ name: string; damage: (installed: string, binary: string) => void; detail: RegExp }> = [
+  { name: "its sdk.mjs is missing", damage: (installed) => fs.rmSync(path.join(installed, "sdk.mjs")), detail: /: sdk\.mjs is missing\./ },
+  { name: "its native binary is truncated", damage: (_installed, binary) => fs.truncateSync(binary, 10), detail: /claude(\.exe)? has 10 bytes, not the \d+ it was installed with\./ },
+];
+
+for (const { name, damage, detail } of DAMAGES) {
+  test(`the standalone ari-driver reports a managed install whose ${name.replace(/^its /, "")}, naming maintenance.install and sdkDirectory, and maintenance.install repairs it`, async () => {
+    requireBuilt(STANDALONE);
+    const where = nodeFreeRoot();
+    const { sdk, native } = fixtureRegistryEntries(where.root, CLAUDE_SDK_VERSION, "fixture native claude from the registry");
+    const registry = await startFixtureRegistry([sdk, native]);
+    const config = { sdkRegistry: registry.url };
+    const installing = await claudeOver(STANDALONE, where, config);
+    const installed = path.join(installing.host.paths.cacheDir, "adapters", ...CLAUDE_SDK_PACKAGE.split("/"), CLAUDE_SDK_VERSION);
+    const binary = path.join(installed, "node_modules", ...native.pkg.split("/"), hostNativePackage().binary);
+    try {
+      await installing.instance.maintenance!.install!();
+    } finally {
+      await installing.close();
+    }
+    damage(installed, binary);
+    // A new ari-driver process, so nothing it loaded before the damage is reused.
+    const claude = await claudeOver(STANDALONE, where, config);
+    try {
+      const status = await claude.instance.status();
+      assert.equal(status.state, "unavailable", JSON.stringify(status));
+      assert.equal(status.error?.code, "driver_unavailable");
+      const message = status.error?.message ?? "";
+      assert.match(message, detail);
+      assert.match(message, /Run maintenance\.install on this instance to repair it, or set sdkDirectory in the driver config/);
+      const before = registry.requests.length;
+      await claude.instance.maintenance!.install!();
+      assert.deepEqual(registry.requests.slice(before).filter((request) => request.startsWith("/-/tarballs/")), ["/-/tarballs/1.tgz", "/-/tarballs/0.tgz"], "the repair downloads both again");
+      const repaired = await claude.instance.status();
+      assert.equal(repaired.installed, true, JSON.stringify(repaired));
+      assert.equal(repaired.version, CLAUDE_SDK_VERSION);
+      const turn = await oneTurn(claude.instance, where.project);
+      assert.equal(turn.status, "completed", turn.events);
+      assert.ok(turn.events.includes("answered: fixture native claude from the registry (found by the SDK itself)"), turn.events);
     } finally {
       await claude.close();
       await registry.close();

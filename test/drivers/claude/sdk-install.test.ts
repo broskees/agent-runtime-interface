@@ -1,12 +1,20 @@
 // The claude driver without an SDK importable by name: it loads the SDK from
 // the directory its `sdkDirectory` config field names, or installs it with
 // `maintenance.install` from an npm registry (by default
-// https://registry.npmjs.org) into the instance's cache directory, checking
-// every tarball against the registry's `dist.integrity` before it unpacks
-// any. These tests run the driver in this process against a fake SDK (see
+// https://registry.npmjs.org) into the instance's cache directory.
+//
+// The install accepts only a sha512, sha384 or sha256 `dist.integrity`,
+// checks both tarballs before it unpacks either, and unpacks only bytes it
+// verified. It lays the SDK out with its native package in its own
+// `node_modules`, so the SDK finds its binary by itself, and records every
+// file; `status()` reports an install that is not whole, naming the steps that
+// work, and `maintenance.install` repairs it.
+//
+// These tests run the driver in this process against a fake SDK (see
 // sdk-fixture.ts) and a local registry; test/standalone/claude-sdk.e2e.ts runs
-// the same paths through the standalone ari-driver. No test here reaches the
-// network or starts a real Claude Code.
+// the same paths through the standalone ari-driver, and
+// sdk-install-node.test.ts checks the bytes again as they are unpacked. No
+// test here reaches the network or starts a real Claude Code.
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -18,14 +26,15 @@ import { BINARY_TARGETS } from "../../../scripts/build-binary.ts";
 import type { AriEvent } from "../../../src/index.ts";
 import { createClaudeDriver } from "../../../src/drivers/claude/index.ts";
 import type { ClaudeDriverConfig, ClaudeDriverOptions } from "../../../src/drivers/claude/index.ts";
-import { claudeManagedPackages } from "../../../src/drivers/claude/install.ts";
+import { CLAUDE_INSTALL_RECORD, claudeManagedPackages } from "../../../src/drivers/claude/install.ts";
 import { isStandaloneExecutableModule } from "../../../src/drivers/claude/sdk.ts";
 import { CLAUDE_DEFAULT_SDK_REGISTRY, CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION, CLAUDE_TESTED_VERSIONS } from "../../../src/meta/claude.ts";
 import { satisfiesVersionRange } from "../../../src/drivers/claude/instance.ts";
 import { createCoordination, createNodeHostServices } from "../../../src/node/index.ts";
 import type { Instance } from "../../../src/runtime.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
-import { fixtureRegistryEntries, hostNativePackage, integrityOf, startFixtureRegistry, writeFixtureSdkDirectory } from "./sdk-fixture.ts";
+import { fixtureRegistryEntries, hostNativePackage, integrityOf, shasumOf, startFixtureRegistry, writeFixtureSdkDirectory } from "./sdk-fixture.ts";
+import type { RegistryEntry } from "./sdk-fixture.ts";
 
 const temporary: string[] = [];
 after(() => {
@@ -87,15 +96,31 @@ async function oneTurn(instance: Instance, cwd: string): Promise<{ status: strin
   }
 }
 
-/** The installed versions and leftovers under `<cacheDir>/adapters/<pkg>/`, hidden lock and lease directories left out. */
-function installedEntries(cacheDir: string, pkg: string): string[] {
-  const directory = path.join(cacheDir, "adapters", ...pkg.split("/"));
-  if (!fs.existsSync(directory)) return [];
-  return fs.readdirSync(directory).filter((name) => name !== ".locks" && name !== ".leases").sort();
+/** Where a managed install of the pinned SDK lives in `cacheDir`. */
+function managedDirectory(cacheDir: string): string {
+  return path.join(cacheDir, "adapters", ...CLAUDE_SDK_PACKAGE.split("/"), CLAUDE_SDK_VERSION);
 }
 
+/** The native binary inside a managed install, where npm would put it. */
+function managedBinary(cacheDir: string): string {
+  return path.join(managedDirectory(cacheDir), "node_modules", ...hostNativePackage().pkg.split("/"), hostNativePackage().binary);
+}
+
+/** What `<cacheDir>/adapters/@anthropic-ai/` holds, and the entries of the SDK's package directory, hidden lock and lease directories left out. */
+function installedEntries(cacheDir: string): { packages: string[]; versions: string[] } {
+  const scope = path.join(cacheDir, "adapters", "@anthropic-ai");
+  const sdkDirectory = path.join(scope, "claude-agent-sdk");
+  return {
+    packages: fs.existsSync(scope) ? fs.readdirSync(scope).sort() : [],
+    versions: fs.existsSync(sdkDirectory) ? fs.readdirSync(sdkDirectory).filter((name) => name !== ".locks" && name !== ".leases").sort() : [],
+  };
+}
+
+const NOTHING_INSTALLED = { packages: [], versions: [] };
+const ONE_INSTALL = { packages: ["claude-agent-sdk"], versions: [CLAUDE_SDK_VERSION] };
+
 describe("the claude driver loads its SDK from sdkDirectory", () => {
-  test("status() reports the fixture's version, and a turn completes on the native binary beside it", async () => {
+  test("status() reports the fixture's version, and a turn completes on the native binary beside it, which the SDK finds by itself", async () => {
     const root = scratchDirectory();
     writeFixtureSdkDirectory(path.join(root, "sdk"), "0.3.330+fixture", "fixture native claude from sdkDirectory");
     fs.mkdirSync(path.join(root, "project"));
@@ -107,7 +132,7 @@ describe("the claude driver loads its SDK from sdkDirectory", () => {
       assert.equal(status.advisory, undefined);
       const turn = await oneTurn(instance, path.join(root, "project"));
       assert.equal(turn.status, "completed", turn.events);
-      assert.ok(turn.events.includes("fixture SDK reply 1, from the native binary that answered: fixture native claude from sdkDirectory"), turn.events);
+      assert.ok(turn.events.includes("fixture SDK reply 1, from the native binary that answered: fixture native claude from sdkDirectory (found by the SDK itself)"), turn.events);
     } finally {
       await dispose();
     }
@@ -122,7 +147,25 @@ describe("the claude driver loads its SDK from sdkDirectory", () => {
       assert.equal(status.error?.code, "driver_unavailable");
       assert.match(status.error?.message ?? "", new RegExp(`sdkDirectory ${path.join(root, "empty").replaceAll("/", "\\/")}`));
       assert.match(status.error?.message ?? "", /node_modules\/@anthropic-ai\/claude-agent-sdk\/package\.json cannot be read/);
+      assert.match(status.error?.message ?? "", /maintenance\.install/);
       await assert.rejects(instance.openSession({}), (error: { callError?: { code: string } }) => error.callError?.code === "driver_unavailable");
+    } finally {
+      await dispose();
+    }
+  });
+
+  test("a directory whose native package is missing names reinstalling there, maintenance.install and executablePath", async () => {
+    const root = scratchDirectory();
+    const binary = writeFixtureSdkDirectory(path.join(root, "sdk"), CLAUDE_SDK_VERSION, "fixture native claude");
+    fs.rmSync(path.dirname(binary), { recursive: true });
+    const { instance, dispose } = await claudeInstance(path.join(root, "host"), { sdkDirectory: path.join(root, "sdk") });
+    try {
+      const status = await instance.status();
+      assert.equal(status.error?.code, "driver_unavailable");
+      const message = status.error?.message ?? "";
+      assert.match(message, new RegExp(`npm install --prefix ${path.join(root, "sdk").replaceAll("/", "\\/")} @anthropic-ai\\/claude-agent-sdk`));
+      assert.match(message, /remove sdkDirectory from the driver config and run maintenance\.install/);
+      assert.match(message, /executablePath/);
     } finally {
       await dispose();
     }
@@ -130,7 +173,7 @@ describe("the claude driver loads its SDK from sdkDirectory", () => {
 });
 
 describe("maintenance.install and maintenance.update on the claude driver", () => {
-  test("download the SDK and this platform's native package from the configured registry into the cache directory, and the next status and turn use them", async () => {
+  test("install the SDK with this platform's native package in its node_modules, from the configured registry, and the next status and turn use them", async () => {
     const root = scratchDirectory();
     const { sdk, native } = fixtureRegistryEntries(root, CLAUDE_SDK_VERSION, "fixture native claude from the registry");
     const registry = await startFixtureRegistry([sdk, native]);
@@ -148,20 +191,27 @@ describe("maintenance.install and maintenance.update on the claude driver", () =
         `/${CLAUDE_SDK_PACKAGE}/${CLAUDE_SDK_VERSION}`,
         "/-/tarballs/0.tgz",
       ]);
-      assert.deepEqual(installedEntries(host.paths.cacheDir, CLAUDE_SDK_PACKAGE), [CLAUDE_SDK_VERSION]);
-      assert.deepEqual(installedEntries(host.paths.cacheDir, native.pkg), [CLAUDE_SDK_VERSION]);
-      const binary = path.join(host.paths.cacheDir, "adapters", ...native.pkg.split("/"), CLAUDE_SDK_VERSION, hostNativePackage().binary);
-      assert.equal(fs.statSync(binary).mode & 0o111, 0o111, "the native binary is executable");
+      // One directory, published by one rename: the SDK, its native package where npm puts it, and the record of both.
+      assert.deepEqual(installedEntries(host.paths.cacheDir), ONE_INSTALL);
+      const installed = managedDirectory(host.paths.cacheDir);
+      assert.deepEqual(fs.readdirSync(installed).sort(), [CLAUDE_INSTALL_RECORD, "node_modules", "package.json", "sdk.mjs"]);
+      assert.equal(fs.statSync(managedBinary(host.paths.cacheDir)).mode & 0o111, 0o111, "the native binary is executable");
+      const record = JSON.parse(fs.readFileSync(path.join(installed, CLAUDE_INSTALL_RECORD), "utf8")) as { files: Array<{ path: string; size: number; sha256: string }> };
+      assert.deepEqual(
+        record.files.map((file) => file.path),
+        [`node_modules/${native.pkg}/${hostNativePackage().binary}`, `node_modules/${native.pkg}/package.json`, "package.json", "sdk.mjs"],
+      );
+      assert.ok(record.files.every((file) => /^[0-9a-f]{64}$/.test(file.sha256) && file.size > 0));
       assert.deepEqual(fs.readdirSync(host.paths.tmpDir), [], "the downloads are gone");
       const status = await instance.status();
       assert.equal(status.installed, true, JSON.stringify(status));
       assert.equal(status.version, CLAUDE_SDK_VERSION);
       const turn = await oneTurn(instance, path.join(root, "project"));
       assert.equal(turn.status, "completed", turn.events);
-      // The SDK cannot find a managed install's native binary by itself; the driver names it, and the fake SDK ran it.
-      assert.ok(turn.events.includes("from the native binary that answered: fixture native claude from the registry"), turn.events);
+      // The driver does not name the binary: the SDK finds it in its own node_modules, as in an npm install.
+      assert.ok(turn.events.includes("from the native binary that answered: fixture native claude from the registry (found by the SDK itself)"), turn.events);
       await instance.maintenance!.update!();
-      assert.equal(registry.requests.length, 4, "an update of an installed version downloads nothing");
+      assert.equal(registry.requests.length, 4, "an update of a whole install downloads nothing");
     } finally {
       await dispose();
       await registry.close();
@@ -190,8 +240,7 @@ describe("maintenance.install and maintenance.update on the claude driver", () =
           return true;
         });
         assert.ok(registry.requests.includes(tampered === "sdk" ? "/-/tarballs/0.tgz" : "/-/tarballs/1.tgz"), "the tampered tarball was downloaded and refused");
-        assert.deepEqual(installedEntries(host.paths.cacheDir, CLAUDE_SDK_PACKAGE), []);
-        assert.deepEqual(installedEntries(host.paths.cacheDir, entries.native.pkg), []);
+        assert.deepEqual(installedEntries(host.paths.cacheDir), NOTHING_INSTALLED);
         assert.deepEqual(fs.readdirSync(host.paths.tmpDir), [], "the downloads are gone");
         assert.equal((await instance.status()).installed, false);
       } finally {
@@ -200,6 +249,84 @@ describe("maintenance.install and maintenance.update on the claude driver", () =
       }
     });
   }
+
+  // What the native package's manifest publishes, and whether the install takes it. The SDK's manifest is a plain sha512 in every case.
+  const manifests: Array<{ name: string; dist: (bytes: Buffer, other: Buffer) => Pick<RegistryEntry, "integrity" | "shasum">; accepted: boolean; detail?: string }> = [
+    { name: "only a matching sha1 shasum, no integrity", dist: (bytes) => ({ integrity: null, shasum: shasumOf(bytes) }), accepted: false, detail: "no_integrity" },
+    { name: "a matching sha1 integrity and shasum", dist: (bytes) => ({ integrity: integrityOf(bytes, "sha1"), shasum: shasumOf(bytes) }), accepted: false, detail: "no_integrity" },
+    { name: "no digest at all", dist: () => ({ integrity: null }), accepted: false, detail: "no_integrity" },
+    { name: "a matching sha256 integrity", dist: (bytes) => ({ integrity: integrityOf(bytes, "sha256") }), accepted: true },
+    { name: "a matching sha384 integrity", dist: (bytes) => ({ integrity: integrityOf(bytes, "sha384") }), accepted: true },
+    { name: "a matching sha256 and a wrong sha512 integrity (the strongest decides)", dist: (bytes, other) => ({ integrity: `${integrityOf(bytes, "sha256")} ${integrityOf(other)}` }), accepted: false, detail: "integrity_mismatch" },
+  ];
+  for (const manifest of manifests) {
+    test(`a native package manifest with ${manifest.name} is ${manifest.accepted ? "installed" : "refused, and nothing is installed"}`, async () => {
+      const root = scratchDirectory();
+      const entries = fixtureRegistryEntries(root, CLAUDE_SDK_VERSION, "fixture native claude");
+      const registry = await startFixtureRegistry([entries.sdk, { ...entries.native, ...manifest.dist(entries.native.tarball, entries.sdk.tarball) }]);
+      const { host, instance, dispose } = await claudeInstance(path.join(root, "host"), { sdkRegistry: registry.url }, { loadSdk: async () => Promise.reject(new Error("not by name")) });
+      try {
+        if (manifest.accepted) {
+          await instance.maintenance!.install!();
+          assert.deepEqual(installedEntries(host.paths.cacheDir), ONE_INSTALL);
+          assert.equal((await instance.status()).installed, true);
+          return;
+        }
+        await assert.rejects(instance.maintenance!.install!(), (error: { callError?: { code: string; detail?: string; message: string } }) => {
+          assert.equal(error.callError?.detail, manifest.detail, JSON.stringify(error.callError));
+          if (manifest.detail === "no_integrity") {
+            assert.equal(
+              error.callError?.message,
+              `The registry manifest of ${entries.native.pkg}@${CLAUDE_SDK_VERSION} publishes no sha512, sha384 or sha256 dist.integrity to check the tarball against (a sha1 integrity or shasum is not accepted)`,
+            );
+          }
+          return true;
+        });
+        assert.deepEqual(installedEntries(host.paths.cacheDir), NOTHING_INSTALLED);
+        assert.deepEqual(fs.readdirSync(host.paths.tmpDir), []);
+      } finally {
+        await dispose();
+        await registry.close();
+      }
+    });
+  }
+
+  test("a downloaded tarball that changes on disk after it was verified is refused before anything is unpacked", async () => {
+    const root = scratchDirectory();
+    const entries = fixtureRegistryEntries(root, CLAUDE_SDK_VERSION, "fixture native claude");
+    let tmpDir = "";
+    let changedOnDisk = false;
+    // The native tarball is downloaded and verified first; while the SDK's manifest is fetched, something rewrites it.
+    const registry = await startFixtureRegistry([entries.sdk, entries.native], {
+      onRequest: (requested) => {
+        if (requested !== `/${CLAUDE_SDK_PACKAGE}/${CLAUDE_SDK_VERSION}`) return;
+        const [download] = fs.readdirSync(tmpDir);
+        const file = path.join(tmpDir, download!, "0.tgz");
+        const bytes = fs.readFileSync(file);
+        assert.deepEqual(bytes, entries.native.tarball, "the scratch file holds the verified tarball");
+        bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 0xff;
+        fs.writeFileSync(file, bytes);
+        changedOnDisk = true;
+      },
+    });
+    const { host, instance, dispose } = await claudeInstance(path.join(root, "host"), { sdkRegistry: registry.url }, { loadSdk: async () => Promise.reject(new Error("not by name")) });
+    tmpDir = host.paths.tmpDir;
+    try {
+      await assert.rejects(instance.maintenance!.install!(), (error: { callError?: { code: string; detail?: string; message: string } }) => {
+        assert.deepEqual(
+          { code: error.callError?.code, detail: error.callError?.detail, message: error.callError?.message },
+          { code: "protocol", detail: "integrity_mismatch", message: `The downloaded tarball of ${entries.native.pkg}@${CLAUDE_SDK_VERSION} changed on disk after it was verified` },
+        );
+        return true;
+      });
+      assert.equal(changedOnDisk, true);
+      assert.deepEqual(installedEntries(host.paths.cacheDir), NOTHING_INSTALLED);
+      assert.deepEqual(fs.readdirSync(host.paths.tmpDir), []);
+    } finally {
+      await dispose();
+      await registry.close();
+    }
+  });
 
   test("two installs at once, from two instances on one cache directory, end with one intact install", async () => {
     const root = scratchDirectory();
@@ -211,14 +338,13 @@ describe("maintenance.install and maintenance.update on the claude driver", () =
     try {
       assert.equal(first.host.paths.cacheDir, second.host.paths.cacheDir);
       await Promise.all([first.instance.maintenance!.install!(), second.instance.maintenance!.install!()]);
-      // Both checked before either installed, so both downloaded; only one unpacked each version.
+      // Both checked before either installed, so both downloaded; only one unpacked.
       assert.equal(registry.requests.filter((request) => request.startsWith("/-/tarballs/")).length, 4, registry.requests.join("\n"));
       const cacheDir = first.host.paths.cacheDir;
-      assert.deepEqual(installedEntries(cacheDir, CLAUDE_SDK_PACKAGE), [CLAUDE_SDK_VERSION], "no staging or trash directory is left");
-      assert.deepEqual(installedEntries(cacheDir, native.pkg), [CLAUDE_SDK_VERSION]);
-      const sdkDirectory = path.join(cacheDir, "adapters", ...CLAUDE_SDK_PACKAGE.split("/"), CLAUDE_SDK_VERSION);
-      assert.deepEqual(fs.readdirSync(sdkDirectory).sort(), ["package.json", "sdk.mjs"]);
-      assert.equal(fs.readFileSync(path.join(sdkDirectory, "sdk.mjs"), "utf8"), fs.readFileSync(new URL("./fixture-sdk/sdk.mjs", import.meta.url), "utf8"));
+      assert.deepEqual(installedEntries(cacheDir), ONE_INSTALL, "no staging or trash directory is left");
+      const installed = managedDirectory(cacheDir);
+      assert.deepEqual(fs.readdirSync(installed).sort(), [CLAUDE_INSTALL_RECORD, "node_modules", "package.json", "sdk.mjs"]);
+      assert.equal(fs.readFileSync(path.join(installed, "sdk.mjs"), "utf8"), fs.readFileSync(new URL("./fixture-sdk/sdk.mjs", import.meta.url), "utf8"));
       for (const { instance } of [first, second]) {
         const status = await instance.status();
         assert.equal(status.version, CLAUDE_SDK_VERSION, JSON.stringify(status));
@@ -251,6 +377,73 @@ describe("maintenance.install and maintenance.update on the claude driver", () =
       await set.dispose();
     }
   });
+});
+
+describe("a managed install that is not whole", () => {
+  /** Changes one byte of `file` and keeps its size. */
+  function flipLastByte(file: string): void {
+    const bytes = fs.readFileSync(file);
+    bytes[bytes.length - 2] = bytes[bytes.length - 2]! ^ 0x01;
+    fs.writeFileSync(file, bytes);
+  }
+
+  const damages: Array<{ name: string; damage: (cacheDir: string) => void; detail: RegExp | null }> = [
+    { name: "sdk.mjs is missing", damage: (cacheDir) => fs.rmSync(path.join(managedDirectory(cacheDir), "sdk.mjs")), detail: /: sdk\.mjs is missing\./ },
+    { name: "the native binary is missing", damage: (cacheDir) => fs.rmSync(managedBinary(cacheDir)), detail: /: node_modules\/@anthropic-ai\/claude-agent-sdk-[a-z0-9-]+\/claude(\.exe)? is missing\./ },
+    {
+      name: "the native binary is truncated",
+      damage: (cacheDir) => fs.truncateSync(managedBinary(cacheDir), 10),
+      detail: /: node_modules\/@anthropic-ai\/claude-agent-sdk-[a-z0-9-]+\/claude(\.exe)? has 10 bytes, not the \d+ it was installed with\./,
+    },
+    { name: "sdk.mjs changed but kept its size", damage: (cacheDir) => flipLastByte(path.join(managedDirectory(cacheDir), "sdk.mjs")), detail: /: sdk\.mjs has changed since it was installed\./ },
+    { name: "the record of the install is missing", damage: (cacheDir) => fs.rmSync(path.join(managedDirectory(cacheDir), CLAUDE_INSTALL_RECORD)), detail: /\.ari-install\.json, written when an install completes, is missing or unreadable/ },
+    // Only the size of the native binary is checked on every load (it is 381 MB); maintenance.install checks its sha256 too.
+    { name: "the native binary changed but kept its size", damage: (cacheDir) => flipLastByte(managedBinary(cacheDir)), detail: null },
+  ];
+  for (const { name, damage, detail } of damages) {
+    test(`when ${name}, status ${detail === null ? "cannot tell, but" : "names maintenance.install and sdkDirectory, and"} maintenance.install repairs it`, async () => {
+      const root = scratchDirectory();
+      const { sdk, native } = fixtureRegistryEntries(root, CLAUDE_SDK_VERSION, "fixture native claude");
+      const registry = await startFixtureRegistry([sdk, native]);
+      fs.mkdirSync(path.join(root, "project"));
+      const hostRoot = path.join(root, "host");
+      const installing = await claudeInstance(hostRoot, { sdkRegistry: registry.url });
+      const cacheDir = installing.host.paths.cacheDir;
+      await installing.instance.maintenance!.install!();
+      await installing.dispose();
+      const whole = { sdk: fs.readFileSync(path.join(managedDirectory(cacheDir), "sdk.mjs")), binary: fs.readFileSync(managedBinary(cacheDir)) };
+      damage(cacheDir);
+      // A new instance, as after a restart, so nothing loaded before the damage is reused.
+      const { instance, dispose } = await claudeInstance(hostRoot, { sdkRegistry: registry.url }, { loadSdk: async () => Promise.reject(new Error("not by name")) });
+      try {
+        const status = await instance.status();
+        if (detail === null) assert.equal(status.installed, true, JSON.stringify(status));
+        else {
+          assert.equal(status.state, "unavailable", JSON.stringify(status));
+          assert.equal(status.error?.code, "driver_unavailable");
+          const message = status.error?.message ?? "";
+          assert.match(message, detail);
+          assert.match(message, /Run maintenance\.install on this instance to repair it, or set sdkDirectory in the driver config/);
+          await assert.rejects(instance.openSession({}), (error: { callError?: { code: string } }) => error.callError?.code === "driver_unavailable");
+        }
+        const before = registry.requests.length;
+        await instance.maintenance!.install!();
+        assert.deepEqual(registry.requests.slice(before).filter((request) => request.startsWith("/-/tarballs/")), ["/-/tarballs/1.tgz", "/-/tarballs/0.tgz"], "the repair downloads both again");
+        assert.deepEqual(installedEntries(cacheDir), ONE_INSTALL, "the damaged install was replaced, and nothing is left beside it");
+        assert.deepEqual(fs.readFileSync(path.join(managedDirectory(cacheDir), "sdk.mjs")), whole.sdk);
+        assert.deepEqual(fs.readFileSync(managedBinary(cacheDir)), whole.binary);
+        const repaired = await instance.status();
+        assert.equal(repaired.installed, true, JSON.stringify(repaired));
+        assert.equal(repaired.version, CLAUDE_SDK_VERSION);
+        const turn = await oneTurn(instance, path.join(root, "project"));
+        assert.equal(turn.status, "completed", turn.events);
+        assert.ok(turn.events.includes("answered: fixture native claude (found by the SDK itself)"), turn.events);
+      } finally {
+        await dispose();
+        await registry.close();
+      }
+    });
+  }
 });
 
 describe("what a managed install holds", () => {

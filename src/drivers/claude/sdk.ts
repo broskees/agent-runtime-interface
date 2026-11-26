@@ -296,15 +296,12 @@ export interface ClaudeSdkRuntime {
   readonly version: string | undefined;
   /** The Claude Code version the SDK bundles (its package.json `claudeCodeVersion`). */
   readonly claudeCodeVersion: string | undefined;
-  /** The bundled native Claude Code binary, or null when the SDK's platform package is missing. */
-  readonly bundledExecutable: string | null;
   /**
-   * True when the SDK cannot find `bundledExecutable` by itself, so every
-   * query names it in `pathToClaudeCodeExecutable`. A managed install keeps
-   * the native package in a directory of its own, outside any `node_modules`
-   * the SDK searches. Left out, the SDK finds its binary as it always does.
+   * The bundled native Claude Code binary, or null when the SDK's platform
+   * package is missing. The SDK finds the same file by itself, so queries do
+   * not name it.
    */
-  readonly passBundledExecutable?: boolean;
+  readonly bundledExecutable: string | null;
 }
 
 /** Loads the SDK. Rejects with `driver_unavailable` naming the package when it is not installed. */
@@ -358,7 +355,7 @@ export function isStandaloneExecutableModule(moduleUrl: string): boolean {
  * first of its platform packages that resolves from that file, as the SDK
  * resolves them (`createRequire` on its own module). Null when none does.
  */
-async function findBundledExecutable(entryFile: string): Promise<string | null> {
+export async function findBundledExecutable(entryFile: string): Promise<string | null> {
   const require = createRequire(entryFile);
   for (const candidate of nativeBinaryCandidates(process.platform, process.arch, prefersMusl())) {
     try {

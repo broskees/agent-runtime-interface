@@ -34,7 +34,7 @@ import type {
   UpdateAdvisory,
 } from "../../generated/instance.ts";
 import type { LimitStatus } from "../../generated/usage.ts";
-import { CLAUDE_BINARY_HINT, CLAUDE_DEFAULT_SDK_REGISTRY, CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_TESTED_VERSIONS } from "../../meta/claude.ts";
+import { CLAUDE_BINARY_HINT, CLAUDE_DEFAULT_SDK_REGISTRY, CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_TESTED_VERSIONS, claudeDirectoryBinaryHint } from "../../meta/claude.ts";
 import type { ClaudeDriverConfig } from "../../meta/claude.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
@@ -171,14 +171,10 @@ const TEXT_KINDS: { readonly [kind: string]: string } = {
   review_guide: "a guide for reviewing the change",
 };
 
-/**
- * A loaded SDK and the Claude Code executable its queries run. `pass` is true
- * when queries must name the executable in `pathToClaudeCodeExecutable`: a
- * configured one, or a binary the SDK cannot find by itself.
- */
+/** A loaded SDK and the Claude Code executable its queries run. */
 interface Available {
   readonly runtime: ClaudeSdkRuntime;
-  readonly executable: { readonly path: string; readonly pass: boolean };
+  readonly executable: { readonly path: string; readonly configured: boolean };
 }
 
 export class ClaudeInstance implements Instance {
@@ -257,22 +253,23 @@ export class ClaudeInstance implements Instance {
    * on PATH, a path with a directory part as it stands. Either way it must
    * name an executable file, or the driver is unavailable.
    */
-  async #executable(runtime: ClaudeSdkRuntime): Promise<{ path: string; pass: boolean }> {
+  async #executable(runtime: ClaudeSdkRuntime): Promise<{ path: string; configured: boolean }> {
     const configured = this.#config.executablePath;
     if (configured !== undefined) {
       const path = await this.#host.process.resolveExecutable(configured);
       if (path === null) {
         throw callErrors.driverUnavailable({ binary: configured, installHint: CLAUDE_BINARY_HINT }, `The configured Claude Code executable (${configured}) was not found.`);
       }
-      return { path, pass: true };
+      return { path, configured: true };
     }
     if (runtime.bundledExecutable === null) {
+      const binaryHint = this.#config.sdkDirectory === undefined ? CLAUDE_BINARY_HINT : claudeDirectoryBinaryHint(this.#config.sdkDirectory);
       throw callErrors.driverUnavailable(
-        { package: `${CLAUDE_SDK_PACKAGE}-${process.platform}-${process.arch}`, binary: "claude", installHint: CLAUDE_BINARY_HINT },
-        `The Claude Agent SDK is installed, but its native Claude Code binary for ${process.platform}-${process.arch} is missing. ${CLAUDE_BINARY_HINT}`,
+        { package: `${CLAUDE_SDK_PACKAGE}-${process.platform}-${process.arch}`, binary: "claude", installHint: binaryHint },
+        `The Claude Agent SDK is installed, but its native Claude Code binary for ${process.platform}-${process.arch} is missing. ${binaryHint}`,
       );
     }
-    return { path: runtime.bundledExecutable, pass: runtime.passBundledExecutable === true };
+    return { path: runtime.bundledExecutable, configured: false };
   }
 
   async #available(): Promise<Available> {
@@ -514,7 +511,7 @@ export class ClaudeInstance implements Instance {
   }
 
   /** Options for a query that must not act: no settings files, no MCP servers, no tools, nothing persisted. */
-  async #isolatedOptions(executable: { path: string; pass: boolean }): Promise<ClaudeQueryOptions> {
+  async #isolatedOptions(executable: { path: string; configured: boolean }): Promise<ClaudeQueryOptions> {
     return {
       env: await this.#queryEnvironment(),
       settingSources: [],
@@ -523,7 +520,7 @@ export class ClaudeInstance implements Instance {
       tools: [],
       persistSession: false,
       permissionMode: "dontAsk",
-      ...(executable.pass ? { pathToClaudeCodeExecutable: executable.path } : {}),
+      ...(executable.configured ? { pathToClaudeCodeExecutable: executable.path } : {}),
       ...(this.#config.model === undefined ? {} : { model: this.#config.model }),
     };
   }
@@ -649,7 +646,7 @@ export class ClaudeInstance implements Instance {
         host: this.#host,
         config: { ...this.#config, ...pickConfig(input.config) },
         sdk: runtime.sdk,
-        executablePath: executable.pass ? executable.path : undefined,
+        executablePath: executable.configured ? executable.path : undefined,
         sessionId: sessionIdFor(this.id, ordinal),
         newUuid,
         environment: () => this.#queryEnvironment(),

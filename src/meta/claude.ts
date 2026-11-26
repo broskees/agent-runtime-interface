@@ -72,9 +72,21 @@ export const CLAUDE_INSTALL_HINT = `Install the Claude Agent SDK next to ari (np
  */
 export const CLAUDE_STANDALONE_INSTALL_HINT = `Run maintenance.install on this instance to download the Claude Agent SDK, or set sdkDirectory in the driver config to a directory where ${CLAUDE_SDK_PACKAGE} is installed.`;
 
+/**
+ * What a host tells the user when a managed install (from
+ * `maintenance.install`) is incomplete or damaged: `maintenance.install`
+ * repairs it, in the standalone `ari-driver` too.
+ */
+export const CLAUDE_REPAIR_HINT = `Run maintenance.install on this instance to repair it, or set sdkDirectory in the driver config to a directory where ${CLAUDE_SDK_PACKAGE} is installed.`;
+
 /** What a host tells the user when the SDK is present but its native Claude Code binary is not. */
 export const CLAUDE_BINARY_HINT =
-  `Reinstall ${CLAUDE_SDK_PACKAGE} without --omit=optional (its platform package carries the native Claude Code binary), or set executablePath in the driver config.`;
+  `Reinstall ${CLAUDE_SDK_PACKAGE} without --omit=optional (its platform package carries the native Claude Code binary), run maintenance.install on this instance, or set executablePath in the driver config.`;
+
+/** The same, when the SDK came from the config's `sdkDirectory`. */
+export function claudeDirectoryBinaryHint(directory: string): string {
+  return `Reinstall it there without --omit=optional (npm install --prefix ${directory} ${CLAUDE_SDK_PACKAGE}), remove sdkDirectory from the driver config and run maintenance.install, or set executablePath in the driver config.`;
+}
 
 /**
  * The Claude Agent SDK versions this driver is tested against, as a semver

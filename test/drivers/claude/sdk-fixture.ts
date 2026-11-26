@@ -87,17 +87,23 @@ export function npmTarball(packageDirectory: string, scratch: string): Buffer {
   return bytes;
 }
 
-/** npm's `dist.integrity` for `bytes`. */
-export function integrityOf(bytes: Uint8Array): string {
-  return `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+/** npm's `dist.integrity` for `bytes`: sha512 unless another algorithm is named. */
+export function integrityOf(bytes: Uint8Array, algorithm: "sha1" | "sha256" | "sha384" | "sha512" = "sha512"): string {
+  return `${algorithm}-${createHash(algorithm).update(bytes).digest("base64")}`;
 }
 
-/** One package version the registry serves. `integrity` defaults to the tarball's own. */
+/** npm's `dist.shasum` for `bytes`: the hex sha1. */
+export function shasumOf(bytes: Uint8Array): string {
+  return createHash("sha1").update(bytes).digest("hex");
+}
+
+/** One package version the registry serves. `integrity` defaults to the tarball's sha512; null leaves it out. `shasum` is left out unless given. */
 export interface RegistryEntry {
   readonly pkg: string;
   readonly version: string;
   readonly tarball: Buffer;
-  readonly integrity?: string;
+  readonly integrity?: string | null;
+  readonly shasum?: string;
 }
 
 export interface FixtureRegistry {
@@ -113,13 +119,18 @@ export interface FixtureRegistry {
  * answers the version's manifest (`dist.tarball` and `dist.integrity`), and
  * `GET /-/tarballs/<n>.tgz` the tarball. Anything else is 404. Tarballs wait
  * `tarballDelayMs` before they are sent, so two installs can overlap.
+ * `onRequest` runs before each answer, with the decoded path.
  */
-export async function startFixtureRegistry(entries: readonly RegistryEntry[], options: { tarballDelayMs?: number } = {}): Promise<FixtureRegistry> {
+export async function startFixtureRegistry(
+  entries: readonly RegistryEntry[],
+  options: { tarballDelayMs?: number; onRequest?: (requested: string) => void | Promise<void> } = {},
+): Promise<FixtureRegistry> {
   const requests: string[] = [];
   let url = "";
-  const server = http.createServer((request, response) => {
+  const server = http.createServer(async (request, response) => {
     const requested = decodeURIComponent(new URL(request.url ?? "/", "http://registry").pathname);
     requests.push(requested);
+    await options.onRequest?.(requested);
     const tarball = /^\/-\/tarballs\/(\d+)\.tgz$/.exec(requested);
     if (tarball !== null) {
       const entry = entries[Number(tarball[1])];
@@ -137,7 +148,9 @@ export async function startFixtureRegistry(entries: readonly RegistryEntry[], op
       return;
     }
     const entry = entries[index]!;
-    const manifest = { name: entry.pkg, version: entry.version, dist: { tarball: `${url}/-/tarballs/${index}.tgz`, integrity: entry.integrity ?? integrityOf(entry.tarball) } };
+    const integrity = entry.integrity === undefined ? integrityOf(entry.tarball) : entry.integrity;
+    const dist = { tarball: `${url}/-/tarballs/${index}.tgz`, ...(integrity === null ? {} : { integrity }), ...(entry.shasum === undefined ? {} : { shasum: entry.shasum }) };
+    const manifest = { name: entry.pkg, version: entry.version, dist };
     response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(manifest));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

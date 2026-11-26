@@ -132,7 +132,7 @@ export interface ClaudeSessionContext {
   readonly host: HostServices<ClaudeDriverConfig>;
   readonly config: ClaudeDriverConfig;
   readonly sdk: ClaudeSdk;
-  /** `pathToClaudeCodeExecutable`, when the config names one or the SDK cannot find its bundled binary by itself (a managed install). */
+  /** `pathToClaudeCodeExecutable`, when the config names one. */
   readonly executablePath: string | undefined;
   readonly sessionId: string;
   /** A new UUID for Claude: a new thread's or fork's session id, or a prompt's id. */

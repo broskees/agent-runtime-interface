@@ -67,7 +67,8 @@ the executable provides `@anthropic-ai/claude-agent-sdk` in one of two ways:
 call `maintenance.install` on the instance, which downloads the pinned SDK and
 its native Claude Code package for the platform from the npm registry (or the
 config's `sdkRegistry`) into the instance's cache directory, checked against
-the registry's integrity hashes, with no Node or npm needed; or set
+the registry's sha512 (or sha384, sha256) integrity, with no Node or npm
+needed, and repairs an install that is no longer whole; or set
 `sdkDirectory` in the driver config to a directory where
 `npm install @anthropic-ai/claude-agent-sdk` ran. ARI does not bundle the SDK
 because its licence is Anthropic's, not MIT; the npm package and the

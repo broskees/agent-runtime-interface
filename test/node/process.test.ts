@@ -291,14 +291,15 @@ describe("ari/node process spawning", () => {
       await assert.rejects(service.spawn({ command: "/bin/sh", cwd: path.join(directory, "missing") }), (error: unknown) => isAriError(error, "not_found"));
 
       // argv: as given, whether found on PATH by name or given as a path. For its first few milliseconds the pid
-      // still runs the launcher (it starts the guard, then execs the child), so wait for the exec first.
+      // still runs the launcher (it starts the guard, then execs the child), and while that exec runs, Linux shows
+      // no arguments at all (`ps` prints `[sleep]`), so wait for the exec to finish first.
       const argvOf = async (spawnIn: typeof service, command: string): Promise<string> => {
         const child = await spawnIn.spawn({ command, args: ["3600"], stdin: "ignore" });
         const deadline = Date.now() + 5000;
         let argv = "";
         do {
           argv = execFileSync("ps", ["-ww", "-o", "args=", "-p", String(child.pid)], { encoding: "utf8" }).trim();
-        } while (argv.includes("ari-agent-launch") && Date.now() < deadline);
+        } while ((argv.includes("ari-agent-launch") || /^\[.*\]$/.test(argv)) && Date.now() < deadline);
         await child.kill();
         return argv;
       };

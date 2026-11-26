@@ -361,7 +361,7 @@ The child's argv is the one spawn would give it, except
 that with no `PATH` in the child's environment a bare command name runs by
 its full path (that path is argv[0]), and that for its first few
 milliseconds the pid shows the launcher's command line, until the launcher
-`exec`s the child. `PWD` and `OLDPWD` are put back as the
+`exec`s the child (while that `exec` runs, Linux shows no arguments at all). `PWD` and `OLDPWD` are put back as the
 child's environment had them, but with bash as `/bin/sh` an environment
 without `SHLVL` gains `SHLVL=0`. On macOS, an executable file that is not a
 program (no `#!` line) is run by `/bin/sh` instead of failing with ENOEXEC;

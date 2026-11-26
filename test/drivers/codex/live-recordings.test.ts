@@ -70,8 +70,8 @@ test("the Codex sanitiser removes machine and usage values in the shapes found o
   assert.deepEqual(sanitiseMessage({ method: "item/completed", params: { contentTokenCount: 7, item: { processId: "9124" } } }), {
     method: "item/completed", params: { contentTokenCount: 0, item: { processId: "1000" } },
   });
-  assert.deepEqual(sanitiseMessage({ method: "thread/started", params: { thread: { projectId: "project-marker" } } }), {
-    method: "thread/started", params: { thread: { projectId: "<PROJECT_ID>" } },
+  assert.deepEqual(sanitiseMessage({ method: "thread/started", params: { thread: { modelProvider: "openai", projectId: "project-marker" } } }), {
+    method: "thread/started", params: { thread: { modelProvider: "openai", projectId: "<PROJECT_ID>" } },
   });
 });
 

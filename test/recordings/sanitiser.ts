@@ -292,7 +292,6 @@ function idPlaceholder(key: string | undefined): string | undefined {
   const plain = plainKey(key);
   if (ACCOUNT_ID_KEY.test(plain)) return PLACEHOLDERS.accountId;
   if (ORG_ID_KEY.test(plain)) return PLACEHOLDERS.orgId;
-  if (plain === "projectid") return PLACEHOLDERS.projectId;
   return undefined;
 }
 
@@ -514,6 +513,12 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const source = withNeutralAcpUsage(picked, key);
       const out: { [key: string]: unknown } = {};
       for (const [field, entry] of Object.entries(source)) {
+        // Codex's Thread can carry a project association. Other protocols use
+        // projectID for values replay depends on, including OpenCode's project routing.
+        if (side === "in" && key === "thread" && typeof source["modelProvider"] === "string" && field === "projectId" && typeof entry === "string" && entry !== "") {
+          out[field] = PLACEHOLDERS.projectId;
+          continue;
+        }
         // Codex remote control also announces these machine identifiers when disabled.
         const remoteControl = side === "in" && source["method"] === "remoteControl/status/changed" && field === "params" && isRecord(entry);
         const cleaned = remoteControl ? {

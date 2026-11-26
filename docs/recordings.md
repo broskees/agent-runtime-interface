@@ -470,7 +470,7 @@ another type than the rule's stays as it is. The code is
 | whether the account reached a limit: Codex's `rateLimitReachedType` and `spendControlReached` | `rateLimitReachedType` (a string), `spendControlReached` (a boolean) | `null`, `false` |
 | the client's machine in a user agent: Codex's `initialize` answer names the operating system, its version, the architecture and the terminal after the product (`codex_cli_rs/0.172.0 (<system>; x86_64) <terminal>`) | `userAgent` (a string with a space) | the product and its version alone, `codex_cli_rs/0.172.0` |
 | the Codex remote-control host and installation | inbound `remoteControl/status/changed` parameters `serverName` and `installationId` (strings) | `<SERVER_NAME>` and `<INSTALLATION_ID>` |
-| a project identifier | `projectId` (a nonempty string) | `<PROJECT_ID>` |
+| a Codex project identifier | `projectId` (a nonempty string on an inbound Codex `Thread`) | `<PROJECT_ID>` |
 | native Codex token counts | `contentTokenCount`, and the counts under `tokenUsage.total` and `tokenUsage.last` (numbers) | `0`; `modelContextWindow` still describes the model |
 | a numeric process identifier serialized as a string, as in Codex command execution | `pid`, `ppid`, `processId` | `"1000"` |
 

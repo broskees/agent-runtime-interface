@@ -1,8 +1,10 @@
 // `ari/drivers/antigravity`: the Google Antigravity CLI over ACP. Quirks it
 // keeps:
 // - each instance gets its own profile directory (`<stateDir>/profile`),
-//   passed as `--gemini-dir` and `GEMINI_HOME`, with file-based credential
-//   storage, so instances never share a Google sign-in;
+//   passed as `--gemini-dir`, and `agy` keeps the instance's Google sign-in
+//   in that profile's file storage, never in the OS keyring's one entry that
+//   every `agy` on the machine shares, so instances never share a Google
+//   sign-in (see ANTIGRAVITY_LAUNCH_ENVIRONMENT);
 // - ambient Google credentials are stripped through the host's
 //   `process.envPolicy`; the driver refuses to start a session when the
 //   host's policy would let one through (see ANTIGRAVITY_STRIPPED_VARIABLES);
@@ -46,6 +48,19 @@ export function antigravityProfile(host: HostServices<unknown>): string {
   return `${host.paths.stateDir}/profile`;
 }
 
+/**
+ * The variables the driver gives `agy acp`, all of which `agy` 1.5.x reads:
+ * - `AGY_CLI_FORCE_FILE_TOKEN_STORAGE`: `agy` 1.5.16 and later keep a Google
+ *   sign-in in the OS keyring's one entry (service `gemini`, account
+ *   `antigravity`), whatever `--gemini-dir` says, unless this is set; then in
+ *   `<profile>/antigravity-acp/antigravity-oauth-token` (they log "Using
+ *   file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is
+ *   set"). `AGY_ACP_FORCE_FILE_STORAGE` and `GEMINI_HOME` are not in the 1.5.x
+ *   binary.
+ * - `AGY_CLI_DISABLE_AUTO_UPDATE`: the switch of the CLI's self-updater.
+ */
+const ANTIGRAVITY_LAUNCH_ENVIRONMENT: { readonly [name: string]: string } = { AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1", AGY_CLI_DISABLE_AUTO_UPDATE: "true" };
+
 /** The required variables the host's environment policy would let through. */
 export function unstrippedVariables(stripAmbient: readonly string[]): string[] {
   const covered = (name: string): boolean => stripAmbient.some((entry) => (entry.endsWith("*") ? name.startsWith(entry.slice(0, -1)) : entry === name));
@@ -73,7 +88,7 @@ export function createAntigravityDriver(): Driver<AntigravityConfig> {
     testedRange: { min: "1.5.0", below: "1.6.0", updateStep: ANTIGRAVITY_UPDATE_STEP },
     launchIdentity: (config) => config.command,
 
-    probeTarget: async (context) => ({ kind: "command", command: context.config.command, versionArgs: ["--version"], env: { AGY_CLI_DISABLE_AUTO_UPDATE: "1" } }),
+    probeTarget: async (context) => ({ kind: "command", command: context.config.command, versionArgs: ["--version"], env: { AGY_CLI_DISABLE_AUTO_UPDATE: "true" } }),
 
     async beforeSession(context) {
       // The host strips ambient Google credentials; a session never starts when its policy would let one through.
@@ -87,8 +102,7 @@ export function createAntigravityDriver(): Driver<AntigravityConfig> {
       const profile = antigravityProfile(context.host as HostServices<unknown>);
       await fs.mkdir(profile, { recursive: true, mode: 0o700 });
       const args = ["acp", "--gemini-dir", profile, "--app-data-dir", "antigravity-acp"];
-      const env = { GEMINI_HOME: profile, AGY_ACP_FORCE_FILE_STORAGE: "1", AGY_CLI_DISABLE_AUTO_UPDATE: "1" };
-      return { command: context.config.command, args, env };
+      return { command: context.config.command, args, env: { ...ANTIGRAVITY_LAUNCH_ENVIRONMENT } };
     },
 
     adjustCapabilities: (capabilities) => ({

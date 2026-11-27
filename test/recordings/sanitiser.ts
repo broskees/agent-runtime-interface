@@ -314,6 +314,8 @@ export interface SanitiserInput {
   readonly protocolWords?: ProtocolWords;
   /** The `provider/model` the recording used: a model list keeps only that model. Without it, a model list stays whole. */
   readonly recordedModel?: string;
+  /** Strip account extensions and pseudonymise native IDs of the Antigravity CLI. */
+  readonly antigravity?: boolean;
 }
 
 /** Which way a frame went: `in` from the native side, `out` from the driver. */
@@ -485,6 +487,7 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
    * array's key), and `slot` what the pinned types say of that key at the
    * value's place (undefined at an opaque place).
    */
+  const nativeIds = new Map<string, string>();
   const walk = (value: unknown, side: FrameSide, key: string | undefined, slot: ProtocolSlot | undefined): unknown => {
     for (const rule of neutralRules(key)) {
       const neutral = rule.neutral(value);
@@ -501,10 +504,21 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       if (entriesWith(value, ["value", "resolvedModel"])) return entries.filter((entry) => entry["value"] === model || entry["resolvedModel"] === model).map((entry) => walk(entry, side, key, slot));
     }
     if (typeof value === "string") {
+      // Preserve the reference across prompts, permission requests and resume,
+      // without retaining the live service's UUIDs or tool-call handles.
+      if (input.antigravity && ((key === "sessionId" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) || (key === "toolCallId" && /^call_[A-Za-z0-9]+$/.test(value)))) {
+        const alias = nativeIds.get(value) ?? `<AGY_ID_${nativeIds.size + 1}>`;
+        nativeIds.set(value, alias);
+        return alias;
+      }
       const id = idPlaceholder(key);
       if (id !== undefined && value !== "") return id;
       const protocolWord = slot?.words?.includes(value) === true;
-      return text(value, side === "in" && !protocolWord ? "word" : "path");
+      // run_command includes local timestamps and timezone in both output copies.
+      const scrubbed = input.antigravity && side === "in" && (key === "output" || key === "text")
+        ? value.replace(/^(Created At: |Completed At: )\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)(?=\r?$)/gm, `$1${NEUTRAL_TIME.iso}`)
+        : value;
+      return text(scrubbed, side === "in" && !protocolWord ? "word" : "path");
     }
     if (Array.isArray(value)) return value.map((each) => walk(each, side, key, slot));
     if (typeof value === "object" && value !== null) {
@@ -513,6 +527,18 @@ export function createSanitiser(input: SanitiserInput): Sanitiser {
       const source = withNeutralAcpUsage(picked, key);
       const out: { [key: string]: unknown } = {};
       for (const [field, entry] of Object.entries(source)) {
+        // agy 1.5.x publishes both pickers. The modern picker drives replay;
+        // keep the legacy picker's current value, not the plan's model list.
+        if (input.antigravity && side === "in" && key === "models" && field === "availableModels" && typeof source["currentModelId"] === "string" && Array.isArray(entry)) {
+          out[field] = walk(entry.filter((model) => isRecord(model) && model["modelId"] === source["currentModelId"]), side, field, undefined);
+          continue;
+        }
+        // Leave initialize's boolean capability alone: only the data object
+        // in the session result carries account data.
+        if (input.antigravity && side === "in" && key === "antigravity" && field === "tier" && isRecord(entry)) {
+          out[field] = { name: PLACEHOLDERS.plan, id: PLACEHOLDERS.plan, upgradeUri: "" };
+          continue;
+        }
         // Codex's Thread can carry a project association. Other protocols use
         // projectID for values replay depends on, including OpenCode's project routing.
         if (side === "in" && key === "thread" && typeof source["modelProvider"] === "string" && field === "projectId" && typeof entry === "string" && entry !== "") {

@@ -7,6 +7,8 @@
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
 import { createFakeHost } from "../../../src/conformance/index.ts";
 import {
@@ -20,7 +22,14 @@ import type { AntigravityConfig } from "../../../src/drivers/antigravity/index.t
 import { isAriError } from "../../../src/index.ts";
 import { meta } from "../../../src/meta/antigravity.ts";
 import { openRig } from "../acp/rig.ts";
+import { createProcessService } from "../../../src/node/process.ts";
+import type { ProcessService } from "../../../src/node/process.ts";
 import { watchInstanceFiles } from "../../helpers/conformance.ts";
+import { profileSignInFile } from "../../recordings/antigravity/credentials.ts";
+import { ANTIGRAVITY_RECORDER_ENV_POLICY, createAntigravityLayout, recordingModelChooser, runAntigravityScenario } from "../../recordings/antigravity/run.ts";
+import type { AntigravityLayout } from "../../recordings/antigravity/run.ts";
+import { SCENARIOS } from "../../recordings/scenarios.ts";
+import { fakeAgyOnPath } from "./fake-agy.ts";
 
 /** The fake `agy` prints a tested version, bare as the real `agy --version` prints it (test/fixtures/cli-version-output/agy.txt). */
 const AGY_VERSION = ["--print-version", "1.5.17"];
@@ -52,16 +61,92 @@ test("each instance gets its own profile directory, and ambient Google credentia
       profiles.push(profile);
       assert.equal(runtime.command, "agy");
       assert.deepEqual(runtime.args, ["acp", "--gemini-dir", profile, "--app-data-dir", "antigravity-acp"]);
-      assert.equal(runtime.environment["GEMINI_HOME"], profile, "the instance's own profile, not the inherited GEMINI_HOME");
-      assert.equal(runtime.environment["AGY_ACP_FORCE_FILE_STORAGE"], "1");
-      assert.equal(runtime.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "1");
+      // agy 1.5.16 and later keep the sign-in in their file storage, under the profile, only with this variable set.
+      assert.equal(runtime.environment["AGY_CLI_FORCE_FILE_TOKEN_STORAGE"], "1");
+      assert.equal(runtime.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
+      // agy 1.5.x reads neither; the driver sets only what it reads.
+      assert.equal(runtime.environment["AGY_ACP_FORCE_FILE_STORAGE"], undefined);
+      assert.equal(runtime.environment["GEMINI_HOME"], undefined, "the inherited GEMINI_HOME was stripped, and the driver sets none");
       assert.equal((fs.statSync(profile).mode & 0o777).toString(8), "700");
-      for (const name of ANTIGRAVITY_STRIPPED_VARIABLES) if (name !== "GEMINI_HOME") assert.equal(runtime.environment[name], undefined, `${name} was stripped`);
+      for (const name of ANTIGRAVITY_STRIPPED_VARIABLES) assert.equal(runtime.environment[name], undefined, `${name} was stripped`);
       assert.equal(runtime.environment["PATH"], "/usr/bin");
     }
     assert.notEqual(profiles[0], profiles[1]);
   } finally {
     for (const rig of instances) await rig.cleanup();
+  }
+});
+
+/**
+ * The real process service, starting the fake `agy` on PATH on a machine whose
+ * keyring holds a Google sign-in and whose session bus is there, as on a
+ * desktop: the fake keeps its sign-in in that shared keyring entry unless it is
+ * told to use its file storage.
+ */
+function desktopProcessService(layout: AntigravityLayout, machine: { readonly bin: string; readonly keyring: string; readonly bus: string; readonly env: { readonly [name: string]: string } }): ProcessService {
+  const service = createProcessService({
+    envPolicy: ANTIGRAVITY_RECORDER_ENV_POLICY,
+    baseEnv: {
+      PATH: `${machine.bin}${path.delimiter}${process.env["PATH"] ?? "/usr/bin:/bin"}`,
+      HOME: layout.home,
+      XDG_CONFIG_HOME: layout.configHome,
+      XDG_DATA_HOME: layout.dataHome,
+      XDG_STATE_HOME: layout.stateHome,
+      XDG_CACHE_HOME: layout.cacheHome,
+      XDG_RUNTIME_DIR: layout.runtimeDir,
+      TMPDIR: layout.tmp,
+      DBUS_SESSION_BUS_ADDRESS: `unix:path=${machine.bus}`,
+      ARI_FAKE_AGY_KEYRING: machine.keyring,
+      ...machine.env,
+    },
+  });
+  return {
+    envPolicy: service.envPolicy,
+    resolveExecutable: (name, options) => service.resolveExecutable(name, options),
+    spawn: (request) => service.spawn({ ...request, cwd: request.cwd ?? layout.cwd }),
+    dispose: () => service.dispose(),
+  };
+}
+
+test("two instances on a desktop whose keyring holds a Google sign-in each keep their own sign-in in their own profile, and neither reads or changes the keyring's", async () => {
+  const machine = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-antigravity-desktop-")));
+  const fake = fakeAgyOnPath(machine);
+  const keyring = path.join(machine, "keyring-gemini-antigravity");
+  const bus = path.join(machine, "session-bus");
+  const keyringSignIn = JSON.stringify({ token: { access_token: "fake-access-keyring", refresh_token: "fake-refresh-keyring" }, auth_method: "consumer" });
+  fs.writeFileSync(keyring, keyringSignIn, { mode: 0o600 });
+  fs.writeFileSync(bus, "");
+  const signedIn = createAntigravityLayout("ari-antigravity-instance-a-");
+  const neverSignedIn = createAntigravityLayout("ari-antigravity-instance-b-");
+  const signInA = JSON.stringify({ token: { access_token: "fake-access-a", refresh_token: "fake-refresh-a" }, auth_method: "consumer" });
+  const refreshedA = JSON.stringify({ token: { access_token: "fake-access-a2", refresh_token: "fake-refresh-a2" }, auth_method: "consumer" });
+  fs.mkdirSync(path.dirname(profileSignInFile(signedIn.profile)), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(profileSignInFile(signedIn.profile), signInA, { mode: 0o600 });
+  const simple = SCENARIOS.find((scenario) => scenario.name === "simple")!;
+  try {
+    for (const [layout, extra] of [[signedIn, { ARI_FAKE_AGY_REFRESH: refreshedA }], [neverSignedIn, {}]] as const) {
+      const service = desktopProcessService(layout, { bin: fake.bin, keyring, bus, env: { ...fake.env, ...extra } });
+      try {
+        await runAntigravityScenario({ scenario: simple, layout, process: service, models: recordingModelChooser({}), timeoutMs: 20_000 });
+      } finally {
+        await service.dispose();
+      }
+    }
+    const acp = fake.processes().filter((each) => each.args[0] === "acp");
+    const of = (layout: AntigravityLayout) => acp.filter((each) => each.args.includes(layout.profile));
+    assert.equal(of(signedIn).length, 1);
+    assert.equal(of(neverSignedIn).length, 1);
+    for (const [layout, found] of [[signedIn, signInA], [neverSignedIn, null]] as const) {
+      const started = of(layout)[0]!;
+      assert.equal(started.signInStore, "file", `agy kept the sign-in of ${layout.profile} in its file storage, not in the keyring every profile shares`);
+      assert.equal(started.signInFile, profileSignInFile(layout.profile));
+      assert.equal(started.signIn, found, "agy found its own profile's sign-in, never the keyring's");
+    }
+    assert.equal(fs.readFileSync(profileSignInFile(signedIn.profile), "utf8"), refreshedA, "the refreshed sign-in went to the instance's own profile");
+    assert.equal(fs.existsSync(profileSignInFile(neverSignedIn.profile)), false, "the other instance got no sign-in");
+    assert.equal(fs.readFileSync(keyring, "utf8"), keyringSignIn, "the keyring's sign-in is unchanged");
+  } finally {
+    for (const directory of [signedIn.root, neverSignedIn.root, machine]) fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -129,6 +214,7 @@ test("the driver runs the agy its command config names: agy on PATH by default, 
         ],
         "status() and openSession asked that agy for its version",
       );
+      for (const probe of rig.host.spawns.filter((spawn) => spawn.purpose === "probe")) assert.equal(probe.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
       const runtime = spawns.find((spawn) => spawn.purpose === "runtime");
       assert.equal(runtime?.command, command, "the session runs that agy");
       assert.equal(runtime?.args?.[0], "acp");

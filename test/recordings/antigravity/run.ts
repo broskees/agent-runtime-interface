@@ -44,6 +44,7 @@ import type { NativeProgress, Scenario, ScenarioRun } from "../scenarios.ts";
 
 export const ANTIGRAVITY_RECORDER_INSTANCE_ID = "antigravity-recorder";
 export const ANTIGRAVITY_MODEL_VARIABLE = "ARI_RECORD_ANTIGRAVITY_MODEL";
+export const ANTIGRAVITY_EFFORT_VARIABLE = "ARI_RECORD_ANTIGRAVITY_EFFORT";
 
 export interface AntigravityLayout {
   readonly root: string;
@@ -199,7 +200,7 @@ async function modelOptionOf(session: Session, threadId: string): Promise<Config
 }
 
 /** `session`, whose startTurn gives each turn the chosen model as the value of its thread's model option. */
-export function withModelChoice(session: Session, models: ModelChooser): Session {
+export function withModelChoice(session: Session, models: ModelChooser, pin?: { model: string; thought_level: string }): Session {
   const startTurn = async (input: StartTurnInput): Promise<StartTurnResult> => {
     const option = await modelOptionOf(session, input.threadId);
     const model = models.pick(option);
@@ -209,6 +210,17 @@ export function withModelChoice(session: Session, models: ModelChooser): Session
   return new Proxy(session, {
     get(target, property) {
       if (property === "startTurn") return startTurn;
+      // Apply and verify the two pickers as the thread opens, not after a
+      // prompt. The model must be set first because it controls the efforts.
+      if (pin !== undefined && (property === "createThread" || property === "resumeThread")) {
+        return async (input: Parameters<Session["createThread"]>[0] & Parameters<Session["resumeThread"]>[0]) => {
+          const thread = await target[property]({ ...input, config: { ...input.config, ...pin } });
+          if (thread.appliedConfig?.["model"] !== pin.model || thread.appliedConfig?.["thought_level"] !== pin.thought_level) {
+            throw new AntigravityModelChoiceError("the ACP thread did not confirm the requested model and effort", []);
+          }
+          return thread;
+        };
+      }
       const value: unknown = Reflect.get(target, property, target);
       return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
@@ -221,8 +233,10 @@ export interface AntigravityScenarioInput {
   /** The process service the driver spawns `agy acp` through: the tapped real one, or the replay's. */
   readonly process: HostServices["process"];
   readonly models: ModelChooser;
+  readonly pin?: { model: string; thought_level: string };
   readonly timeoutMs: number;
   readonly native?: NativeProgress;
+  readonly mayApprove?: NonNullable<Parameters<typeof runScenario>[1]["mayApprove"]>;
   /** Wraps each session the host opens; tests use it to play a host that behaves differently. */
   readonly wrapSession?: (session: Session) => Session;
 }
@@ -258,14 +272,30 @@ export async function runAntigravityScenario(input: AntigravityScenarioInput): P
   try {
     const run = await runScenario(input.scenario, {
       openSession: async () => {
-        const session = withModelChoice(await instance.openSession({}), input.models);
+        const session = withModelChoice(await instance.openSession({}), input.models, input.pin);
         return input.wrapSession === undefined ? session : input.wrapSession(session);
       },
       cwd: input.layout.cwd,
       timeoutMs: input.timeoutMs,
+      ...(input.mayApprove === undefined ? {} : { mayApprove: input.mayApprove }),
       ...(input.native === undefined ? {} : { native: input.native }),
     });
     return { run, diagnostics: host.diagnosticEntries };
+  } finally {
+    await instance.dispose();
+  }
+}
+
+/** Inspect the ACP model picker without ever sending session/prompt. */
+export async function listAntigravityModels(layout: AntigravityLayout, process: HostServices["process"], models: ModelChooser, pin?: AntigravityScenarioInput["pin"]): Promise<string[]> {
+  const instance = await createAntigravityDriver().create(recorderHost(layout, process), {
+    instanceId: ANTIGRAVITY_RECORDER_INSTANCE_ID, config: antigravityRecorderConfig(), environment: {},
+  });
+  try {
+    const session = withModelChoice(await instance.openSession({}), models, pin);
+    const thread = await session.createThread({ cwd: layout.cwd, policy: { cwd: layout.cwd, mode: "approval_required", interaction: "default" } });
+    const option = await modelOptionOf(session, thread.id);
+    return option === undefined ? [] : offered(option);
   } finally {
     await instance.dispose();
   }

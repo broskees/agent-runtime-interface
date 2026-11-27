@@ -25,6 +25,8 @@ import { RecordingNotWrittenError, recoveryFileFor } from "../../recordings/reco
 import { SCENARIO_NAMES } from "../../recordings/scenarios.ts";
 import type { ScenarioName } from "../../recordings/scenarios.ts";
 import { buildChildEnvironment } from "../../../src/node/process.ts";
+import { installMarkerCwdGuard, isAntigravityMarkerApproval } from "../../recordings/antigravity/record.ts";
+import { SCENARIOS } from "../../recordings/scenarios.ts";
 import { FAKE_AGY_MODELS, fakeAgyOnPath } from "./fake-agy.ts";
 import type { FakeAgy } from "./fake-agy.ts";
 import { antigravitySetupSources, loadedAntigravitySetup } from "./user-setup.ts";
@@ -172,11 +174,12 @@ function seedHome(): { home: string; env: { [name: string]: string }; files: Map
 }
 
 /** Records `scenarios` with the recorder's own process service, against a fresh fake `agy` on PATH. */
-async function recordWithFake(env: { [name: string]: string }, scenarios: readonly ScenarioName[], options: { source?: "fake" | "live"; outDir?: string } = {}): Promise<{ outDir: string; outcomes: AntigravityRecordOutcome[]; fake: FakeAgy; log: string[] }> {
+async function recordWithFake(env: { [name: string]: string }, scenarios: readonly ScenarioName[], options: { source?: "fake" | "live"; outDir?: string; listModels?: boolean; requireVersion?: string } = {}): Promise<{ outDir: string; outcomes: AntigravityRecordOutcome[]; fake: FakeAgy; log: string[] }> {
   const fake = fakeAgyOnPath(DIRECTORY);
   const outDir = options.outDir ?? fs.mkdtempSync(path.join(DIRECTORY, "out-"));
   const log: string[] = [];
   const outcomes = await recordAntigravity({
+    ...options,
     scenarios,
     outDir,
     source: options.source ?? "fake",
@@ -187,8 +190,8 @@ async function recordWithFake(env: { [name: string]: string }, scenarios: readon
   return { outDir, outcomes, fake, log };
 }
 
-/** The Google and Antigravity variables the recorded agy may get: the driver's own, and the recorder's file storage switch. */
-const ALLOWED_AGENT_VARIABLES = ["AGY_ACP_FORCE_FILE_STORAGE", "AGY_CLI_DISABLE_AUTO_UPDATE", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE", "GEMINI_HOME"];
+/** The Google and Antigravity variables the recorded agy acp may get: the driver's own, its file storage switch among them. */
+const ALLOWED_AGENT_VARIABLES = ["AGY_CLI_DISABLE_AUTO_UPDATE", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE"];
 
 test("the fake agy, given the user's own environment, loads every seeded setting, MCP entry, instruction, rule and skill, so a leak would show", () => {
   const { home, env } = seedHome();
@@ -197,9 +200,91 @@ test("the fake agy, given the user's own environment, loads every seeded setting
   assert.ok(!loaded.includes(MARKERS.signIn), "the sign-in is not setup");
 });
 
+test("model preflight uses the isolated file, returns a refresh, and does not send a prompt or write a tape", async () => {
+  const { env, signIn } = seedHome();
+  const refreshed = "fake sign-in refreshed during startup";
+  const { outDir, outcomes, fake, log } = await recordWithFake({ ...env, ARI_FAKE_AGY_REFRESH_ON_START: refreshed }, [], { source: "live", listModels: true, requireVersion: "1.5.17-fake" });
+  assert.equal(outcomes.length, 1);
+  const outcome = outcomes[0]!;
+  assert.equal(outcome.error, undefined);
+  assert.deepEqual(outcome.offeredModels, FAKE_AGY_MODELS.map(({ value }) => value));
+  assert.deepEqual(fake.wire().filter(({ direction }) => direction === "in").map(({ line }) => JSON.parse(line).method), ["initialize", "session/new"]);
+  assert.ok(log.some((line) => line.includes("because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set")));
+  const runtime = fake.processes().find(({ args }) => args[0] === "acp");
+  assert.equal(runtime?.signIn, SIGN_IN);
+  assert.equal(runtime?.signInStore, "file");
+  assert.equal(fs.readFileSync(signIn, "utf8"), refreshed);
+  assert.deepEqual(fs.readdirSync(outDir), []);
+  assert.ok(!fs.existsSync(outcome.workspace));
+});
+
+test("the required CLI version is checked before opening ACP", async () => {
+  const { env } = seedHome();
+  const { outcomes, fake } = await recordWithFake(env, [], { source: "live", listModels: true, requireVersion: "1.5.16" });
+  assert.match(outcomes[0]!.error?.message ?? "", /does not report the required version/);
+  assert.deepEqual(fake.processes().map(({ args }) => args), [["--version"]]);
+});
+
+test("preflight verifies the pinned model and effort without sending a prompt", async () => {
+  const { env } = seedHome();
+  const model = FAKE_AGY_MODELS[1]!.value;
+  const pinned = { ...env, ARI_RECORD_ANTIGRAVITY_MODEL: model, ARI_RECORD_ANTIGRAVITY_EFFORT: "medium" };
+  const options = { source: "live", listModels: true } as const;
+  const accepted = await recordWithFake({ ...pinned, ARI_FAKE_AGY_EFFORT: "1" }, [], options);
+  assert.equal(accepted.outcomes[0]!.error, undefined);
+  assert.deepEqual(accepted.fake.wire().filter(({ direction }) => direction === "in").map(({ line }) => {
+    const { method, params } = JSON.parse(line);
+    return method === "session/set_config_option" ? [params.configId, params.value] : method;
+  }), ["initialize", "session/new", ["model", model], ["thought_level", "medium"]]);
+  const missing = await recordWithFake(pinned, ["simple"], { source: "live" });
+  assert.match(missing.outcomes[0]!.error?.message ?? "", /did not confirm the requested model and effort/);
+  assert.ok(!missing.fake.wire().some(({ direction, line }) => direction === "in" && JSON.parse(line).method === "session/prompt"));
+  assert.deepEqual(fs.readdirSync(missing.outDir), []);
+});
+
+test("live approval allows only the exact marker command at the explicit isolated cwd", () => {
+  const scenario = SCENARIOS.find(({ name }) => name === "approval_allowed")!;
+  const cwd = "/tmp/test-cwd";
+  const tool = { name: scenario.command!, input: { CommandLine: scenario.command!, Cwd: cwd, WaitMsBeforeAsync: 1000, toolSummary: "Write marker" } };
+  const subject = { cwd, tool };
+  const options = [{ optionId: "once", label: "Allow once", decision: "accept", scope: "once" }] as const;
+  const request = { kind: "command" as const, subject, options: [...options] };
+  assert.ok(isAntigravityMarkerApproval(request, scenario, cwd));
+  for (const unsafe of [
+    { ...subject, tool: { name: tool.name, input: { CommandLine: tool.input.CommandLine } } },
+    { ...subject, tool: { ...tool, input: { ...tool.input, Cwd: "/elsewhere" } } },
+    { ...subject, tool: { ...tool, input: { ...tool.input, CommandLine: `${scenario.command} && echo surprise` } } },
+    { ...subject, cwd: "/elsewhere" },
+    { ...subject, tool: { ...tool, input: { ...tool.input, cwd: "/elsewhere" } } },
+  ]) assert.ok(!isAntigravityMarkerApproval({ ...request, subject: unsafe }, scenario, cwd));
+  assert.ok(!isAntigravityMarkerApproval({ ...request, options: [] }, scenario, cwd));
+  const { Cwd: _cwd, ...input } = tool.input;
+  assert.ok(isAntigravityMarkerApproval({ ...request, subject: { cwd, tool: { ...tool, input } } }, scenario, cwd, true));
+  assert.ok(!isAntigravityMarkerApproval({ ...request, subject: { cwd, tool: { ...tool, input: { ...input, Cwd: "/elsewhere" } } } }, scenario, cwd, true));
+});
+
+test("the guard for agy's implicit command cwd permits the actual marker write only in the isolated directory", () => {
+  const layout = createAntigravityLayout("ari-test-marker-guard-");
+  try {
+    const tee = path.join(installMarkerCwdGuard(layout), "tee");
+    const name = "ari-marker.txt";
+    const input = "ari-test-marker\n";
+    assert.notEqual(spawnSync(tee, [name], { cwd: layout.root, input }).status, 0);
+    assert.ok(!fs.existsSync(path.join(layout.root, name)));
+    assert.notEqual(spawnSync(tee, ["elsewhere.txt"], { cwd: layout.cwd, input }).status, 0);
+    assert.deepEqual(fs.readdirSync(layout.cwd), [".git"]);
+    assert.equal(spawnSync(tee, [name], { cwd: layout.cwd, input }).status, 0);
+    assert.equal(fs.readFileSync(path.join(layout.cwd, name), "utf8"), input);
+    assert.notEqual(spawnSync(tee, [name], { cwd: layout.cwd, input: "different" }).status, 0);
+    assert.equal(fs.readFileSync(path.join(layout.cwd, name), "utf8"), input);
+  } finally {
+    fs.rmSync(layout.root, { recursive: true, force: true });
+  }
+});
+
 test("the recorder starts agy with a profile, HOME, XDG directories, TMPDIR and working directory inside its own temp dir and none of the user's Google or Antigravity variables: nothing of the user's Antigravity setup reaches agy or the recording, and every seeded file is byte-identical afterwards", async () => {
   const { home, env, files } = seedHome();
-  const { outDir, outcomes, fake } = await recordWithFake(env, SCENARIO_NAMES);
+  const { outDir, outcomes, fake, log } = await recordWithFake(env, SCENARIO_NAMES);
   assert.deepEqual(
     outcomes.map((outcome) => [outcome.scenario, outcome.error?.message]),
     SCENARIO_NAMES.map((name) => [name, undefined]),
@@ -220,20 +305,24 @@ test("the recorder starts agy with a profile, HOME, XDG directories, TMPDIR and 
       { HOME: path.join(workspace, "agy-home"), XDG_CONFIG_HOME: path.join(workspace, "xdg-config"), XDG_DATA_HOME: path.join(workspace, "xdg-data"), XDG_STATE_HOME: path.join(workspace, "xdg-state"), XDG_CACHE_HOME: path.join(workspace, "xdg-cache"), XDG_RUNTIME_DIR: path.join(workspace, "xdg-runtime"), TMPDIR: path.join(workspace, "tmp"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(workspace, "no-session-bus")}` },
       `${outcome.scenario}: agy's own directories, and a session bus nobody listens on`,
     );
-    assert.equal(started.env["AGY_CLI_DISABLE_AUTO_UPDATE"], "1", "neither the probe nor the ACP runtime can auto-update");
+    assert.equal(started.env["AGY_CLI_DISABLE_AUTO_UPDATE"], "true", "neither the probe nor the ACP runtime can auto-update");
     assert.ok(!fs.existsSync(path.join(workspace, "no-session-bus")) || !outcome.workspaceKept);
     assert.deepEqual(
       Object.keys(started.env).filter((name) => /^(GEMINI_|GOOGLE_|GCLOUD_|CLOUDSDK_|AGY_)/.test(name)).sort(),
-      started.args[0] === "acp" ? ALLOWED_AGENT_VARIABLES : ["AGY_CLI_DISABLE_AUTO_UPDATE", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE"],
+      started.args[0] === "acp" ? ALLOWED_AGENT_VARIABLES : ["AGY_CLI_DISABLE_AUTO_UPDATE"],
       `${outcome.scenario}: none of the user's Google or Antigravity variables`,
     );
     if (started.args[0] !== "acp") continue;
     assert.deepEqual(started.args, ["acp", "--gemini-dir", profile, "--app-data-dir", "antigravity-acp"], "the instance's own profile");
-    assert.equal(started.env["GEMINI_HOME"], profile);
+    assert.equal(started.env["AGY_CLI_FORCE_FILE_TOKEN_STORAGE"], "1", "the driver's file storage switch");
     for (const source of antigravitySetupSources(started.env, started.cwd, profile, "antigravity-acp")) assert.ok(!source.startsWith(`${home}${path.sep}`), `${outcome.scenario}: agy would read ${source}`);
     assert.deepEqual(started.loaded, [], `${outcome.scenario}: agy loaded nothing of the user's setup`);
     assert.equal(started.signIn, SIGN_IN, `${outcome.scenario}: agy got the user's sign-in`);
     assert.equal(started.signInFile, profileSignInFile(profile));
+    assert.equal(started.signInStore, "file");
+  }
+  for (const name of SCENARIO_NAMES) {
+    assert.ok(log.includes(`${name}: agy's log on where it keeps the sign-in: Using file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set`), `the run's log quotes what agy logged about its token storage:\n${log.join("\n")}`);
   }
   for (const outcome of outcomes) {
     const text = fs.readFileSync(outcome.file!, "utf8");
@@ -394,10 +483,12 @@ for (const [label, blockRecovery] of [
 
 test("a live run without the user's sign-in file stops before it starts agy, naming the file, and records nothing", async () => {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "no-sign-in-")));
-  const { outcomes, fake } = await recordWithFake({ HOME: home }, ["simple", "multi_turn"], { source: "live" });
+  const { outcomes, fake, log } = await recordWithFake({ HOME: home }, ["simple", "multi_turn"], { source: "live" });
   assert.equal(outcomes.length, 1, "the run stopped");
   assert.ok(outcomes[0]!.error instanceof AntigravitySignInMissingError, outcomes[0]!.error?.message);
   assert.ok(outcomes[0]!.error!.message.includes(path.join(home, ".gemini", "antigravity-cli", ANTIGRAVITY_SIGN_IN_FILE)));
+  assert.ok(outcomes[0]!.error!.message.includes(`\`AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir ${path.join(home, ".gemini")} --app-data-dir antigravity-cli\``), "the error gives the step that signs in into that file");
+  assert.ok(!log.some((line) => line.includes("agy's log")), "no agy ran, so the run quotes no agy log");
   assert.equal(outcomes[0]!.file, undefined);
   assert.deepEqual(fake.processes(), [], "agy never started");
   assert.ok(!fs.existsSync(outcomes[0]!.workspace));

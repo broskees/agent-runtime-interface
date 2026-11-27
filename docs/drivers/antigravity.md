@@ -9,15 +9,38 @@ hints. ARI never downloads, installs or updates the Antigravity CLI (`agy`).
 
 `agy acp --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp`
 
-with `GEMINI_HOME=<stateDir>/profile`, `AGY_ACP_FORCE_FILE_STORAGE=1` and
-`AGY_CLI_DISABLE_AUTO_UPDATE=1`.
+with `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1` and `AGY_CLI_DISABLE_AUTO_UPDATE=true`.
+The driver sets no other variable: `agy` 1.5.x reads neither
+`AGY_ACP_FORCE_FILE_STORAGE` nor `GEMINI_HOME`, which earlier releases of this
+driver set.
 
 ## Quirks
 
 - **A profile per instance.** Each instance's sign-in, settings and session
   files live in its own `<stateDir>/profile` (mode 0700, created when a
-  session opens, never by a probe), with file-based credential storage, so
-  two instances never share a Google account.
+  session opens, never by a probe), so two instances never share a Google
+  account. `agy` 1.5.x keeps a Google sign-in in the OS keyring (Apple
+  Keychain, the Secret Service on Linux, Windows Credential Manager), in one
+  entry, service `gemini` and account `antigravity`, whatever `--gemini-dir`
+  and `--app-data-dir` say, so every `agy` on the machine would share it, the
+  user's own included. With `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` set it keeps
+  the sign-in in its file storage instead,
+  `<stateDir>/profile/antigravity-acp/antigravity-oauth-token`, and logs
+  "Using file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is
+  set". It neither reads nor changes the keyring's entry then.
+  `test/drivers/antigravity/antigravity.suite.ts` runs two instances against
+  a fake `agy` that keeps its sign-in where 1.5.16 does, on a machine whose
+  keyring holds one, and shows each finds and refreshes only its own
+  profile's.
+- **Each instance signs in once.** A new instance has no sign-in of its own,
+  also when the user's own `agy` is signed in, and the driver does not sign
+  in for it. Sign it in once with
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp`
+  (`--login`: "Log in with Google interactively, then exit (ACP terminal
+  auth)", `agy acp --help`). Use the executable the instance configures.
+  Existing instances with a working profile credential do not need to sign in
+  again. On Linux, `agy` can also use the profile file when the keyring is
+  unreachable.
 - **Ambient Google credentials are stripped.** A host strips them with
   `process.envPolicy.stripAmbient`. The driver cannot strip variables itself
   (`SpawnRequest` adds variables; it removes none), so it declares them and
@@ -157,3 +180,26 @@ with `driver_unavailable` naming `agy`, and `openSession` rejects with
   https://github.com/google-antigravity/antigravity-cli#installation; and
   the Antigravity CLI docs, for the update step:
   https://antigravity.google/docs/cli/commands/changelog/.
+- Where `agy` 1.5.x keeps the sign-in, read 2026-11-25:
+  - Antigravity CLI issue https://github.com/google-antigravity/antigravity-cli/issues/1610
+    (open): 1.5.10 and 1.5.11 keep the Google sign-in in one keyring entry
+    whatever `--gemini-dir` and `--app-data-dir` say, and ignore
+    `AGY_ACP_FORCE_FILE_STORAGE`.
+  - T3 Code issue https://github.com/pingdotgg/t3code/issues/41973, with the
+    1.5.16 log line "Using file-based token storage because
+    AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set" and the profile's
+    `antigravity-acp/antigravity-oauth-token` (mode 0600) it then writes; and
+    the pull requests https://github.com/pingdotgg/t3code/pull/41982 and
+    https://github.com/pingdotgg/t3code/pull/42633, checked against 1.5.16
+    with a live macOS Keychain: with the variable, a profile's own token
+    file is used and the Keychain is not read; `acp --login` logs the file
+    storage. The 1.5.16 entry of the CLI's changelog
+    (https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md)
+    and the same issue show that 1.5.16 on macOS no longer keeps the sign-in
+    in a file only because `SSH_CONNECTION` is set, so that variable is no
+    way to isolate a profile.
+  - The `agy` 1.5.15 and 1.5.17 binaries hold `AGY_CLI_FORCE_FILE_TOKEN_STORAGE`
+    and the log text "Using file-based token storage because %s is set", and
+    hold neither `AGY_ACP_FORCE_FILE_STORAGE` nor `GEMINI_HOME` (read with
+    `strings`).
+  - `agy acp --help` of 1.5.17: `--gemini-dir`, `--app-data-dir` and `--login`.

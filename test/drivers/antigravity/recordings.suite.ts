@@ -141,7 +141,7 @@ test("each Antigravity recording holds the spawn request with the names, never t
         proc: spawn["proc"],
         command: "agy",
         args: ["acp", "--gemini-dir", "<WORKSPACE>/instances/antigravity-recorder/state/profile", "--app-data-dir", "antigravity-acp"],
-        envNames: ["AGY_ACP_FORCE_FILE_STORAGE", "AGY_CLI_DISABLE_AUTO_UPDATE", "GEMINI_HOME"],
+        envNames: ["AGY_CLI_DISABLE_AUTO_UPDATE", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE"],
         purpose: "runtime",
         stdin: "pipe",
       });

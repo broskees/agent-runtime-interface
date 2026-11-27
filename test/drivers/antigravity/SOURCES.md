@@ -25,3 +25,13 @@ the file digests, and `test/drivers/acp/vendor.suite.ts` checks them.
   (`test/fixtures/cli-version-output/agy.txt`, captured from `agy` 1.5.17).
   The driver runs the user's own `agy`; the install and update steps it names
   come from Google's docs, cited in `docs/drivers/antigravity.md`.
+- The fake `agy` (`fake-agy-cli.ts`) keeps its sign-in where `agy` 1.5.16
+  does: in the OS keyring's one entry every profile shares, unless
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` is set or the session bus is
+  unreachable, and then in `<gemini dir>/<app data dir>/antigravity-oauth-token`;
+  it reads neither `GEMINI_HOME` nor `AGY_ACP_FORCE_FILE_STORAGE`. Its log
+  lines use the words `agy` 1.5.10 to 1.5.16 logged. The sources, read
+  2026-11-25, are in `docs/drivers/antigravity.md`, "Sources": the Antigravity
+  CLI's issue 1610, and the issue and pull requests of the same open-source
+  ACP client (the repository rule on host names keeps its name out of
+  `test/`), checked against 1.5.16 with a live macOS Keychain.

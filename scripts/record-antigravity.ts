@@ -11,11 +11,14 @@
 //   scenario  any of simple, multi_turn, approval_allowed, approval_denied,
 //             interrupt, resume; all six when none is named
 //   --out     where the recordings go; test/drivers/antigravity/recordings/ by default
+//   --list-models     open an isolated thread, send no prompts and write no tape
 // Environment:
 //   ARI_RECORD_ANTIGRAVITY_MODEL  the model to record with, one `agy acp` offers;
 //                                 the first Flash model it offers by default. A
 //                                 model it does not offer stops the recorder
-//                                 before the first prompt, listing the models
+//                                 before the first prompt
+//   ARI_RECORD_ANTIGRAVITY_EFFORT  pin the ACP thought_level for an explicit model
+//   ARI_RECORD_ANTIGRAVITY_VERSION  require this exact installed agy version
 //
 // docs/recordings.md says how `agy` is kept apart from the user's own
 // Antigravity setup, how the sign-in reaches it, and how to refresh the
@@ -41,9 +44,11 @@ async function main(argv: readonly string[]): Promise<number> {
   const { SCENARIO_NAMES } = await import("../test/recordings/scenarios.ts");
   const { AntigravityModelChoiceError } = await import("../test/recordings/antigravity/run.ts");
   const { AntigravitySignInMissingError, AntigravityWorkspaceCustomizedError, AntigravityWorkspaceInHomeError, describeAntigravityRun, failuresOf, recordAntigravity } = await import("../test/recordings/antigravity/record.ts");
+  const { safeAntigravityFailure } = await import("../test/recordings/antigravity/record.ts");
+  const listModels = argv.length === 1 && argv[0] === "--list-models";
   let parsed: RecordArguments;
   try {
-    parsed = parseRecordArguments(argv, SCENARIO_NAMES, DEFAULT_ANTIGRAVITY_RECORDINGS);
+    parsed = parseRecordArguments(listModels ? [] : argv, SCENARIO_NAMES, DEFAULT_ANTIGRAVITY_RECORDINGS);
   } catch (error) {
     process.stderr.write(`record-antigravity: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
@@ -52,13 +57,18 @@ async function main(argv: readonly string[]): Promise<number> {
     ...(parsed.scenarios.length === 0 ? {} : { scenarios: parsed.scenarios as Array<(typeof SCENARIO_NAMES)[number]> }),
     outDir: parsed.outDir,
     source: "live",
+    listModels,
+    ...(process.env["ARI_RECORD_ANTIGRAVITY_VERSION"] === undefined ? {} : { requireVersion: process.env["ARI_RECORD_ANTIGRAVITY_VERSION"] }),
     env: process.env,
     log: (line) => process.stdout.write(`record-antigravity: ${line}\n`),
   });
   const stop = outcomes.flatMap(failuresOf).find((failure) => failure instanceof AntigravityModelChoiceError || failure instanceof AntigravitySignInMissingError || failure instanceof AntigravityWorkspaceInHomeError || failure instanceof AntigravityWorkspaceCustomizedError);
-  if (stop !== undefined) process.stderr.write(`record-antigravity: stopped before the first prompt. ${stop.message}\n`);
+  if (stop !== undefined) process.stderr.write(`record-antigravity: stopped before the first prompt. ${safeAntigravityFailure(stop)}\n`);
   // Every recovery file and every kept workspace, whatever else failed.
   const failed = outcomes.filter((outcome) => outcome.error !== undefined);
+  if (listModels && failed.length === 0) {
+    for (const model of outcomes[0]?.offeredModels ?? []) if (/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/.test(model)) process.stdout.write(`model: ${model}\n`);
+  }
   const stream = failed.length === 0 ? process.stdout : process.stderr;
   for (const line of describeAntigravityRun(outcomes, parsed.outDir)) stream.write(`record-antigravity: ${line}\n`);
   if (stop !== undefined) return 2;

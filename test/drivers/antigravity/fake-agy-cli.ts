@@ -14,13 +14,21 @@
 //
 // Like `agy`, `acp` loads the user's setup from where its environment and
 // `--gemini-dir` say (./user-setup.ts), and repeats every setup file it loaded
-// in its replies, so a test sees in the recording what leaked. It finds its
-// sign-in in `<gemini dir>/<app data dir>/antigravity-oauth-token`. It
-// appends what it saw to the JSON lines file in ARI_FAKE_AGY_REPORT: its
-// arguments, environment and directory, what it loaded, and the sign-in it
-// found. Variables steer it in a test:
-//   ARI_FAKE_AGY_REFRESH       at its first turn, its sign-in file gets this
-//                              content, as when agy refreshes a token
+// in its replies, so a test sees in the recording what leaked. It keeps its
+// sign-in where `agy` 1.5.16 and later keep it (`signInStore` below): in the
+// OS keyring's one entry, which every profile shares, unless
+// AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set or the session bus is unreachable;
+// then in `<gemini dir>/<app data dir>/antigravity-oauth-token`. Like 1.5.x it
+// reads neither GEMINI_HOME nor AGY_ACP_FORCE_FILE_STORAGE. It appends what it
+// saw to the JSON lines file in ARI_FAKE_AGY_REPORT: its arguments,
+// environment and directory, what it loaded, and the sign-in it found and
+// where. Variables steer it in a test:
+//   ARI_FAKE_AGY_KEYRING       a file standing in for the OS keyring's entry
+//                              (service `gemini`, account `antigravity`);
+//                              without it the machine has no keyring
+//   ARI_FAKE_AGY_REFRESH       at its first turn, the sign-in it uses (the
+//                              keyring entry or the file) gets this content,
+//                              as when agy refreshes a token
 //   ARI_FAKE_AGY_TOUCH         at its first turn, the file this names gets the
 //                              content of ARI_FAKE_AGY_TOUCH_VALUE, as when
 //                              another agy changes the user's sign-in meanwhile
@@ -58,17 +66,42 @@ function option(args: readonly string[], name: string): string | undefined {
   return index === -1 ? undefined : args[index + 1];
 }
 
+/**
+ * Where the sign-in is kept, as `agy` 1.5.16 and later choose: the file when
+ * AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set (1.5.16 logs "Using file-based token
+ * storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set"), when the machine
+ * has no keyring, or when the session bus is unreachable (a
+ * DBUS_SESSION_BUS_ADDRESS of `unix:path=<p>` with nothing at `<p>`; agy then
+ * falls back to the file); else the keyring's one entry, whatever the profile.
+ * `logLine` is what agy's log says about it, in the words agy 1.5.10 to 1.5.16
+ * logged.
+ */
+function signInStore(env: NodeJS.ProcessEnv, profileFile: string): { store: "keyring" | "file"; file: string; logLine?: string } {
+  const keyring = env["ARI_FAKE_AGY_KEYRING"];
+  const bus = /^unix:path=(.+)$/.exec(env["DBUS_SESSION_BUS_ADDRESS"] ?? "")?.[1];
+  if ((env["AGY_CLI_FORCE_FILE_TOKEN_STORAGE"] ?? "") !== "") return { store: "file", file: profileFile, logLine: "composite_token_storage.go:207] Using file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set" };
+  if (keyring === undefined || keyring === "") return { store: "file", file: profileFile, logLine: "composite_token_storage.go:176] Using file-based token storage because no D-Bus session bus detected" };
+  if (bus !== undefined && !fs.existsSync(bus)) return { store: "file", file: profileFile, logLine: `composite_token_storage.go:586] Failed to load stored token from keyring, falling back to file: dial unix ${bus}: connect: no such file or directory` };
+  return { store: "keyring", file: keyring };
+}
+
 function acp(args: readonly string[]): void {
   const env = process.env;
   const home = env["HOME"] ?? "/";
   const geminiDir = path.resolve(home, option(args, "--gemini-dir") ?? ".gemini");
   const appDataDir = option(args, "--app-data-dir") ?? "antigravity-cli";
-  const signIn = path.join(geminiDir, appDataDir, SIGN_IN_FILE);
+  const { store: signInKind, file: signIn, logLine } = signInStore(env, path.join(geminiDir, appDataDir, SIGN_IN_FILE));
+  // agy logs to <app data dir>/log/ ("Other editors (ACP)").
+  const log = path.join(geminiDir, appDataDir, "log");
+  fs.mkdirSync(log, { recursive: true });
+  fs.appendFileSync(path.join(log, "acp-fake.log"), `I1125 00:00:00.000000 1 server.go:2782] Language server version: ${FAKE_AGY_VERSION}\n${logLine === undefined ? "" : `I1125 00:00:00.000001 1 ${logLine}\n`}`);
   const loaded = loadedAntigravitySetup(env, process.cwd(), geminiDir, appDataDir);
-  report({ loaded, signIn: fs.existsSync(signIn) ? fs.readFileSync(signIn, "utf8") : null, signInFile: signIn });
+  report({ loaded, signIn: fs.existsSync(signIn) ? fs.readFileSync(signIn, "utf8") : null, signInFile: signIn, signInStore: signInKind });
+  if (env["ARI_FAKE_AGY_REFRESH_ON_START"] !== undefined) fs.writeFileSync(signIn, env["ARI_FAKE_AGY_REFRESH_ON_START"]);
 
   const models = env["ARI_FAKE_AGY_MODELS"] === undefined ? FAKE_AGY_MODELS : (JSON.parse(env["ARI_FAKE_AGY_MODELS"]) as Array<{ value: string; name: string }>);
   const configOptions = [{ id: "model", name: "Model", category: "model", type: "select", currentValue: models[0]?.value ?? "", options: models }];
+  if (env["ARI_FAKE_AGY_EFFORT"] === "1") configOptions.push({ id: "thought_level", name: "Thinking level", category: "thought_level", type: "select", currentValue: "high", options: ["high", "medium"].map((value) => ({ value, name: value })) });
   const store = path.join(geminiDir, "fake-acp-store");
   const child = childProcess.spawn(process.execPath, [FAKE_AGENT, "--protocol", "1", "--store", store, "--config-options", JSON.stringify(configOptions)], { stdio: ["pipe", "pipe", "pipe", "ipc"] });
   // The wire, line by line, as the agent's side sees it.

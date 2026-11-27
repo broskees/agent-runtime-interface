@@ -18,8 +18,9 @@
 // GEMINI.md or .agents/ of the folders above; and the recorder stops before
 // it starts `agy` when the workspace lies in the user's home or below a folder
 // holding one of those. A sign-in `agy` refreshed during the run goes
-// back to the user's file, or, when it cannot, into this run's recovery file
-// beside it (../credential-file.ts). The workspace is removed after every
+// back to the user's file while the recorder holds its lock on that file's
+// folder (`returnAntigravitySignIn`), or, when it cannot, into this run's
+// recovery file beside it (../credential-file.ts). The workspace is removed after every
 // scenario, also after one that fails, unless it holds the only copy of a
 // refreshed sign-in: then the recorder keeps it and stops.
 
@@ -30,8 +31,10 @@ import type { ProcessService } from "../../../src/node/process.ts";
 import { ACP_TESTED_SCHEMA_RELEASE } from "../../../src/meta/acp.ts";
 import type { Frame, RecordingSource } from "../format.ts";
 import { writeRecording } from "../format.ts";
-import { copyCredentialFile, returnCredentialFile } from "../credential-file.ts";
+import { copyCredentialFile, keepRefreshedCopy, returnCredentialFile } from "../credential-file.ts";
 import type { CopiedCredentialFile } from "../credential-file.ts";
+import { holdFlock } from "../flock.ts";
+import type { HeldFlock } from "../flock.ts";
 import { CredentialsKeptError, RecordingNotWrittenError } from "../recovery.ts";
 import { createSanitiser } from "../sanitiser.ts";
 import { SCENARIOS, checkScenario } from "../scenarios.ts";
@@ -165,6 +168,8 @@ export interface RecordAntigravityOptions {
   readonly date?: string;
   /** The OS user name the sanitiser replaces; os.userInfo().username when left out. */
   readonly user?: string;
+  /** How long the copy-back waits for another recorder run to let go of the lock on the folder of the user's sign-in file; ANTIGRAVITY_SIGN_IN_LOCK_WAIT_MS when left out. */
+  readonly signInLockWaitMs?: number;
 }
 
 export interface AntigravityRecordOutcome {
@@ -275,6 +280,43 @@ export function safeAntigravityFailure(error: Error): string {
   return "recording or scenario check failed";
 }
 
+/** How long the copy-back waits for another recorder run to let go of the lock on the folder of the user's sign-in file. A run holds it only while it compares and replaces that file. */
+export const ANTIGRAVITY_SIGN_IN_LOCK_WAIT_MS = 30_000;
+
+/**
+ * Puts a sign-in `agy` refreshed back over the user's file, as
+ * ../credential-file.ts does, while holding flock(2) on that file's folder
+ * from before it compares the file until after it replaced it. `agy`
+ * documents no lock of its own on the file, so the lock is the recorder's:
+ * every Antigravity recorder run takes it, and another run sharing the
+ * sign-in cannot put its own refresh back between this run's comparison and
+ * its replace. The run that comes second finds the file changed and keeps its
+ * refresh in its recovery file. An unchanged copy takes no lock. When the
+ * lock cannot be taken (`flock` does not run, or another run held it for
+ * `waitMs`), the refresh goes to the recovery file too. It throws as
+ * returnCredentialFile throws.
+ */
+export async function returnAntigravitySignIn(credential: CopiedCredentialFile, env: { readonly [name: string]: string | undefined }, waitMs = ANTIGRAVITY_SIGN_IN_LOCK_WAIT_MS): Promise<void> {
+  if (!fs.existsSync(credential.copy)) return;
+  const refreshed = fs.readFileSync(credential.copy);
+  if (refreshed.equals(credential.original)) return;
+  const folder = path.dirname(credential.real);
+  let lock: HeldFlock | undefined;
+  try {
+    // flock would create a file where the folder was.
+    if (!fs.statSync(folder).isDirectory()) throw new Error(`${folder} is not a folder`);
+    lock = await holdFlock(folder, waitMs, env);
+  } catch (error) {
+    return keepRefreshedCopy(credential, refreshed, `the recorder could not lock ${folder} to write the sign-in agy refreshed back to ${credential.real} (${error instanceof Error ? error.message : String(error)})`);
+  }
+  if (lock === undefined) return keepRefreshedCopy(credential, refreshed, `another recorder run held its lock on ${folder} for ${waitMs / 1000} s, so the recorder did not write the sign-in agy refreshed back to ${credential.real}`);
+  try {
+    returnCredentialFile(credential, "agy");
+  } finally {
+    await lock.release();
+  }
+}
+
 /** Accept only the literal marker command; omission of Cwd needs a guard at execution. */
 export function isAntigravityMarkerApproval(request: Pick<Request, "kind" | "subject" | "options">, scenario: Scenario, cwd: string, guarded = false): boolean {
   if (scenario.name !== "approval_allowed" || scenario.command === undefined || request.kind !== "command" || request.subject?.cwd !== cwd) return false;
@@ -367,7 +409,7 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
     await service?.dispose().catch(failed);
     if (credential !== undefined) {
       try {
-        returnCredentialFile(credential, "agy");
+        await returnAntigravitySignIn(credential, options.env, options.signInLockWaitMs);
       } catch (reason) {
         failed(reason);
         // Kept in the recovery file: the copy can go. Anything else: the copy may hold the only refreshed sign-in.

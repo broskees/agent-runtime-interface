@@ -21,6 +21,7 @@ import { AntigravitySignInMissingError, AntigravityWorkspaceCustomizedError, Ant
 import type { AntigravityRecordOutcome } from "../../recordings/antigravity/record.ts";
 import { replayAntigravity } from "../../recordings/antigravity/replay.ts";
 import { ANTIGRAVITY_RECORDER_ENV_POLICY, AntigravityModelChoiceError, createAntigravityLayout, defaultAntigravityModel } from "../../recordings/antigravity/run.ts";
+import { holdFlock } from "../../recordings/flock.ts";
 import { RecordingNotWrittenError, recoveryFileFor } from "../../recordings/recovery.ts";
 import { SCENARIO_NAMES } from "../../recordings/scenarios.ts";
 import type { ScenarioName } from "../../recordings/scenarios.ts";
@@ -174,17 +175,18 @@ function seedHome(): { home: string; env: { [name: string]: string }; files: Map
   return { home, env, files, signIn };
 }
 
-/** Records `scenarios` with the recorder's own process service, against a fresh fake `agy` on PATH. */
-async function recordWithFake(env: { [name: string]: string }, scenarios: readonly ScenarioName[], options: { source?: "fake" | "live"; outDir?: string; listModels?: boolean; requireVersion?: string } = {}): Promise<{ outDir: string; outcomes: AntigravityRecordOutcome[]; fake: FakeAgy; log: string[] }> {
+/** Records `scenarios` with the recorder's own process service, against a fresh fake `agy` on PATH; `binBeforeSystem` goes on PATH after the fake and before the rest. */
+async function recordWithFake(env: { [name: string]: string }, scenarios: readonly ScenarioName[], options: { source?: "fake" | "live"; outDir?: string; listModels?: boolean; requireVersion?: string; signInLockWaitMs?: number; binBeforeSystem?: string } = {}): Promise<{ outDir: string; outcomes: AntigravityRecordOutcome[]; fake: FakeAgy; log: string[] }> {
   const fake = fakeAgyOnPath(DIRECTORY);
+  const { binBeforeSystem, ...recordOptions } = options;
   const outDir = options.outDir ?? fs.mkdtempSync(path.join(DIRECTORY, "out-"));
   const log: string[] = [];
   const outcomes = await recordAntigravity({
-    ...options,
+    ...recordOptions,
     scenarios,
     outDir,
     source: options.source ?? "fake",
-    env: { PATH: `${fake.bin}${path.delimiter}${process.env["PATH"] ?? "/usr/bin:/bin"}`, USER: "ari-test-user", ...fake.env, ...env },
+    env: { PATH: [fake.bin, ...(binBeforeSystem === undefined ? [] : [binBeforeSystem]), process.env["PATH"] ?? "/usr/bin:/bin"].join(path.delimiter), USER: "ari-test-user", ...fake.env, ...env },
     timeoutMs: 20_000,
     log: (line) => log.push(line),
   });
@@ -472,6 +474,42 @@ test("two recorder runs that share the user's sign-in, each refreshing it, keep 
   const folder = path.dirname(signIn);
   assert.deepEqual(fs.readdirSync(folder).filter((name) => name.includes(".ari-recorder-") && !/\.ari-recorder-refreshed-\d+\.json$/.test(name)), [], "no staged file is left beside the user's sign-in");
   assert.equal(spawnSync("flock", ["--exclusive", "--nonblock", folder, "true"]).status, 0, "nobody holds a lock on the sign-in's folder afterwards");
+});
+
+test("while another holder keeps the lock on the sign-in's folder, or flock fails, a refreshed sign-in goes to the recovery file and the user's file stays as it is; an unchanged copy takes no lock", async () => {
+  for (const [label, refreshes, failingFlock] of [
+    ["another holder keeps the lock", true, false],
+    ["flock fails", true, true],
+    ["agy refreshes nothing", false, false],
+  ] as const) {
+    const { env, signIn } = seedHome();
+    const folder = path.dirname(signIn);
+    const bin = fs.mkdtempSync(path.join(DIRECTORY, "failing-flock-"));
+    fs.writeFileSync(path.join(bin, "flock"), "#!/bin/sh\necho 'flock: cannot lock' >&2\nexit 1\n", { mode: 0o755 });
+    const held = failingFlock ? undefined : await holdFlock(folder, 1_000, process.env);
+    assert.ok(failingFlock || held !== undefined, `${label}: the test holds the lock`);
+    let run;
+    try {
+      run = await recordWithFake({ ...env, ...(refreshes ? { ARI_FAKE_AGY_REFRESH: "refreshed-by-the-recorded-agy" } : {}) }, ["simple"], { signInLockWaitMs: 500, ...(failingFlock ? { binBeforeSystem: bin } : {}) });
+    } finally {
+      await held?.release();
+    }
+    const [outcome] = run.outcomes;
+    const kept = recoveryFileFor(signIn);
+    assert.ok(!fs.existsSync(outcome!.workspace), `${label}: the workspace is removed`);
+    if (!refreshes) {
+      assert.equal(outcome!.error, undefined, `${label}: ${outcome!.error?.message}`);
+      assert.equal(fs.readFileSync(signIn, "utf8"), SIGN_IN);
+      assert.ok(!fs.existsSync(kept), `${label}: no recovery file`);
+      continue;
+    }
+    const why = failingFlock ? `the recorder could not lock ${escape(folder)} to write the sign-in agy refreshed back to ${escape(signIn)} \\(flock exited with 1 before it held ${escape(folder)}: flock: cannot lock\\)` : `another recorder run held its lock on ${escape(folder)} for 0\\.5 s, so the recorder did not write the sign-in agy refreshed back to ${escape(signIn)}`;
+    assert.match(outcome!.error?.message ?? "", new RegExp(`${why}; it kept the refreshed sign-in in ${escape(kept)}`), label);
+    assert.equal(fs.readFileSync(signIn, "utf8"), SIGN_IN, `${label}: the user's file stays as it is`);
+    assert.equal(outcome!.recoveryFile, kept, label);
+    assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ANTIGRAVITY_SIGN_IN_FILE, value: "refreshed-by-the-recorded-agy" }], label);
+    assert.ok(describeAntigravityRun(run.outcomes, run.outDir).some((line) => line.includes(kept)), `${label}: the run's last lines name the recovery file`);
+  }
 });
 
 test("when the recorder cannot write a refreshed sign-in back, it keeps it in the recovery file beside the user's file and says where", async () => {

@@ -61,8 +61,10 @@ These rules protect users from a compromised release:
   tarball's own `package.json`, and publishes that file.
 - **Pinned actions.** Every action the workflows use is pinned to a full
   commit SHA.
-- **Release binaries carry checksums.** The standalone `ari-driver`
-  executables are attached to the GitHub release with a `SHA256SUMS` file.
+- **Release binaries carry checksums and a notice.** The standalone
+  `ari-driver` executables are attached to the GitHub release with a
+  `SHA256SUMS` file and `THIRD-PARTY-NOTICES.md`, the notice for the Claude
+  Agent SDK code they include.
 - **Signed tags and a changelog.** Each release is cut from a signed tag and
   described in `CHANGELOG.md` and the per-driver changelogs in `changelogs/`.
 - **A size budget.** The gate fails when the root export grows past the byte

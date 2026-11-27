@@ -86,7 +86,7 @@ describe("claude driver availability", () => {
     assert.deepEqual(run, { resolved: [], spawned: [], result: "imported" });
   });
 
-  test("with the SDK missing, create() succeeds, status() and probe() name the package and the npm commands that install it, and openSession rejects with driver_unavailable", () => {
+  test("with the SDK missing, create() succeeds, status() and probe() name the package and the npm command that installs it, and openSession rejects with driver_unavailable", () => {
     const run = inChild(
       `${createInstance}
 const status = await instance.status();
@@ -103,11 +103,9 @@ result = { status, probe: { ok: probe.ok, installed: probe.installed, error: pro
     assert.equal(result.status.installed, false);
     assert.equal(result.status.error.code, "driver_unavailable");
     assert.equal(result.status.error.package, CLAUDE_SDK_PACKAGE);
-    // Under Node both steps work: the package next to ari by name, or a directory the host installed it in. ARI installs nothing.
+    // Under Node the driver imports the package by name, so the step is to install it next to ari. ARI installs nothing.
     const message = result.status.error.message;
-    assert.ok(message.includes(`npm install ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}`), message);
-    assert.ok(message.includes(`npm install --prefix <directory> ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION} and set sdkDirectory in the driver config to that directory`), message);
-    assert.match(message, /ARI does not install it/);
+    assert.equal(message, `The Claude Agent SDK (${CLAUDE_SDK_PACKAGE}) is not installed. ARI does not install it. Install the Claude Agent SDK next to ari (npm install ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}).`);
     assert.doesNotMatch(message, /maintenance\./);
     assert.deepEqual([result.probe.ok, result.probe.installed, result.probe.error.code, result.probe.error.package], [false, false, "driver_unavailable", CLAUDE_SDK_PACKAGE]);
     assert.equal(result.opened.code, "driver_unavailable");

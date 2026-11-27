@@ -17,8 +17,11 @@
 //   - the root export, bundled and minified for a neutral platform, exceeds
 //     the byte budget in scripts/size-budget.json;
 //   - a shipped file holds code of the Claude Agent SDK, found by a string
-//     unique to its sdk.mjs (CLAUDE_SDK_CODE_MARKER). The SDK's licence is
-//     Anthropic's, not MIT, so ARI never redistributes it.
+//     unique to its sdk.mjs (CLAUDE_SDK_CODE_MARKER). In the npm package the
+//     SDK is an optional peer the host installs; as a regular dependency npm
+//     would also install its ~381 MB native Claude Code package everywhere.
+//     (The standalone `ari-driver` does compile the SDK in; see
+//     scripts/build-binary.ts.)
 //
 // Usage: node scripts/check-package.ts [--root <dir>] [--tarball <file.tgz>]
 //   --tarball checks that tarball's own package.json and file list instead of
@@ -35,8 +38,8 @@ import { stagedContents } from "./pack.ts";
 /**
  * A string unique to the Claude Agent SDK's sdk.mjs: the environment variable
  * it sets for every Claude Code process it starts. ARI's own code never names
- * it, so a shipped file (or the standalone `ari-driver`) that contains it
- * holds the SDK's code.
+ * it, so a shipped file that contains it holds the SDK's code, and the
+ * standalone `ari-driver` must contain it.
  */
 export const CLAUDE_SDK_CODE_MARKER = "CLAUDE_CODE_SDK_READS_SESSION_STATE";
 
@@ -253,7 +256,7 @@ export function publishedContents(root: string): PackageContents {
 /** Problems from shipped files that hold the Claude Agent SDK's code. */
 export function vendorCodeProblems(contents: PackageContents): string[] {
   return contents.filesContaining(CLAUDE_SDK_CODE_MARKER).map(
-    (file) => `${file} holds code of @anthropic-ai/claude-agent-sdk (it contains ${CLAUDE_SDK_CODE_MARKER}, a string unique to the SDK's sdk.mjs); ARI must not redistribute the SDK`,
+    (file) => `${file} holds code of @anthropic-ai/claude-agent-sdk (it contains ${CLAUDE_SDK_CODE_MARKER}, a string unique to the SDK's sdk.mjs); the npm package must not ship the SDK, an optional peer`,
   );
 }
 

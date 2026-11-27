@@ -1,31 +1,29 @@
-// The claude driver without an SDK importable by name: it loads the SDK from
-// the directory its `sdkDirectory` config field names, where the host
-// installed it with npm. ARI installs nothing; a directory without the SDK is
-// reported unavailable with the npm command that installs it there.
+// The user's own Claude Code decides whether the claude driver is
+// available. The SDK here is a fake on disk (sdk-fixture.ts), which the
+// driver's loader imports by file URL, with the decoy native package npm
+// would put beside it. Every query runs the user's Claude Code: a fake
+// `claude` on the host's PATH, never the decoy. A `claude` that is missing,
+// prints no version or is older than the version the pinned SDK bundles
+// leaves the driver unavailable with an error that names the fix, and starts
+// no Claude Code session; a newer one runs with an advisory; a `claude
+// update` shows at the next status() without a restart.
 //
-// Wherever the SDK comes from, every query runs the user's own Claude Code:
-// here a fake `claude` on the host's PATH (sdk-fixture.ts), or the one
-// `executablePath` names, never the decoy native package npm would put
-// beside the SDK. A `claude` that is missing, prints no version or is older
-// than the version the pinned SDK bundles leaves the driver unavailable with
-// an error that names the fix, and starts no Claude Code session; a newer one
-// runs with an advisory.
-//
-// These tests run the driver in this process against a fake SDK (see
-// sdk-fixture.ts); test/standalone/claude-sdk.e2e.ts runs the same paths
-// through the standalone ari-driver. No test here reaches the network or
-// starts a real Claude Code.
+// npm-sdk.test.ts runs the same cases with the SDK imported by name, and
+// test/standalone/claude-sdk.e2e.ts through the standalone ari-driver with
+// the real SDK compiled in. No test here reaches the network or starts a
+// real Claude Code.
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, describe, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import type { AriEvent } from "../../../src/index.ts";
 import { createClaudeDriver } from "../../../src/drivers/claude/index.ts";
 import type { ClaudeDriverConfig, ClaudeDriverOptions } from "../../../src/drivers/claude/index.ts";
-import { isStandaloneExecutableModule } from "../../../src/drivers/claude/sdk.ts";
-import { CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION, CLAUDE_TESTED_VERSIONS } from "../../../src/meta/claude.ts";
+import type { ClaudeSdk } from "../../../src/drivers/claude/sdk.ts";
+import { CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION, CLAUDE_TESTED_CLAUDE_CODE_VERSION, CLAUDE_TESTED_VERSIONS } from "../../../src/meta/claude.ts";
 import { satisfiesVersionRange } from "../../../src/drivers/claude/instance.ts";
 import { createCoordination, createNodeHostServices } from "../../../src/node/index.ts";
 import type { Instance } from "../../../src/runtime.ts";
@@ -107,75 +105,13 @@ async function oneTurn(instance: Instance, cwd: string): Promise<{ status: strin
   }
 }
 
-describe("the claude driver loads its SDK from sdkDirectory and runs the user's Claude Code", () => {
-  test("status() reports the fixture's version, and a turn runs the claude on PATH, never the native package npm put beside the SDK", async () => {
-    const where = scratch();
-    const decoy = writeFixtureSdkDirectory(path.join(where.root, "sdk"), "0.3.330+fixture", "the native package beside the SDK");
-    const claude = userClaude(where.bin);
-    const { instance, dispose } = await claudeInstance(where, { sdkDirectory: path.join(where.root, "sdk") });
-    try {
-      const status = await instance.status();
-      assert.equal(status.installed, true, JSON.stringify(status));
-      assert.equal(status.version, "0.3.330+fixture");
-      assert.equal(status.advisory, undefined, "the claude on PATH is the minimum, which is tested");
-      const turn = await oneTurn(instance, where.project);
-      assert.equal(turn.status, "completed", turn.events);
-      assert.ok(turn.events.includes(`fixture SDK reply 1, ${ranOn(claude)}`), turn.events);
-      assert.equal(fakeClaudeSessions(claude).length, 1);
-      assert.deepEqual(fakeClaudeInvocations(decoy), [], "the native package beside the SDK never ran");
-      // The decoy sits where the pinned SDK would look for its native Claude Code: a platform package its sdk.mjs lists.
-      const pinned = JSON.parse(fs.readFileSync(path.join(fs.realpathSync(path.join(REPO_ROOT, "node_modules", ...CLAUDE_SDK_PACKAGE.split("/"))), "package.json"), "utf8")) as { optionalDependencies: { [name: string]: string } };
-      assert.equal(pinned.optionalDependencies[sdkNativePackage().pkg], CLAUDE_SDK_VERSION);
-    } finally {
-      await dispose();
-    }
-  });
-
-  test("with executablePath set, that Claude Code runs instead of the claude on PATH", async () => {
-    const where = scratch();
-    const decoy = writeFixtureSdkDirectory(path.join(where.root, "sdk"), CLAUDE_SDK_VERSION, "the native package beside the SDK");
-    const onPath = userClaude(where.bin);
-    const configured = writeFakeClaude(path.join(where.root, "elsewhere", "claude-nightly"), { versionLine: MINIMUM_VERSION_LINE, greeting: "the configured claude" });
-    const { instance, dispose } = await claudeInstance(where, { sdkDirectory: path.join(where.root, "sdk"), executablePath: configured });
-    try {
-      const turn = await oneTurn(instance, where.project);
-      assert.equal(turn.status, "completed", turn.events);
-      assert.ok(turn.events.includes(ranOn(configured, "the configured claude")), turn.events);
-      assert.equal(fakeClaudeInvocations(configured)[0], "--version", "the driver checked the configured Claude Code's version before it ran it");
-      assert.deepEqual(fakeClaudeInvocations(onPath), []);
-      assert.deepEqual(fakeClaudeInvocations(decoy), []);
-    } finally {
-      await dispose();
-    }
-  });
-
-  test("a directory without the SDK is reported unavailable naming it and the npm command that installs the SDK there, and openSession refuses", async () => {
-    const where = scratch();
-    userClaude(where.bin);
-    const empty = path.join(where.root, "empty");
-    const { instance, dispose } = await claudeInstance(where, { sdkDirectory: empty });
-    try {
-      const status = await instance.status();
-      assert.equal(status.installed, false);
-      assert.equal(status.error?.code, "driver_unavailable");
-      const message = status.error?.message ?? "";
-      assert.ok(message.includes(`sdkDirectory ${empty}`), message);
-      assert.match(message, /node_modules\/@anthropic-ai\/claude-agent-sdk\/package\.json cannot be read/);
-      assert.ok(message.includes(`npm install --prefix ${empty} ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}`), message);
-      assert.match(message, /ARI does not install it/);
-      assert.doesNotMatch(message, /maintenance\./);
-      await assert.rejects(instance.openSession({}), (error: { callError?: { code: string; message: string } }) => error.callError?.code === "driver_unavailable" && error.callError.message === message);
-    } finally {
-      await dispose();
-    }
-  });
-});
-
-describe("the user's Claude Code decides whether the claude driver is available with sdkDirectory", () => {
-  /** An instance whose SDK comes from sdkDirectory, with the decoy native package beside the SDK and `bin` its host's PATH. */
+describe("the user's Claude Code decides whether the claude driver is available", () => {
+  /** An instance whose loader imports the fake SDK from an npm layout under `where.root`, with the decoy native package beside it, and `bin` its host's PATH. */
   async function prepared(where: ReturnType<typeof scratch>) {
     const decoy = writeFixtureSdkDirectory(path.join(where.root, "sdk"), CLAUDE_SDK_VERSION, "the native package beside the SDK");
-    return { ...(await claudeInstance(where, { sdkDirectory: path.join(where.root, "sdk") }, { loadSdk: async () => Promise.reject(new Error("not by name")) })), decoy };
+    const entry = path.join(where.root, "sdk", "node_modules", ...CLAUDE_SDK_PACKAGE.split("/"), "sdk.mjs");
+    const loadSdk = async () => ({ sdk: (await import(pathToFileURL(entry).href)) as ClaudeSdk, version: CLAUDE_SDK_VERSION, claudeCodeVersion: CLAUDE_TESTED_CLAUDE_CODE_VERSION });
+    return { ...(await claudeInstance(where, {}, { loadSdk })), decoy };
   }
 
   /** status() is driver_unavailable, openSession rejects with the same error, and no Claude Code session started. */
@@ -284,9 +220,9 @@ describe("the user's Claude Code decides whether the claude driver is available 
   });
 });
 
-describe("the pinned SDK and the standalone executable", () => {
+describe("the pinned SDK", () => {
   const sdkRoot = fs.realpathSync(path.join(REPO_ROOT, "node_modules", ...CLAUDE_SDK_PACKAGE.split("/")));
-  const pinned = JSON.parse(fs.readFileSync(path.join(sdkRoot, "package.json"), "utf8")) as { version: string };
+  const pinned = JSON.parse(fs.readFileSync(path.join(sdkRoot, "package.json"), "utf8")) as { version: string; optionalDependencies: { [name: string]: string } };
 
   test("the pinned version is the SDK devDependency, inside the tested range", () => {
     const repository = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { devDependencies: { [name: string]: string } };
@@ -295,12 +231,7 @@ describe("the pinned SDK and the standalone executable", () => {
     assert.equal(satisfiesVersionRange(CLAUDE_SDK_VERSION, CLAUDE_TESTED_VERSIONS), true);
   });
 
-  test("the standalone executable is recognized by its modules' URLs, on every release platform", () => {
-    assert.equal(isStandaloneExecutableModule("file:///$bunfs/root/ari-driver"), true);
-    assert.equal(isStandaloneExecutableModule("file:///B:/~BUN/root/ari-driver.exe"), true);
-    assert.equal(isStandaloneExecutableModule("file:///b:/~BUN/root/ari-driver.exe"), true);
-    assert.equal(isStandaloneExecutableModule(import.meta.url), false);
-    assert.equal(isStandaloneExecutableModule("file:///home/me/project/node_modules/ari/dist/drivers/claude/sdk.js"), false);
-    assert.equal(isStandaloneExecutableModule("file:///C:/Users/me/ari/dist/drivers/claude/sdk.js"), false);
+  test("the decoy sits where the pinned SDK would look for its native Claude Code: a platform package its package.json lists", () => {
+    assert.equal(pinned.optionalDependencies[sdkNativePackage().pkg], CLAUDE_SDK_VERSION);
   });
 });

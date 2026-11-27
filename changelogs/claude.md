@@ -11,8 +11,9 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
 - ARI never downloads or ships Claude Code. Every query runs the user's
   `claude`: the configured `executablePath`, else `claude` on the host's
   `PATH`, passed to the SDK as `pathToClaudeCodeExecutable`, wherever the SDK
-  comes from (npm under Node, or `sdkDirectory`). The
-  native Claude Code package npm installs beside the SDK is never run. Every
+  comes from (npm under Node, or the SDK compiled into the standalone
+  `ari-driver`). The native Claude Code package npm installs beside the SDK
+  is never run. Every
   query also sets `mcpServersDelivery: "initialize"`, as the SDK recommends
   for an app that starts its own Claude Code, so no MCP server goes on its
   command line and the SDK's `CLAUDE_SDK_MCP_SERVERS_ARGV_DEPRECATED` warning
@@ -59,19 +60,27 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
 - Catalog from `supportedModels()`, limits from rate limit events, text
   generation without tools, native sessions through `listSessions`,
   `archiveSession` and `deleteSession`.
-- ARI installs nothing: the host installs the SDK. Under Node the driver
-  imports it by name; the `sdkDirectory` config field loads it by file URL
-  from a directory where the host ran
-  `npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@0.3.330`.
-  The standalone `ari-driver`, which cannot import a package by name, needs
-  `sdkDirectory`. The SDK stays out of ARI's package and executables (its
-  licence is Anthropic's).
-- Without an SDK, `status()` is `unavailable` with `driver_unavailable` and
-  `openSession` rejects with it. The message says ARI does not install the
-  SDK and names the npm command and `sdkDirectory`; under Node it also names
+- ARI installs nothing. Under Node the host installs the SDK and the driver
+  imports it by name; the npm package holds none of the SDK's code.
+- The standalone `ari-driver`, which cannot import a package by name, has
+  the pinned SDK 0.3.330's JavaScript compiled in, so its `claude` driver
+  needs no SDK install and no config. It holds none of the SDK's 8 platform
+  packages and no Claude Code: it runs the user's `claude`, with the same
+  minimum. The SDK is © Anthropic PBC, under Anthropic's terms, not ARI's MIT
+  License; `THIRD-PARTY-NOTICES.md`, attached to each release beside the
+  binaries, says so.
+- Under Node without the SDK, `status()` is `unavailable` with
+  `driver_unavailable` and `openSession` rejects with it. The message says
+  ARI does not install the SDK and names
   `npm install @anthropic-ai/claude-agent-sdk@0.3.330` next to ari.
 - Removed: `maintenance.install` and `maintenance.update`, which an earlier
   build of this version offered to download the SDK into the instance's
   cache directory, the `sdkRegistry` config field they read, and the `fetch`
   option of `createClaudeDriver` they downloaded with. The config schema now
   refuses `sdkRegistry`.
+- Removed: the `sdkDirectory` config field, which loaded the SDK from a
+  directory the host installed it in and was the standalone `ari-driver`'s
+  only way to get the SDK; the binary now has it compiled in. The config
+  schema now refuses `sdkDirectory`. `ari/meta/claude` no longer exports
+  `CLAUDE_SDK_INSTALL_COMMAND` or `CLAUDE_STANDALONE_INSTALL_HINT`, and
+  `CLAUDE_INSTALL_HINT` names only the npm install next to ari.

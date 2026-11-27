@@ -3,9 +3,9 @@
 // into a fresh project and imports; a package-contents check that fails on
 // stray files, missing build output, a published export condition or bin that
 // names an unshipped file, an oversized root export, and any code of the
-// Claude Agent SDK (which ARI never redistributes); and the two release
-// guards: packing the repository directly is refused, and a non-empty
-// `dependencies` fails scripts/check-dependencies.ts.
+// Claude Agent SDK (an optional peer the npm package never ships); and the
+// two release guards: packing the repository directly is refused, and a
+// non-empty `dependencies` fails scripts/check-dependencies.ts.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -172,7 +172,7 @@ describe("the package-contents check", () => {
     assert.ok(fs.readFileSync(sdkModule).includes(CLAUDE_SDK_CODE_MARKER), "the pinned SDK's sdk.mjs contains the string");
     const real = publishedContents(REPO_ROOT);
     assert.deepEqual(vendorCodeProblems(real), []);
-    assert.ok(real.filesContaining("cannot load a package by name").includes("dist/drivers/claude/sdk.js"), "the check reads every shipped file");
+    assert.ok(real.filesContaining("failed to load: ").includes("dist/drivers/claude/sdk.js"), "the check reads every shipped file");
     const root = tempDir("ari-vendored-");
     for (const part of ["package.json", "README.md", "LICENSE", "dist", "json-schema", "src", "scripts"]) {
       fs.cpSync(path.join(REPO_ROOT, part), path.join(root, part), { recursive: true });
@@ -183,7 +183,7 @@ describe("the package-contents check", () => {
     assert.ok(problems.some((problem) => problem.startsWith("dist/vendor/sdk.js holds code of @anthropic-ai/claude-agent-sdk")), problems.join("\n"));
     const { tarball } = packPackage(root, tempDir("ari-vendored-pack-"));
     assert.deepEqual(vendorCodeProblems(tarballContents(tarball)), [
-      `${path.basename(tarball)} holds code of @anthropic-ai/claude-agent-sdk (it contains ${CLAUDE_SDK_CODE_MARKER}, a string unique to the SDK's sdk.mjs); ARI must not redistribute the SDK`,
+      `${path.basename(tarball)} holds code of @anthropic-ai/claude-agent-sdk (it contains ${CLAUDE_SDK_CODE_MARKER}, a string unique to the SDK's sdk.mjs); the npm package must not ship the SDK, an optional peer`,
     ]);
   });
 });

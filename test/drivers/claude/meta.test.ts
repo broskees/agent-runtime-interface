@@ -19,6 +19,7 @@ import {
   CLAUDE_LABEL,
   CLAUDE_METADATA,
   CLAUDE_SDK_PACKAGE,
+  CLAUDE_SDK_VERSION,
   CLAUDE_TESTED_CLAUDE_CODE_VERSION,
   CLAUDE_TESTED_VERSIONS,
   claudeDefaultConfig,
@@ -56,22 +57,21 @@ describe("ari/meta/claude", () => {
     assert.equal(validate(claudeDriver.defaultConfig()), true, JSON.stringify(validate.errors));
     assert.equal(validate(claudeDefaultConfig()), true);
     assert.equal(
-      validate({ executablePath: "/opt/claude/bin/claude", model: "opus", effort: "high", settingSources: ["project", "local"], sdkDirectory: "/opt/claude-agent-sdk" }),
+      validate({ executablePath: "/opt/claude/bin/claude", model: "opus", effort: "high", settingSources: ["project", "local"] }),
       true,
     );
     assert.equal(validate({ sdkRegistry: "https://registry.npmjs.org" }), false, "sdkRegistry is gone: ARI downloads nothing");
+    assert.equal(validate({ sdkDirectory: "/opt/claude-agent-sdk" }), false, "sdkDirectory is gone: the standalone ari-driver has the SDK compiled in");
     assert.equal(validate({ effort: "extreme" }), false);
     assert.equal(validate({ settingSources: ["global"] }), false);
     assert.equal(validate({ executablePath: "" }), false);
-    assert.equal(validate({ sdkDirectory: "" }), false);
     assert.equal(validate({ unknown: true }), false);
   });
 
-  test("ari/meta/claude reaches no Node built-in or package (repository rule c); ari/drivers/claude reaches Node built-ins and, only through import(), the SDK by name or a file by URL", () => {
+  test("ari/meta/claude reaches no Node built-in or package (repository rule c); ari/drivers/claude reaches Node built-ins and, only through import(), the SDK by name", () => {
     assert.deepEqual(reachableImports(path.join(REPO_ROOT, "src", "meta", "claude.ts")).external, []);
     const driver = reachableImports(path.join(REPO_ROOT, "src", "drivers", "claude", "index.ts")).external;
-    // `file:` is check-rules' name for `import(pathToFileURL(x).href)`: the SDK's entry module in sdkDirectory, a file and never a package.
-    assert.deepEqual(driver.filter((specifier) => !specifier.startsWith("node:")), [CLAUDE_SDK_PACKAGE, "file:"]);
+    assert.deepEqual(driver.filter((specifier) => !specifier.startsWith("node:")), [CLAUDE_SDK_PACKAGE]);
   });
 
   test("the CLI manifest is valid for ari/cli-manifests and builds fresh, resume and fork launches without inherited credentials", () => {
@@ -110,5 +110,22 @@ describe("ari/meta/claude", () => {
       assert.ok(docs.includes(fact), `docs/drivers/claude.md does not mention ${fact}`);
     }
     for (const fact of ["0.3.330", "canUseTool", "forkSession", "claude.hooks", "ari.goal"]) assert.ok(changelog.includes(fact), `changelogs/claude.md does not mention ${fact}`);
+    // sdkDirectory is gone: the standalone ari-driver has the SDK compiled in. Only the changelogs name it, as removed.
+    for (const file of ["README.md", "docs/drivers/claude.md"]) assert.doesNotMatch(fs.readFileSync(path.join(REPO_ROOT, file), "utf8"), /sdkDirectory/, `${file} names sdkDirectory`);
+  });
+
+  test("THIRD-PARTY-NOTICES.md names the SDK the standalone ari-driver compiles in, quotes its licence, and the release attaches it beside the binaries", () => {
+    const notice = fs.readFileSync(path.join(REPO_ROOT, "THIRD-PARTY-NOTICES.md"), "utf8");
+    assert.ok(notice.includes(`\`${CLAUDE_SDK_PACKAGE}\` ${CLAUDE_SDK_VERSION}`), "the notice names the pinned SDK and its version");
+    assert.ok(notice.includes("ARI's own code is under the MIT License"));
+    // The SDK's own LICENSE.md, quoted in full: © Anthropic PBC, under Anthropic's legal agreements.
+    const licence = fs.readFileSync(path.join(fs.realpathSync(path.join(REPO_ROOT, "node_modules", ...CLAUDE_SDK_PACKAGE.split("/"))), "LICENSE.md"), "utf8");
+    const words = (text: string): string => text.replace(/^> /gm, "").replace(/\s+/g, " ").trim();
+    assert.ok(licence.includes("© Anthropic PBC") && licence.includes("https://code.claude.com/docs/en/legal-and-compliance"), licence);
+    assert.ok(words(notice).includes(words(licence)), `THIRD-PARTY-NOTICES.md does not quote the SDK's LICENSE.md: ${licence}`);
+    const release = fs.readFileSync(path.join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
+    assert.match(release, /^ {10}cp THIRD-PARTY-NOTICES\.md build\/release\/THIRD-PARTY-NOTICES\.md$/m, "the build job copies the notice beside the binaries");
+    assert.match(release, /gh release create [^\n]*\\\n(?: {12}\S+ \\\n)* {12}build\/release\/THIRD-PARTY-NOTICES\.md \\\n/, "gh release create attaches the notice");
+    assert.match(fs.readFileSync(path.join(REPO_ROOT, "README.md"), "utf8"), /\[`THIRD-PARTY-NOTICES\.md`\]\(THIRD-PARTY-NOTICES\.md\)/);
   });
 });

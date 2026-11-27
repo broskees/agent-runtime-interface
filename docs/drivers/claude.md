@@ -7,8 +7,9 @@ hints and the tested versions.
 
 ## Install
 
-The driver needs two things on the user's machine: the user's own Claude
-Code, and the SDK. ARI installs neither: the user or the host does.
+The driver needs two things: the user's own Claude Code, and the SDK. ARI
+installs neither. The user installs Claude Code. Under Node the user or the
+host installs the SDK; the standalone `ari-driver` includes it.
 
 ### Claude Code: the user's own `claude`
 
@@ -18,7 +19,7 @@ the config's `executablePath` when set (a name looked up on the host's
 `PATH`, or a path), else `claude` on the host's `PATH`, both found through the
 host's `process.resolveExecutable`. The driver passes it to the SDK as
 `pathToClaudeCodeExecutable`. This holds wherever the SDK comes from: an npm
-install under Node, or `sdkDirectory`.
+install under Node, or the SDK compiled into the standalone `ari-driver`.
 
 It must be Claude Code **2.1.330** or newer (`CLAUDE_TESTED_CLAUDE_CODE_VERSION`
 in `ari/meta/claude`), the Claude Code the pinned SDK bundles: the SDK's
@@ -41,7 +42,7 @@ In each unavailable case `openSession` rejects with the same error before any
 Claude Code session starts. `maintenance.advisory()` gives the same advisory
 as `status()`. ARI does not update Claude Code for the user.
 
-### The SDK
+### The SDK under Node
 
 The SDK is an optional peer of `ari`:
 
@@ -64,27 +65,26 @@ loses nothing.
 The standalone `ari-driver` executable (built with `bun build --compile`)
 cannot import a package by name: Bun resolves a bare specifier against the
 executable's embedded file system, never against a `node_modules` on disk.
-So `npm install` next to it does not help. ARI installs nothing, so a host
-that ships only the executable installs the SDK into a directory of its
-own:
+So it includes the SDK: `scripts/build-binary.ts` compiles the pinned
+`@anthropic-ai/claude-agent-sdk` 0.3.330 (the lockfile's install) into it and
+hands the `claude` driver a loader over that copy. The `claude` driver there
+needs no SDK install and no config. `status()` reports the SDK version
+0.3.330, and every query runs the user's `claude` as above.
 
-```sh
-npm install --prefix /opt/claude-agent-sdk @anthropic-ai/claude-agent-sdk@0.3.330
-```
-
-and names that directory in the driver config:
-`sdkDirectory: "/opt/claude-agent-sdk"`. The driver loads
-`<sdkDirectory>/node_modules/@anthropic-ai/claude-agent-sdk` by its entry
-module's file URL, and never runs the native package npm put beside it.
-`sdkDirectory` works under Node too. When it is set, the driver loads the SDK
-only from there; when it is not, the driver imports the package by name.
+The executable holds only the SDK's JavaScript, its `sdk.mjs`. It holds none
+of the SDK's 8 platform packages (`@anthropic-ai/claude-agent-sdk-<platform>`,
+its optional dependencies, each a copy of Claude Code, 381 MB on linux-x64)
+and no Claude Code at all. The SDK's `sdk.mjs` does not import those
+packages: it resolves one at run time, with `createRequire(...).resolve()` of
+a template string, and only when `pathToClaudeCodeExecutable` is unset, which
+the driver never leaves it. The bundler cannot follow that, and the build
+also marks the 8 packages `--external`. The other vendor SDKs stay out of the
+executable.
 
 **Checked against the real Claude Code.** `ARI_LIVE_RECORD=1 node
-scripts/live-claude-standalone.ts --sdk-directory <directory> --no-turn`
-(after `pnpm run build:binary`, and after you installed the SDK in
-`<directory>` as above) runs the standalone `ari-driver` with no `node` or
-`bun` on `PATH`: it loads the SDK from `<directory>` through `sdkDirectory`
-and prints `instance/status` without spending quota. To run the fixed `haiku` smoke
+scripts/live-claude-standalone.ts --no-turn` (after `pnpm run build:binary`)
+runs the standalone `ari-driver` with no `node` or `bun` on `PATH`: it loads
+the compiled-in SDK and prints `instance/status` without spending quota. To run the fixed `haiku` smoke
 prompt on your Claude sign-in, replace `--no-turn` with `--attempt-dir`
 and the path to a private scratch directory. Reuse that directory when
 resuming; an interrupted attempt cannot be repeated. A separately verified
@@ -105,12 +105,18 @@ for catalog and text generation queries. Local wire sessions inherit the same
 process-group cleanup as other standalone drivers; a delegated host owns
 its Claude Code processes instead.
 
-**Why ARI does not bundle the SDK.** The SDK's licence is Anthropic's
-("SEE LICENSE IN README.md", Anthropic's legal agreements), not MIT. ARI
-redistributes none of it: the npm tarball and the standalone executable hold
-no SDK code, and `check:package` and `test/standalone/claude-sdk.e2e.ts`
-check both for `CLAUDE_CODE_SDK_READS_SESSION_STATE`, a string unique to the
-SDK's `sdk.mjs`. The host installs the SDK itself, with npm.
+**The SDK's terms, and where its code is.** The SDK is © Anthropic PBC, and
+its use is subject to Anthropic's legal agreements
+(https://code.claude.com/docs/en/legal-and-compliance); it is not under
+ARI's MIT License. The standalone `ari-driver` includes it, so each GitHub
+release attaches `THIRD-PARTY-NOTICES.md` beside the binaries, which says
+so. The npm package holds none of the SDK's code: there the SDK stays an
+optional peer, because as a regular dependency npm would also install the
+platform's 381 MB Claude Code package for every user of `ari`.
+`check:package` checks the npm tarball for `CLAUDE_CODE_SDK_READS_SESSION_STATE`,
+a string unique to the SDK's `sdk.mjs`, and
+`test/standalone/claude-sdk.e2e.ts` checks the executable has it and none of
+Claude Code.
 
 ## How the driver runs Claude Code
 
@@ -131,18 +137,13 @@ SDK's `sdk.mjs`. The host installs the SDK itself, with npm.
   stdin. Naming the executable has one SDK effect the driver cannot change:
   a resume starts Claude Code without `--await-initialize`, which the SDK
   adds only for the Claude Code it finds itself.
-- **Missing runtime.** Without the SDK, `status()` and `probe()` report
-  `installed: false` with a `driver_unavailable` error naming
+- **Missing runtime.** Under Node without the SDK, `status()` and `probe()`
+  report `installed: false` with a `driver_unavailable` error naming
   `@anthropic-ai/claude-agent-sdk`, and `openSession` rejects with it. The
-  message says ARI does not install the SDK. Under Node it names
-  `npm install @anthropic-ai/claude-agent-sdk@0.3.330` next to ari, and
-  `npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@0.3.330`
-  with `sdkDirectory`. In the standalone `ari-driver` (recognized by its
-  modules' `/$bunfs/` or `B:/~BUN/` URLs) it names only the second, the one
-  step that works there. A `sdkDirectory` without the SDK is reported with
-  the path the driver read and the npm command that installs the SDK there.
-  A missing, unreadable or too old Claude Code is reported as the table above
-  says.
+  message says ARI does not install the SDK and names
+  `npm install @anthropic-ai/claude-agent-sdk@0.3.330` next to ari. The
+  standalone `ari-driver` always has the SDK. A missing, unreadable or too
+  old Claude Code is reported as the table above says.
 - **One query per thread.** Each thread is one Claude session run by one
   `query()` in streaming input mode, so one Claude Code process per thread
   (`sessionModel: "process_per_thread"`). A session holds any number of
@@ -440,26 +441,28 @@ mistakes to show each is caught), the conformance harness and suite, and the tes
 the driver's quirks, launch context, availability, capability honesty and
 metadata. `SOURCES.md` lists the vendor sources and pinned versions.
 
-`sdk-directory.test.ts` covers loading the SDK from `sdkDirectory` against
-a fake SDK on disk (`fixture-sdk/sdk.mjs`, plain JavaScript like the real
-`sdk.mjs`, laid out by `sdk-fixture.ts`) and a fake of the user's `claude`
-(a shell script on the host's `PATH` that logs each invocation), with a
-decoy native package beside the SDK: that a turn runs the user's `claude`
-or `executablePath` and never the decoy, a directory without the SDK
-reported with the npm command that installs it there, and a `claude` that
-is older, missing, unreadable or newer. `availability.test.ts` hides the
-SDK from Node's resolver and checks the message names both npm commands and
-`sdkDirectory`. `npm-sdk.test.ts` runs the same cases under Node with the
-SDK imported by name (a module hook points the name at the fake).
-`real-sdk-launch.test.ts` has the pinned SDK's own `sdk.mjs` start a fake
-`claude` for a session with an MCP server: no deprecation warning, the exact
-launch arguments, and the server over stdin.
-`test/standalone/claude-sdk.e2e.ts` runs the fixture through the standalone
-`ari-driver` with no `node` or `bun` on `PATH`, and through `ari-driver`
-under Node: `sdkDirectory` with the user's `claude` and with
-`executablePath`, an older or missing `claude`, the message with no SDK
-(the npm command and `sdkDirectory`, and no install next to ari), and that
-the executable holds no SDK code.
+`user-claude-code.test.ts` gives the driver a fake SDK on disk
+(`fixture-sdk/sdk.mjs`, plain JavaScript like the real `sdk.mjs`, laid out by
+`sdk-fixture.ts`) through its loader, with a decoy native package beside the
+SDK, and a fake of the user's `claude` (a shell script on the host's `PATH`
+that logs each invocation): a `claude` that is older, missing, unreadable or
+newer, and a `claude update` that shows at the next `status()`.
+`availability.test.ts` hides the SDK from Node's resolver and checks the
+message names the npm command. `npm-sdk.test.ts` runs the `claude` cases
+under Node with the SDK imported by name (a module hook points the name at
+the fake), and checks a turn runs the user's `claude` or `executablePath`
+and never the decoy. `real-sdk-launch.test.ts` has the pinned SDK's own
+`sdk.mjs` start a fake `claude` for a session with an MCP server: no
+deprecation warning, the exact launch arguments, and the server over stdin.
+`test/standalone/claude-sdk.e2e.ts` runs the standalone `ari-driver` with no
+`node` or `bun` on `PATH`, no config and no SDK on disk: a turn completes
+through the compiled-in SDK on a fake `claude` that speaks the SDK's
+stream-json protocol in shell built-ins, and with `executablePath`; an older
+or missing `claude` is refused; Claude Code and its group end when
+`ari-driver` is killed; and the executable holds the SDK's code and none of
+Claude Code. The turn and kill cases run again through `ari-driver` under
+Node, with the SDK's name resolved to a copy of the pinned `sdk.mjs` beside
+a decoy.
 
 `replay.test.ts` and `recorder.test.ts` cover the native recorder
 (`pnpm run record:claude`): they record the six recording scenarios from the

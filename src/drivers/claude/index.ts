@@ -8,14 +8,15 @@
 // Code that is missing or too old, shows in `status()` and fails
 // `openSession` with `driver_unavailable`.
 //
-// Where no package can be imported by name (the standalone `ari-driver`),
-// the SDK comes from the directory the config's `sdkDirectory` names, where
-// the host installed it with npm; the driver loads it by file URL. ARI
-// installs nothing: the user or the host installs the SDK and Claude Code.
+// The standalone `ari-driver`, which cannot import a package by name, has
+// the SDK's JavaScript compiled in (scripts/build-binary.ts) and never a
+// Claude Code. Under Node, ARI installs nothing: the user or the host
+// installs the SDK and Claude Code.
 //
 // `createClaudeDriver({ loadSdk, newUuid })` builds the driver with another
-// SDK loader (a host that bundles the SDK, or a test's fake) and another
-// source of the UUIDs it gives Claude; `claudeDriver` uses the defaults.
+// SDK loader (a build that bundles the SDK, as the standalone `ari-driver`
+// does, or a test's fake) and another source of the UUIDs it gives Claude;
+// `claudeDriver` uses the defaults.
 
 import type { CliLaunchManifest } from "../../generated/driver.ts";
 import { CLAUDE_CONFIG_SCHEMA, CLAUDE_DRIVER_KIND, CLAUDE_METADATA, CLAUDE_TESTED_VERSIONS, claudeDefaultConfig } from "../../meta/claude.ts";

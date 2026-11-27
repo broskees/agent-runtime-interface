@@ -87,6 +87,18 @@ on a real Mac checks both.
 
 ## Resolution
 
+> **Note (2026-11-27, later): the SDK is compiled in.** Joe ruled that the
+> standalone `ari-driver` may include the SDK's JavaScript, as approach 1
+> proposed, without its platform packages. `scripts/build-binary.ts` now
+> compiles the pinned `@anthropic-ai/claude-agent-sdk` 0.3.330 into the
+> binary, whose `claude` driver needs no SDK install and no config; it still
+> runs the user's own Claude Code and holds none. `sdkDirectory` is gone, and
+> so is `--sdk-directory` from `scripts/live-claude-standalone.ts`.
+> `THIRD-PARTY-NOTICES.md`, attached to each release beside the binaries,
+> states the SDK's terms. The npm package still holds no SDK code. The parts
+> below that name `sdkDirectory`, or say ARI does not redistribute the SDK,
+> are history.
+
 > **Note (2026-11-27): the managed install is gone.** Joe ruled that ARI
 > handles no installation at all, so `maintenance.install`,
 > `maintenance.update`, the `sdkRegistry` config field and `ari/node`'s

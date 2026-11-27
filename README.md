@@ -33,7 +33,7 @@ one in this table:
 
 | You use | Also install |
 |---|---|
-| `ari/drivers/claude` | Claude Code 2.1.330 or newer, the user's own `claude` on `PATH` (or `executablePath`); and `@anthropic-ai/claude-agent-sdk` 0.3.330 next to ari, or in a directory that `sdkDirectory` names (the only way for the standalone `ari-driver`) |
+| `ari/drivers/claude` | Claude Code 2.1.330 or newer, the user's own `claude` on `PATH` (or `executablePath`); and, under Node, `@anthropic-ai/claude-agent-sdk` 0.3.330 next to ari (the standalone `ari-driver` includes it) |
 | `ari/drivers/cursor` | `@cursor/sdk` |
 | `ari/drivers/opencode` | the `opencode` CLI, plus `@opencode-ai/sdk` for an OpenCode 1.x server or `@opencode/client` for 2.x |
 | `ari/drivers/muse` | `@muse-code/sdk` and the `muse` CLI |
@@ -62,7 +62,9 @@ The package also ships the `ari-driver` bin, which serves a driver over
 `ari-driver ./my-driver.js` for any module that exports a driver. Each GitHub
 release also carries a standalone `ari-driver` executable for linux-x64,
 linux-arm64, darwin-x64, darwin-arm64 and windows-x64, so a host written in
-another language needs no Node installed.
+another language needs no Node installed. Beside them is
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), the notice for the SDK
+code they include.
 
 The `claude` driver always runs the user's own Claude Code: the `claude` on
 the host's `PATH`, or the one the config's `executablePath` names, never a
@@ -75,14 +77,15 @@ or set `executablePath`. If the driver cannot read the version, `status()`
 reports `driver_unavailable` with the executable's path and what
 `claude --version` printed, if it ran.
 
-The standalone executable cannot import a package by name, so `npm install`
-beside it does not give the `claude` driver its SDK. A host that ships only
-the executable runs
-`npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@0.3.330`
-and sets `sdkDirectory` in the driver config to that directory. Without it,
-`status()` reports `driver_unavailable` naming that command. ARI does not
-bundle the SDK because its licence is Anthropic's, not MIT; the npm package
-and the executable contain none of its code.
+The standalone executable includes the JavaScript of the Claude Agent SDK,
+`@anthropic-ai/claude-agent-sdk` 0.3.330, so its `claude` driver needs no
+SDK install and no config: only the user's `claude`. It includes no Claude
+Code. The SDK is © Anthropic PBC and under Anthropic's terms
+(https://code.claude.com/docs/en/legal-and-compliance), not under ARI's MIT
+License; `THIRD-PARTY-NOTICES.md` says so, and each release attaches it
+beside the binaries. The npm package holds none of the SDK's code: under
+Node the SDK is an optional peer you install, and without it `status()`
+reports `driver_unavailable` naming the npm command.
 [docs/drivers/claude.md](docs/drivers/claude.md) has the details.
 
 Each driver has a page in [`docs/drivers/`](docs/drivers/) and a changelog in
@@ -399,4 +402,6 @@ range; a vendor CLI older than the range is refused instead (see
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE). The standalone `ari-driver` executables also
+include the Claude Agent SDK, under Anthropic's terms; see
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

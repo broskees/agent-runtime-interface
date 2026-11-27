@@ -1174,8 +1174,19 @@ host gives the turn that model as the value of the thread's model option, and
 the driver sends `session/set_config_option` when the thread holds another.
 When the variable names a model the agent does not offer, or it is not set
 and the agent offers no Flash model, or the agent offers no model option, the
-recorder stops before the first prompt, lists the models, and records
-nothing. Replay gives each turn the model the header names.
+recorder stops before the first prompt and records nothing. Run
+`ARI_LIVE_RECORD=1 node scripts/record-antigravity.ts --list-models` to list
+model IDs in an isolated ACP session without sending any prompt.
+`ARI_RECORD_ANTIGRAVITY_VERSION` can require an exact installed version.
+Set `ARI_RECORD_ANTIGRAVITY_EFFORT` with an explicit model to set ACP's
+`thought_level`. The recorder checks both applied values before prompting,
+including after resuming. Replay uses the header model and the recorded
+effort change, if any.
+
+The live recorder denies all tool requests except the exact marker command
+in `approval_allowed`, approved once. For `agy` 1.5.17 an implicit command
+cwd needs an extra check: a private `tee` wrapper verifies the physical cwd
+and filename before passing the marker to system `tee`.
 
 ## How the Codex recorder keeps the user's setup out
 
@@ -1536,7 +1547,7 @@ turns.
 3. Run `ARI_LIVE_RECORD=1 pnpm run record:antigravity`.
 4. To record with another model, set `ARI_RECORD_ANTIGRAVITY_MODEL` to one the
    agent offers; a model it does not offer stops the recorder before the
-   first prompt with the list.
+   first prompt. Use `--list-models` to see the available IDs.
 5. To record some scenarios only, or to write somewhere else, use the
    arguments of `record:claude`: `-- simple resume`, `--out <dir>`.
 6. Run `pnpm run check:recordings`, then the replay tests.

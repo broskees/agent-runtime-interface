@@ -36,11 +36,12 @@ import { CredentialsKeptError, RecordingNotWrittenError } from "../recovery.ts";
 import { createSanitiser } from "../sanitiser.ts";
 import { SCENARIOS, checkScenario } from "../scenarios.ts";
 import type { Scenario, ScenarioName } from "../scenarios.ts";
+import type { Request } from "../../../src/generated/request.ts";
 import { tapProcess } from "../stdio/tap.ts";
 import { acpNativeAnswers } from "../acp/frames.ts";
 import { ACP_PROTOCOL_WORDS } from "../acp/protocol-words.ts";
 import { ANTIGRAVITY_SIGN_IN_FILE, profileSignInFile, userSignInFile } from "./credentials.ts";
-import { ANTIGRAVITY_RECORDER_ENV_POLICY, AntigravityModelChoiceError, antigravityRecorderConfig, createAntigravityLayout, recordingModelChooser, runAntigravityScenario } from "./run.ts";
+import { ANTIGRAVITY_EFFORT_VARIABLE, ANTIGRAVITY_MODEL_VARIABLE, ANTIGRAVITY_RECORDER_ENV_POLICY, AntigravityModelChoiceError, antigravityRecorderConfig, createAntigravityLayout, listAntigravityModels, recordingModelChooser, runAntigravityScenario } from "./run.ts";
 import type { AntigravityLayout } from "./run.ts";
 
 export const ANTIGRAVITY_VENDOR_NAME = "antigravity-cli";
@@ -93,13 +94,17 @@ export function antigravityProcessService(layout: AntigravityLayout, env: { read
   return {
     envPolicy: service.envPolicy,
     resolveExecutable: (name, options) => service.resolveExecutable(name, options),
-    spawn: (request) => service.spawn({ ...request, cwd: request.cwd ?? layout.cwd }),
+    spawn: (request) => {
+      if (request.cwd !== undefined && request.cwd !== layout.cwd) throw new Error("the recorder requires the isolated process cwd");
+      return service.spawn({ ...request, cwd: layout.cwd });
+    },
     dispose: () => service.dispose(),
   };
 }
 
 /** The lines of `agy`'s log that say where it keeps a Google sign-in: "Using file-based token storage because ..." and "... falling back to file ...". */
-const TOKEN_STORAGE_LINE = /(?:Using file-based token storage because|Failed to load stored token from keyring, falling back to file)[^\n]*/g;
+const EXPLICIT_FILE_MODE = "Using file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set";
+const TOKEN_STORAGE_LINE = /Using file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set|Using file-based token storage because no D-Bus session bus detected|Failed to load stored token from keyring, falling back to file/g;
 
 /**
  * What `agy` logged, in any `*.log` file under `directory`, about where it
@@ -139,6 +144,10 @@ export async function agentVersion(service: ProcessService, command: string): Pr
 }
 
 export interface RecordAntigravityOptions {
+  /** Open one ACP thread to list models, without sending a prompt or writing a tape. */
+  readonly listModels?: boolean;
+  /** Abort before ACP startup if the installed CLI reports another version. */
+  readonly requireVersion?: string;
   /** The scenarios to record, in order; all six when left out. */
   readonly scenarios?: readonly ScenarioName[];
   readonly outDir: string;
@@ -159,6 +168,7 @@ export interface RecordAntigravityOptions {
 }
 
 export interface AntigravityRecordOutcome {
+  readonly offeredModels?: readonly string[];
   readonly scenario: ScenarioName;
   /** The recording written, when the run reached `agy` and chose a model, and the write succeeded. */
   readonly file?: string;
@@ -254,14 +264,49 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Never print a native error: an ACP error can carry account details in its text. */
+export function safeAntigravityFailure(error: Error): string {
+  if (error instanceof AntigravitySignInMissingError || error instanceof AntigravityWorkspaceInHomeError || error instanceof AntigravityWorkspaceCustomizedError) return error.message;
+  if (error instanceof AntigravityModelChoiceError) return "the ACP thread did not confirm the requested model or effort";
+  if (error instanceof AggregateError) return (error.errors as Error[]).map(safeAntigravityFailure).join("; ");
+  const code = (error as { callError?: { code?: unknown } }).callError?.code;
+  if (typeof code === "string" && /^[a-z_]{1,40}$/.test(code)) return `ACP call failed (${code})`;
+  if (["the installed agy does not report the required version", "the isolated ACP thread advertised no models", "agy did not confirm explicitly forced profile-file token storage"].includes(error.message)) return error.message;
+  return "recording or scenario check failed";
+}
+
+/** Accept only the literal marker command; omission of Cwd needs a guard at execution. */
+export function isAntigravityMarkerApproval(request: Pick<Request, "kind" | "subject" | "options">, scenario: Scenario, cwd: string, guarded = false): boolean {
+  if (scenario.name !== "approval_allowed" || scenario.command === undefined || request.kind !== "command" || request.subject?.cwd !== cwd) return false;
+  const input = request.subject.tool?.input;
+  if (typeof input !== "object" || input === null || !("CommandLine" in input) || input.CommandLine !== scenario.command) return false;
+  if ("Cwd" in input ? input.Cwd !== cwd : !guarded) return false;
+  if (Object.keys(input).some((key) => !["Cwd", "CommandLine", "WaitMsBeforeAsync", "toolSummary"].includes(key))) return false;
+  if (request.subject.tool?.name !== scenario.command) return false;
+  if (request.subject.command !== undefined && (request.subject.command.length !== 1 || request.subject.command[0] !== scenario.command)) return false;
+  return request.options?.some((option) => option.decision === "accept" && option.scope === "once") === true;
+}
+
+/** agy 1.5.17 omits Cwd for run_command. Its only approved write must
+ * pass this cwd check before reaching the system tee. No command is rewritten. */
+export function installMarkerCwdGuard(layout: AntigravityLayout): string {
+  const bin = path.join(layout.root, "marker-bin");
+  fs.mkdirSync(bin, { mode: 0o700 });
+  const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+  fs.writeFileSync(path.join(bin, "tee"), `#!/bin/sh\nset -eu\n[ "$(pwd -P)" = ${quote(layout.cwd)} ] && [ "$#" -eq 1 ] && [ "$1" = ari-marker.txt ] && [ ! -e "$1" ] && [ ! -L "$1" ] || exit 1\n/usr/bin/tee -- "$1"\n: > ${quote(path.join(bin, "marker-written"))}\n`, { mode: 0o700 });
+  return bin;
+}
+
 async function recordOne(scenario: Scenario, options: RecordAntigravityOptions): Promise<AntigravityRecordOutcome> {
   const log = options.log ?? (() => undefined);
-  const layout = createAntigravityLayout(`ari-antigravity-record-${scenario.name}-`);
+  const label = options.listModels ? "model preflight" : scenario.name;
+  const layout = createAntigravityLayout(`ari-antigravity-record-${options.listModels ? "models" : scenario.name}-`);
   const frames: Frame[] = [];
   const models = recordingModelChooser(options.env);
   let credential: CopiedCredentialFile | undefined;
   let service: ProcessService | undefined;
   let vendorVersion = "unknown";
+  let offeredModels: readonly string[] | undefined;
   const errors: Error[] = [];
   const failed = (reason: unknown): void => {
     errors.push(reason instanceof Error ? reason : new Error(String(reason)));
@@ -269,6 +314,10 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
   let recoveryFile: string | undefined;
   let workspaceKept = false;
   try {
+    const thought_level = options.env[ANTIGRAVITY_EFFORT_VARIABLE]?.trim();
+    const named = options.env[ANTIGRAVITY_MODEL_VARIABLE]?.trim();
+    if (thought_level !== undefined && (!named || !thought_level)) throw new AntigravityModelChoiceError("pinning effort requires both a model and an effort", []);
+    const pin = thought_level === undefined || !named ? undefined : { model: named, thought_level };
     const home = options.env["HOME"]?.trim();
     if (home !== undefined && home !== "") {
       const homes = new Set([home, fs.existsSync(home) ? fs.realpathSync(home) : home]);
@@ -281,14 +330,37 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
     if (options.source === "live" && credential === undefined) throw new AntigravitySignInMissingError(real);
     service = antigravityProcessService(layout, options.env);
     vendorVersion = await agentVersion(service, antigravityRecorderConfig().command);
+    if (options.requireVersion !== undefined && vendorVersion !== options.requireVersion) throw new Error("the installed agy does not report the required version");
+    const guarded = options.source === "live" && !options.listModels && scenario.name === "approval_allowed" && vendorVersion === "1.5.17";
+    if (guarded) {
+      const bin = installMarkerCwdGuard(layout);
+      await service.dispose();
+      service = antigravityProcessService(layout, { ...options.env, PATH: `${bin}${path.delimiter}${options.env["PATH"] ?? "/usr/bin:/bin"}` });
+    }
     const tap = tapProcess(service, (frame) => frames.push(frame));
     let run;
     try {
-      ({ run } = await runAntigravityScenario({ scenario, layout, process: tap.process, models, timeoutMs: options.timeoutMs ?? 300_000 }));
+      if (options.listModels) {
+        offeredModels = await listAntigravityModels(layout, tap.process, models, pin);
+        if (offeredModels.length === 0) throw new Error("the isolated ACP thread advertised no models");
+      } else {
+        let allowed = false;
+        ({ run } = await runAntigravityScenario({ scenario, layout, process: tap.process, models, timeoutMs: options.timeoutMs ?? 300_000,
+          ...(pin === undefined ? {} : { pin }),
+          ...(options.source === "live" ? { mayApprove: (request: Request) => {
+            if (allowed || !isAntigravityMarkerApproval(request, scenario, layout.cwd, guarded)) return false;
+            allowed = true;
+            return true;
+          } } : {}),
+        }));
+      }
     } finally {
       if (!(await tap.settled(10_000))) failed(new Error(`an agy process of scenario ${scenario.name} was still running, or its output still open, 10 s after the driver closed its sessions`));
     }
-    checkScenario(run, acpNativeAnswers(frames));
+    if (run !== undefined) {
+      checkScenario(run, acpNativeAnswers(frames));
+      if (guarded && (!fs.existsSync(path.join(layout.root, "marker-bin", "marker-written")) || fs.readFileSync(path.join(layout.cwd, "ari-marker.txt"), "utf8") !== `${scenario.marker}\n`)) throw new Error("the guarded marker was not written in the isolated cwd");
+    }
   } catch (reason) {
     failed(reason);
   } finally {
@@ -307,12 +379,14 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
       }
     }
     // Only once an agy acp ran: the recorder can stop before it starts one.
-    if (frames.some((frame) => frame.kind === "spawn")) {
+    if (frames.some((frame) => frame.kind === "spawn" && frame["purpose"] === "runtime")) {
       try {
         const storage = tokenStorageLog(layout.root);
-        log(`${scenario.name}: agy's log ${storage.length === 0 ? "says nothing about where it keeps the sign-in" : `on where it keeps the sign-in: ${storage.join("; ")}`}`);
+        log(`${label}: agy's log ${storage.length === 0 ? "says nothing about where it keeps the sign-in" : `on where it keeps the sign-in: ${storage.join("; ")}`}`);
+        if (options.listModels && !storage.includes(EXPLICIT_FILE_MODE)) failed(new Error("agy did not confirm explicitly forced profile-file token storage"));
       } catch (reason) {
-        log(`${scenario.name}: agy's log could not be read: ${reason instanceof Error ? reason.message : String(reason)}`);
+        log(`${label}: agy's token storage log could not be read`);
+        if (options.listModels) failed(reason);
       }
     }
     if (!workspaceKept) fs.rmSync(layout.root, { recursive: true, force: true });
@@ -323,7 +397,7 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
     const target = path.join(options.outDir, `${scenario.name}.ndjson`);
     // A failed write joins the scenario's other failures, so none of them, nor where a refreshed sign-in went, is lost with it.
     try {
-      const sanitise = createSanitiser({ workspace: layout.root, env: options.env, protocolWords: ACP_PROTOCOL_WORDS, recordedModel: model, ...(options.user === undefined ? {} : { user: options.user }) });
+      const sanitise = createSanitiser({ workspace: layout.root, env: options.env, protocolWords: ACP_PROTOCOL_WORDS, antigravity: true, recordedModel: model, ...(options.user === undefined ? {} : { user: options.user }) });
       await writeRecording(
         target,
         {
@@ -345,13 +419,14 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
     }
   }
   const error = errors.length <= 1 ? errors[0] : new AggregateError(errors, `${errors.length} failures:\n${errors.map((each, index) => `  ${index + 1}. ${each.message}`).join("\n")}`);
-  log(`${scenario.name}: ${error === undefined ? "passed" : `FAILED: ${error.message}`}${file === undefined ? ", nothing recorded" : `, ${frames.length} frames in ${file}`}`);
+  log(`${label}: ${error === undefined ? "passed" : `FAILED: ${options.source === "live" ? safeAntigravityFailure(error) : error.message}`}${file === undefined ? ", nothing recorded" : `, ${frames.length} frames in ${file}`}`);
   return {
     scenario: scenario.name,
     frames: frames.length,
     workspace: layout.root,
     workspaceKept,
     ...(model === undefined ? {} : { model }),
+    ...(offeredModels === undefined ? {} : { offeredModels }),
     ...(file === undefined ? {} : { file }),
     ...(error === undefined ? {} : { error }),
     ...(recoveryFile === undefined ? {} : { recoveryFile }),
@@ -367,7 +442,7 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
  * could not write.
  */
 export async function recordAntigravity(options: RecordAntigravityOptions): Promise<AntigravityRecordOutcome[]> {
-  const names = options.scenarios ?? SCENARIOS.map((scenario) => scenario.name);
+  const names = options.listModels ? ["simple"] as const : options.scenarios ?? SCENARIOS.map((scenario) => scenario.name);
   const outcomes: AntigravityRecordOutcome[] = [];
   for (const name of names) {
     const scenario = SCENARIOS.find((candidate) => candidate.name === name);

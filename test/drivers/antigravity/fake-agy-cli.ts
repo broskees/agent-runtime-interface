@@ -97,9 +97,11 @@ function acp(args: readonly string[]): void {
   fs.appendFileSync(path.join(log, "acp-fake.log"), `I1125 00:00:00.000000 1 server.go:2782] Language server version: ${FAKE_AGY_VERSION}\n${logLine === undefined ? "" : `I1125 00:00:00.000001 1 ${logLine}\n`}`);
   const loaded = loadedAntigravitySetup(env, process.cwd(), geminiDir, appDataDir);
   report({ loaded, signIn: fs.existsSync(signIn) ? fs.readFileSync(signIn, "utf8") : null, signInFile: signIn, signInStore: signInKind });
+  if (env["ARI_FAKE_AGY_REFRESH_ON_START"] !== undefined) fs.writeFileSync(signIn, env["ARI_FAKE_AGY_REFRESH_ON_START"]);
 
   const models = env["ARI_FAKE_AGY_MODELS"] === undefined ? FAKE_AGY_MODELS : (JSON.parse(env["ARI_FAKE_AGY_MODELS"]) as Array<{ value: string; name: string }>);
   const configOptions = [{ id: "model", name: "Model", category: "model", type: "select", currentValue: models[0]?.value ?? "", options: models }];
+  if (env["ARI_FAKE_AGY_EFFORT"] === "1") configOptions.push({ id: "thought_level", name: "Thinking level", category: "thought_level", type: "select", currentValue: "high", options: ["high", "medium"].map((value) => ({ value, name: value })) });
   const store = path.join(geminiDir, "fake-acp-store");
   const child = childProcess.spawn(process.execPath, [FAKE_AGENT, "--protocol", "1", "--store", store, "--config-options", JSON.stringify(configOptions)], { stdio: ["pipe", "pipe", "pipe", "ipc"] });
   // The wire, line by line, as the agent's side sees it.

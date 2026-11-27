@@ -60,6 +60,14 @@ export async function replayAntigravity(source: Recording | string, options: Ant
   const header = recording.header;
   if (header.driver !== "antigravity") throw new Error(`${recording.file}: the recording is of driver ${header.driver}, not antigravity`);
   const scenario = scenarioNamed(header.scenario);
+  // Pinned captures apply thought_level before the first prompt, through
+  // createThread (and resumeThread). Replay the same host choice, not the
+  // previous default advertised in session/new.
+  const effort = recording.frames.flatMap(({ frame }) => {
+    if (frame.dir !== "out" || frame.kind !== "stdin") return [];
+    const message = frame["message"] as { method?: string; params?: { configId?: string; value?: string } } | undefined;
+    return message?.method === "session/set_config_option" && message.params?.configId === "thought_level" && typeof message.params.value === "string" ? [message.params.value] : [];
+  })[0];
   const layout = createAntigravityLayout(`ari-antigravity-replay-${scenario.name}-`);
   try {
     const env = options.env ?? process.env;
@@ -77,6 +85,7 @@ export async function replayAntigravity(source: Recording | string, options: Ant
         layout,
         process: replay.process,
         models: fixedModelChooser(header.model),
+        ...(effort === undefined ? {} : { pin: { model: header.model, thought_level: effort } }),
         timeoutMs: options.timeoutMs ?? 30_000,
         native: replay.progress,
         ...(wrapSession === undefined ? {} : { wrapSession: (session: Session) => wrapSession(session, replay.sequencer) }),

@@ -61,3 +61,11 @@ copied.
   throw), the CLI's own settings files, and the assistant message Claude
   Code streams with a local command's output (the driver reads goals from
   the transcript, not from the stream).
+
+The process boundary tests use the installed SDK directly. The pinned
+`sdk.d.ts` defines `spawnClaudeCodeProcess`, `SpawnOptions` and `SpawnedProcess`.
+Its `sdk.mjs` calls the hook synchronously, attaches `exit` and `error`
+listeners, and handles stderr itself only for its default spawn. The
+[official TypeScript reference](https://code.claude.com/docs/en/agent-sdk/typescript#spawnoptions)
+also documents the forwarded abort signal: the SDK closes stdin first and
+allows roughly two seconds for the CLI to exit before requesting teardown.

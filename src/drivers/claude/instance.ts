@@ -60,6 +60,7 @@ import { ARI_VERSION } from "../../version.ts";
 import { installClaudeSdk, loadManagedClaudeSdk } from "./install.ts";
 import { limitStatusFrom, limitWindowFrom, strongRef } from "./mapping.ts";
 import type { ClaudeLimitWindowState } from "./mapping.ts";
+import { claudeProcessOptions } from "./process.ts";
 import { loadClaudeSdkFromDirectory } from "./sdk.ts";
 import type { ClaudeQueryOptions, ClaudeRateLimitInfo, ClaudeResultMessage, ClaudeSdkLoader, ClaudeSdkRuntime, ClaudeUserMessage } from "./sdk.ts";
 import { ClaudeSession, sessionIdFor } from "./session.ts";
@@ -633,9 +634,7 @@ export class ClaudeInstance implements Instance {
       tools: [],
       persistSession: false,
       permissionMode: "dontAsk",
-      pathToClaudeCodeExecutable: claudeCode.path,
-      // What sdk.d.ts recommends for an app that starts its own Claude Code at or above the bundled version: MCP servers in the initialize request, never on the command line.
-      mcpServersDelivery: "initialize",
+      ...claudeProcessOptions(this.#host, claudeCode.path),
       ...(this.#config.model === undefined ? {} : { model: this.#config.model }),
     };
   }

@@ -76,6 +76,10 @@
           },
           "description": "Explicit additions, applied after `envPolicy` stripping."
         },
+        "inheritEnv": {
+          "type": "boolean",
+          "description": "Defaults to true. When false, start with an empty environment and apply only `env`."
+        },
         "purpose": {
           "$ref": "#/$defs/SpawnPurpose"
         },

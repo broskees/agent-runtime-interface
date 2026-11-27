@@ -109,7 +109,9 @@ export function errorFrom(recorded: unknown): Error {
 
 /** A query's options as the `query` frame holds them. */
 export function queryOptionsFrame(options: Options | undefined): unknown {
-  return jsonSafe(options ?? {});
+  // Process plumbing is not an SDK exchange. Replay never starts a process.
+  const { spawnClaudeCodeProcess: _spawn, ...recorded } = options ?? {};
+  return jsonSafe(recorded);
 }
 
 /** The approval answers the driver sent to Claude Code, read off its `permission` frames. */

@@ -40,6 +40,8 @@ export type SpawnRequest = {
   cwd?: string;
   /** Explicit additions, applied after `envPolicy` stripping. */
   env?: { [key: string]: string };
+  /** Defaults to true. When false, start with an empty environment and apply only `env`. */
+  inheritEnv?: boolean;
   purpose?: SpawnPurpose;
   stdin?: "pipe" | "ignore" | (string & {});
   timeoutMs?: number;
@@ -205,6 +207,10 @@ export const hostDocument: SchemaDocument = {
             "type": "string"
           },
           "description": "Explicit additions, applied after `envPolicy` stripping."
+        },
+        "inheritEnv": {
+          "type": "boolean",
+          "description": "Defaults to true. When false, start with an empty environment and apply only `env`."
         },
         "purpose": {
           "$ref": "#/$defs/SpawnPurpose"

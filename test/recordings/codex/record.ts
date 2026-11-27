@@ -48,6 +48,7 @@ import { CODEX_SYSTEM_CONFIG_DIR, CodexCredentialStoreError, checkCodexCredentia
 import { CODEX_SIGN_IN_FILE, userCodexHome, userSignInFile, workspaceSignInFile } from "./credentials.ts";
 import { CODEX_SIGN_IN_LOCK, CodexSignInLockError, checkFlockRuns, takeCodexSignInLock } from "./sign-in-lock.ts";
 import type { HeldCodexSignInLock } from "./sign-in-lock.ts";
+import { FlockLostError } from "../flock.ts";
 import { codexNativeAnswers } from "./frames.ts";
 import { CODEX_PROTOCOL_WORDS } from "./protocol-words.ts";
 import { CODEX_RECORDER_ENV_POLICY, CODEX_RECORDER_INSTANCE_ID, codexRecorderConfig, codexRecorderHost, createCodexLayout, runCodexScenario } from "./run.ts";
@@ -324,7 +325,13 @@ function keepRefreshedSignIn(credential: CopiedCredentialFile, why: string): nev
   throw new CredentialsKeptError(`${why}; it kept the refreshed sign-in in ${recoveryFile}, readable only by you. Write its newest value over ${credential.real}, or sign in again.`, recoveryFile);
 }
 
-/** Compare and replace the resolved file under both pinned Codex locks. Never rename over a link. */
+/**
+ * Compare and replace the resolved file under both pinned Codex locks. Never
+ * rename over a link. When a lock may have been lost before the recorder let
+ * go (its holder did not answer the release, ../flock.ts), a refresh already
+ * written back goes to the recovery file as well, since another codex may
+ * have written the file in between.
+ */
 export async function returnCodexSignIn(credential: CopiedCodexSignIn, env: { readonly [name: string]: string | undefined }, homeWaitMs = CODEX_SIGN_IN_LOCK_WAIT_MS, commitWaitMs = CODEX_COMMIT_LOCK_WAIT_MS): Promise<void> {
   if (!fs.existsSync(credential.copy)) return;
   const refreshed = fs.readFileSync(credential.copy);
@@ -345,6 +352,7 @@ export async function returnCodexSignIn(credential: CopiedCodexSignIn, env: { re
   };
   const homeLock = await requireLock(path.join(path.dirname(real), CODEX_SIGN_IN_LOCK), homeWaitMs);
   let commitLock: HeldCodexSignInLock | undefined;
+  let wroteBack = false;
   try {
     try {
       checkTarget();
@@ -368,6 +376,7 @@ export async function returnCodexSignIn(credential: CopiedCodexSignIn, env: { re
           fs.writeFileSync(replacement, refreshed, { mode: 0o600, flag: "wx", flush: true });
           checkTarget();
           fs.renameSync(replacement, target);
+          wroteBack = true;
         } finally {
           fs.rmSync(staging, { recursive: true, force: true });
         }
@@ -378,11 +387,16 @@ export async function returnCodexSignIn(credential: CopiedCodexSignIn, env: { re
     }
     return keepRefreshedSignIn(credential, `${real} changed while the recorder ran, and codex also refreshed the recorder's copy; the recorder left ${real} as it is`);
   } finally {
-    try {
-      await commitLock?.release();
-    } finally {
-      await homeLock.release();
+    // Let go of both locks whatever happened. A lock that may have been lost matters only when the refresh went back under it.
+    const lost: string[] = [];
+    for (const lock of [commitLock, homeLock]) {
+      try {
+        await lock?.release();
+      } catch (error) {
+        lost.push(error instanceof FlockLostError ? `the lock on ${error.file} may have been lost before it let go (${error.why})` : `letting go of a lock failed (${error instanceof Error ? error.message : String(error)})`);
+      }
     }
+    if (wroteBack && lost.length > 0) keepRefreshedSignIn(credential, `the recorder wrote the sign-in codex refreshed back to ${real}, but ${lost.join(", and ")}, so another codex may have written the file meanwhile`);
   }
 }
 

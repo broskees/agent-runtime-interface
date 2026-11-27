@@ -1144,11 +1144,18 @@ under them.
   the sign-in", `test/recordings/flock.ts`). It waits up to 30 s for another
   run to let go and never breaks the lock. When `flock` cannot take it, or
   another run held it all that time, the refresh goes to the recovery file.
-  An unchanged copy takes no lock.
+  The holder fails closed: when it does not answer the recorder's release,
+  the lock may have been lost, so the refresh, already written back, goes to
+  the recovery file as well and the run reports it. An unchanged copy takes
+  no lock.
 - The window that remains: `agy` itself takes no such lock that anyone has
   found, so another `agy` that saves a refresh between the copy-back's
   comparison and its rename (a stat, a write of the staged copy and the
-  rename) is overwritten. `test/drivers/antigravity/recorder.suite.ts` runs
+  rename) is overwritten. So is a refresh another recorder run puts back in
+  the same moment, if something kills this run's holder between its
+  comparison and its rename; the release then shows the lock lost, and this
+  run keeps its own refresh in its recovery file too.
+  `test/drivers/antigravity/recorder.suite.ts` runs
   a second recorder run at the first run's comparison, with the same `HOME`;
   both refreshes survive. The Claude recorder's copy-back takes Claude
   Code's own lock (see "How Claude Code finds the sign-in").
@@ -1407,6 +1414,17 @@ sign-in, before it starts `codex` ("How Codex finds the sign-in").
   (`test/recordings/codex/sign-in-lock.ts` and `test/recordings/flock.ts`),
   from Node and Bun alike. When
   `flock` does not run, the recorder stops before it starts `codex`.
+- How the holder fails closed. `flock --no-fork` takes the lock, then
+  becomes a shell that runs only builtins (`read`, `[`, `echo`, `exit`), so
+  the shell itself holds the lock for as long as it lives, and no command it
+  runs can fail and end it. It says `held` only after it read the recorder's
+  `ready` line, and `released` only after it read the recorder's `release`
+  line, then exits 0. So a holder that says `released` held the lock from
+  `held` until the release. When it does not say `released` and exit 0, the
+  lock may have been lost, and a refresh the recorder already wrote back
+  goes to the recovery file as well. `test/recordings/flock.test.ts` runs
+  the holder with only `flock` and `sh` on `PATH`, and with a holder that
+  ends before it is told to let go.
 - The window that remains: a program that ignores the locks can still write
   between comparison and replacement. The locks do not serialize manual
   edits to the link chain. The recorder checks the resolved path again just

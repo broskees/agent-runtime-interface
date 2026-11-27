@@ -33,7 +33,7 @@ import type { Frame, RecordingSource } from "../format.ts";
 import { writeRecording } from "../format.ts";
 import { copyCredentialFile, keepRefreshedCopy, returnCredentialFile } from "../credential-file.ts";
 import type { CopiedCredentialFile } from "../credential-file.ts";
-import { holdFlock } from "../flock.ts";
+import { FlockLostError, holdFlock } from "../flock.ts";
 import type { HeldFlock } from "../flock.ts";
 import { CredentialsKeptError, RecordingNotWrittenError } from "../recovery.ts";
 import { createSanitiser } from "../sanitiser.ts";
@@ -293,8 +293,11 @@ export const ANTIGRAVITY_SIGN_IN_LOCK_WAIT_MS = 30_000;
  * its replace. The run that comes second finds the file changed and keeps its
  * refresh in its recovery file. An unchanged copy takes no lock. When the
  * lock cannot be taken (`flock` does not run, or another run held it for
- * `waitMs`), the refresh goes to the recovery file too. It throws as
- * returnCredentialFile throws.
+ * `waitMs`), the refresh goes to the recovery file too. When the lock may
+ * have been lost before the recorder let go (its holder did not answer the
+ * release, ../flock.ts), the refresh was written back but goes to the
+ * recovery file as well, since another run may have written the file in
+ * between. It throws as returnCredentialFile throws.
  */
 export async function returnAntigravitySignIn(credential: CopiedCredentialFile, env: { readonly [name: string]: string | undefined }, waitMs = ANTIGRAVITY_SIGN_IN_LOCK_WAIT_MS): Promise<void> {
   if (!fs.existsSync(credential.copy)) return;
@@ -310,11 +313,22 @@ export async function returnAntigravitySignIn(credential: CopiedCredentialFile, 
     return keepRefreshedCopy(credential, refreshed, `the recorder could not lock ${folder} to write the sign-in agy refreshed back to ${credential.real} (${error instanceof Error ? error.message : String(error)})`);
   }
   if (lock === undefined) return keepRefreshedCopy(credential, refreshed, `another recorder run held its lock on ${folder} for ${waitMs / 1000} s, so the recorder did not write the sign-in agy refreshed back to ${credential.real}`);
+  let failure: { readonly error: unknown } | undefined;
   try {
     returnCredentialFile(credential, "agy");
-  } finally {
-    await lock.release();
+  } catch (error) {
+    failure = { error };
   }
+  let lost: string | undefined;
+  try {
+    await lock.release();
+  } catch (error) {
+    lost = error instanceof FlockLostError ? error.why : error instanceof Error ? error.message : String(error);
+  }
+  // The copy-back kept the refresh elsewhere, or failed: that outcome stands, lock or not.
+  if (failure !== undefined) throw failure.error;
+  // It wrote the refresh back, but maybe without the lock: another run may have put its own refresh back meanwhile, and this one went over it.
+  if (lost !== undefined) keepRefreshedCopy(credential, refreshed, `the recorder wrote the sign-in agy refreshed back to ${credential.real}, but the lock on ${folder} may have been lost before it let go (${lost}), so another recorder run may have written the file meanwhile`);
 }
 
 /** Accept only the literal marker command; omission of Cwd needs a guard at execution. */

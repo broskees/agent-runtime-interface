@@ -619,12 +619,24 @@ test("a live run without the user's sign-in file stops before it starts agy, nam
 });
 
 test("a temp workspace inside the user's home stops the run before it starts agy: agy reads AGENTS.md, GEMINI.md and .agents/ in the folders above its own", async () => {
-  // A home that holds the system temp directory, and so every workspace the recorder makes.
-  const home = path.dirname(fs.realpathSync(os.tmpdir()));
-  const { outcomes, fake } = await recordWithFake({ HOME: home }, ["simple", "multi_turn"]);
+  // A home that holds TMPDIR, and so every workspace the recorder makes, wherever the system temp directory is.
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(DIRECTORY, "home-")));
+  const tmp = path.join(home, "tmp");
+  fs.mkdirSync(tmp);
+  const { outcomes, fake } = await withTmpdir(tmp, () => recordWithFake({ HOME: home }, ["simple", "multi_turn"]));
   assert.equal(outcomes.length, 1, "the run stopped");
+  assert.ok(outcomes[0]!.workspace.startsWith(`${tmp}${path.sep}`), `the workspace was made in TMPDIR: ${outcomes[0]!.workspace}`);
   assert.ok(outcomes[0]!.error instanceof AntigravityWorkspaceInHomeError, outcomes[0]!.error?.message);
   assert.ok(outcomes[0]!.error!.message.includes(`inside your home ${home}`));
+  assert.deepEqual(fake.processes(), [], "agy never started");
+  assert.ok(!fs.existsSync(outcomes[0]!.workspace));
+});
+
+test("a home of / holds every temp workspace, so it stops the run before it starts agy", async () => {
+  const { outcomes, fake } = await recordWithFake({ HOME: "/" }, ["simple", "multi_turn"]);
+  assert.equal(outcomes.length, 1, "the run stopped");
+  assert.ok(outcomes[0]!.error instanceof AntigravityWorkspaceInHomeError, outcomes[0]!.error?.message);
+  assert.ok(outcomes[0]!.error!.message.includes("inside your home /, and"));
   assert.deepEqual(fake.processes(), [], "agy never started");
   assert.ok(!fs.existsSync(outcomes[0]!.workspace));
 });

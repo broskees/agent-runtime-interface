@@ -77,7 +77,7 @@ function startOwner(nodeArgs: readonly string[], agentKinds: readonly FakeAgentK
 
 async function startAgent(service: ProcessService, kind: FakeAgentKind, agents: RecordedAgent[]) {
   const child = await service.spawn({ command: "/bin/sh", args: fakeAgentArgs(kind), purpose: "runtime" });
-  const [agent] = recordAgents(agents, [{ pid: child.pid!, grandchildPid: Number(await readFirstLine(child.stdout)) }]);
+  const [agent] = await recordAgents(agents, [{ pid: child.pid!, grandchildPid: Number(await readFirstLine(child.stdout)) }]);
   return { child, agent: agent! };
 }
 
@@ -96,7 +96,7 @@ describe("agents end when their owner dies, and not before", () => {
     const agents: RecordedAgent[] = [];
     try {
       const line = await readFirstLine(owner.stdout).catch((error: Error) => assert.fail(`${error.message}; owner stderr: ${stderr()}`));
-      recordAgents(agents, JSON.parse(line) as Array<{ pid: number; grandchildPid: number }>);
+      await recordAgents(agents, JSON.parse(line) as Array<{ pid: number; grandchildPid: number }>);
       assert.equal(agents.length, 2);
 
       const killedAt = Date.now();

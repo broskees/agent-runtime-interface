@@ -81,7 +81,7 @@ test("a delegated child whose host spawn resolves after the close handler ran is
         await gate;
       }
       const child = await service.spawn({ command: request.command, args: [...(request.args ?? [])] });
-      recordAgents(agents, [{ pid: child.pid!, grandchildPid: Number(await readFirstLine(child.stdout)) }]);
+      await recordAgents(agents, [{ pid: child.pid!, grandchildPid: Number(await readFirstLine(child.stdout)) }]);
       if (index === 1) lateStarted = true;
       const counted: SpawnedProcess = {
         pid: child.pid,

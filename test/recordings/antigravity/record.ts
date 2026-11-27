@@ -218,6 +218,12 @@ export class AntigravityWorkspaceInHomeError extends Error {
   }
 }
 
+/** Whether `directory` lies below `folder`, for any folder, `/` included. */
+function isInsideFolder(directory: string, folder: string): boolean {
+  const relative = path.relative(folder, directory);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
 /** What Antigravity reads as the rules and customizations of the folder it works in and of each parent folder up to its repository's root ("Customization discovery"). */
 export const ANTIGRAVITY_WORKSPACE_CUSTOMIZATIONS = ["AGENTS.md", "GEMINI.md", ".agents"] as const;
 
@@ -377,7 +383,7 @@ async function recordOne(scenario: Scenario, options: RecordAntigravityOptions):
     const home = options.env["HOME"]?.trim();
     if (home !== undefined && home !== "") {
       const homes = new Set([home, fs.existsSync(home) ? fs.realpathSync(home) : home]);
-      for (const each of homes) if (layout.root.startsWith(`${each}${path.sep}`)) throw new AntigravityWorkspaceInHomeError(layout.root, home);
+      for (const each of homes) if (isInsideFolder(layout.root, each)) throw new AntigravityWorkspaceInHomeError(layout.root, home);
     }
     const above = customizationsAbove(layout.root);
     if (above.length > 0) throw new AntigravityWorkspaceCustomizedError(layout.root, above);

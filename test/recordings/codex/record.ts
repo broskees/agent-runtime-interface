@@ -235,6 +235,12 @@ export class CodexWorkspaceInHomeError extends Error {
   }
 }
 
+/** Whether `directory` lies below `folder`, for any folder, `/` included. */
+function isInsideFolder(directory: string, folder: string): boolean {
+  const relative = path.relative(folder, directory);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
 /** What Codex reads as the instructions and configuration of the folder it works in and of each parent folder up to the project root (codex-rs/core/src/agents_md.rs:7–18). */
 export const CODEX_WORKSPACE_CUSTOMIZATIONS = ["AGENTS.md", "AGENTS.override.md", ".codex", ".agents"] as const;
 
@@ -428,7 +434,7 @@ async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promi
     const home = options.env["HOME"]?.trim();
     if (home !== undefined && home !== "") {
       const homes = new Set([home, fs.existsSync(home) ? fs.realpathSync(home) : home]);
-      for (const each of homes) if (layout.root.startsWith(`${each}${path.sep}`)) throw new CodexWorkspaceInHomeError(layout.root, home);
+      for (const each of homes) if (isInsideFolder(layout.root, each)) throw new CodexWorkspaceInHomeError(layout.root, home);
     }
     const above = customizationsAbove(layout.root);
     if (above.length > 0) throw new CodexWorkspaceCustomizedError(layout.root, above);

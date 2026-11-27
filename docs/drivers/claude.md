@@ -133,8 +133,8 @@ with the same handling of a refreshed sign-in, and fails when your
 `settings.json`, `CLAUDE.md`, `~/.claude.json` or installed Claude executable changed. Without
 `ARI_LIVE_RECORD=1` it exits 2 before it loads the driver or starts a process.
 The [standalone issue's live follow-up](../issues/2026-11-25-standalone-ari-driver-cannot-run-claude.md#resolution)
-records a completed `ok` turn with an external Claude Code and the separate
-smoke-script failure that prevented the live driver-death check.
+records a completed `ok` turn with an external Claude Code and a separate
+check in which Claude Code and its process group ended after the driver died.
 
 The Claude Agent SDK builds the command and exchanges messages over stdin
 and stdout. ARI starts that command through the host process service, including

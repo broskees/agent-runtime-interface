@@ -186,7 +186,12 @@ event: {"type":"turn.terminal","status":"completed"}
 
 The named user files and installed CLI were unchanged. The smoke script
 incorrectly rejected the reply because the settling patch omitted `kind`.
-The script now folds the item patches before checking the reply. It did not
-retry the live turn or run the separate live driver-death check. The sanitized
-transcript is in the plan's `reports/phase-2/live-exact-3.log`, SHA-256
+The script now folds the item patches before checking the reply. The host
+accepted the recorded result without rerunning the turn. The sanitized exact
+reply is in the plan's `reports/phase-2/live-exact-3.log`, SHA-256
 `bb319ef81e94a1e6b756bbbfde2d21c49b5df781a801cef60fb2bc13d490028c`.
+
+The separate driver-death check used a standalone rebuilt from `b1c0ee1`.
+Claude Code and its process group were gone 2,029 ms after `ari-driver`
+received SIGKILL. The controller exited 0, the watched values matched, and
+the sign-in did not refresh. See the [sanitized transcript](../../reports/phase-2/live-death-3.log).

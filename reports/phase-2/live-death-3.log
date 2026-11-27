@@ -1,0 +1,33 @@
+live-claude-standalone: before: sha256 a257673089c606bfc2afd94d65ae683f84947dd9db91901e592a63b81750269d  ~/.claude/settings.json  ~/.claude/settings.json
+live-claude-standalone: before: sha256 9e07810d6cc83bf2ba9be0709948af53cf2a5d19100e2e9a957ce0cf1736bdb4  ~/.claude.json  ~/.claude.json
+live-claude-standalone: before: sha256 missing  ~/.claude/CLAUDE.md
+live-claude-standalone: before: sha256 dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed  ~/.local/share/mise/installs/claude/2.1.319/claude  ~/.local/share/mise/installs/claude/latest/claude
+live-claude-standalone: workspace $WORKSPACE
+live-claude-standalone: PATH $WORKSPACE/bin: 3356 programs from /usr/local/bin and /usr/bin, none of node, nodejs, npm, npx, corepack, pnpm, yarn, bun, bunx
+live-claude-standalone: Claude Code on the isolated PATH: $VERIFIED_CLI
+live-claude-standalone: starting $STANDALONE claude, config {"model":"haiku","settingSources":[],"sdkRegistry":"https://registry.npmjs.org"}
+live-claude-standalone: instance/status before the install: {"state":"unavailable","installed":false,"error":{"code":"driver_unavailable","message":"The Claude Agent SDK (@anthropic-ai/claude-agent-sdk) is not installed for this standalone ari-driver, which cannot load a package by name. Run maintenance.install on this instance to download the Claude Agent SDK, or set sdkDirectory in the driver config to a directory where @anthropic-ai/claude-agent-sdk is installed.","package":"@anthropic-ai/claude-agent-sdk","installHint":"Run maintenance.install on this instance to download the Claude Agent SDK, or set sdkDirectory in the driver config to a directory where @anthropic-ai/claude-agent-sdk is installed."}}
+live-claude-standalone: maintenance.install finished in 0.5 s
+live-claude-standalone: registry https://registry.npmjs.org: installed only @anthropic-ai/claude-agent-sdk@0.3.330
+live-claude-standalone: installed in $WORKSPACE/host/instances/claude-recorder/cache/adapters/@anthropic-ai/claude-agent-sdk/0.3.330: 30 files
+live-claude-standalone:   package.json: 2822 bytes, sha256 6ba327d25874c770884bc608783bbc8b30c75c0f50aa33af0e0f86b69aaf6bc0
+live-claude-standalone:   sdk.mjs: 1462103 bytes, sha256 bd73eccc325886831bfb367ccfa4bf06c16407f545dae88112edf089fce5d815
+live-claude-standalone: instance/status after the install: {"state":"ready","installed":true,"version":"0.3.330","auth":{"status":"authenticated","evidence":"active","scope":"ambient"},"nativeSessions":{"list":true,"delete":true,"archive":true}}
+live-claude-standalone: event: {"type":"capabilities.updated"}
+live-claude-standalone: event: {"type":"session.state"}
+live-claude-standalone: event: {"type":"thread.upsert"}
+live-claude-standalone: reserved live attempt 2/2 in $ATTEMPT_DIR/2-driver-death.attempted
+live-claude-standalone: turn: "Reply with exactly the word: ok" on haiku
+live-claude-standalone: event: {"type":"thread.upsert"}
+live-claude-standalone: startTurn: {"status":"accepted","accepted":"started"}
+live-claude-standalone: SIGKILL ari-driver pid 3422349; Claude Code pid 3422401, group 3422401, from /proc
+live-claude-standalone: event: {"type":"turn.upsert"}
+live-claude-standalone: event: {"type":"item.upsert","kind":"user_message","status":"completed"}
+live-claude-standalone: event: {"type":"turn.terminal","status":"failed","failure":"transport_error"}
+live-claude-standalone: Claude Code pid 3422401 and group 3422401 gone within 2029 ms
+live-claude-standalone: Claude Code did not change the sign-in
+live-claude-standalone: after:  sha256 a257673089c606bfc2afd94d65ae683f84947dd9db91901e592a63b81750269d  ~/.claude/settings.json  ~/.claude/settings.json (unchanged)
+live-claude-standalone: after:  sha256 9e07810d6cc83bf2ba9be0709948af53cf2a5d19100e2e9a957ce0cf1736bdb4  ~/.claude.json  ~/.claude.json (unchanged)
+live-claude-standalone: after:  sha256 missing  ~/.claude/CLAUDE.md (unchanged)
+live-claude-standalone: after:  sha256 dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed  ~/.local/share/mise/installs/claude/2.1.319/claude  ~/.local/share/mise/installs/claude/latest/claude (unchanged)
+live-claude-standalone: passed: SDK 0.3.330 installed and the Claude Code group ended through $STANDALONE

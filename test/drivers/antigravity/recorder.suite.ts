@@ -30,6 +30,7 @@ import { SCENARIOS } from "../../recordings/scenarios.ts";
 import { FAKE_AGY_MODELS, fakeAgyOnPath } from "./fake-agy.ts";
 import type { FakeAgy } from "./fake-agy.ts";
 import { antigravitySetupSources, loadedAntigravitySetup } from "./user-setup.ts";
+import type { ChildRecordOutcome } from "./record-in-child.ts";
 
 const DIRECTORY = fs.mkdtempSync(path.join(os.tmpdir(), "ari-antigravity-recorder-"));
 process.on("exit", () => fs.rmSync(DIRECTORY, { recursive: true, force: true }));
@@ -407,6 +408,70 @@ test("refreshed sign-ins that cannot go back in two scenarios both survive in th
   assert.equal(first.outcomes[0]!.recoveryFile, kept);
   assert.equal(second.outcomes[0]!.recoveryFile, kept);
   assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ANTIGRAVITY_SIGN_IN_FILE, value: "refreshed-2", olderValues: ["refreshed-1"] }]);
+});
+
+/** Every sign-in value the user can still find: their sign-in file's, and each one in a recovery file of any recorder run beside it. */
+function survivingSignIns(signIn: string): string[] {
+  const folder = path.dirname(signIn);
+  const recoveryFiles = fs.readdirSync(folder).filter((name) => name.startsWith(`${path.basename(signIn)}.ari-recorder-refreshed-`) && name.endsWith(".json"));
+  const kept = recoveryFiles.flatMap((name) => (JSON.parse(fs.readFileSync(path.join(folder, name), "utf8")) as Array<{ value: string; olderValues?: string[] }>).flatMap((record) => [record.value, ...(record.olderValues ?? [])]));
+  return [fs.readFileSync(signIn, "utf8"), ...kept];
+}
+
+const RECORD_IN_CHILD = path.join(REPO_ROOT, "test", "drivers", "antigravity", "record-in-child.ts");
+
+test("two recorder runs that share the user's sign-in, each refreshing it, keep both refreshes when the second run puts its refresh back between the first run's comparison of the user's file and its replace", async () => {
+  const { env, signIn } = seedHome();
+  const refreshedByFirst = JSON.stringify({ token: { access_token: "fake-access-first-run", refresh_token: "fake-refresh-first-run" }, auth_method: "consumer" });
+  const refreshedBySecond = JSON.stringify({ token: { access_token: "fake-access-second-run", refresh_token: "fake-refresh-second-run" }, auth_method: "consumer" });
+  const secondFake = fakeAgyOnPath(DIRECTORY);
+  const secondOptions = {
+    outDir: fs.mkdtempSync(path.join(DIRECTORY, "out-")),
+    env: { PATH: `${secondFake.bin}${path.delimiter}${process.env["PATH"] ?? "/usr/bin:/bin"}`, USER: "ari-test-user", ...secondFake.env, ...env, ARI_FAKE_AGY_REFRESH: refreshedBySecond },
+    timeoutMs: 20_000,
+    // The first run holds on at its comparison until the second run ends, so the second gives up waiting for the sign-in lock after 1 s rather than 30.
+    signInLockWaitMs: 1_000,
+  };
+  const original = Buffer.from(SIGN_IN);
+  let secondRun: { status: number | null; stdout: string; stderr: string } | undefined;
+  // The copy-back compares the user's file with the sign-in it copied, and replaces the file only when they are the same. At the moment the first
+  // run finds them the same, the second run (same HOME, its own fake agy and workspace) records in a process of its own, runtime as this test's,
+  // and finishes before the first run goes on. Buffer.prototype is shared by every module under Node and Bun alike, so this needs no module patch.
+  const realEquals = Buffer.prototype.equals;
+  Buffer.prototype.equals = function (this: Buffer, other: Uint8Array): boolean {
+    const same = realEquals.call(this, other);
+    if (secondRun === undefined && same && realEquals.call(this, original)) {
+      secondRun = spawnSync(process.execPath, [RECORD_IN_CHILD, JSON.stringify(secondOptions)], { encoding: "utf8", timeout: 120_000 });
+    }
+    return same;
+  };
+  let first;
+  try {
+    first = await recordWithFake({ ...env, ARI_FAKE_AGY_REFRESH: refreshedByFirst }, ["simple"]);
+  } finally {
+    Buffer.prototype.equals = realEquals;
+  }
+  assert.ok(secondRun !== undefined, "the second run recorded while the first run compared the user's sign-in file with the sign-in it copied");
+  assert.equal(secondRun.status, 0, `the second run's process: ${secondRun.stderr}`);
+  const [secondOutcome] = JSON.parse(secondRun.stdout) as ChildRecordOutcome[];
+  const [firstOutcome] = first.outcomes;
+  const runs = [
+    { name: "the first run", refreshed: refreshedByFirst, workspace: firstOutcome!.workspace, recoveryFile: firstOutcome!.recoveryFile, error: firstOutcome!.error?.message },
+    { name: "the second run", refreshed: refreshedBySecond, workspace: secondOutcome!.workspace, recoveryFile: secondOutcome!.recoveryFile, error: secondOutcome!.error?.message },
+  ];
+  const surviving = survivingSignIns(signIn);
+  const report = JSON.stringify({ signIn: fs.readFileSync(signIn, "utf8"), surviving, runs });
+  for (const run of runs) {
+    assert.ok(surviving.includes(run.refreshed), `${run.name}'s refreshed sign-in survives in the user's file or a recovery file: ${report}`);
+    if (fs.readFileSync(signIn, "utf8") !== run.refreshed) {
+      assert.ok(run.recoveryFile !== undefined, `${run.name} says where it kept its refresh: ${report}`);
+      assert.ok((JSON.parse(fs.readFileSync(run.recoveryFile, "utf8")) as Array<{ value: string }>).some((record) => record.value === run.refreshed), `${run.name}'s recovery file holds its refresh: ${report}`);
+    }
+    assert.ok(!fs.existsSync(run.workspace), `${run.name}'s workspace is removed: ${report}`);
+  }
+  const folder = path.dirname(signIn);
+  assert.deepEqual(fs.readdirSync(folder).filter((name) => name.includes(".ari-recorder-") && !/\.ari-recorder-refreshed-\d+\.json$/.test(name)), [], "no staged file is left beside the user's sign-in");
+  assert.equal(spawnSync("flock", ["--exclusive", "--nonblock", folder, "true"]).status, 0, "nobody holds a lock on the sign-in's folder afterwards");
 });
 
 test("when the recorder cannot write a refreshed sign-in back, it keeps it in the recovery file beside the user's file and says where", async () => {

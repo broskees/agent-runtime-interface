@@ -200,7 +200,7 @@ export function createAcpRegistryDriver(options: AcpRegistryDriverOptions = {}):
           if ("reason" in installable) throw callErrors.invalidState("distribution_unsupported", installable.reason);
           const installer = flavorInstaller(
             context.host.paths.cacheDir,
-            archiveFetch(fetchImplementation, { pkg: agent.id, version: agent.version, url: installable.build.archive, algorithm: "sha256", digest: installable.build.sha256 ?? "" }),
+            archiveFetch(fetchImplementation, { pkg: agent.id, version: agent.version, url: installable.build.archive, sha256: installable.build.sha256 ?? "" }),
           );
           await installer.install(agent.id, agent.version);
           selections.set(context, { agentId: agent.id, agentVersion: agent.version });

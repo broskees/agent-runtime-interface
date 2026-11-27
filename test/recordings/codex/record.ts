@@ -31,6 +31,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { codexDriver } from "../../../src/drivers/codex/index.ts";
 import type { ModelInfo } from "../../../src/generated/instance.ts";
+import type { Request } from "../../../src/generated/request.ts";
 import { createProcessService } from "../../../src/node/process.ts";
 import type { ProcessService } from "../../../src/node/process.ts";
 import { CODEX_SOURCE } from "../../../scripts/codegen-codex.ts";
@@ -385,6 +386,16 @@ export async function returnCodexSignIn(credential: CopiedCodexSignIn, env: { re
   }
 }
 
+/** Codex reports the command as one string, sometimes wrapped in a shell invocation. Never parse or execute it here. */
+export function isCodexMarkerApproval(request: Pick<Request, "kind" | "subject">, scenario: Scenario, cwd: string): boolean {
+  if (scenario.name !== "approval_allowed" || scenario.command === undefined || request.kind !== "command" || request.subject?.cwd !== cwd) return false;
+  const command = request.subject.command;
+  if (command?.length !== 1) return false;
+  const singleQuoted = `'${scenario.command.replaceAll("'", "'\\''")}'`;
+  const doubleQuoted = `"${scenario.command.replace(/["\\$`]/g, "\\$&")}"`;
+  return command[0] === scenario.command || ["/usr/bin/bash -lc", "/bin/bash -lc", "/bin/bash -c", "/bin/sh -c"].some((shell) => command[0] === `${shell} ${singleQuoted}` || command[0] === `${shell} ${doubleQuoted}`);
+}
+
 async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promise<CodexRecordOutcome> {
   const log = options.log ?? (() => undefined);
   const layout = createCodexLayout(`ari-codex-record-${scenario.name}-`);
@@ -419,7 +430,15 @@ async function recordOne(scenario: Scenario, options: RecordCodexOptions): Promi
     const tap = tapProcess(service, (frame) => frames.push(frame));
     let run;
     try {
-      ({ run } = await runCodexScenario({ scenario, layout, process: tap.process, model, timeoutMs: options.timeoutMs ?? 300_000 }));
+      let approved = false;
+      ({ run } = await runCodexScenario({
+        scenario, layout, process: tap.process, model, timeoutMs: options.timeoutMs ?? 300_000,
+        ...(options.source !== "live" ? {} : { mayApprove: (request: Request) => {
+          if (approved || !isCodexMarkerApproval(request, scenario, layout.cwd)) return false;
+          approved = true;
+          return true;
+        } }),
+      }));
     } finally {
       if (!(await tap.settled(10_000))) failed(new Error(`a codex process of scenario ${scenario.name} was still running, or its output still open, 10 s after the driver closed its sessions`));
     }

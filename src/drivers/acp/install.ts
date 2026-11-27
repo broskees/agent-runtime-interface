@@ -1,9 +1,9 @@
-// Managed installs for the ACP flavors that install their agent
-// (`acp-registry` and `antigravity`). They go through `ari/node`'s adapter
-// installer, which unpacks a tarball into `<cacheDir>/adapters/<pkg>/<version>`
-// atomically and keeps leased versions; it never runs npx or any other
-// program. This module only supplies the tarball: it downloads one archive
-// URL and checks it against the digest its publisher gave.
+// Managed installs for the ACP flavor that installs its agents
+// (`acp-registry`). They go through `ari/node`'s adapter installer, which
+// unpacks a tarball into `<cacheDir>/adapters/<pkg>/<version>` atomically and
+// keeps leased versions; it never runs npx or any other program. This module
+// only supplies the tarball: it downloads one archive URL and checks it
+// against the sha256 its publisher gave.
 
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -31,27 +31,24 @@ async function* readBody(body: ReadableStream<Uint8Array>): AsyncGenerator<Uint8
   }
 }
 
-/** Passes `chunks` through and, at the end, fails unless their digest is `expected` (hex). */
-async function* checked(chunks: AsyncIterable<Uint8Array>, algorithm: "sha256" | "sha512", expected: string, label: string): AsyncGenerator<Uint8Array> {
-  const hash = createHash(algorithm);
+/** Passes `chunks` through and, at the end, fails unless their sha256 is `expected` (hex). */
+async function* checked(chunks: AsyncIterable<Uint8Array>, expected: string, label: string): AsyncGenerator<Uint8Array> {
+  const hash = createHash("sha256");
   for await (const chunk of chunks) {
     hash.update(chunk);
     yield chunk;
   }
-  if (hash.digest("hex") !== expected.toLowerCase()) throw callErrors.protocol("integrity_mismatch", `The archive of ${label} does not match its published ${algorithm} digest`);
+  if (hash.digest("hex") !== expected.toLowerCase()) throw callErrors.protocol("integrity_mismatch", `The archive of ${label} does not match its published sha256 digest`);
 }
 
-/** A tarball source for one known archive of one version, checked against its digest. */
-export function archiveFetch(
-  fetchImplementation: FetchFunction,
-  archive: { readonly pkg: string; readonly version: string; readonly url: string; readonly algorithm: "sha256" | "sha512"; readonly digest: string },
-): TarballFetch {
+/** A tarball source for one known archive of one version, checked against its sha256. */
+export function archiveFetch(fetchImplementation: FetchFunction, archive: { readonly pkg: string; readonly version: string; readonly url: string; readonly sha256: string }): TarballFetch {
   return async ({ pkg, version, signal }) => {
     const label = `${pkg}@${version}`;
     if (pkg !== archive.pkg || version !== archive.version) throw callErrors.notFound({ resource: "archive", id: label });
     const response = await fetchImplementation(archive.url, signal === undefined ? {} : { signal });
     if (!response.ok || response.body === null) throw callErrors.transport(`The download of ${label} answered ${response.status}`);
-    return checked(readBody(response.body), archive.algorithm, archive.digest, label);
+    return checked(readBody(response.body), archive.sha256, label);
   };
 }
 

@@ -4,15 +4,19 @@
 // the driver unavailable naming the package, and openSession rejects with
 // driver_unavailable; with the `muse` binary missing, they name the binary;
 // with both present, status() reports the version found, and a version
-// outside the tested range gets an advisory. The child-process checks run the
-// driver's real loader, with every child_process entry point trapped.
+// above the tested range gets an advisory, while a `muse` below the minimum
+// is driver_unavailable naming its update step. The child-process checks run
+// the driver's real loader, with every child_process entry point trapped.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { describe, test } from "node:test";
+import { createMemoryProcess } from "../../../src/conformance/index.ts";
 import { isAriError } from "../../../src/index.ts";
 import { loadMuseSdk } from "../../../src/drivers/muse/index.ts";
-import { MUSE_SDK_PACKAGE, MUSE_TESTED_VERSIONS } from "../../../src/meta/muse.ts";
+import { MUSE_CLI_UPDATE_STEP, MUSE_MINIMUM_VERSION, MUSE_SDK_PACKAGE, MUSE_TESTED_VERSIONS } from "../../../src/meta/muse.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { museRig } from "./rig.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
@@ -151,4 +155,59 @@ result = { status, probe: { ok: probe.ok, installed: probe.installed, error: pro
       await sdk.cleanup();
     }
   });
+
+  test("a muse CLI older than the minimum is refused: status() is driver_unavailable naming the version, the path, the minimum and the installer that updates it; openSession rejects the same way and no muse serve starts", async () => {
+    await checkRealVersionOutput();
+    for (const version of ["1.4.24", "1.4.7"]) {
+      const rig = await museRig({ fake: { version } });
+      try {
+        const status = await rig.instance.status();
+        assert.equal(status.state, "unavailable");
+        assert.equal(status.installed, true);
+        assert.equal(status.version, version);
+        assert.equal(status.advisory, undefined);
+        assert.equal(status.error?.code, "driver_unavailable");
+        const error = status.error as { message: string; binary?: string; installHint?: string };
+        assert.equal(error.message, `Muse Code ${version} (/usr/local/bin/muse) is older than ${MUSE_MINIMUM_VERSION}, the oldest version this driver supports. ${MUSE_CLI_UPDATE_STEP}`);
+        assert.equal(error.binary, "muse");
+        assert.equal(error.installHint, "Update Muse Code by running its installer again: `curl -fsSL https://dev.meta.ai/install.sh | bash`.");
+        assert.deepEqual((await rig.instance.probe()).error, status.error);
+        await assert.rejects(rig.instance.openSession({}), (rejection) => isAriError(rejection, "driver_unavailable") && rejection.message === error.message);
+        assert.deepEqual(
+          rig.host.spawns.map((spawn) => [spawn.command, ...(spawn.args ?? [])]),
+          [
+            ["muse", "--version"],
+            ["muse", "--version"],
+            ["muse", "--version"],
+          ],
+          "only muse --version ran",
+        );
+      } finally {
+        await rig.cleanup();
+      }
+    }
+  });
+
+  async function checkRealVersionOutput(): Promise<void> {
+    const output = fs.readFileSync(path.join(REPO_ROOT, "test", "fixtures", "cli-version-output", "muse.txt"), "utf8");
+    const rig = await museRig({
+      host: {
+        spawn: async () => {
+          const memory = createMemoryProcess({ onStdin() {}, onStdinClosed() {}, onKill() {} });
+          queueMicrotask(() => {
+            memory.stdout(output);
+            memory.exit(0, null);
+          });
+          return memory.process;
+        },
+      },
+    });
+    try {
+      const probe = await rig.instance.probe();
+      assert.equal(probe.version, "1.4.7");
+      assert.equal(probe.error?.code, "driver_unavailable", "the actual captured version is below the minimum");
+    } finally {
+      await rig.cleanup();
+    }
+  }
 });

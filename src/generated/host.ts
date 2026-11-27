@@ -60,8 +60,10 @@ export type ProcessExit = {
 
 export type ResolveExecutableInput = {
   name: string;
-  /** A PATH-style list of directories to search instead of the host default. */
+  /** A PATH-style list of directories to search instead of the host default when `env` is not supplied. */
   path?: string;
+  /** Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`. */
+  env?: { [key: string]: string };
 };
 
 /** Secrets are addressed by namespace and key. Neither may contain `..` or `/`. */
@@ -274,7 +276,14 @@ export const hostDocument: SchemaDocument = {
         },
         "path": {
           "type": "string",
-          "description": "A PATH-style list of directories to search instead of the host default."
+          "description": "A PATH-style list of directories to search instead of the host default when `env` is not supplied."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`."
         }
       },
       "required": [

@@ -7,8 +7,16 @@ First version of the Muse Code driver.
 - Speaks the Muse Session Protocol with the `Connection` of `@muse-code/sdk`
   (optional peer `^1.4.25`, loaded with a dynamic `import()`), over `muse
   serve` processes the host spawns, one per thread. Tested against Muse Code
-  and `@muse-code/sdk` `>=1.4.25 <1.4.26`; other versions get an
-  `untested_version` advisory.
+  and `@muse-code/sdk` `>=1.4.25 <1.4.26`; an SDK outside it, or a newer
+  `muse`, gets an `untested_version` advisory.
+- Runs the `muse` the user installed and never downloads, installs or updates
+  one. A `muse` older than the minimum, 1.4.25 (the lower bound of the tested
+  range), is refused: `status()` is `unavailable` with `driver_unavailable`
+  and `openSession` rejects with it before any `muse serve` starts, naming the
+  version found, its path, the minimum and the update step, running Muse
+  Code's installer again (`curl -fsSL https://dev.meta.ai/install.sh | bash`).
+  Above the tested range a `muse` still runs, with an `untested_version`
+  advisory.
 - Threads: create (`session/start` with the driver's session id), resume
   (`session/resume`, with `session.replaced` when the session is missing or
   another host holds it; the running turn and the requests Muse re-issues

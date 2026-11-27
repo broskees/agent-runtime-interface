@@ -2,7 +2,8 @@
 // vendor package and spawns nothing; without `pi`, `create()` works,
 // `status()` names the binary to install and `openSession` rejects with
 // `driver_unavailable`; with `pi`, `status()` reports its version and an
-// advisory when it is outside the tested range. The last test runs the driver
+// advisory above the tested range, and a `pi` older than the minimum is
+// `driver_unavailable` naming `pi update`. The last test runs the driver
 // on real Node host services against a `pi` found on PATH, and type-checks
 // every frame that fake exchanged, read from its trace file.
 
@@ -13,8 +14,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createFakeHost } from "../../../src/conformance/index.ts";
-import { PI_TESTED_VERSIONS, piDriver } from "../../../src/drivers/pi/index.ts";
+import { createFakeHost, createMemoryProcess } from "../../../src/conformance/index.ts";
+import { PI_MINIMUM_VERSION, PI_TESTED_VERSIONS, PI_UPDATE_STEP, piDriver } from "../../../src/drivers/pi/index.ts";
 import { isAriError, toCallError } from "../../../src/index.ts";
 import type { AriEvent, Request } from "../../../src/index.ts";
 import { createCoordination, createNodeHostServices } from "../../../src/node/index.ts";
@@ -83,17 +84,18 @@ test("without pi, create() succeeds, status() names the binary, and openSession 
   assert.equal(host.spawns.length, 0);
 });
 
-test("with pi, status() reports its version, and an advisory only outside the tested range", async () => {
+test("with pi, status() reports its version: ready with no advisory at the minimum, and with an advisory above the tested range", async () => {
   const tested = await openPiTestRig();
   const inRange = await tested.instance.status();
   assert.equal(inRange.state, "ready");
-  assert.equal(inRange.version, "1.6.0");
+  assert.equal(inRange.version, PI_MINIMUM_VERSION);
   assert.equal(inRange.advisory, undefined);
   await tested.close();
 
-  for (const version of ["0.9.4", "2.0.0"]) {
+  for (const version of ["2.0.0", "2.3.1"]) {
     const untested = await openPiTestRig({ fakeVersion: version });
     const status = await untested.instance.status();
+    assert.equal(status.state, "ready");
     assert.equal(status.version, version);
     assert.equal(status.advisory?.kind, "untested_version");
     assert.equal(status.advisory?.currentVersion, version);
@@ -101,6 +103,56 @@ test("with pi, status() reports its version, and an advisory only outside the te
     await untested.close();
   }
 });
+
+test("a pi older than the minimum is refused: status() is driver_unavailable naming the version, the path, the minimum and `pi update`; openSession rejects the same way and pi never starts in RPC mode", async () => {
+  await checkRealVersionOutput();
+  for (const version of ["1.5.9", "0.9.4"]) {
+    const rig = await openPiTestRig({ fakeVersion: version });
+    try {
+      const status = await rig.instance.status();
+      assert.equal(status.state, "unavailable");
+      assert.equal(status.installed, true);
+      assert.equal(status.version, version);
+      assert.equal(status.advisory, undefined);
+      assert.equal(status.error?.code, "driver_unavailable");
+      const error = status.error as { message: string; binary?: string; installHint?: string };
+      assert.equal(error.message, `Pi ${version} (${FAKE_PI}) is older than ${PI_MINIMUM_VERSION}, the oldest version this driver supports. ${PI_UPDATE_STEP}`);
+      assert.equal(error.binary, "pi");
+      assert.equal(error.installHint, "Update pi with `pi update`.");
+      assert.deepEqual((await rig.instance.probe()).error, status.error);
+      await assert.rejects(rig.instance.openSession({}), (rejection: unknown) => isAriError(rejection, "driver_unavailable") && rejection.message === error.message);
+      assert.deepEqual(
+        rig.host.spawns.map((spawn) => spawn.args),
+        [["--version"], ["--version"], ["--version"]],
+        "only pi --version ran",
+      );
+    } finally {
+      await rig.close();
+    }
+  }
+});
+
+async function checkRealVersionOutput(): Promise<void> {
+  const output = fs.readFileSync(path.join(ROOT, "test", "fixtures", "cli-version-output", "pi.txt"), "utf8");
+  const host = createFakeHost({
+    config: piDriver.defaultConfig(),
+    resolveExecutable: async (name) => (name === "pi" ? "/usr/local/bin/pi" : null),
+    spawn: async () => {
+      const memory = createMemoryProcess({ onStdin() {}, onStdinClosed() {}, onKill() {} });
+      queueMicrotask(() => {
+        memory.stdout(output);
+        memory.exit(0, null);
+      });
+      return memory.process;
+    },
+  });
+  const instance = await piDriver.create(host, { instanceId: "pi-real-version", config: piDriver.defaultConfig(), environment: {} });
+  const probe = await instance.probe();
+  assert.equal(probe.version, "1.6.0");
+  assert.equal(probe.ok, true);
+  assert.equal(probe.error, undefined);
+  await instance.dispose();
+}
 
 test("on real Node host services, the driver finds pi on PATH and completes a turn with an approval", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-pi-node-")));

@@ -18,8 +18,9 @@ const EXPECTED_RECORDINGS: { readonly [source: string]: number } = {
   // One harness per conformance run, shared by its 15 scenarios: the base over v1 and over v2, and the five flavors.
   "test/drivers/acp/conformance-suite.ts": 7,
   // Per driver: the optional members, the missing agent, the status (2 for a release range, 1 for the protocol range),
-  // the protocol advisory, resume instructions (2), no driver text, host instructions (2). Four release-range drivers and two protocol-range ones: 4 × 10 + 2 × 9.
-  "test/drivers/acp/driver-rules.ts": 58,
+  // for a release range a CLI below the minimum and the real --version output (1 each), the protocol advisory, resume
+  // instructions (2), no driver text, host instructions (2). Four release-range drivers and two protocol-range ones: 4 × 12 + 2 × 9.
+  "test/drivers/acp/driver-rules.ts": 66,
   "test/drivers/acp/protocol.suite.ts": 24,
   "test/drivers/acp/standalone.suite.ts": 4,
   "test/drivers/antigravity/antigravity.suite.ts": 7,

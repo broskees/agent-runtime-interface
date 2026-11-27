@@ -220,12 +220,34 @@ image URL becomes its URI.
   drops them from the instance's own environment, so only credentials the
   instance configured reach Pi.
 
+## The user's own `pi`, and its minimum
+
+ARI runs the `pi` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. The minimum is Pi
+1.6.0, the lower bound of the tested range `>=1.6.0 <2.0.0`. With an older
+`pi`, `status()` is `unavailable` with `driver_unavailable` (with `installed:
+true` and the version found), and `openSession` rejects with the same error
+before any Pi process starts in RPC mode: the only process that runs is `pi
+--version`. The error names the version found, the path, the minimum and Pi's
+update step:
+
+```text
+Pi 1.5.9 (/usr/local/bin/pi) is older than 1.6.0, the oldest version this driver supports. Update pi with `pi update`.
+```
+
+The update step is Pi's own: "Both installers pin all dependencies and update
+Pi with `pi update`" ([Pi quickstart](https://pi.dev/docs/latest/quickstart);
+a Nix install updates with `nix profile upgrade pi`, the same page says). A
+`pi` above the tested range still runs, with an `untested_version` advisory.
+`pi --version` prints the bare version, such as `1.6.0`
+(`test/fixtures/cli-version-output/pi.txt`).
+
 ## Probes and status
 
 `probe()` runs only `pi --version`; `probe({ deep: true })` adds the auth
 check. Neither writes a file or calls a mutating host service. `status()`
-reports the version and an `untested_version` advisory outside
-`>=1.6.0 <2.0.0`. Without `pi`, `status()` is `unavailable` with a
+reports the version, an `untested_version` advisory above `>=1.6.0 <2.0.0`,
+and `driver_unavailable` below 1.6.0. Without `pi`, `status()` is `unavailable` with a
 `driver_unavailable` error naming the binary, and `openSession` rejects with
 it.
 

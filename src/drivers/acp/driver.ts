@@ -1,9 +1,12 @@
 // The ACP base driver and the factory its flavors use. A flavor is thin: it
 // says how to launch its agent, how to read its version, and which few
-// capabilities or members differ; everything ACP is shared here.
+// capabilities or members differ; everything ACP is shared here. A flavor
+// that runs a vendor's CLI runs the one the user installed, and refuses one
+// older than its tested range (`testedRange`).
 
 import * as fs from "node:fs/promises";
 import { AriError, callErrors } from "../../errors.ts";
+import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ConfigValues, JsonSchema } from "../../generated/common.ts";
@@ -47,11 +50,15 @@ export interface AcpFlavor<Config extends AcpBaseConfig> {
   defaultConfig(): Config;
   readonly cliManifest?: CliLaunchManifest;
   /**
-   * The vendor releases the driver is tested against, for a flavor with a fixed vendor CLI. `status()` gives an
-   * advisory outside them. Every ACP driver is also tested against ACP protocol versions 1 and 2, which `status()`
-   * checks for all of them.
+   * The vendor releases the driver is tested against, for a flavor that runs the vendor's CLI. A CLI below `min` is
+   * refused: `status()` reports `driver_unavailable` and `openSession` rejects with it, naming `updateStep`. Above the
+   * range `status()` gives an advisory. Every ACP driver is also tested against ACP protocol versions 1 and 2, which
+   * `status()` checks for all of them.
    */
-  readonly testedRange?: TestedRange;
+  readonly testedRange?: TestedRange & {
+    /** The vendor's documented update step, as a sentence, named when the CLI is older than `min`. */
+    readonly updateStep: string;
+  };
   /** The flavor's own advisory for the version `probe()` found, checked after the protocol and `testedRange`. */
   advisory?(context: AcpFlavorContext<Config>, version: string | undefined): UpdateAdvisory | undefined;
   /** Identifies the account and launch, for `continuationKey` and `bindingKey`. Never secret. */
@@ -161,6 +168,8 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
     if (!probe.installed) {
       return { state: probe.error?.code === "driver_unavailable" ? "unavailable" : "setup_required", installed: false, ...(probe.error === undefined ? {} : { error: probe.error }) };
     }
+    // Installed but older than the tested range: the driver will not run it.
+    if (probe.error?.code === "driver_unavailable") return { state: "unavailable", installed: true, ...(probe.version === undefined ? {} : { version: probe.version }), error: probe.error };
     const advisory = this.#advisory(probe.version);
     return { state: "ready", installed: true, ...(probe.version === undefined ? {} : { version: probe.version }), ...(advisory === undefined ? {} : { advisory }) };
   }
@@ -199,18 +208,36 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
     if (target.kind === "known") {
       return { ok: target.installed, installed: target.installed, ...(target.version === undefined ? {} : { version: target.version }), ...(target.error === undefined ? {} : { error: target.error }), checkedAt };
     }
+    return this.#probeCommand(target, checkedAt);
+  }
+
+  /** Finds the executable and runs its version command; a version below the flavor's tested range is `driver_unavailable`. */
+  async #probeCommand(target: Extract<AcpProbeTarget, { kind: "command" }>, checkedAt: string): Promise<ProbeResult> {
     const path = await this.#context.host.process.resolveExecutable(target.command);
     if (path === null) {
       return { ok: false, installed: false, error: callErrors.driverUnavailable({ binary: target.command }, `${target.command} is not installed or not on PATH`).callError, checkedAt };
     }
+    let run: { code: number | null; output: string };
     try {
-      const run = await runProbe(this.#context.host as HostServices<unknown>, target.command, target.versionArgs, target.env);
-      const version = parseVersion(run.output);
-      return { ok: run.code === 0, installed: true, ...(version === undefined ? {} : { version }), checkedAt };
+      run = await runProbe(this.#context.host as HostServices<unknown>, target.command, target.versionArgs, target.env);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, installed: true, error: callErrors.protocol("version_check_failed", `${target.command} did not report its version: ${message}`).callError, checkedAt };
     }
+    const version = parseVersion(run.output);
+    const range = this.#flavor.testedRange;
+    if (range !== undefined && version !== undefined && compareVersions(version, range.min) < 0) {
+      const tooOld = new CliTooOldError({
+        name: this.#flavor.metadata.displayName,
+        binary: target.command,
+        version,
+        path,
+        minimum: range.min,
+        updateStep: range.updateStep,
+      });
+      return { ok: false, installed: true, version, error: tooOld.callError, checkedAt };
+    }
+    return { ok: run.code === 0, installed: true, ...(version === undefined ? {} : { version }), checkedAt };
   }
 
   async openSession(input: OpenSessionInput): Promise<Session> {
@@ -220,7 +247,13 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
       throw callErrors.driverUnavailable({ binary: target.command }, `${target.command} is not installed or not on PATH`);
     }
     if (target.kind === "known" && !target.installed && target.error !== undefined) throw new AriError(target.error);
+    // The flavor's own checks run before anything is spawned, the version command included.
     await this.#flavor.beforeSession?.(this.#context);
+    // A flavor with a tested range checks the version, so a CLI below it never starts an agent.
+    if (target.kind === "command" && this.#flavor.testedRange !== undefined) {
+      const probe = await this.#probeCommand(target, new Date().toISOString());
+      if (probe.error?.code === "driver_unavailable") throw new AriError(probe.error);
+    }
     this.#sessionCount += 1;
     const id = deriveId({ kind: "session", native: { id: null, strength: "none", ordinal: this.#sessionCount }, identityVersion: ACP_IDENTITY_VERSION, scope: this.id });
     const config = this.#context.config;

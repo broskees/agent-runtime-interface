@@ -23,6 +23,7 @@ import type { ReplaySequencer } from "../sequencer.ts";
 import { startStdioReplay } from "../stdio/replay-process.ts";
 import type { StdioReplay } from "../stdio/replay-process.ts";
 import { codexNativeAnswers, codexTurnsDependedOn } from "./frames.ts";
+import { readPreAdmissionCodexCapture } from "./pre-admission.ts";
 import { CODEX_PROTOCOL_WORDS } from "./protocol-words.ts";
 import { CODEX_RECORDER_ENV_POLICY, createCodexLayout, runCodexScenario } from "./run.ts";
 
@@ -34,6 +35,8 @@ export interface CodexReplayResult {
 }
 
 export interface CodexReplayOptions {
+  /** Only for the six pinned live captures made before session admission probed the CLI. Requires a file path. */
+  readonly preAdmissionLiveCapture?: true;
   /** How long the scenario waits for any one thing; 30 s by default. */
   readonly timeoutMs?: number;
   /** After the scenario, how long replay waits with no frame taken before it calls a frame never taken; 500 ms by default. */
@@ -57,19 +60,22 @@ export function replayedNativeAnswers(recording: Recording, sequencer: ReplaySeq
 }
 
 export async function replayCodex(source: Recording | string, options: CodexReplayOptions = {}): Promise<CodexReplayResult> {
-  const recording = typeof source === "string" ? await readRecording(source) : source;
+  if (options.preAdmissionLiveCapture && typeof source !== "string") throw new Error("pre-admission replay requires a recording file for checksum validation");
+  const legacy = options.preAdmissionLiveCapture && typeof source === "string" ? await readPreAdmissionCodexCapture(source) : undefined;
+  const recording = legacy?.recording ?? (typeof source === "string" ? await readRecording(source) : source);
   const header = recording.header;
   if (header.driver !== "codex") throw new Error(`${recording.file}: the recording is of driver ${header.driver}, not codex`);
   const scenario = scenarioNamed(header.scenario);
   const layout = createCodexLayout(`ari-codex-replay-${scenario.name}-`);
   try {
     const env = options.env ?? process.env;
-    const replay = startStdioReplay(recording, {
+    const transport = {
       workspace: layout.root,
       sanitise: createSanitiser({ workspace: layout.root, env, protocolWords: CODEX_PROTOCOL_WORDS, ...(options.user === undefined ? {} : { user: options.user }) }),
       ignored: REPLAY_IGNORED_FIELDS,
       envPolicy: CODEX_RECORDER_ENV_POLICY,
-    });
+    };
+    const replay = legacy === undefined ? startStdioReplay(recording, transport) : legacy.startReplay(transport);
     const wrapSession = options.wrapSession;
     let result: { run: ScenarioRun; diagnostics: readonly DiagnosticEntry[] };
     try {
@@ -86,9 +92,11 @@ export async function replayCodex(source: Recording | string, options: CodexRepl
       // A stall happened while nothing had drifted: what the cleanup after it sent is not the cause.
       if (error instanceof ScenarioStallError) throw error;
       // Otherwise a drift explains a failed run better than whatever the driver made of it.
-      throw replay.sequencer.failure ?? error;
+      throw replay.progress.failure() ?? error;
     }
     await replay.sequencer.whenTaken(options.idleMs ?? 500);
+    const failure = replay.progress.failure();
+    if (failure !== undefined) throw failure;
     replay.sequencer.finish();
     try {
       checkScenario(result.run, replayedNativeAnswers(recording, replay.sequencer));

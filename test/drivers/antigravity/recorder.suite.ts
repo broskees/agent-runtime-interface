@@ -22,6 +22,7 @@ import type { AntigravityRecordOutcome } from "../../recordings/antigravity/reco
 import { replayAntigravity } from "../../recordings/antigravity/replay.ts";
 import { ANTIGRAVITY_RECORDER_ENV_POLICY, AntigravityModelChoiceError, createAntigravityLayout, defaultAntigravityModel } from "../../recordings/antigravity/run.ts";
 import { holdFlock } from "../../recordings/flock.ts";
+import { dyingHolderBin, lockHolderBin } from "../../helpers/lock-holder-bins.ts";
 import { RecordingNotWrittenError, recoveryFileFor } from "../../recordings/recovery.ts";
 import { SCENARIO_NAMES } from "../../recordings/scenarios.ts";
 import type { ScenarioName } from "../../recordings/scenarios.ts";
@@ -175,10 +176,13 @@ function seedHome(): { home: string; env: { [name: string]: string }; files: Map
   return { home, env, files, signIn };
 }
 
-/** Records `scenarios` with the recorder's own process service, against a fresh fake `agy` on PATH; `binBeforeSystem` goes on PATH after the fake and before the rest. */
-async function recordWithFake(env: { [name: string]: string }, scenarios: readonly ScenarioName[], options: { source?: "fake" | "live"; outDir?: string; listModels?: boolean; requireVersion?: string; signInLockWaitMs?: number; binBeforeSystem?: string } = {}): Promise<{ outDir: string; outcomes: AntigravityRecordOutcome[]; fake: FakeAgy; log: string[] }> {
+/** The system's PATH, which comes after the fake `agy` unless a test gives its own. */
+const SYSTEM_PATH = process.env["PATH"] ?? "/usr/bin:/bin";
+
+/** Records `scenarios` with the recorder's own process service, against a fresh fake `agy` first on PATH, then `pathAfterFake` (the system's PATH when left out). */
+async function recordWithFake(env: { [name: string]: string }, scenarios: readonly ScenarioName[], options: { source?: "fake" | "live"; outDir?: string; listModels?: boolean; requireVersion?: string; signInLockWaitMs?: number; pathAfterFake?: string } = {}): Promise<{ outDir: string; outcomes: AntigravityRecordOutcome[]; fake: FakeAgy; log: string[] }> {
   const fake = fakeAgyOnPath(DIRECTORY);
-  const { binBeforeSystem, ...recordOptions } = options;
+  const { pathAfterFake, ...recordOptions } = options;
   const outDir = options.outDir ?? fs.mkdtempSync(path.join(DIRECTORY, "out-"));
   const log: string[] = [];
   const outcomes = await recordAntigravity({
@@ -186,7 +190,7 @@ async function recordWithFake(env: { [name: string]: string }, scenarios: readon
     scenarios,
     outDir,
     source: options.source ?? "fake",
-    env: { PATH: [fake.bin, ...(binBeforeSystem === undefined ? [] : [binBeforeSystem]), process.env["PATH"] ?? "/usr/bin:/bin"].join(path.delimiter), USER: "ari-test-user", ...fake.env, ...env },
+    env: { PATH: [fake.bin, pathAfterFake ?? SYSTEM_PATH].join(path.delimiter), USER: "ari-test-user", ...fake.env, ...env },
     timeoutMs: 20_000,
     log: (line) => log.push(line),
   });
@@ -422,14 +426,18 @@ function survivingSignIns(signIn: string): string[] {
 
 const RECORD_IN_CHILD = path.join(REPO_ROOT, "test", "drivers", "antigravity", "record-in-child.ts");
 
-test("two recorder runs that share the user's sign-in, each refreshing it, keep both refreshes when the second run puts its refresh back between the first run's comparison of the user's file and its replace", async () => {
+for (const [label, pathAfterFake] of [
+  ["the system's PATH", undefined],
+  ["only flock, sh and node, and no cat, on PATH", () => lockHolderBin(DIRECTORY)],
+] as const) test(`with ${label} after the fake agy, two recorder runs that share the user's sign-in, each refreshing it, keep both refreshes when the second run puts its refresh back between the first run's comparison of the user's file and its replace`, async () => {
   const { env, signIn } = seedHome();
+  const afterFake = pathAfterFake?.();
   const refreshedByFirst = JSON.stringify({ token: { access_token: "fake-access-first-run", refresh_token: "fake-refresh-first-run" }, auth_method: "consumer" });
   const refreshedBySecond = JSON.stringify({ token: { access_token: "fake-access-second-run", refresh_token: "fake-refresh-second-run" }, auth_method: "consumer" });
   const secondFake = fakeAgyOnPath(DIRECTORY);
   const secondOptions = {
     outDir: fs.mkdtempSync(path.join(DIRECTORY, "out-")),
-    env: { PATH: `${secondFake.bin}${path.delimiter}${process.env["PATH"] ?? "/usr/bin:/bin"}`, USER: "ari-test-user", ...secondFake.env, ...env, ARI_FAKE_AGY_REFRESH: refreshedBySecond },
+    env: { PATH: [secondFake.bin, afterFake ?? SYSTEM_PATH].join(path.delimiter), USER: "ari-test-user", ...secondFake.env, ...env, ARI_FAKE_AGY_REFRESH: refreshedBySecond },
     timeoutMs: 20_000,
     // The first run holds on at its comparison until the second run ends, so the second gives up waiting for the sign-in lock after 1 s rather than 30.
     signInLockWaitMs: 1_000,
@@ -449,7 +457,7 @@ test("two recorder runs that share the user's sign-in, each refreshing it, keep 
   };
   let first;
   try {
-    first = await recordWithFake({ ...env, ARI_FAKE_AGY_REFRESH: refreshedByFirst }, ["simple"]);
+    first = await recordWithFake({ ...env, ARI_FAKE_AGY_REFRESH: refreshedByFirst }, ["simple"], afterFake === undefined ? {} : { pathAfterFake: afterFake });
   } finally {
     Buffer.prototype.equals = realEquals;
   }
@@ -476,6 +484,19 @@ test("two recorder runs that share the user's sign-in, each refreshing it, keep 
   assert.equal(spawnSync("flock", ["--exclusive", "--nonblock", folder, "true"]).status, 0, "nobody holds a lock on the sign-in's folder afterwards");
 });
 
+test("when the holder of the lock on the sign-in's folder ends before the recorder lets go, the recorder takes the lock as lost: the refreshed sign-in also goes to the recovery file, and the run names it", async () => {
+  const { env, signIn } = seedHome();
+  const folder = path.dirname(signIn);
+  const run = await recordWithFake({ ...env, ARI_FAKE_AGY_REFRESH: "refreshed-by-the-recorded-agy" }, ["simple"], { pathAfterFake: [dyingHolderBin(DIRECTORY), lockHolderBin(DIRECTORY)].join(path.delimiter) });
+  const [outcome] = run.outcomes;
+  const kept = recoveryFileFor(signIn);
+  assert.match(outcome!.error?.message ?? "", new RegExp(`the recorder wrote the sign-in agy refreshed back to ${escape(signIn)}, but the lock on ${escape(folder)} may have been lost before it let go \\(.+\\), so another recorder run may have written the file meanwhile; it kept the refreshed sign-in in ${escape(kept)}`));
+  assert.equal(outcome!.recoveryFile, kept);
+  assert.deepEqual(JSON.parse(fs.readFileSync(kept, "utf8")), [{ id: ANTIGRAVITY_SIGN_IN_FILE, value: "refreshed-by-the-recorded-agy" }], "the refreshed value is in the recovery file");
+  assert.ok(!fs.existsSync(outcome!.workspace), "the workspace is removed");
+  assert.ok(describeAntigravityRun(run.outcomes, run.outDir).some((line) => line.includes(kept)), "the run's last lines name the recovery file");
+});
+
 test("while another holder keeps the lock on the sign-in's folder, or flock fails, a refreshed sign-in goes to the recovery file and the user's file stays as it is; an unchanged copy takes no lock", async () => {
   for (const [label, refreshes, failingFlock] of [
     ["another holder keeps the lock", true, false],
@@ -490,7 +511,7 @@ test("while another holder keeps the lock on the sign-in's folder, or flock fail
     assert.ok(failingFlock || held !== undefined, `${label}: the test holds the lock`);
     let run;
     try {
-      run = await recordWithFake({ ...env, ...(refreshes ? { ARI_FAKE_AGY_REFRESH: "refreshed-by-the-recorded-agy" } : {}) }, ["simple"], { signInLockWaitMs: 500, ...(failingFlock ? { binBeforeSystem: bin } : {}) });
+      run = await recordWithFake({ ...env, ...(refreshes ? { ARI_FAKE_AGY_REFRESH: "refreshed-by-the-recorded-agy" } : {}) }, ["simple"], { signInLockWaitMs: 500, ...(failingFlock ? { pathAfterFake: [bin, SYSTEM_PATH].join(path.delimiter) } : {}) });
     } finally {
       await held?.release();
     }

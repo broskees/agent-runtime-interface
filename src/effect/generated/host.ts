@@ -37,6 +37,8 @@ export const SpawnRequestSchema: Effect.Schema.Codec<Wire.SpawnRequest> = Schema
     cwd: Schema.optional(Schema.String),
     /** Explicit additions, applied after `envPolicy` stripping. */
     env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+    /** Defaults to true. When false, start with an empty environment and apply only `env`. */
+    inheritEnv: Schema.optional(Schema.Boolean),
     purpose: Schema.optional(Schema.suspend(() => SpawnPurposeSchema)),
     stdin: Schema.optional(Schema.Union([Schema.Literals(["pipe", "ignore"]), Schema.String])),
     timeoutMs: Schema.optional(kit.Integer.check(Schema.isGreaterThanOrEqualTo(0))),

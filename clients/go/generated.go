@@ -2953,10 +2953,12 @@ type SpawnRequest struct {
 	Args    []string `json:"args,omitzero"`
 	Cwd     *string  `json:"cwd,omitzero"`
 	// Explicit additions, applied after `envPolicy` stripping.
-	Env       map[string]string  `json:"env,omitzero"`
-	Purpose   *SpawnPurpose      `json:"purpose,omitzero"`
-	Stdin     *SpawnRequestStdin `json:"stdin,omitzero"`
-	TimeoutMs *int64             `json:"timeoutMs,omitzero"`
+	Env map[string]string `json:"env,omitzero"`
+	// Defaults to true. When false, start with an empty environment and apply only `env`.
+	InheritEnv *bool              `json:"inheritEnv,omitzero"`
+	Purpose    *SpawnPurpose      `json:"purpose,omitzero"`
+	Stdin      *SpawnRequestStdin `json:"stdin,omitzero"`
+	TimeoutMs  *int64             `json:"timeoutMs,omitzero"`
 }
 
 // Open: any string is kept; Recognized reports whether this client knows it.
@@ -4741,10 +4743,12 @@ type HostProcessSpawnParams struct {
 	Args       []string `json:"args,omitzero"`
 	Cwd        *string  `json:"cwd,omitzero"`
 	// Explicit additions, applied after `envPolicy` stripping.
-	Env       map[string]string            `json:"env,omitzero"`
-	Purpose   *SpawnPurpose                `json:"purpose,omitzero"`
-	Stdin     *HostProcessSpawnParamsStdin `json:"stdin,omitzero"`
-	TimeoutMs *int64                       `json:"timeoutMs,omitzero"`
+	Env map[string]string `json:"env,omitzero"`
+	// Defaults to true. When false, start with an empty environment and apply only `env`.
+	InheritEnv *bool                        `json:"inheritEnv,omitzero"`
+	Purpose    *SpawnPurpose                `json:"purpose,omitzero"`
+	Stdin      *HostProcessSpawnParamsStdin `json:"stdin,omitzero"`
+	TimeoutMs  *int64                       `json:"timeoutMs,omitzero"`
 	// The id the driver gives this child: unique on the connection and never reused, even after the child exits. The host names the child by it in `host/process.output` and `host/process.exit`, and the driver in `host/process.write`, `host/process.closeStdin` and `host/process.kill`. A host refuses a spawn whose `processId` it has seen before on the connection with `invalid_state` (`duplicate_process_id`) and starts nothing.
 	ProcessID string `json:"processId"`
 }

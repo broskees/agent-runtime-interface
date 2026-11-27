@@ -33,6 +33,7 @@ import type { DiagnosticEntry } from "../../../src/generated/host.ts";
 import { createClaudeDriver } from "../../../src/drivers/claude/index.ts";
 import type { ClaudeDriverConfig } from "../../../src/drivers/claude/index.ts";
 import type { HostServices, Session } from "../../../src/runtime.ts";
+import { createProcessService } from "../../../src/node/process.ts";
 import { runScenario } from "../scenarios.ts";
 import type { NativeProgress, Scenario, ScenarioRun } from "../scenarios.ts";
 import { fixedUuids } from "./frames.ts";
@@ -110,18 +111,20 @@ export interface ClaudeScenarioResult {
 /**
  * A host with no tool server for threads, so the recorded session gets no MCP
  * server at all. It finds `claude` at `claudeCode.path` and answers that
- * path's `--version` with `claudeCode.version`; it starts no process, so every
- * other spawn (`claude auth status --json`) fails as on a host without it.
+ * path's `--version` with `claudeCode.version`. Only a genuine SDK query
+ * invokes the runtime spawn. Probes other than `--version` stay simulated.
  */
-function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrubPrefixes: readonly string[], claudeCode: ClaudeCodeOnPath): HostServices<ClaudeDriverConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[] } {
+function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrubPrefixes: readonly string[], claudeCode: ClaudeCodeOnPath): HostServices<ClaudeDriverConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[]; dispose(): Promise<void> } {
   const base = path.join(layout.root, "instances", CLAUDE_RECORDER_INSTANCE_ID);
   const paths = { stateDir: path.join(base, "state"), cacheDir: path.join(base, "cache"), tmpDir: path.join(base, "tmp") };
   for (const directory of Object.values(paths)) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const processes = createProcessService({ envPolicy: { stripAmbient: [...envScrubPrefixes] }, baseEnv: {} });
   const host = createFakeHost<ClaudeDriverConfig>({
     paths,
     envScrubPrefixes,
     resolveExecutable: async (name) => (name === "claude" ? claudeCode.path : null),
     spawn: async (request) => {
+      if (request.purpose === "runtime" && claudeCode.path !== CLAUDE_STAND_IN_PATH) return processes.spawn(request);
       if (request.command !== claudeCode.path || (request.args ?? []).join(" ") !== "--version") throw callErrors.notFound({ resource: "executable", id: request.command });
       const child = createMemoryProcess({ onStdin: () => undefined, onStdinClosed: () => undefined, onKill: () => undefined });
       queueMicrotask(() => {
@@ -134,6 +137,7 @@ function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrub
   });
   return {
     ...host,
+    dispose: processes.dispose,
     hostTools: {
       ...host.hostTools,
       mcpServerFor: async () => {
@@ -164,6 +168,6 @@ export async function runClaudeScenario(input: ClaudeScenarioInput): Promise<Cla
     });
     return { run, diagnostics: host.diagnosticEntries };
   } finally {
-    await instance.dispose();
+    try { await instance.dispose(); } finally { await host.dispose(); }
   }
 }

@@ -2544,6 +2544,9 @@ pub struct SpawnRequest {
     /// Explicit additions, applied after `envPolicy` stripping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, String>>,
+    /// Defaults to true. When false, start with an empty environment and apply only `env`.
+    #[serde(rename = "inheritEnv", default, skip_serializing_if = "Option::is_none")]
+    pub inherit_env: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<SpawnPurpose>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4525,6 +4528,9 @@ pub struct HostProcessSpawnParams {
     /// Explicit additions, applied after `envPolicy` stripping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, String>>,
+    /// Defaults to true. When false, start with an empty environment and apply only `env`.
+    #[serde(rename = "inheritEnv", default, skip_serializing_if = "Option::is_none")]
+    pub inherit_env: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<SpawnPurpose>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

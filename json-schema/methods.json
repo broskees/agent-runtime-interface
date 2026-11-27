@@ -180,42 +180,6 @@
       }
     },
     {
-      "name": "instance/maintenance.install",
-      "direction": "host_to_driver",
-      "kind": "request",
-      "interface": "Instance",
-      "member": "maintenance.install",
-      "optional": true,
-      "params": {
-        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
-      },
-      "result": {
-        "$ref": "rpc.schema.json#/$defs/VoidResult"
-      },
-      "version": {
-        "major": 1,
-        "minor": 0
-      }
-    },
-    {
-      "name": "instance/maintenance.update",
-      "direction": "host_to_driver",
-      "kind": "request",
-      "interface": "Instance",
-      "member": "maintenance.update",
-      "optional": true,
-      "params": {
-        "$ref": "rpc.schema.json#/$defs/InstanceTarget"
-      },
-      "result": {
-        "$ref": "rpc.schema.json#/$defs/VoidResult"
-      },
-      "version": {
-        "major": 1,
-        "minor": 0
-      }
-    },
-    {
       "name": "instance/auth.methods",
       "direction": "host_to_driver",
       "kind": "request",

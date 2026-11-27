@@ -136,7 +136,7 @@ export interface Session {
   close(): Promise<void>;
 }
 
-/** One configured account of a driver: install state, sign-in, catalog, limits and sessions. */
+/** One configured account of a driver: whether its runtime is there, sign-in, catalog, limits and sessions. */
 export interface Instance {
   readonly id: string;
   /** Instances with equal keys can continue each other's threads. */
@@ -150,10 +150,9 @@ export interface Instance {
   probe(options?: ProbeOptions): Promise<ProbeResult>;
   invalidateCaches?(): Promise<void>;
 
+  /** Version advice only: ARI installs and updates nothing; the user or the host does. */
   maintenance?: {
     advisory(): Promise<UpdateAdvisory | null>;
-    install?(): Promise<void>;
-    update?(): Promise<void>;
   };
 
   auth?: {

@@ -120,8 +120,6 @@ export function createRecordingDriver(options: { readonly full: boolean; readonl
     instance.invalidateCaches = recorded("instance", "invalidateCaches", async () => undefined) as Instance["invalidateCaches"];
     instance.maintenance = {
       advisory: recorded("instance", "maintenance.advisory", async () => null) as never,
-      install: recorded("instance", "maintenance.install", async () => undefined) as never,
-      update: recorded("instance", "maintenance.update", async () => undefined) as never,
     };
     instance.auth = {
       methods: recorded("instance", "auth.methods", () => RECORDING_AUTH_METHODS.map((method) => ({ ...method }))) as never,

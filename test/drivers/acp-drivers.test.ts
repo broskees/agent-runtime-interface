@@ -1,5 +1,5 @@
-// Runs the test suites of the six ACP drivers (`acp`, `grok`, `fx`, `kiro`,
-// `acp-registry`, `antigravity`) in this one process, one after another.
+// Runs the test suites of the five ACP drivers (`acp`, `grok`, `fx`, `kiro`,
+// `antigravity`) in this one process, one after another.
 //
 // Each suite starts dozens of fake agent processes. As separate test files,
 // `node --test` ran them all at once, alongside every other file, and the
@@ -23,9 +23,6 @@ import "./fx/fx.suite.ts";
 import "./kiro/conformance.suite.ts";
 import "./kiro/rules.suite.ts";
 import "./kiro/kiro.suite.ts";
-import "./acp-registry/conformance.suite.ts";
-import "./acp-registry/rules.suite.ts";
-import "./acp-registry/registry.suite.ts";
 import "./antigravity/conformance.suite.ts";
 import "./antigravity/rules.suite.ts";
 import "./antigravity/antigravity.suite.ts";

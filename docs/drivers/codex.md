@@ -173,7 +173,7 @@ scope `thread`; `sessionModel` `process_per_instance` (one app-server per
 session); `diffs` emitted and can be turned off; `contextWindowReporting`
 from `thread/tokenUsage/updated`; and the extensions below.
 
-## The 44 optional members
+## The 42 optional members
 
 | Member | Outcome |
 |---|---|
@@ -186,7 +186,6 @@ from `thread/tokenUsage/updated`; and the extensions below.
 | `ext` | supported (the five extensions below) |
 | `invalidateCaches`, `catalog.refresh` | supported (`model/list`) |
 | `maintenance.advisory` | supported: an `untested_version` advisory outside `>=0.172.0 <0.173.0` |
-| `maintenance.install`, `maintenance.update` | absent: updating the user's Codex belongs to the installer that owns it |
 | `auth.methods`, `.state`, `.reportRuntimeFailure`, `.start`, `.complete`, `.respond`, `.cancel`, `.logout`, `.transferProfile` | supported |
 | `auth.transferSession` | absent: Codex has no request that moves a thread to another account |
 | `workspace.snapshot` | absent: not built in this version |
@@ -196,7 +195,7 @@ from `thread/tokenUsage/updated`; and the extensions below.
 | `nativeSessions.list`, `.delete`, `.archive` | supported (`thread/list`, `thread/delete`, `thread/archive`) |
 | `subProviders.list`, `.set`, `.disable` | absent: Codex has no sub-provider registry |
 
-`test/drivers/codex/capabilities.test.ts` lists all 44 and exercises each
+`test/drivers/codex/capabilities.test.ts` lists all 42 and exercises each
 supported member against the fake app-server.
 
 ## Turns, items and requests

@@ -247,7 +247,7 @@ where it has no row. Every difference names its source.
 | `contextWindowReporting` | `true` | not in §1.2 | `model/list` `contextLimit`. |
 | `extensions` | none | not checked (§14) | |
 
-## The 44 optional members
+## The 42 optional members
 
 | Member | Outcome |
 |---|---|
@@ -256,7 +256,6 @@ where it has no row. Every difference names its source.
 | `injectHistory`, `backgroundTasks.*`, `stopSubagent`, `mcpApps.*`, `canReuseContextUsage`, `uploadFeedback`, `ext` | absent |
 | `invalidateCaches`, `catalog.refresh` | supported (`model/list`) |
 | `maintenance.advisory` | supported: `untested_version` outside `>=1.4.25 <1.4.26` |
-| `maintenance.install`, `maintenance.update` | absent: installing Muse Code belongs to the user's own installer |
 | `auth.methods`, `.state`, `.reportRuntimeFailure`, `.start`, `.respond`, `.cancel`, `.logout` | supported |
 | `auth.complete` | rejects with `unsupported{capability: "auth.complete"}` |
 | `auth.transferProfile`, `auth.transferSession` | absent |
@@ -265,7 +264,7 @@ where it has no row. Every difference names its source.
 | `limits.consumeResetCredit`, `usageHistory.scan`, `textGeneration.generate` | absent |
 | `nativeSessions.*`, `subProviders.*` | absent |
 
-`test/drivers/muse/capabilities.suite.ts` lists all 44 and exercises each
+`test/drivers/muse/capabilities.suite.ts` lists all 42 and exercises each
 supported member against the fake `muse serve`.
 
 ## Host instructions and tools

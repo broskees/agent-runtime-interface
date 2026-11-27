@@ -254,7 +254,7 @@ export type NativeSessionInfoPage = {
   nextCursor?: string | null;
 };
 
-/** A provider behind a multi-provider agent, such as an ACP Registry agent. */
+/** A provider behind a multi-provider agent. */
 export type SubProvider = {
   id: string;
   label: string;
@@ -1090,7 +1090,7 @@ export const instanceDocument: SchemaDocument = {
       ]
     },
     "SubProvider": {
-      "description": "A provider behind a multi-provider agent, such as an ACP Registry agent.",
+      "description": "A provider behind a multi-provider agent.",
       "type": "object",
       "properties": {
         "id": {

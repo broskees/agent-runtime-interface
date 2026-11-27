@@ -23,7 +23,6 @@ The drivers:
 | `grok` | [drivers/grok.md](drivers/grok.md) |
 | `fx` | [drivers/fx.md](drivers/fx.md) |
 | `kiro` | [drivers/kiro.md](drivers/kiro.md) |
-| `acp-registry` | [drivers/acp-registry.md](drivers/acp-registry.md) |
 | `antigravity` | [drivers/antigravity.md](drivers/antigravity.md) |
 | `codex` | [drivers/codex.md](drivers/codex.md) |
 | `claude` | [drivers/claude.md](drivers/claude.md) |

@@ -356,7 +356,6 @@ describe("Instance, Driver and HostServices", () => {
     assert.equal(instance.bindingKey, "binding-1");
     assert.equal(instance.workspace, undefined);
     assert.equal(instance.usageHistory, undefined);
-    assert.equal(instance.maintenance?.install, undefined);
     assert.equal(instance.auth?.logout, undefined);
     assert.deepEqual(instance.auth?.credentialBinding, { kind: "account" });
 

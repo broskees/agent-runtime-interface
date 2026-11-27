@@ -131,7 +131,7 @@ describe("methods.json", () => {
 
   test("the interfaces have the inventory's member counts", () => {
     assert.equal(surfaces.get("Session")!.methods.size, 28);
-    assert.equal(surfaces.get("Instance")!.methods.size, 33);
+    assert.equal(surfaces.get("Instance")!.methods.size, 31);
     assert.equal(surfaces.get("HostServices")!.methods.size, 17);
     assert.deepEqual([...surfaces.get("Driver")!.methods.keys()].sort(), ["create", "defaultConfig"]);
   });
@@ -147,7 +147,7 @@ describe("methods.json", () => {
     for (const [key, entry] of byMember) {
       assert.ok(surfaces.get(entry.interface!)?.methods.has(entry.member!), `${entry.name} names ${key}, which is not a method`);
     }
-    assert.equal(byMember.size, 28 + 33 + 17 + 2);
+    assert.equal(byMember.size, 28 + 31 + 17 + 2);
   });
 
   test("initialize and the event notification are listed", () => {

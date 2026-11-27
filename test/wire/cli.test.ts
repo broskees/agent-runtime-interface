@@ -63,7 +63,7 @@ describe("the ari-driver bin", () => {
   });
 
   test("names and paths are told apart: a path has a separator, a leading dot, or a script extension", () => {
-    for (const name of ["pi", "acp-registry", "codex"]) assert.equal(isModulePath(name), false, name);
+    for (const name of ["pi", "my-driver", "codex"]) assert.equal(isModulePath(name), false, name);
     for (const spec of ["./driver.js", "../d/index.ts", "/abs/driver.mjs", "driver.ts", "dir\\driver.js", ".hidden"]) assert.equal(isModulePath(spec), true, spec);
   });
 

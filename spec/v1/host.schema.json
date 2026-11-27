@@ -25,7 +25,7 @@
     "SpawnPurpose": {
       "description": "`probe`: a side-effect-free check such as `--version`. `runtime`: the agent process itself.",
       "anyOf": [
-        { "enum": ["probe", "runtime", "install"] },
+        { "enum": ["probe", "runtime"] },
         { "type": "string" }
       ]
     },

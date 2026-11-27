@@ -348,7 +348,7 @@ it has no row. Every difference names its source.
 
 ## Optional members
 
-Of the 44 optional `Session` and `Instance` members, the driver implements
+Of the 42 optional `Session` and `Instance` members, the driver implements
 `readSnapshot`, `forkThread`, `rollbackThread`, `compactThread`,
 `unloadThread`, `contextWindow` and the `auth` group. `auth.complete` rejects
 with `unsupported{capability: "auth.complete"}`, because no Pi sign-in returns

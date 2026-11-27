@@ -449,7 +449,7 @@ server declares `sessionModel: "external"`, `externallyOwned: true`, and
 
 ## Optional members
 
-Of the 44 optional `Session` and `Instance` members, the driver implements
+Of the 42 optional `Session` and `Instance` members, the driver implements
 `readSnapshot`, `forkThread`, `rollbackThread`, `compactThread`,
 `unloadThread`, `contextWindow` and `ext`. `unloadThread` rejects with
 `unsupported{capability: "threads.unload"}` on a 2.x or external server.

@@ -5,6 +5,10 @@
 - Added the ACP base driver (`ari/drivers/acp`, `ari/meta/acp`): runs any
   Agent Client Protocol agent on stdio, speaking ACP v1 or v2 as the agent
   negotiates (`maxProtocolVersion`, default 1).
+- ARI installs no agent: the user installs it and names its `command`. The
+  `acp-registry` flavor an earlier build offered, which installed ACP
+  Registry agents, is gone; run a registry agent you installed with this
+  driver instead.
 - ACP clients typed by tables generated from ACP's v1 and v2 JSON Schemas,
   release `schema-v2.0.0-beta.3`, with a drift check (`codegen:acp:check`).
 - v2 turns are accepted by the `session/prompt` response and settle on the

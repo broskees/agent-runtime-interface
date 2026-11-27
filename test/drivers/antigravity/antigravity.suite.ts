@@ -234,7 +234,7 @@ test("ARI installs no agy: the config schema, form hints and default config have
   }
   const rig = await openRig({ name: "antigravity", driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG }, executable: "agy", protocol: 1, agentArgs: AGY_VERSION });
   try {
-    assert.equal(rig.instance.maintenance, undefined, "no maintenance.install, maintenance.update or maintenance.advisory");
+    assert.equal(rig.instance.maintenance, undefined, "no maintenance member, not even maintenance.advisory");
   } finally {
     await rig.cleanup();
   }

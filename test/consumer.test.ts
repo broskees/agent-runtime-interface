@@ -3,7 +3,7 @@
 //
 // - One without `effect` or any vendor SDK, type-checked with
 //   `moduleResolution: "nodenext"`. Every export subpath other than
-//   `ari/effect`, all 12 `ari/drivers/<name>` and `ari/meta/<name>` modules
+//   `ari/effect`, all 11 `ari/drivers/<name>` and `ari/meta/<name>` modules
 //   and a JSON Schema file import under Node, and again under
 //   `node --conditions=development`, which must not reach the src/ files the
 //   tarball leaves out; a file importing a type from each type-checks; each
@@ -31,7 +31,7 @@ import { REPO_ROOT } from "./helpers/spec.ts";
 /** The export subpaths of the package (§17.2). */
 const EXPORT_SUBPATHS = [".", "./host", "./driver-kit", "./node", "./wire", "./conformance", "./effect", "./drivers/*", "./meta/*", "./cli-manifests", "./json-schema/*"];
 /** The first-party drivers; each has `ari/drivers/<name>` and `ari/meta/<name>`. */
-const DRIVERS = ["pi", "acp", "grok", "fx", "kiro", "acp-registry", "antigravity", "codex", "claude", "opencode", "cursor", "muse"];
+const DRIVERS = ["pi", "acp", "grok", "fx", "kiro", "antigravity", "codex", "claude", "opencode", "cursor", "muse"];
 /** The entries with one module each, other than `ari/effect`. */
 const SINGLE_ENTRIES = ["ari", "ari/host", "ari/driver-kit", "ari/node", "ari/wire", "ari/conformance", "ari/cli-manifests"];
 const JSON_SCHEMA_FILE = "ari/json-schema/events.schema.json";
@@ -143,7 +143,7 @@ describe("package.json exports", () => {
     }
   });
 
-  test("the drivers in src/drivers/ are exactly the 12 first-party drivers", () => {
+  test("the drivers in src/drivers/ are exactly the 11 first-party drivers", () => {
     const directories = fs.readdirSync(path.join(REPO_ROOT, "src", "drivers"), { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
     assert.deepEqual(directories.sort(), [...DRIVERS].sort());
   });
@@ -186,7 +186,7 @@ describe("a consumer project without effect or any vendor SDK", () => {
     assert.equal(problems.filter((problem) => problem.includes("condition development")).length, EXPORT_SUBPATHS.length - 1, problems.join("\n"));
   });
 
-  test("imports every subpath except ari/effect: 7 entries, 12 drivers, 12 metadata modules and a JSON Schema file", () => {
+  test("imports every subpath except ari/effect: 7 entries, 11 drivers, 11 metadata modules and a JSON Schema file", () => {
     const found = lastJsonLine(run(NODE_EXECUTABLE, ["--input-type=module", "-e", IMPORT_EVERYTHING], consumer)) as Found;
     for (const specifier of SINGLE_ENTRIES) assert.ok(found.modules[specifier]! > 0, `${specifier} exported nothing`);
     for (const name of DRIVERS) {

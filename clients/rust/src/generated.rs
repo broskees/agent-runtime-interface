@@ -24,8 +24,6 @@ pub const METHOD_VERSIONS: &[(&str, u32, u32)] = &[
     ("instance/probe", 1, 0),
     ("instance/invalidateCaches", 1, 0),
     ("instance/maintenance.advisory", 1, 0),
-    ("instance/maintenance.install", 1, 0),
-    ("instance/maintenance.update", 1, 0),
     ("instance/auth.methods", 1, 0),
     ("instance/auth.state", 1, 0),
     ("instance/auth.reportRuntimeFailure", 1, 0),
@@ -2530,7 +2528,6 @@ crate::open_enum! {
     SpawnPurpose {
         Probe = "probe",
         Runtime = "runtime",
-        Install = "install",
     }
 }
 
@@ -3097,7 +3094,7 @@ pub struct NativeSessionInfoPage {
     pub next_cursor: Option<Option<String>>,
 }
 
-/// A provider behind a multi-provider agent, such as an ACP Registry agent.
+/// A provider behind a multi-provider agent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SubProvider {
     pub id: String,
@@ -5711,16 +5708,6 @@ impl crate::Client {
     /// `instance/maintenance.advisory`
     pub async fn instance_maintenance_advisory(&self, params: &InstanceTarget) -> Result<NullableUpdateAdvisory, CallError> {
         self.call("instance/maintenance.advisory", params).await
-    }
-
-    /// `instance/maintenance.install`
-    pub async fn instance_maintenance_install(&self, params: &InstanceTarget) -> Result<VoidResult, CallError> {
-        self.call("instance/maintenance.install", params).await
-    }
-
-    /// `instance/maintenance.update`
-    pub async fn instance_maintenance_update(&self, params: &InstanceTarget) -> Result<VoidResult, CallError> {
-        self.call("instance/maintenance.update", params).await
     }
 
     /// `instance/auth.methods`

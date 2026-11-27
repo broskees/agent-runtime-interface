@@ -6,6 +6,11 @@ Each driver also has its own changelog under [`changelogs/`](changelogs/).
 
 The first version. Nothing is published yet.
 
+ARI installs nothing. It never downloads, unpacks, installs or updates a
+vendor CLI, an agent or an SDK package; the user or the host installs every
+one of them, and a driver whose CLI or SDK is missing reports
+`driver_unavailable` naming what to install.
+
 ### Contract (`ari`, `ari/json-schema/*`)
 
 - The ARI wire contract, version 1, as JSON Schema draft 2020-12 under
@@ -33,12 +38,8 @@ The first version. Nothing is published yet.
   `node:test` adapter (which also runs under `bun test`), virtual time and an
   in-memory reference driver.
 - `ari/node`: process spawning with environment rules and process-group
-  cleanup, file-backed secrets, an atomic managed adapter installer, instance
-  paths, coordination leases, diagnostics and sign-in callbacks. The
-  installer's optional `prepare` hook adds files to an install before it is
-  published, and `isIntact` makes it replace an install that is not whole;
-  `npmRegistryFetch({ strongIntegrityOnly: true })` accepts only a sha512,
-  sha384 or sha256 `dist.integrity`.
+  cleanup, file-backed secrets, instance paths, coordination leases,
+  diagnostics and sign-in callbacks.
 
 ### Wire and clients
 
@@ -52,9 +53,31 @@ The first version. Nothing is published yet.
 
 ### Drivers (`ari/drivers/<name>`, `ari/meta/<name>`)
 
-- `pi`, `acp` (ACP v1 and v2), the ACP flavors `grok`, `fx`, `kiro`,
-  `acp-registry` and `antigravity`, `codex`, `claude`, `opencode` (1.x and
-  2.x servers), `cursor` and `muse`.
+- `pi`, `acp` (ACP v1 and v2), the ACP flavors `grok`, `fx`, `kiro` and
+  `antigravity`, `codex`, `claude`, `opencode` (1.x and 2.x servers),
+  `cursor` and `muse`.
+
+### Removed: every installation feature
+
+Earlier builds of this unreleased version could install things. All of it is
+gone:
+
+- The `acp-registry` driver (`ari/drivers/acp-registry`,
+  `ari/meta/acp-registry`), which installed ACP Registry agents. Install the
+  agent yourself and run it with the `acp` driver, which runs any ACP agent
+  you name with `command` and `args`.
+- The wire methods `instance/maintenance.install` and
+  `instance/maintenance.update`, and `Instance.maintenance.install` and
+  `.update`, from the contract, the wire code, the JSON Schemas and the Rust,
+  Python and Go clients. `maintenance.advisory` stays. The `SpawnPurpose`
+  value `install` is gone too; a purpose is still any string.
+- The `claude` driver's `maintenance.install` and `maintenance.update`, which
+  downloaded the Claude Agent SDK, and its `sdkRegistry` config field. The
+  host installs the SDK: next to ari under Node, or in a directory named by
+  `sdkDirectory`, the only way for the standalone `ari-driver`.
+- `ari/node`'s managed adapter installer (`createAdapterInstaller`,
+  `npmRegistryFetch`, install leases, `<cacheDir>/adapters/`), its tar
+  extractor (`extractTarball`) and `DEFAULT_HANDSHAKE_TIMEOUT_MS`.
 
 ### Effect
 

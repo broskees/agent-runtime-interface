@@ -22,8 +22,7 @@ export interface ClaudeDriverConfig {
    * (`Options.pathToClaudeCodeExecutable`): a name looked up on the host's
    * PATH, or a path. Leave it out to run the `claude` on the host's PATH. It
    * must be Claude Code `CLAUDE_TESTED_CLAUDE_CODE_VERSION` or newer. The
-   * driver never runs a Claude Code binary that npm or `maintenance.install`
-   * put beside the SDK.
+   * driver never runs a Claude Code binary that npm put beside the SDK.
    */
   readonly executablePath?: string;
   /** The model new threads start with, for example `sonnet` or `claude-opus-4-8`; Claude Code's default when unset. */
@@ -33,17 +32,16 @@ export interface ClaudeDriverConfig {
   /** Which settings files Claude Code loads; all three when unset (Claude Code's own default). */
   readonly settingSources?: readonly ClaudeSettingSource[];
   /**
-   * An absolute path to a directory where `@anthropic-ai/claude-agent-sdk` is
-   * installed: the directory `npm install @anthropic-ai/claude-agent-sdk` ran
-   * in, which holds `node_modules/@anthropic-ai/claude-agent-sdk`. The driver
+   * An absolute path to a directory where the host installed
+   * `@anthropic-ai/claude-agent-sdk`: the directory `npm install --prefix
+   * <directory> @anthropic-ai/claude-agent-sdk@<CLAUDE_SDK_VERSION>` ran for,
+   * which holds `node_modules/@anthropic-ai/claude-agent-sdk`. The driver
    * loads the SDK from there by file URL instead of importing the package by
    * name; a native Claude Code package npm put beside it is never run. The
-   * standalone `ari-driver` cannot import a package by name, so it needs this
-   * field or `maintenance.install`.
+   * standalone `ari-driver` cannot import a package by name, so this field is
+   * the only way it gets the SDK. ARI installs nothing itself.
    */
   readonly sdkDirectory?: string;
-  /** The npm registry `maintenance.install` and `maintenance.update` download the SDK from; `https://registry.npmjs.org` when unset. */
-  readonly sdkRegistry?: string;
 }
 
 export const CLAUDE_LABEL = "Claude";
@@ -56,8 +54,8 @@ export const CLAUDE_DRIVER_KIND = "claude";
 export const CLAUDE_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
 
 /**
- * The SDK version `maintenance.install` and `maintenance.update` install: the
- * pinned devDependency, inside `CLAUDE_TESTED_VERSIONS`.
+ * The SDK version the install hints name: the pinned devDependency, inside
+ * `CLAUDE_TESTED_VERSIONS`. ARI never installs it; the host does.
  */
 export const CLAUDE_SDK_VERSION = "0.3.330";
 
@@ -74,25 +72,21 @@ export const CLAUDE_TESTED_CLAUDE_CODE_VERSION = "2.1.330";
 /** Anthropic's Claude Code setup page, which the install and update hints name. */
 export const CLAUDE_CODE_SETUP_URL = "https://code.claude.com/docs/en/setup";
 
-/** The npm registry the driver installs the SDK from when `sdkRegistry` is unset. */
-export const CLAUDE_DEFAULT_SDK_REGISTRY = "https://registry.npmjs.org";
+/**
+ * The npm command a host runs to install the pinned SDK into a directory it
+ * then names in `sdkDirectory`. ARI never runs it.
+ */
+export const CLAUDE_SDK_INSTALL_COMMAND = `npm install --prefix <directory> ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}`;
 
-/** What a host tells the user when the SDK is missing under Node, where importing the package by name works. */
-export const CLAUDE_INSTALL_HINT = `Install the Claude Agent SDK next to ari (npm install ${CLAUDE_SDK_PACKAGE}), run maintenance.install on this instance, or set sdkDirectory in the driver config to a directory where it is installed.`;
+/** What a host tells the user when the SDK is missing under Node, where importing the package by name works. ARI installs nothing itself. */
+export const CLAUDE_INSTALL_HINT = `ARI does not install it. Install the Claude Agent SDK next to ari (npm install ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}), or run ${CLAUDE_SDK_INSTALL_COMMAND} and set sdkDirectory in the driver config to that directory.`;
 
 /**
  * What a host tells the user when the SDK is missing in the standalone
- * `ari-driver` executable, which cannot import a package by name: only these
- * two steps work there.
+ * `ari-driver` executable, which cannot import a package by name: there
+ * `sdkDirectory` is the only way.
  */
-export const CLAUDE_STANDALONE_INSTALL_HINT = `Run maintenance.install on this instance to download the Claude Agent SDK, or set sdkDirectory in the driver config to a directory where ${CLAUDE_SDK_PACKAGE} is installed.`;
-
-/**
- * What a host tells the user when a managed install (from
- * `maintenance.install`) is incomplete or damaged: `maintenance.install`
- * repairs it, in the standalone `ari-driver` too.
- */
-export const CLAUDE_REPAIR_HINT = `Run maintenance.install on this instance to repair it, or set sdkDirectory in the driver config to a directory where ${CLAUDE_SDK_PACKAGE} is installed.`;
+export const CLAUDE_STANDALONE_INSTALL_HINT = `ARI does not install it. Run ${CLAUDE_SDK_INSTALL_COMMAND} and set sdkDirectory in the driver config to that directory.`;
 
 /**
  * What a host tells the user when no Claude Code is found: Anthropic's
@@ -149,13 +143,7 @@ export const CLAUDE_CONFIG_SCHEMA: JsonSchema = {
     sdkDirectory: {
       type: "string",
       minLength: 1,
-      description:
-        "An absolute path to a directory where @anthropic-ai/claude-agent-sdk is installed (it holds node_modules/@anthropic-ai/claude-agent-sdk). The driver loads the SDK from there instead of by package name; the standalone ari-driver needs this or maintenance.install.",
-    },
-    sdkRegistry: {
-      type: "string",
-      pattern: "^https?://",
-      description: "The npm registry maintenance.install downloads the Claude Agent SDK from. https://registry.npmjs.org when unset.",
+      description: `An absolute path to a directory where the host ran ${CLAUDE_SDK_INSTALL_COMMAND} (it holds node_modules/${CLAUDE_SDK_PACKAGE}). The driver loads the SDK from there instead of by package name; the standalone ari-driver needs it. ARI installs nothing itself.`,
     },
   },
   additionalProperties: false,
@@ -196,17 +184,9 @@ export const CLAUDE_FORM_HINTS: { readonly [field in keyof ClaudeDriverConfig]-?
   },
   sdkDirectory: {
     label: "Claude Agent SDK directory",
-    help:
-      "A directory where npm install @anthropic-ai/claude-agent-sdk ran. Leave empty to use the SDK maintenance.install downloaded, or the one installed next to ari. The standalone ari-driver needs this or maintenance.install.",
+    help: `A directory where you ran ${CLAUDE_SDK_INSTALL_COMMAND}. Leave empty to use the SDK installed next to ari. The standalone ari-driver needs this. ARI installs nothing itself.`,
     placeholder: "/opt/claude-agent-sdk",
     widget: "path",
-    advanced: true,
-  },
-  sdkRegistry: {
-    label: "npm registry for the SDK",
-    help: "Where maintenance.install downloads the Claude Agent SDK from.",
-    placeholder: CLAUDE_DEFAULT_SDK_REGISTRY,
-    widget: "text",
     advanced: true,
   },
 };

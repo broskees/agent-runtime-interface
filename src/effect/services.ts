@@ -273,8 +273,6 @@ export interface EffectInstance {
 
   maintenance?: {
     advisory(): AriEffect<UpdateAdvisory | null>;
-    install?(): AriEffect<void>;
-    update?(): AriEffect<void>;
   };
 
   auth?: {
@@ -355,11 +353,7 @@ export function toEffectInstance(instance: Instance): EffectInstance {
   if (catalog.refresh) effectInstance.catalog.refresh = () => fromPromise(() => catalog.refresh!());
 
   const maintenance = instance.maintenance;
-  if (maintenance) {
-    effectInstance.maintenance = { advisory: () => fromPromise(() => maintenance.advisory()) };
-    if (maintenance.install) effectInstance.maintenance.install = () => fromPromise(() => maintenance.install!());
-    if (maintenance.update) effectInstance.maintenance.update = () => fromPromise(() => maintenance.update!());
-  }
+  if (maintenance) effectInstance.maintenance = { advisory: () => fromPromise(() => maintenance.advisory()) };
 
   const auth = instance.auth;
   if (auth) {

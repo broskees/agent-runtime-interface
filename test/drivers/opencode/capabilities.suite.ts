@@ -1,6 +1,6 @@
 // Honest capabilities. docs/drivers/opencode.md lists every declared
 // capability for OpenCode 1.x and 2.x next to the proposal's §1.2 columns,
-// with a source for each difference. The 44 optional members of inventories D
+// with a source for each difference. The 42 optional members of inventories D
 // and E each have an outcome per generation here: left out, rejected with
 // `unsupported{capability}`, or supported and exercised below (the conformance
 // runs exercise the session members again in scenario 14).
@@ -46,8 +46,6 @@ function outcomes(generation: Generation): { readonly [member: string]: Outcome 
     "Session.ext": supported,
     "Instance.invalidateCaches": absent,
     "Instance.maintenance.advisory": absent,
-    "Instance.maintenance.install": absent,
-    "Instance.maintenance.update": absent,
     "Instance.auth.methods": absent,
     "Instance.auth.state": absent,
     "Instance.auth.reportRuntimeFailure": absent,
@@ -94,9 +92,9 @@ function optionalMembers(): string[] {
 }
 
 for (const generation of [1, 2] as const) {
-  test(`${generation}.x: the outcome table covers exactly the 44 optional Session and Instance members`, () => {
+  test(`${generation}.x: the outcome table covers exactly the 42 optional Session and Instance members`, () => {
     const members = optionalMembers();
-    assert.equal(members.length, 44);
+    assert.equal(members.length, 42);
     assert.deepEqual(Object.keys(outcomes(generation)).sort(), [...members].sort());
   });
 

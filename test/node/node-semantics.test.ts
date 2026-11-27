@@ -5,10 +5,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { after, before, describe, test } from "node:test";
-import { createAdapterInstaller, createCoordination, createInstanceDirectories, createNodeHostServices, createProcessService, instancePaths } from "../../src/node/index.ts";
+import { describe, test } from "node:test";
+import { createCoordination, createInstanceDirectories, createNodeHostServices, createProcessService, instancePaths } from "../../src/node/index.ts";
 import { createSymlinkedRoot, exists } from "../helpers/symlinked-root.ts";
-import { PKG, assertCompleteInstall, fromFile, packageEntries, packedTarball, removeInstallerFixture, setUpInstallerFixture } from "./installer-fixture.ts";
 
 async function readAll(stream: AsyncIterable<Uint8Array>): Promise<string> {
   let text = "";
@@ -138,29 +137,6 @@ describe("ari/node process spawning", () => {
         assert.equal((await readAll(byPath.stdout)).trim(), "release adapter", "running the returned path runs the same file");
       }
       await service.dispose();
-    } finally {
-      await fs.rm(layout.root, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("ari/node adapter installer", () => {
-  before(setUpInstallerFixture);
-  after(removeInstallerFixture);
-
-  test("a cache dir with `..` after a symbolic link is used as the operating system reads it", async () => {
-    const layout = await createSymlinkedRoot("ari-installer-symlink-");
-    try {
-      const installer = createAdapterInstaller({ cacheDir: layout.throughSymlink("cache"), fetchTarball: fromFile(packedTarball) });
-      const lease = await installer.lease(PKG, "1.0.0");
-      await installer.install(PKG, "2.0.0");
-      await assertCompleteInstall(lease.dir);
-      await assertSameFile(lease.dir, layout.real("cache/adapters/@ari-test/fake-adapter/1.0.0"));
-      assert.deepEqual((await installer.cleanup()).map((entry) => entry.version), ["2.0.0"], "cleanup finds the lease in the real cache");
-      await assertCompleteInstall(lease.dir);
-      assert.deepEqual(await packageEntries(layout.real("cache/adapters/@ari-test/fake-adapter")), ["1.0.0"]);
-      assert.equal(await exists(layout.collapsed("cache")), false, "nothing is written where lexical normalization points");
-      await lease.release();
     } finally {
       await fs.rm(layout.root, { recursive: true, force: true });
     }

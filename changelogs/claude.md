@@ -11,7 +11,7 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
 - ARI never downloads or ships Claude Code. Every query runs the user's
   `claude`: the configured `executablePath`, else `claude` on the host's
   `PATH`, passed to the SDK as `pathToClaudeCodeExecutable`, wherever the SDK
-  comes from (npm under Node, `sdkDirectory` or `maintenance.install`). The
+  comes from (npm under Node, or `sdkDirectory`). The
   native Claude Code package npm installs beside the SDK is never run. Every
   query also sets `mcpServersDelivery: "initialize"`, as the SDK recommends
   for an app that starts its own Claude Code, so no MCP server goes on its
@@ -59,18 +59,18 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
 - Catalog from `supportedModels()`, limits from rate limit events, text
   generation without tools, native sessions through `listSessions`,
   `archiveSession` and `deleteSession`.
-- Runs in the standalone `ari-driver`, which cannot import a package by name:
-  the `sdkDirectory` config field loads the SDK from a directory where it is
-  installed, and `maintenance.install` and `maintenance.update` download the
-  pinned SDK (0.3.330), and only the SDK, from an npm registry
-  (`sdkRegistry`, by default `https://registry.npmjs.org`) into the
-  instance's cache directory. Only a sha512, sha384 or sha256
-  `dist.integrity` is accepted, the tarball is checked before it is unpacked,
-  and what is unpacked is what was checked. A record of every file (its size
-  and sha256) lets `status()` report an install that is not whole, among it
-  one an earlier ARI made with a native Claude Code package beside the SDK,
-  and `maintenance.install` repair it with the SDK alone. Both routes import
-  the SDK by file URL. The SDK stays out of ARI's package and executables
-  (its licence is Anthropic's).
-- Without an SDK, the standalone `ari-driver` names `maintenance.install` and
-  `sdkDirectory`; under Node the message also names `npm install`.
+- ARI installs nothing: the host installs the SDK. Under Node the driver
+  imports it by name; the `sdkDirectory` config field loads it by file URL
+  from a directory where the host ran
+  `npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@0.3.330`.
+  The standalone `ari-driver`, which cannot import a package by name, needs
+  `sdkDirectory`. The SDK stays out of ARI's package and executables (its
+  licence is Anthropic's).
+- Without an SDK, `status()` is `unavailable` with `driver_unavailable` and
+  `openSession` rejects with it. The message says ARI does not install the
+  SDK and names the npm command and `sdkDirectory`; under Node it also names
+  `npm install @anthropic-ai/claude-agent-sdk@0.3.330` next to ari.
+- Removed: `maintenance.install` and `maintenance.update`, which an earlier
+  build of this version offered to download the SDK into the instance's
+  cache directory, and the `sdkRegistry` config field they read. The config
+  schema now refuses `sdkRegistry`.

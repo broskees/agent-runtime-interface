@@ -61,7 +61,7 @@ type Auth = Group<I, "auth">;
 type Maintenance = Group<I, "maintenance">;
 type NativeSessions = Group<I, "nativeSessions">;
 
-// Inventory E: 33 Instance methods plus five properties.
+// Inventory E: 31 Instance methods plus five properties.
 export type InstanceSurface = [
   Expect<IsRequired<I, "id">>,
   Expect<IsRequired<I, "continuationKey">>,
@@ -72,8 +72,6 @@ export type InstanceSurface = [
   Expect<IsOptional<I, "invalidateCaches">>, Expect<IsMethod<I["invalidateCaches"]>>,
   Expect<IsOptional<I, "maintenance">>,
   Expect<IsRequired<Maintenance, "advisory">>, Expect<IsMethod<Maintenance["advisory"]>>,
-  Expect<IsOptional<Maintenance, "install">>, Expect<IsMethod<Maintenance["install"]>>,
-  Expect<IsOptional<Maintenance, "update">>, Expect<IsMethod<Maintenance["update"]>>,
   Expect<IsOptional<I, "auth">>,
   Expect<IsRequired<Auth, "methods">>, Expect<IsMethod<Auth["methods"]>>,
   Expect<IsRequired<Auth, "state">>, Expect<IsMethod<Auth["state"]>>,
@@ -164,8 +162,7 @@ const SESSION_METHODS = [
   "uploadFeedback", "ext", "close",
 ];
 const INSTANCE_METHODS = [
-  "status", "statusChanges", "probe", "invalidateCaches", "maintenance.advisory", "maintenance.install",
-  "maintenance.update", "auth.methods", "auth.state", "auth.reportRuntimeFailure", "auth.start", "auth.complete",
+  "status", "statusChanges", "probe", "invalidateCaches", "maintenance.advisory", "auth.methods", "auth.state", "auth.reportRuntimeFailure", "auth.start", "auth.complete",
   "auth.respond", "auth.cancel", "auth.logout", "auth.transferProfile", "auth.transferSession", "catalog.list",
   "catalog.refresh", "workspace.snapshot", "limits.current", "limits.accountKey", "limits.consumeResetCredit",
   "usageHistory.scan", "textGeneration.generate", "nativeSessions.list", "nativeSessions.delete",
@@ -222,7 +219,7 @@ const fullInstance = {
   statusChanges: () => noStatus(),
   probe: unused,
   invalidateCaches: unused,
-  maintenance: { advisory: unused, install: unused, update: unused },
+  maintenance: { advisory: unused },
   auth: {
     methods: () => [],
     state: unused,
@@ -312,8 +309,8 @@ describe("runtime interfaces", () => {
     for (const member of SESSION_METHODS) assert.equal(typeof at(fullSession, member), "function", member);
   });
 
-  test("Instance has the 33 methods of inventory E and its five properties", () => {
-    assert.equal(INSTANCE_METHODS.length, 33);
+  test("Instance has the 31 methods of inventory E and its five properties", () => {
+    assert.equal(INSTANCE_METHODS.length, 31);
     for (const member of INSTANCE_METHODS) assert.equal(typeof at(fullInstance, member), "function", member);
     for (const property of ["id", "continuationKey", "bindingKey", "auth.credentialBinding", "textGeneration.guarantees"]) {
       assert.notEqual(at(fullInstance, property), undefined, property);

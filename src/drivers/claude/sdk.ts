@@ -18,7 +18,7 @@ import * as fs from "node:fs/promises";
 import type { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { callErrors } from "../../errors.ts";
-import { CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_STANDALONE_INSTALL_HINT } from "../../meta/claude.ts";
+import { CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION, CLAUDE_STANDALONE_INSTALL_HINT } from "../../meta/claude.ts";
 
 /** The SDK's `UUID` (from `node:crypto`): five hyphen-separated groups. */
 export type ClaudeUuid = `${string}-${string}-${string}-${string}-${string}`;
@@ -393,13 +393,14 @@ export async function importClaudeSdkPackage(
 }
 
 /**
- * Loads the SDK from `directory`, a directory `npm install
- * @anthropic-ai/claude-agent-sdk` ran in (the `sdkDirectory` config field):
+ * Loads the SDK from `directory`, a directory the host installed it in with
+ * `npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@<version>`
+ * (the `sdkDirectory` config field):
  * `<directory>/node_modules/@anthropic-ai/claude-agent-sdk`, imported by file
  * URL. The native Claude Code package npm installs beside it is not used.
  */
 export async function loadClaudeSdkFromDirectory(directory: string): Promise<ClaudeSdkRuntime> {
-  const hint = `Install it there (npm install --prefix ${directory} ${CLAUDE_SDK_PACKAGE}), or remove sdkDirectory from the driver config and run maintenance.install.`;
+  const hint = `ARI does not install it. Install it there (npm install --prefix ${directory} ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}), or set sdkDirectory to a directory where it is installed.`;
   return importClaudeSdkPackage(`${directory.replace(/[\\/]+$/, "")}/node_modules/${CLAUDE_SDK_PACKAGE}`, (detail) =>
     callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: hint }, `The Claude Agent SDK cannot be loaded from sdkDirectory ${directory}: ${detail}. ${hint}`),
   );
@@ -410,7 +411,8 @@ export async function loadClaudeSdkFromDirectory(directory: string): Promise<Cla
  * SDK's package.json for its version. Nothing is spawned, and the native
  * Claude Code package npm installs beside the SDK is not used. In the
  * standalone executable a package cannot be imported by name, so there it
- * reports the SDK missing at once, naming the two steps that work there.
+ * reports the SDK missing at once, naming `sdkDirectory`, the one step that
+ * works there.
  */
 export async function loadClaudeSdk(): Promise<ClaudeSdkRuntime> {
   if (isStandaloneExecutableModule(import.meta.url)) {

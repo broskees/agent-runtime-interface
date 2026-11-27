@@ -28,7 +28,7 @@ export const EnvPolicySchema: Effect.Schema.Codec<Wire.EnvPolicy> = Schema.Struc
 ).annotate({ identifier: "EnvPolicy" });
 
 /** `probe`: a side-effect-free check such as `--version`. `runtime`: the agent process itself. */
-export const SpawnPurposeSchema: Effect.Schema.Codec<Wire.SpawnPurpose> = Schema.Union([Schema.Literals(["probe", "runtime", "install"]), Schema.String]).annotate({ identifier: "SpawnPurpose" });
+export const SpawnPurposeSchema: Effect.Schema.Codec<Wire.SpawnPurpose> = Schema.Union([Schema.Literals(["probe", "runtime"]), Schema.String]).annotate({ identifier: "SpawnPurpose" });
 
 export const SpawnRequestSchema: Effect.Schema.Codec<Wire.SpawnRequest> = Schema.StructWithRest(
   Schema.Struct({

@@ -173,8 +173,7 @@ for (const each of CASES) {
       assert.equal(status.error?.message, `${each.name} ${each.below.version} (${cli.executable}) is older than ${each.minimum}, the oldest version this driver supports. ${each.updateStep}`);
       assert.equal((status.error as { installHint?: string }).installHint, each.updateStep);
       await assert.rejects(instance.openSession({}), (error: unknown) => isAriError(error, "driver_unavailable") && error.message === status.error?.message);
-      assert.equal(instance.maintenance?.install, undefined, "the instance installs nothing");
-      assert.equal(instance.maintenance?.update, undefined, "the instance updates nothing");
+      assert.deepEqual(Object.keys(instance.maintenance ?? {}).filter((member) => member !== "advisory"), [], "the instance installs and updates nothing");
     });
     assert.deepEqual(cli.invocations(), ["--version", "--version"], `${each.binary} ran only with --version: no agent started`);
     for (const [found, advised] of [
@@ -220,7 +219,7 @@ test("standalone Codex probes the instance PATH in both local and delegated proc
 test("the standalone ari-driver's antigravity instance has no maintenance member, and refuses a config that names the old installation setting", async () => {
   const cli = fakeCli("agy", "1.5.17");
   await withInstance("antigravity", cli, { ...ANTIGRAVITY_DEFAULT_CONFIG }, async (instance) => {
-    assert.equal(instance.maintenance, undefined, "no maintenance.install, update or advisory");
+    assert.equal(instance.maintenance, undefined, "no maintenance member, not even maintenance.advisory");
   });
   const old = { ...ANTIGRAVITY_DEFAULT_CONFIG, installation: "managed" };
   await assert.rejects(

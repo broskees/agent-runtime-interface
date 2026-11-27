@@ -4,9 +4,9 @@
 //
 // The ACP base driver runs any agent that speaks the Agent Client Protocol
 // (https://agentclientprotocol.com) on stdio: the user names the executable
-// and its arguments. The flavor drivers (`grok`, `fx`, `kiro`,
-// `acp-registry`, `antigravity`) build on the same driver with a fixed launch
-// command; their metadata imports the shared pieces from this module.
+// and its arguments. ARI installs no agent; the user does. The flavor drivers
+// (`grok`, `fx`, `kiro`, `antigravity`) build on the same driver with a fixed
+// launch command; their metadata imports the shared pieces from this module.
 
 import type { Icon, JsonSchema } from "../generated/common.ts";
 import type { DriverMetadata } from "../generated/driver.ts";

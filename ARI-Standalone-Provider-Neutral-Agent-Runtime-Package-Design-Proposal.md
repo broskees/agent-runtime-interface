@@ -1,6 +1,12 @@
 
 # ARI: a standalone, provider-neutral runtime contract for coding-agent apps
 
+> **Note (2026-11-27):** ARI handles no installation. Where this proposal
+> describes install and update handling (`maintenance.install`,
+> `maintenance.update`, `ari/node`'s managed adapter installer and the
+> registry-based `acp-registry` driver), that part was dropped: the user or
+> the host installs every CLI, agent and SDK. See `CHANGELOG.md`.
+
 *Proposal originally drafted October 28, 2026; revised November 23, 2026 to incorporate findings from the 14-orchestrator architecture audit (`doc-c03cbe6c`). "ARI" (Agent Runtime Interface) is a working name. ARI is designed to ship as **one standalone npm package with zero runtime dependencies that imports nothing from T3**. T3 Code (audited at commit `be6ff17`, [T3 Tools Inc., 2026a](https://github.com/pingdotgg/t3code/tree/be6ff17f5171c8a55969ec74af46ff1d86666c3a); updated to 11 built-in drivers on `main` as of November 23, 2026, [T3 Tools Inc., 2026f](https://raw.githubusercontent.com/pingdotgg/t3code/main/apps/server/src/provider/builtInDrivers.ts)) is the reference adopter, not a dependency. Packaging is covered in §17–§19, and the mapping from T3's concepts is in Appendix A (§22).*
 
 ---

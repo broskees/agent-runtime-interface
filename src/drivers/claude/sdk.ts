@@ -1,6 +1,8 @@
 // The part of the Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) this
 // driver uses, written out as structural types, and the loader that finds the
-// real SDK with a dynamic `import()`.
+// real SDK with a dynamic `import()` by package name. (The standalone
+// `ari-driver` passes its own loader, over the SDK compiled into it; see
+// scripts/build-binary.ts.)
 //
 // The driver never imports the SDK's own types: its published declarations
 // would then name a package a host may not have installed. Instead these
@@ -16,9 +18,8 @@
 
 import * as fs from "node:fs/promises";
 import type { Readable, Writable } from "node:stream";
-import { pathToFileURL } from "node:url";
 import { callErrors } from "../../errors.ts";
-import { CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION, CLAUDE_STANDALONE_INSTALL_HINT } from "../../meta/claude.ts";
+import { CLAUDE_INSTALL_HINT, CLAUDE_SDK_PACKAGE } from "../../meta/claude.ts";
 
 /** The SDK's `UUID` (from `node:crypto`): five hyphen-separated groups. */
 export type ClaudeUuid = `${string}-${string}-${string}-${string}-${string}`;
@@ -340,87 +341,21 @@ function isModuleNotFound(error: unknown): boolean {
   return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND" || code === "ERR_PACKAGE_PATH_NOT_EXPORTED";
 }
 
-/**
- * True when `moduleUrl` lies in a Bun standalone executable's embedded file
- * system: `/$bunfs/` on Linux and macOS, `B:/~BUN/` on Windows (Bun's
- * `StandaloneModuleGraph` base paths). Code there cannot import a package by
- * name, because Bun resolves the name against that embedded root and never
- * against a `node_modules` on disk; a file URL still loads.
- */
-export function isStandaloneExecutableModule(moduleUrl: string): boolean {
-  return /^file:\/\/\/(?:\$bunfs\/|[A-Za-z]:\/~BUN\/)/.test(moduleUrl);
-}
-
-/** The SDK package's version, bundled Claude Code version and entry module, from its package.json. */
-function readSdkManifest(text: string): { version: string | undefined; claudeCodeVersion: string | undefined; entry: string } {
-  const manifest = JSON.parse(text) as { version?: unknown; claudeCodeVersion?: unknown; main?: unknown; exports?: unknown };
-  // The "." export: a string, or conditions of which `import` or `default` names the module (the SDK uses `default`).
-  const root = typeof manifest.exports === "object" && manifest.exports !== null ? (manifest.exports as { [subpath: string]: unknown })["."] : manifest.exports;
-  const conditions = typeof root === "object" && root !== null ? (root as { [condition: string]: unknown }) : {};
-  const fromExports = typeof root === "string" ? root : [conditions["import"], conditions["default"]].find((target): target is string => typeof target === "string");
+/** The SDK package's version and bundled Claude Code version, from its package.json. */
+function readSdkManifest(text: string): { version: string | undefined; claudeCodeVersion: string | undefined } {
+  const manifest = JSON.parse(text) as { version?: unknown; claudeCodeVersion?: unknown };
   return {
     version: typeof manifest.version === "string" ? manifest.version : undefined,
     claudeCodeVersion: typeof manifest.claudeCodeVersion === "string" ? manifest.claudeCodeVersion : undefined,
-    entry: fromExports ?? (typeof manifest.main === "string" ? manifest.main : "index.js"),
   };
-}
-
-/**
- * Imports the SDK package installed in `packageDirectory` by the file URL of
- * its entry module, never by package name, so it loads in the standalone
- * executable too. The module's own imports then resolve from its place on
- * disk. `unavailable` builds the error for a package that is missing or fails
- * to load.
- */
-export async function importClaudeSdkPackage(
-  packageDirectory: string,
-  unavailable: (detail: string) => Error,
-): Promise<ClaudeSdkRuntime> {
-  let manifest: ReturnType<typeof readSdkManifest>;
-  try {
-    manifest = readSdkManifest(await fs.readFile(`${packageDirectory}/package.json`, "utf8"));
-  } catch (error) {
-    throw unavailable(`${packageDirectory}/package.json cannot be read (${errorText(error)})`);
-  }
-  const entryFile = `${packageDirectory}/${manifest.entry.replace(/^\.\//, "")}`;
-  let sdk: ClaudeSdk;
-  try {
-    sdk = (await import(pathToFileURL(entryFile).href)) as ClaudeSdk;
-  } catch (error) {
-    throw unavailable(`${entryFile} failed to load: ${errorText(error)}`);
-  }
-  return { sdk, version: manifest.version, claudeCodeVersion: manifest.claudeCodeVersion };
-}
-
-/**
- * Loads the SDK from `directory`, a directory the host installed it in with
- * `npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@<version>`
- * (the `sdkDirectory` config field):
- * `<directory>/node_modules/@anthropic-ai/claude-agent-sdk`, imported by file
- * URL. The native Claude Code package npm installs beside it is not used.
- */
-export async function loadClaudeSdkFromDirectory(directory: string): Promise<ClaudeSdkRuntime> {
-  const hint = `ARI does not install it. Install it there (npm install --prefix ${directory} ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}), or set sdkDirectory to a directory where it is installed.`;
-  return importClaudeSdkPackage(`${directory.replace(/[\\/]+$/, "")}/node_modules/${CLAUDE_SDK_PACKAGE}`, (detail) =>
-    callErrors.driverUnavailable({ package: CLAUDE_SDK_PACKAGE, installHint: hint }, `The Claude Agent SDK cannot be loaded from sdkDirectory ${directory}: ${detail}. ${hint}`),
-  );
 }
 
 /**
  * The default loader: `import("@anthropic-ai/claude-agent-sdk")`, then the
  * SDK's package.json for its version. Nothing is spawned, and the native
- * Claude Code package npm installs beside the SDK is not used. In the
- * standalone executable a package cannot be imported by name, so there it
- * reports the SDK missing at once, naming `sdkDirectory`, the one step that
- * works there.
+ * Claude Code package npm installs beside the SDK is not used.
  */
 export async function loadClaudeSdk(): Promise<ClaudeSdkRuntime> {
-  if (isStandaloneExecutableModule(import.meta.url)) {
-    throw callErrors.driverUnavailable(
-      { package: CLAUDE_SDK_PACKAGE, installHint: CLAUDE_STANDALONE_INSTALL_HINT },
-      `The Claude Agent SDK (${CLAUDE_SDK_PACKAGE}) is not installed for this standalone ari-driver, which cannot load a package by name. ${CLAUDE_STANDALONE_INSTALL_HINT}`,
-    );
-  }
   let sdk: ClaudeSdk;
   try {
     sdk = (await import(SDK_SPECIFIER)) as ClaudeSdk;

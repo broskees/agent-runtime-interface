@@ -31,17 +31,6 @@ export interface ClaudeDriverConfig {
   readonly effort?: ClaudeEffortLevel;
   /** Which settings files Claude Code loads; all three when unset (Claude Code's own default). */
   readonly settingSources?: readonly ClaudeSettingSource[];
-  /**
-   * An absolute path to a directory where the host installed
-   * `@anthropic-ai/claude-agent-sdk`: the directory `npm install --prefix
-   * <directory> @anthropic-ai/claude-agent-sdk@<CLAUDE_SDK_VERSION>` ran for,
-   * which holds `node_modules/@anthropic-ai/claude-agent-sdk`. The driver
-   * loads the SDK from there by file URL instead of importing the package by
-   * name; a native Claude Code package npm put beside it is never run. The
-   * standalone `ari-driver` cannot import a package by name, so this field is
-   * the only way it gets the SDK. ARI installs nothing itself.
-   */
-  readonly sdkDirectory?: string;
 }
 
 export const CLAUDE_LABEL = "Claude";
@@ -54,8 +43,9 @@ export const CLAUDE_DRIVER_KIND = "claude";
 export const CLAUDE_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
 
 /**
- * The SDK version the install hints name: the pinned devDependency, inside
- * `CLAUDE_TESTED_VERSIONS`. ARI never installs it; the host does.
+ * The SDK version the install hint names: the pinned devDependency, inside
+ * `CLAUDE_TESTED_VERSIONS`, and the version the standalone `ari-driver`
+ * compiles in. ARI never installs it; under Node the host does.
  */
 export const CLAUDE_SDK_VERSION = "0.3.330";
 
@@ -73,20 +63,11 @@ export const CLAUDE_TESTED_CLAUDE_CODE_VERSION = "2.1.330";
 export const CLAUDE_CODE_SETUP_URL = "https://code.claude.com/docs/en/setup";
 
 /**
- * The npm command a host runs to install the pinned SDK into a directory it
- * then names in `sdkDirectory`. ARI never runs it.
+ * What a host tells the user when the SDK is missing under Node, where the
+ * driver imports the package by name. ARI installs nothing itself. (The
+ * standalone `ari-driver` has the SDK compiled in.)
  */
-export const CLAUDE_SDK_INSTALL_COMMAND = `npm install --prefix <directory> ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}`;
-
-/** What a host tells the user when the SDK is missing under Node, where importing the package by name works. ARI installs nothing itself. */
-export const CLAUDE_INSTALL_HINT = `ARI does not install it. Install the Claude Agent SDK next to ari (npm install ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}), or run ${CLAUDE_SDK_INSTALL_COMMAND} and set sdkDirectory in the driver config to that directory.`;
-
-/**
- * What a host tells the user when the SDK is missing in the standalone
- * `ari-driver` executable, which cannot import a package by name: there
- * `sdkDirectory` is the only way.
- */
-export const CLAUDE_STANDALONE_INSTALL_HINT = `ARI does not install it. Run ${CLAUDE_SDK_INSTALL_COMMAND} and set sdkDirectory in the driver config to that directory.`;
+export const CLAUDE_INSTALL_HINT = `ARI does not install it. Install the Claude Agent SDK next to ari (npm install ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}).`;
 
 /**
  * What a host tells the user when no Claude Code is found: Anthropic's
@@ -140,11 +121,6 @@ export const CLAUDE_CONFIG_SCHEMA: JsonSchema = {
       uniqueItems: true,
       description: "Which settings files Claude Code loads. All of them when unset.",
     },
-    sdkDirectory: {
-      type: "string",
-      minLength: 1,
-      description: `An absolute path to a directory where the host ran ${CLAUDE_SDK_INSTALL_COMMAND} (it holds node_modules/${CLAUDE_SDK_PACKAGE}). The driver loads the SDK from there instead of by package name; the standalone ari-driver needs it. ARI installs nothing itself.`,
-    },
   },
   additionalProperties: false,
 };
@@ -181,13 +157,6 @@ export const CLAUDE_FORM_HINTS: { readonly [field in keyof ClaudeDriverConfig]-?
     widget: "multi_select",
     advanced: true,
     options: CLAUDE_SETTING_SOURCES.map((source) => ({ value: source, label: source })),
-  },
-  sdkDirectory: {
-    label: "Claude Agent SDK directory",
-    help: `A directory where you ran ${CLAUDE_SDK_INSTALL_COMMAND}. Leave empty to use the SDK installed next to ari. The standalone ari-driver needs this. ARI installs nothing itself.`,
-    placeholder: "/opt/claude-agent-sdk",
-    widget: "path",
-    advanced: true,
   },
 };
 

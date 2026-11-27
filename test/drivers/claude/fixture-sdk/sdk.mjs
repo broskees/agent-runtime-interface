@@ -1,10 +1,10 @@
 // A stand-in for the entry module of `@anthropic-ai/claude-agent-sdk`, for
-// tests that make the claude driver load an SDK from a directory on disk
-// (the `sdkDirectory` config field, or a managed install). The tests copy it
-// into a package laid out as the real one is (see sdk-fixture.ts).
+// tests that give the claude driver an SDK from disk: imported by name
+// through a module hook, or by file URL from the driver's loader. The tests
+// copy it into a package laid out as the real one is (see sdk-fixture.ts).
 //
 // Like the real `sdk.mjs` it is plain JavaScript that imports only Node
-// built-ins, so the standalone ari-driver can load it by file URL. It picks
+// built-ins. It picks
 // the Claude Code it runs as the real SDK does:
 // `options.pathToClaudeCodeExecutable`, else the first of its platform
 // packages that resolves from this file (the native package npm installs

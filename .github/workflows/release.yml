@@ -8,8 +8,10 @@
 #                   ari-driver for the five release platforms
 #   npm             publishes that tarball with npm trusted publishing and
 #                   provenance; the only job that can mint an OIDC token
-#   github-release  creates the GitHub release with the binaries, their
-#                   SHA256SUMS and the tarball; the only job that can write
+#   github-release  creates the GitHub release with the binaries, the
+#                   third-party notice for the SDK code they include
+#                   (THIRD-PARTY-NOTICES.md), their SHA256SUMS and the
+#                   tarball; the only job that can write
 #
 # Before the first release, configure a trusted publisher for the package on
 # npmjs.com: this repository and the workflow file `release.yml`. Then set
@@ -113,15 +115,16 @@ jobs:
           node scripts/check-package.ts --tarball "$TARBALL"
           node scripts/check-dependencies.ts "$TARBALL"
 
-      - name: Build ari-driver for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64
+      - name: Build ari-driver for linux-x64, linux-arm64, darwin-x64, darwin-arm64 and windows-x64, with its notice
         run: |
           node scripts/build-binary.ts --target all --out build/standalone
           for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
             cp "build/standalone/$target/ari-driver" "build/release/ari-driver-$target"
           done
           cp build/standalone/windows-x64/ari-driver.exe build/release/ari-driver-windows-x64.exe
+          cp THIRD-PARTY-NOTICES.md build/release/THIRD-PARTY-NOTICES.md
           cd build/release
-          sha256sum ari-driver-* ./*.tgz > SHA256SUMS
+          sha256sum ari-driver-* THIRD-PARTY-NOTICES.md ./*.tgz > SHA256SUMS
           cat SHA256SUMS
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -193,7 +196,7 @@ jobs:
           name: release
           path: build/release
 
-      - name: Create the release and attach the binaries
+      - name: Create the release and attach the binaries and their notice
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -205,5 +208,6 @@ jobs:
             build/release/ari-driver-darwin-x64 \
             build/release/ari-driver-darwin-arm64 \
             build/release/ari-driver-windows-x64.exe \
+            build/release/THIRD-PARTY-NOTICES.md \
             build/release/SHA256SUMS \
             "$TARBALL"

@@ -8,9 +8,9 @@
 // line: it gets them over stdin.
 //
 // The SDK is a copy of the pinned package's sdk.mjs and package.json in a
-// temp `sdkDirectory`, with a decoy native Claude Code package beside it, so
-// the SDK could never find the real native binary in this repository's
-// node_modules. The user's Claude Code is a fake (a Node script named
+// temp npm layout, which the driver's loader imports by file URL, with a
+// decoy native Claude Code package beside it, so the SDK could never find the
+// real native binary in this repository's node_modules. The user's Claude Code is a fake (a Node script named
 // `claude` on the host's PATH) that records its arguments and the lines it
 // reads, and answers the SDK's control requests and one prompt. Nothing
 // reaches the network or starts a real Claude Code.
@@ -20,11 +20,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import type { AriEvent } from "../../../src/index.ts";
 import { createClaudeDriver } from "../../../src/drivers/claude/index.ts";
 import type { ClaudeDriverConfig } from "../../../src/drivers/claude/index.ts";
-import { loadClaudeSdkFromDirectory } from "../../../src/drivers/claude/sdk.ts";
-import type { ClaudeUserMessage } from "../../../src/drivers/claude/sdk.ts";
+import type { ClaudeSdk, ClaudeSdkRuntime, ClaudeUserMessage } from "../../../src/drivers/claude/sdk.ts";
 import { CLAUDE_SDK_PACKAGE } from "../../../src/meta/claude.ts";
 import { createCoordination, createNodeHostServices, resolveExecutable } from "../../../src/node/index.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
@@ -100,6 +100,9 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
   fs.mkdirSync(sdkPackage, { recursive: true });
   for (const file of ["package.json", "sdk.mjs"]) fs.copyFileSync(path.join(pinned, file), path.join(sdkPackage, file));
   const decoy = writeDecoyNativePackage(path.join(root, "sdk", "node_modules"), "the native package beside the SDK");
+  // The driver's loader for that copy, by file URL, as the standalone ari-driver's loader imports the SDK compiled into it.
+  const { version, claudeCodeVersion } = JSON.parse(fs.readFileSync(path.join(sdkPackage, "package.json"), "utf8")) as { version: string; claudeCodeVersion: string };
+  const loadCopy = async (): Promise<ClaudeSdkRuntime> => ({ sdk: (await import(pathToFileURL(path.join(sdkPackage, "sdk.mjs")).href)) as ClaudeSdk, version, claudeCodeVersion });
   // The user's claude on the host's PATH.
   const bin = path.join(root, "bin");
   const project = path.join(root, "project");
@@ -116,7 +119,7 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
   };
   process.on("warning", onWarning);
   const diagnostics: string[] = [];
-  const config: ClaudeDriverConfig = { sdkDirectory: path.join(root, "sdk") };
+  const config: ClaudeDriverConfig = {};
   const host = await createNodeHostServices<ClaudeDriverConfig>({
     hostRoot: path.join(root, "host"),
     instanceId: "claude-real-sdk",
@@ -139,11 +142,11 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
     if (request.purpose === "runtime") children.push({ pid: child.pid, cwd: request.cwd });
     return child;
   };
-  const instance = await createClaudeDriver().create(host, { instanceId: "claude-real-sdk", config, environment: { HOME: root, PATH: bin } });
+  const instance = await createClaudeDriver({ loadSdk: loadCopy }).create(host, { instanceId: "claude-real-sdk", config, environment: { HOME: root, PATH: bin } });
   try {
     const status = await instance.status();
     assert.equal(status.state, "ready", JSON.stringify(status));
-    assert.equal(status.version, "0.3.330", "the pinned SDK loaded from sdkDirectory");
+    assert.equal(status.version, "0.3.330", "the copy of the pinned SDK loaded");
     const session = await instance.openSession({
       launch: { mcpServers: [{ name: "fixture-tools", transport: "stdio", command: "/bin/true", args: ["--serve"], env: { FIXTURE_TOKEN: SECRET } }] },
     });
@@ -204,7 +207,7 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
 
   // The control: the same SDK given MCP servers in Options.mcpServers with no delivery mode, as an app that ignores the deprecation would.
   // It warns, once per process, and puts the servers on the command line: what the driver's runs above did not do.
-  const runtime = await loadClaudeSdkFromDirectory(path.join(root, "sdk"));
+  const runtime = await loadCopy();
   const never = (async function* (): AsyncGenerator<ClaudeUserMessage> {
     await new Promise(() => undefined);
   })();

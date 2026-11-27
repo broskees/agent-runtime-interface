@@ -47,7 +47,12 @@ one of them, and a driver whose CLI or SDK is missing reports
   negotiates the contract, grammar, method and persistence versions; host
   services across the wire, with optional process delegation; and the
   `ari-driver` bin.
-- A standalone `ari-driver` executable built with `bun build --compile`.
+- A standalone `ari-driver` executable built with `bun build --compile`. It
+  includes the JavaScript of the Claude Agent SDK
+  (`@anthropic-ai/claude-agent-sdk` 0.3.330, © Anthropic PBC, under
+  Anthropic's terms, not ARI's MIT License), so its `claude` driver needs no
+  SDK install and no config. It includes none of the SDK's platform packages
+  and no Claude Code. The npm package holds no SDK code.
 - Thin Rust (`ari-client`), Python (`ari-client`) and Go (`ari-go`) clients
   generated from the JSON Schema.
 
@@ -72,9 +77,10 @@ gone:
   Python and Go clients. `maintenance.advisory` stays. The `SpawnPurpose`
   value `install` is gone too; a purpose is still any string.
 - The `claude` driver's `maintenance.install` and `maintenance.update`, which
-  downloaded the Claude Agent SDK, and its `sdkRegistry` config field. The
-  host installs the SDK: next to ari under Node, or in a directory named by
-  `sdkDirectory`, the only way for the standalone `ari-driver`.
+  downloaded the Claude Agent SDK, and its `sdkRegistry` config field. Under
+  Node the host installs the SDK next to ari; the standalone `ari-driver`
+  includes it. The `sdkDirectory` config field, which an earlier build of
+  this version added for the standalone `ari-driver`, is gone too.
 - `ari/node`'s managed adapter installer (`createAdapterInstaller`,
   `npmRegistryFetch`, install leases, `<cacheDir>/adapters/`), its tar
   extractor (`extractTarball`) and `DEFAULT_HANDSHAKE_TIMEOUT_MS`.
@@ -92,4 +98,5 @@ gone:
 - CI runs the gate on Node 22, 24 and 26 and on Bun. The release workflow
   publishes with npm trusted publishing and provenance, refuses runtime
   dependencies and attaches `ari-driver` binaries for five platforms to the
-  GitHub release.
+  GitHub release, with `THIRD-PARTY-NOTICES.md`, the notice for the Claude
+  Agent SDK code they include.

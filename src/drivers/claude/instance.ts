@@ -3,10 +3,10 @@
 // reports) or an Anthropic API key this instance keeps in the host's secrets
 // (a managed profile), given to Claude Code as ANTHROPIC_API_KEY.
 //
-// The SDK is an optional peer the host installs, loaded on first use: from
-// the directory the config's `sdkDirectory` names when it is set, else the
-// package imported by name (the loader `createClaudeDriver` was given). ARI
-// never installs it.
+// The SDK is loaded on first use, by the loader `createClaudeDriver` was
+// given: by default the package imported by name, an optional peer the host
+// installs under Node (ARI never installs it); in the standalone `ari-driver`,
+// the SDK compiled into it.
 //
 // Every query runs the user's own Claude Code, wherever the SDK came from:
 // the configured `executablePath`, else `claude` on the host's PATH, passed
@@ -59,7 +59,6 @@ import { ARI_VERSION } from "../../version.ts";
 import { limitStatusFrom, limitWindowFrom, strongRef } from "./mapping.ts";
 import type { ClaudeLimitWindowState } from "./mapping.ts";
 import { claudeProcessOptions } from "./process.ts";
-import { loadClaudeSdkFromDirectory } from "./sdk.ts";
 import type { ClaudeQueryOptions, ClaudeRateLimitInfo, ClaudeResultMessage, ClaudeSdkLoader, ClaudeSdkRuntime, ClaudeUserMessage } from "./sdk.ts";
 import { ClaudeSession, sessionIdFor } from "./session.ts";
 
@@ -78,8 +77,9 @@ export const CLAUDE_AUTH_METHODS: readonly AuthMethod[] = [
 /** Options for `createClaudeDriver`: seams for hosts and tests. */
 export interface ClaudeDriverOptions {
   /**
-   * Loads the SDK when the config names no `sdkDirectory`. Defaults to a
-   * dynamic `import("@anthropic-ai/claude-agent-sdk")`.
+   * Loads the SDK. Defaults to a dynamic
+   * `import("@anthropic-ai/claude-agent-sdk")`; the standalone `ari-driver`
+   * passes one over the SDK compiled into it.
    */
   readonly loadSdk?: ClaudeSdkLoader;
   /**
@@ -283,17 +283,11 @@ export class ClaudeInstance implements Instance {
 
   /** The loaded SDK; a failed load is not kept, so installing the SDK later works without a restart. */
   #sdk(): Promise<ClaudeSdkRuntime> {
-    this.#runtime ??= this.#loadRuntime().catch((error: unknown) => {
+    this.#runtime ??= this.#loadSdk().catch((error: unknown) => {
       this.#runtime = undefined;
       throw error;
     });
     return this.#runtime;
-  }
-
-  /** The SDK from the configured `sdkDirectory`, else from the driver's loader (the package by name). */
-  async #loadRuntime(): Promise<ClaudeSdkRuntime> {
-    if (this.#config.sdkDirectory !== undefined) return loadClaudeSdkFromDirectory(this.#config.sdkDirectory);
-    return this.#loadSdk();
   }
 
   /**

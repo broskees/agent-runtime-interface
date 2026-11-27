@@ -1,6 +1,7 @@
-// Fake installs of the Claude Agent SDK on disk and a fake of the user's own
-// Claude Code, for the tests that make the claude driver load its SDK from a
-// directory (`sdkDirectory`) or import it by name.
+// Fake installs of the Claude Agent SDK on disk and fakes of the user's own
+// Claude Code, for the tests that give the claude driver its SDK from disk
+// (by name through a module hook, or by file URL from its loader) and for
+// the standalone ari-driver, whose SDK is compiled in.
 //
 // The fake SDK package is laid out as the real one is: its own package.json
 // (with `exports["."].default` naming `sdk.mjs`, and `claudeCodeVersion`),

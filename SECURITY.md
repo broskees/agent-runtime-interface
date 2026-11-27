@@ -14,7 +14,7 @@ Please include:
 
 - the affected package version, subpath and driver;
 - what an attacker can do, and what they need first (for example a malicious
-  agent binary on `PATH`, a crafted wire frame, or a crafted registry index);
+  agent binary on `PATH`, or a crafted wire frame);
 - the steps or a small program that shows it.
 
 A fix ships as a new release with a GitHub security advisory.
@@ -29,7 +29,7 @@ this applies from its first release.
 In scope: everything in the npm package (`dist/` and `json-schema/`), the
 `ari-driver` executables attached to GitHub releases, and the release
 workflow. For example: a driver that leaks a secret into a child process's
-environment or a log, a path from a session or registry that escapes the
+environment or a log, a path from a session that escapes the
 instance's directories, a host prompt a driver injects, or a wire frame that
 crashes or takes over a host.
 

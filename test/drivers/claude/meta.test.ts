@@ -56,22 +56,21 @@ describe("ari/meta/claude", () => {
     assert.equal(validate(claudeDriver.defaultConfig()), true, JSON.stringify(validate.errors));
     assert.equal(validate(claudeDefaultConfig()), true);
     assert.equal(
-      validate({ executablePath: "/opt/claude/bin/claude", model: "opus", effort: "high", settingSources: ["project", "local"], sdkDirectory: "/opt/claude-agent-sdk", sdkRegistry: "https://registry.example.test/npm/" }),
+      validate({ executablePath: "/opt/claude/bin/claude", model: "opus", effort: "high", settingSources: ["project", "local"], sdkDirectory: "/opt/claude-agent-sdk" }),
       true,
     );
-    assert.equal(validate({ sdkRegistry: "http://127.0.0.1:4873" }), true);
+    assert.equal(validate({ sdkRegistry: "https://registry.npmjs.org" }), false, "sdkRegistry is gone: ARI downloads nothing");
     assert.equal(validate({ effort: "extreme" }), false);
     assert.equal(validate({ settingSources: ["global"] }), false);
     assert.equal(validate({ executablePath: "" }), false);
     assert.equal(validate({ sdkDirectory: "" }), false);
-    assert.equal(validate({ sdkRegistry: "ftp://registry.example.test" }), false);
     assert.equal(validate({ unknown: true }), false);
   });
 
   test("ari/meta/claude reaches no Node built-in or package (repository rule c); ari/drivers/claude reaches Node built-ins and, only through import(), the SDK by name or a file by URL", () => {
     assert.deepEqual(reachableImports(path.join(REPO_ROOT, "src", "meta", "claude.ts")).external, []);
     const driver = reachableImports(path.join(REPO_ROOT, "src", "drivers", "claude", "index.ts")).external;
-    // `file:` is check-rules' name for `import(pathToFileURL(x).href)`: the SDK's entry module in sdkDirectory or a managed install, a file and never a package.
+    // `file:` is check-rules' name for `import(pathToFileURL(x).href)`: the SDK's entry module in sdkDirectory, a file and never a package.
     assert.deepEqual(driver.filter((specifier) => !specifier.startsWith("node:")), [CLAUDE_SDK_PACKAGE, "file:"]);
   });
 

@@ -794,7 +794,7 @@
       ]
     },
     "SubProvider": {
-      "description": "A provider behind a multi-provider agent, such as an ACP Registry agent.",
+      "description": "A provider behind a multi-provider agent.",
       "type": "object",
       "properties": {
         "id": {

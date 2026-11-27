@@ -32,7 +32,7 @@ export type EnvPolicy = {
 };
 
 /** `probe`: a side-effect-free check such as `--version`. `runtime`: the agent process itself. */
-export type SpawnPurpose = "probe" | "runtime" | "install" | (string & {});
+export type SpawnPurpose = "probe" | "runtime" | (string & {});
 
 export type SpawnRequest = {
   command: string;
@@ -177,8 +177,7 @@ export const hostDocument: SchemaDocument = {
         {
           "enum": [
             "probe",
-            "runtime",
-            "install"
+            "runtime"
           ]
         },
         {

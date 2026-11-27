@@ -159,7 +159,7 @@ describe("the package-contents check", () => {
     broken.dependencies = { "left-pad": "1.3.0" };
     const problems = checkPublishedManifest(broken, files);
     assert.ok(problems.some((problem) => problem.includes('exports["./host"] condition development sends ./src/host/index.ts')), problems.join("\n"));
-    assert.ok(problems.some((problem) => problem.includes('exports["./meta/*"] condition browser sends 12 of 12 subpaths')), problems.join("\n"));
+    assert.ok(problems.some((problem) => problem.includes('exports["./meta/*"] condition browser sends 11 of 11 subpaths')), problems.join("\n"));
     assert.ok(problems.some((problem) => problem.includes("bin ari-driver is ./dist/wire/missing-cli.js")), problems.join("\n"));
     assert.ok(problems.some((problem) => problem.includes('"dependencies" must be empty')), problems.join("\n"));
   });

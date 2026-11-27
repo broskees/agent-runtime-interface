@@ -152,12 +152,12 @@ with the differences in the last rows.
 
 ## Optional members
 
-As the [ACP base driver](acp.md#optional-members-44), except that
+As the [ACP base driver](acp.md#optional-members-42), except that
 `rollbackThread` is present and rejects `unsupported`. The instance has no
-`maintenance` member (no `maintenance.install`, `maintenance.update` or
-`maintenance.advisory`): ARI never installs or updates `agy`, so over
-`ari/wire` its `InstanceDescriptor.members` lists none of them.
-`test/drivers/antigravity/rules.suite.ts` checks all 44, and
+`maintenance` member (no `maintenance.advisory`): ARI never installs or
+updates `agy`, so over `ari/wire` its `InstanceDescriptor.members` lists no
+`maintenance` member.
+`test/drivers/antigravity/rules.suite.ts` checks all 42, and
 `test/standalone/user-installed-cli.e2e.ts` checks the standalone
 `ari-driver`.
 

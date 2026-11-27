@@ -1,9 +1,10 @@
 // A one-time live check that the standalone `ari-driver` (the Bun-built
 // executable from scripts/build-binary.ts) runs the real Claude Code. With no
 // `node` and no `bun` on its PATH it:
-//   1. runs `maintenance.install` on a `claude` instance, which downloads the
-//      pinned Claude Agent SDK, and only the SDK, from the npm registry
-//      (https://registry.npmjs.org, the driver default) and verifies it;
+//   1. starts a `claude` instance whose `sdkDirectory` is the `--sdk-directory`
+//      you name: a directory where you ran
+//      `npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@0.3.330`
+//      yourself (ARI installs nothing, and neither does this script);
 //   2. prints `instance/status`, which must report the pinned SDK version;
 //   3. runs one turn, "Reply with exactly the word: ok", on the `haiku` model
 //      with the user's Claude sign-in, and prints every event.
@@ -11,15 +12,16 @@
 // checked before it loads the driver or SDK or starts a process. No gate step and
 // no CI workflow sets ARI_LIVE_RECORD, and nothing runs this script for them.
 //
-// Usage: ARI_LIVE_RECORD=1 node scripts/live-claude-standalone.ts [options]
+// Usage: ARI_LIVE_RECORD=1 node scripts/live-claude-standalone.ts --sdk-directory <path> [options]
+//   --sdk-directory <path>  required: the directory where the pinned SDK is installed
 //   --binary   the ari-driver to run; build/standalone/<this platform>/ari-driver by default
 //              (`pnpm run build:binary` builds it)
-//   --no-turn  steps 1 and 2 only: install and status, no turn and so no quota spent
+//   --no-turn  steps 1 and 2 only: load the SDK and status, no turn and so no quota spent
 //   --claude   a separately integrity-verified temporary compatible CLI, if the installed one is too old
 //   --attempt-dir <path>  existing private scratch directory; reuse it across interruptions
 //   --driver-death       the separate second turn, allowed only after the exact-reply turn passed
 // Environment:
-//   TMPDIR                   where the workspace goes, the SDK install with it; it must be outside HOME
+//   TMPDIR                   where the workspace goes; it must be outside HOME
 //
 // The session is kept apart from the user's own Claude setup exactly as the
 // Claude recorder keeps it (test/recordings/claude/run.ts, whose code this
@@ -85,7 +87,6 @@ async function main(argv: readonly string[]): Promise<number> {
   const { createHash } = await import("node:crypto");
   const { executableName, hostTarget } = await import("./build-binary.ts");
   const { CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION, CLAUDE_TESTED_CLAUDE_CODE_VERSION } = await import("../src/meta/claude.ts");
-  const { CLAUDE_INSTALL_RECORD, managedClaudeSdkDirectory } = await import("../src/drivers/claude/install.ts");
   const { createCoordination, createNodeHostServices, resolveExecutable } = await import("../src/node/index.ts");
   const { startAriDriver } = await import("../src/wire/index.ts");
   const { CLAUDE_CREDENTIAL_FILE, claudeCredentialLock } = await import("../test/recordings/claude/record.ts");
@@ -100,6 +101,7 @@ async function main(argv: readonly string[]): Promise<number> {
   let driverDeath = false;
   let compatibleClaude: string | undefined;
   let attemptDir: string | undefined;
+  let sdkDirectory: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--binary" && argv[index + 1] !== undefined && argv[index + 1] !== "") {
       binary = path.resolve(argv[index + 1]!);
@@ -108,10 +110,11 @@ async function main(argv: readonly string[]): Promise<number> {
       runTurn = false;
     } else if (argv[index] === "--driver-death") {
       driverDeath = true;
-    } else if ((argv[index] === "--claude" || argv[index] === "--attempt-dir") && argv[index + 1]) {
+    } else if ((argv[index] === "--claude" || argv[index] === "--attempt-dir" || argv[index] === "--sdk-directory") && argv[index + 1]) {
       const value = path.resolve(argv[index + 1]!);
       if (argv[index] === "--claude") compatibleClaude = value;
-      else attemptDir = value;
+      else if (argv[index] === "--attempt-dir") attemptDir = value;
+      else sdkDirectory = value;
       index += 1;
     } else {
       process.stderr.write(`live-claude-standalone: unknown or incomplete option ${JSON.stringify(argv[index])}\n`);
@@ -120,6 +123,13 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   if (binary === undefined || !fs.existsSync(binary)) {
     process.stderr.write(`live-claude-standalone: no ari-driver at ${binary ?? `build/standalone/<target> (this platform, ${process.platform}-${process.arch}, is no release target)`}; run \`pnpm run build:binary\` first, or name one with --binary\n`);
+    return 2;
+  }
+  const sdkManifest = sdkDirectory === undefined ? undefined : path.join(sdkDirectory, "node_modules", CLAUDE_SDK_PACKAGE, "package.json");
+  if (sdkManifest === undefined || !fs.existsSync(sdkManifest)) {
+    process.stderr.write(
+      `live-claude-standalone: name the directory that holds the Claude Agent SDK with --sdk-directory; ARI installs nothing, so install it there first with npm install --prefix <directory> ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}\n`,
+    );
     return 2;
   }
   if (driverDeath && (!runTurn || process.platform !== "linux")) {
@@ -211,7 +221,7 @@ async function main(argv: readonly string[]): Promise<number> {
   };
   const model = "haiku";
   // Over the wire a config is plain JSON values.
-  const config: { [field: string]: unknown } = { ...claudeRecorderConfig(model), sdkRegistry: "https://registry.npmjs.org" };
+  const config: { [field: string]: unknown } = { ...claudeRecorderConfig(model), sdkDirectory };
 
   const failures: string[] = [];
   let workspaceKept = false;
@@ -243,23 +253,13 @@ async function main(argv: readonly string[]): Promise<number> {
       const connection = await startAriDriver({ driver: "claude", command: [binary], env: driverEnvironment, cwd: layout.cwd, envPolicy: { stripAmbient: [] } });
       try {
         const instance = await connection.driver.create(host, { instanceId: CLAUDE_RECORDER_INSTANCE_ID, config, environment: instanceEnvironment });
-        log(`instance/status before the install: ${printable(await instance.status())}`);
-        const started = Date.now();
-        await instance.maintenance!.install!();
-        log(`maintenance.install finished in ${((Date.now() - started) / 1000).toFixed(1)} s`);
-        const installed = managedClaudeSdkDirectory(host.paths.cacheDir);
-        const record = JSON.parse(fs.readFileSync(path.join(installed, CLAUDE_INSTALL_RECORD), "utf8")) as { files: Array<{ path: string; size: number; sha256: string }> };
-        const manifest = JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8")) as { name: string; version: string };
-        if (manifest.name !== CLAUDE_SDK_PACKAGE || manifest.version !== CLAUDE_SDK_VERSION || fs.existsSync(path.join(installed, "node_modules"))) {
-          throw new SmokeFailure("the managed install does not contain only the pinned SDK; no turn run");
+        const manifest = JSON.parse(fs.readFileSync(sdkManifest, "utf8")) as { name: string; version: string };
+        if (manifest.name !== CLAUDE_SDK_PACKAGE || manifest.version !== CLAUDE_SDK_VERSION) {
+          throw new SmokeFailure(`${sdkManifest} is not ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}; no turn run`);
         }
-        log(`registry https://registry.npmjs.org: installed only ${manifest.name}@${manifest.version}`);
-        log(`installed in ${installed}: ${record.files.length} files`);
-        for (const file of record.files.filter((each) => each.path === "package.json" || each.path === "sdk.mjs")) {
-          log(`  ${file.path}: ${file.size} bytes, sha256 ${file.sha256}`);
-        }
+        log(`sdkDirectory ${sdkDirectory}: ${manifest.name}@${manifest.version}`);
         const status = await instance.status();
-        log(`instance/status after the install: ${printable(status)}`);
+        log(`instance/status: ${printable(status)}`);
         const older = status.state === "unavailable" && status.error?.code === "driver_unavailable" && status.error.message.includes(`is older than ${CLAUDE_TESTED_CLAUDE_CODE_VERSION}`) && status.error.message.includes("Update Claude Code");
         if (older && compatibleClaude === undefined && !runTurn) log("the installed Claude Code is too old; no turn run");
         else if (status.state !== "ready" || status.installed !== true || status.version !== CLAUDE_SDK_VERSION) {
@@ -370,7 +370,7 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   if (failures.length === 0) {
     if (runTurn && !driverDeath) fs.writeFileSync(exactReplyPassed!, "passed\n", { flag: "wx", mode: 0o600, flush: true });
-    log(`passed: SDK ${CLAUDE_SDK_VERSION} installed${!runTurn ? " (no turn)" : driverDeath ? " and the Claude Code group ended" : " and the exact reply completed"} through ${binary}`);
+    log(`passed: SDK ${CLAUDE_SDK_VERSION} loaded from ${sdkDirectory}${!runTurn ? " (no turn)" : driverDeath ? " and the Claude Code group ended" : " and the exact reply completed"} through ${binary}`);
     return 0;
   }
   for (const failure of failures) process.stderr.write(`live-claude-standalone: FAILED: ${failure}\n`);

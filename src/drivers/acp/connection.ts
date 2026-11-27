@@ -22,8 +22,6 @@ export interface AcpLaunch {
   /** Explicit environment additions; the host's `envPolicy` strips ambient variables first. */
   readonly env: { readonly [name: string]: string };
   readonly cwd?: string;
-  /** Called once the process has exited, for example to end an installer lease. */
-  readonly release?: () => Promise<void>;
 }
 
 /** JSON-RPC error codes ACP defines. */
@@ -72,7 +70,7 @@ export class AcpConnection {
   #closedByDriver = false;
   #handshake: AcpHandshake | undefined;
 
-  private constructor(process: SpawnedProcess, handlers: AcpConnectionHandlers, release: (() => Promise<void>) | undefined) {
+  private constructor(process: SpawnedProcess, handlers: AcpConnectionHandlers) {
     this.process = process;
     const peer = new JsonRpcPeer({
       send: (message) => process.write(encodeNdjson(message)),
@@ -93,7 +91,6 @@ export class AcpConnection {
       }
       const exit = await process.exited;
       peer.close(callErrors.transport(`The ACP agent exited (${exit.code === null ? `signal ${String(exit.signal)}` : `code ${exit.code}`})`));
-      await release?.().catch(() => undefined);
       handlers.onExit(exit, this.#closedByDriver);
       return exit;
     })();
@@ -122,11 +119,10 @@ export class AcpConnection {
         ...(launch.cwd === undefined ? {} : { cwd: launch.cwd }),
       });
     } catch (error) {
-      await launch.release?.().catch(() => undefined);
       if (toCallError(error)?.code === "not_found") throw callErrors.driverUnavailable({ binary: launch.command }, `The ACP agent ${launch.command} is not installed`);
       throw error;
     }
-    const connection = new AcpConnection(process, handlers, launch.release);
+    const connection = new AcpConnection(process, handlers);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const handshake = await Promise.race([

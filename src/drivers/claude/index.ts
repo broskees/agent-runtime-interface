@@ -9,9 +9,9 @@
 // `openSession` with `driver_unavailable`.
 //
 // Where no package can be imported by name (the standalone `ari-driver`),
-// the SDK comes from the directory the config's `sdkDirectory` names, or
-// from `maintenance.install`, which downloads it from an npm registry into
-// the instance's cache directory. Both load it by file URL.
+// the SDK comes from the directory the config's `sdkDirectory` names, where
+// the host installed it with npm; the driver loads it by file URL. ARI
+// installs nothing: the user or the host installs the SDK and Claude Code.
 //
 // `createClaudeDriver({ loadSdk, newUuid })` builds the driver with another
 // SDK loader (a host that bundles the SDK, or a test's fake) and another

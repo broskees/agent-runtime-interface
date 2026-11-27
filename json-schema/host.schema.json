@@ -45,8 +45,7 @@
         {
           "enum": [
             "probe",
-            "runtime",
-            "install"
+            "runtime"
           ]
         },
         {

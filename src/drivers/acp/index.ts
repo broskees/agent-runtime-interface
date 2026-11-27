@@ -1,7 +1,8 @@
 // `ari/drivers/acp`: the ACP base driver. It runs any agent that speaks the
 // Agent Client Protocol (v1 or v2) on stdio, with the command the user
-// configures. The `grok`, `fx`, `kiro`, `acp-registry` and `antigravity`
-// drivers are flavors of it, built with `createAcpDriver`.
+// configures. The `grok`, `fx`, `kiro` and `antigravity` drivers are flavors
+// of it, built with `createAcpDriver`. ARI installs no agent: the user
+// installs the agent and names its command here.
 //
 // Importing this module starts nothing and loads no vendor package: the agent
 // runs only when a session opens.

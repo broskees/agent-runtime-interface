@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, test } from "node:test";
 import type { ClaudeDriverConfig } from "../../../src/drivers/claude/index.ts";
-import { CLAUDE_TESTED_VERSIONS } from "../../../src/meta/claude.ts";
+import { CLAUDE_SDK_PACKAGE, CLAUDE_SDK_VERSION, CLAUDE_TESTED_VERSIONS } from "../../../src/meta/claude.ts";
 import { REPO_ROOT } from "../../helpers/spec.ts";
 import { openClaudeRig } from "./rig.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
@@ -86,7 +86,7 @@ describe("claude driver availability", () => {
     assert.deepEqual(run, { resolved: [], spawned: [], result: "imported" });
   });
 
-  test("with the SDK missing, create() succeeds, status() and probe() name the package to install, and openSession rejects with driver_unavailable", () => {
+  test("with the SDK missing, create() succeeds, status() and probe() name the package and the npm commands that install it, and openSession rejects with driver_unavailable", () => {
     const run = inChild(
       `${createInstance}
 const status = await instance.status();
@@ -98,18 +98,21 @@ result = { status, probe: { ok: probe.ok, installed: probe.installed, error: pro
     );
     assert.deepEqual(run.spawned, []);
     assert.ok(run.resolved.includes("@anthropic-ai/claude-agent-sdk"), "the loader never asked for the SDK");
-    const result = run.result as { status: { state: string; installed: boolean; error: { code: string; package: string; message: string } }; probe: { ok: boolean; installed: boolean; error: { code: string; package: string } }; opened: { code: string; package: string }; hostSpawns: number };
+    const result = run.result as { status: { state: string; installed: boolean; error: { code: string; package: string; message: string } }; probe: { ok: boolean; installed: boolean; error: { code: string; package: string } }; opened: { code: string; package: string; message: string }; hostSpawns: number };
     assert.equal(result.status.state, "unavailable");
     assert.equal(result.status.installed, false);
     assert.equal(result.status.error.code, "driver_unavailable");
-    assert.equal(result.status.error.package, "@anthropic-ai/claude-agent-sdk");
-    // Under Node all three steps work: the package by name, a managed install, or a directory.
-    assert.match(result.status.error.message, /npm install @anthropic-ai\/claude-agent-sdk/);
-    assert.match(result.status.error.message, /maintenance\.install/);
-    assert.match(result.status.error.message, /sdkDirectory/);
-    assert.deepEqual([result.probe.ok, result.probe.installed, result.probe.error.code, result.probe.error.package], [false, false, "driver_unavailable", "@anthropic-ai/claude-agent-sdk"]);
+    assert.equal(result.status.error.package, CLAUDE_SDK_PACKAGE);
+    // Under Node both steps work: the package next to ari by name, or a directory the host installed it in. ARI installs nothing.
+    const message = result.status.error.message;
+    assert.ok(message.includes(`npm install ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION}`), message);
+    assert.ok(message.includes(`npm install --prefix <directory> ${CLAUDE_SDK_PACKAGE}@${CLAUDE_SDK_VERSION} and set sdkDirectory in the driver config to that directory`), message);
+    assert.match(message, /ARI does not install it/);
+    assert.doesNotMatch(message, /maintenance\./);
+    assert.deepEqual([result.probe.ok, result.probe.installed, result.probe.error.code, result.probe.error.package], [false, false, "driver_unavailable", CLAUDE_SDK_PACKAGE]);
     assert.equal(result.opened.code, "driver_unavailable");
-    assert.equal(result.opened.package, "@anthropic-ai/claude-agent-sdk");
+    assert.equal(result.opened.package, CLAUDE_SDK_PACKAGE);
+    assert.equal(result.opened.message, message);
     assert.equal(result.hostSpawns, 0);
   });
 

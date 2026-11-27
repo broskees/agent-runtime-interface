@@ -50,7 +50,7 @@ test("the optional member lists match methods.json's optional flags and capabili
     optional("Session").map((method) => [method.member!, method.capability!]).sort(),
   );
   assert.deepEqual([...OPTIONAL_HOST_MEMBERS].sort(), optional("HostServices").map((method) => method.member!).sort());
-  assert.equal(OPTIONAL_INSTANCE_MEMBERS.length, 27);
+  assert.equal(OPTIONAL_INSTANCE_MEMBERS.length, 25);
   assert.equal(Object.keys(OPTIONAL_SESSION_MEMBERS).length, 17);
   // driver/create's hostMembers names the same members.
   assert.deepEqual([...rpc.$defs.OptionalHostMember.anyOf[0].enum].sort(), [...OPTIONAL_HOST_MEMBERS].sort());

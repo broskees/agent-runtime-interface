@@ -96,10 +96,10 @@ with the differences in the last rows.
 
 ## Optional members
 
-As the [ACP base driver](acp.md#optional-members-44): `ext` works, and
+As the [ACP base driver](acp.md#optional-members-42): `ext` works, and
 `forkThread` rejects `unsupported` unless Grok advertises `session/fork`;
 the other 42 members are left out. `test/drivers/grok/rules.suite.ts`
-checks all 44.
+checks all 42.
 
 ## Missing CLI
 

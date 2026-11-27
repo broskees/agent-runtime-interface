@@ -1,4 +1,4 @@
-// Capability honesty for the Codex driver: all 44 optional members of the
+// Capability honesty for the Codex driver: all 42 optional members of the
 // Session and Instance interfaces (inventories D and E) with the driver's
 // outcome for each. A member the driver leaves out is absent; each member it
 // supports is exercised here against the fake Codex app-server, with a check
@@ -40,8 +40,6 @@ export const CODEX_OPTIONAL_MEMBERS: { readonly [member: string]: "supported" | 
   // Instance (inventory E).
   "Instance.invalidateCaches": "supported",
   "Instance.maintenance.advisory": "supported",
-  "Instance.maintenance.install": "absent",
-  "Instance.maintenance.update": "absent",
   "Instance.auth.methods": "supported",
   "Instance.auth.state": "supported",
   "Instance.auth.reportRuntimeFailure": "supported",
@@ -71,11 +69,11 @@ function member(target: object, dotted: string): unknown {
   return dotted.split(".").reduce<unknown>((value, key) => (value === undefined || value === null ? undefined : (value as { [key: string]: unknown })[key]), target);
 }
 
-describe("capability honesty: the 44 optional members", () => {
+describe("capability honesty: the 42 optional members", () => {
   test("the table lists exactly the optional Session and Instance members of methods.json", () => {
     const methods = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "spec", "v1", "methods.json"), "utf8")) as { methods: Array<{ interface?: string; member?: string; optional?: boolean }> };
     const optional = methods.methods.filter((entry) => (entry.interface === "Session" || entry.interface === "Instance") && entry.optional === true).map((entry) => `${entry.interface}.${entry.member}`);
-    assert.equal(optional.length, 44);
+    assert.equal(optional.length, 42);
     assert.deepEqual(Object.keys(CODEX_OPTIONAL_MEMBERS).sort(), optional.sort());
   });
 

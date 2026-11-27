@@ -265,7 +265,7 @@ export function serveDriver(driver: Driver<any>, transport: WireTransport, optio
       case "subProviders.disable":
         return callMember(instance, member, [rest]);
       default:
-        // status, invalidateCaches, maintenance.*, auth.methods, auth.state, auth.logout,
+        // status, invalidateCaches, maintenance.advisory, auth.methods, auth.state, auth.logout,
         // catalog.refresh, limits.current, limits.accountKey: no arguments.
         return callMember(instance, member, []);
     }

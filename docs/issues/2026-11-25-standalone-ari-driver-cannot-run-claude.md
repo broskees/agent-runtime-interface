@@ -87,6 +87,19 @@ on a real Mac checks both.
 
 ## Resolution
 
+> **Note (2026-11-27): the managed install is gone.** Joe ruled that ARI
+> handles no installation at all, so `maintenance.install`,
+> `maintenance.update`, the `sdkRegistry` config field and `ari/node`'s
+> adapter installer were removed (see `CHANGELOG.md`). The fix that remains
+> is `sdkDirectory`: the host runs
+> `npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@0.3.330`
+> and names that directory, and without it the standalone `ari-driver`
+> reports `driver_unavailable` naming that command. The managed-install
+> parts below, and the tests they name (`sdk-install.test.ts`,
+> `sdk-install-node.test.ts`, `test/node/installer.test.ts`), are history.
+> `scripts/live-claude-standalone.ts` now takes the SDK from
+> `--sdk-directory`.
+
 Fixed by approach 2 plus a managed install (plan
 `standalone-claude-20261125-190353`, phase 1): commit `f1a8db3`, then
 `2a29185`, which tightens the install's integrity checks, lays the install

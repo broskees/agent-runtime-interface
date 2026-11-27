@@ -7,10 +7,16 @@ its `args` through the host's `process.spawn`, speaks newline-delimited
 JSON-RPC 2.0 with it, and maps ACP onto ARI. `ari/meta/acp` holds its label,
 icon, config schema and form hints, and imports nothing at run time.
 
-The five flavor drivers are this driver with a fixed launch and a few
-quirks: [`grok`](grok.md), [`fx`](fx.md), [`kiro`](kiro.md),
-[`acp-registry`](acp-registry.md) and [`antigravity`](antigravity.md).
-Build your own with `createAcpDriver(flavor)`.
+The four flavor drivers are this driver with a fixed launch and a few
+quirks: [`grok`](grok.md), [`fx`](fx.md), [`kiro`](kiro.md) and
+[`antigravity`](antigravity.md). Build your own with
+`createAcpDriver(flavor)`.
+
+ARI installs no agent. The user installs it and names its `command` here.
+That includes agents from the [ACP Registry](https://agentclientprotocol.com/get-started/registry):
+install one with its own installer, then point `command` and `args` at it.
+There is no `acp-registry` driver; an earlier build had one that installed
+registry agents.
 
 ```ts
 import { acpDriver } from "ari/drivers/acp";
@@ -198,16 +204,16 @@ Runtime modes: `approval_required` and `full_access` are supported, both
 `client_boundary`; the others are declared off. `requests.allowCustomAnswer`
 is false, `responseModes` is `live`. Diffs are emitted and can be turned off.
 
-## Optional members (44)
+## Optional members (42)
 
 | Members | Outcome |
 |---|---|
 | `forkThread` | Present. Works when the agent advertises `session/fork` (at `latest`; `fromTurn` and `fromItem` reject `unsupported`); otherwise rejects `unsupported{threads.fork}` |
 | `ext` | Works for namespace `acp`; any other namespace rejects `unsupported` |
 | The other 15 Session members (`readSnapshot`, `rollbackThread`, `compactThread`, `injectHistory`, `unloadThread`, `backgroundTasks.*`, `stopSubagent`, `mcpApps.*`, `contextWindow`, `canReuseContextUsage`, `uploadFeedback`) | Left out |
-| All 27 optional Instance members (`invalidateCaches`, `maintenance.*`, `auth.*`, `catalog.refresh`, `workspace.snapshot`, `limits.*`, `usageHistory.scan`, `textGeneration.generate`, `nativeSessions.*`, `subProviders.*`) | Left out. Agents sign in through their own CLI, so `auth` is left out and an ACP `-32000` becomes `auth_required` |
+| All 25 optional Instance members (`invalidateCaches`, `maintenance.advisory`, `auth.*`, `catalog.refresh`, `workspace.snapshot`, `limits.*`, `usageHistory.scan`, `textGeneration.generate`, `nativeSessions.*`, `subProviders.*`) | Left out. Agents sign in through their own CLI, so `auth` is left out and an ACP `-32000` becomes `auth_required` |
 
-`test/drivers/acp/rules.suite.ts` checks every one of the 44.
+`test/drivers/acp/rules.suite.ts` checks every one of the 42.
 
 ## Missing agent
 
@@ -226,7 +232,7 @@ fails `openSession` with a `protocol` error, and from then on `status()`
 gives an `untested_version` advisory naming the version it answered
 (`testedRange: "1 - 2"`). Every flavor gives the same protocol advisory; a
 flavor with a fixed vendor CLI also gives one for a release outside its own
-range. `test/drivers/acp/driver-rules.ts` checks both for all six drivers.
+range. `test/drivers/acp/driver-rules.ts` checks both for all five drivers.
 
 ## Tests
 

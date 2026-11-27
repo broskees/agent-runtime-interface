@@ -1,5 +1,5 @@
 // Honest capabilities. docs/drivers/pi.md lists every declared capability next
-// to the proposal's §1.2 Pi column, with a source for each difference. The 44
+// to the proposal's §1.2 Pi column, with a source for each difference. The 42
 // optional members of inventories D and E each have an outcome here: left out,
 // rejected with `unsupported{capability}`, or supported and exercised below
 // (the conformance run exercises the session members again in scenario 14).
@@ -41,8 +41,6 @@ const OUTCOMES: { readonly [member: string]: Outcome } = {
   "Session.ext": { outcome: "absent" },
   "Instance.invalidateCaches": { outcome: "absent" },
   "Instance.maintenance.advisory": { outcome: "absent" },
-  "Instance.maintenance.install": { outcome: "absent" },
-  "Instance.maintenance.update": { outcome: "absent" },
   "Instance.auth.methods": { outcome: "supported" },
   "Instance.auth.state": { outcome: "supported" },
   "Instance.auth.reportRuntimeFailure": { outcome: "supported" },
@@ -87,9 +85,9 @@ function optionalMembers(): string[] {
   return methods.methods.filter((entry) => entry.optional === true && (entry.interface === "Session" || entry.interface === "Instance")).map((entry) => `${entry.interface}.${entry.member}`);
 }
 
-test("the outcome table covers exactly the 44 optional Session and Instance members", () => {
+test("the outcome table covers exactly the 42 optional Session and Instance members", () => {
   const members = optionalMembers();
-  assert.equal(members.length, 44);
+  assert.equal(members.length, 42);
   assert.deepEqual(Object.keys(OUTCOMES).sort(), [...members].sort());
 });
 

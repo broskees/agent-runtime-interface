@@ -1,5 +1,5 @@
 // The rules every driver meets, checked for one ACP driver (the base or a
-// flavor): honest optional members (44 of them), a missing runtime that fails
+// flavor): honest optional members (42 of them), a missing runtime that fails
 // loudly only when used, no host prompts and host-chosen names, and its
 // metadata, docs and changelog. Each driver's `rules.suite.ts` calls
 // `driverRuleTests` with its profile.
@@ -22,7 +22,7 @@ import type { HostPaths } from "../../../src/index.ts";
 import { openRig } from "./rig.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
 
-/** The 17 optional Session members (inventory D) and 27 optional Instance members (inventory E). */
+/** The 17 optional Session members (inventory D) and 25 optional Instance members (inventory E). */
 export const OPTIONAL_SESSION_MEMBERS = [
   "readSnapshot",
   "forkThread",
@@ -46,8 +46,6 @@ export const OPTIONAL_SESSION_MEMBERS = [
 export const OPTIONAL_INSTANCE_MEMBERS = [
   "invalidateCaches",
   "maintenance.advisory",
-  "maintenance.install",
-  "maintenance.update",
   "auth.methods",
   "auth.state",
   "auth.reportRuntimeFailure",
@@ -180,9 +178,9 @@ function filesContaining(root: string, markers: readonly string[]): string[] {
 export function driverRuleTests<Config>(profile: DriverProfile<Config>): void {
   const { kind } = profile;
 
-  test(`${kind}: the 44 optional members are absent, reject with unsupported, or work`, async () => {
+  test(`${kind}: the 42 optional members are absent, reject with unsupported, or work`, async () => {
     const outcomes = { ...profile.session, ...profile.instance };
-    assert.equal(Object.keys(outcomes).length, 44);
+    assert.equal(Object.keys(outcomes).length, 42);
     const rig = await openRig(rigOptions(profile));
     try {
       const { session } = await rig.open();

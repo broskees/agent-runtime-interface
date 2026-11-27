@@ -24,8 +24,6 @@ var WireMethodVersions = map[string]Version{
 	"instance/probe":                     {Major: 1, Minor: 0},
 	"instance/invalidateCaches":          {Major: 1, Minor: 0},
 	"instance/maintenance.advisory":      {Major: 1, Minor: 0},
-	"instance/maintenance.install":       {Major: 1, Minor: 0},
-	"instance/maintenance.update":        {Major: 1, Minor: 0},
 	"instance/auth.methods":              {Major: 1, Minor: 0},
 	"instance/auth.state":                {Major: 1, Minor: 0},
 	"instance/auth.reportRuntimeFailure": {Major: 1, Minor: 0},
@@ -2936,13 +2934,12 @@ type SpawnPurpose string
 const (
 	SpawnPurposeProbe   SpawnPurpose = "probe"
 	SpawnPurposeRuntime SpawnPurpose = "runtime"
-	SpawnPurposeInstall SpawnPurpose = "install"
 )
 
 // Recognized reports whether this client knows the value.
 func (v SpawnPurpose) Recognized() bool {
 	switch v {
-	case SpawnPurposeProbe, SpawnPurposeRuntime, SpawnPurposeInstall:
+	case SpawnPurposeProbe, SpawnPurposeRuntime:
 		return true
 	}
 	return false
@@ -3484,7 +3481,7 @@ type NativeSessionInfoPage struct {
 	NextCursor Nullable[string]    `json:"nextCursor,omitzero"`
 }
 
-// A provider behind a multi-provider agent, such as an ACP Registry agent.
+// A provider behind a multi-provider agent.
 type SubProvider struct {
 	ID          string  `json:"id"`
 	Label       string  `json:"label"`
@@ -5858,20 +5855,6 @@ func (c *Client) InstanceInvalidateCaches(ctx context.Context, params InstanceTa
 func (c *Client) InstanceMaintenanceAdvisory(ctx context.Context, params InstanceTarget) (NullableUpdateAdvisory, error) {
 	var result NullableUpdateAdvisory
 	err := c.call(ctx, "instance/maintenance.advisory", params, &result)
-	return result, err
-}
-
-// InstanceMaintenanceInstall calls instance/maintenance.install.
-func (c *Client) InstanceMaintenanceInstall(ctx context.Context, params InstanceTarget) (VoidResult, error) {
-	var result VoidResult
-	err := c.call(ctx, "instance/maintenance.install", params, &result)
-	return result, err
-}
-
-// InstanceMaintenanceUpdate calls instance/maintenance.update.
-func (c *Client) InstanceMaintenanceUpdate(ctx context.Context, params InstanceTarget) (VoidResult, error) {
-	var result VoidResult
-	err := c.call(ctx, "instance/maintenance.update", params, &result)
 	return result, err
 }
 

@@ -3,15 +3,15 @@
 // reports) or an Anthropic API key this instance keeps in the host's secrets
 // (a managed profile), given to Claude Code as ANTHROPIC_API_KEY.
 //
-// The SDK is an optional peer, loaded on first use from the first of: the
-// directory the config's `sdkDirectory` names, the managed install
-// `maintenance.install` put in the instance's cache directory, and the
-// package imported by name (the loader `createClaudeDriver` was given).
+// The SDK is an optional peer the host installs, loaded on first use: from
+// the directory the config's `sdkDirectory` names when it is set, else the
+// package imported by name (the loader `createClaudeDriver` was given). ARI
+// never installs it.
 //
 // Every query runs the user's own Claude Code, wherever the SDK came from:
 // the configured `executablePath`, else `claude` on the host's PATH, passed
-// to the SDK as `pathToClaudeCodeExecutable`. A Claude Code binary that npm or
-// `maintenance.install` put beside the SDK is never run. Its `--version` must
+// to the SDK as `pathToClaudeCodeExecutable`. A Claude Code binary that npm
+// put beside the SDK is never run. Its `--version` must
 // be at least `CLAUDE_TESTED_CLAUDE_CODE_VERSION`, the Claude Code the pinned
 // SDK bundles; a newer one gets an `untested_version` advisory.
 //
@@ -47,7 +47,6 @@ import type { LimitStatus } from "../../generated/usage.ts";
 import {
   CLAUDE_CODE_INSTALL_HINT,
   CLAUDE_CODE_UPDATE_HINT,
-  CLAUDE_DEFAULT_SDK_REGISTRY,
   CLAUDE_INSTALL_HINT,
   CLAUDE_SDK_PACKAGE,
   CLAUDE_SDK_VERSION,
@@ -57,7 +56,6 @@ import {
 import type { ClaudeDriverConfig } from "../../meta/claude.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
-import { installClaudeSdk, loadManagedClaudeSdk } from "./install.ts";
 import { limitStatusFrom, limitWindowFrom, strongRef } from "./mapping.ts";
 import type { ClaudeLimitWindowState } from "./mapping.ts";
 import { claudeProcessOptions } from "./process.ts";
@@ -80,12 +78,10 @@ export const CLAUDE_AUTH_METHODS: readonly AuthMethod[] = [
 /** Options for `createClaudeDriver`: seams for hosts and tests. */
 export interface ClaudeDriverOptions {
   /**
-   * Loads the SDK when the config names no `sdkDirectory` and no managed
-   * install exists. Defaults to a dynamic `import("@anthropic-ai/claude-agent-sdk")`.
+   * Loads the SDK when the config names no `sdkDirectory`. Defaults to a
+   * dynamic `import("@anthropic-ai/claude-agent-sdk")`.
    */
   readonly loadSdk?: ClaudeSdkLoader;
-  /** How `maintenance.install` and `maintenance.update` download from the npm registry. Defaults to the global `fetch`. */
-  readonly fetch?: typeof globalThis.fetch;
   /**
    * Makes the UUIDs the driver gives Claude: the session id of each new
    * thread or fork, and the id of each prompt (which the transcript keeps and
@@ -294,25 +290,10 @@ export class ClaudeInstance implements Instance {
     return this.#runtime;
   }
 
-  /** The SDK from the configured `sdkDirectory`, else from a managed install, else from the driver's loader (the package by name). */
+  /** The SDK from the configured `sdkDirectory`, else from the driver's loader (the package by name). */
   async #loadRuntime(): Promise<ClaudeSdkRuntime> {
     if (this.#config.sdkDirectory !== undefined) return loadClaudeSdkFromDirectory(this.#config.sdkDirectory);
-    const managed = await loadManagedClaudeSdk(this.#host.paths.cacheDir);
-    return managed ?? this.#loadSdk();
-  }
-
-  /** `maintenance.install` and `maintenance.update`: installs the pinned SDK, and only the SDK, from the npm registry; the next use loads it. */
-  async #install(): Promise<void> {
-    if (this.#disposed) throw callErrors.invalidState("instance_disposed");
-    await installClaudeSdk({
-      cacheDir: this.#host.paths.cacheDir,
-      tmpDir: this.#host.paths.tmpDir,
-      registry: this.#config.sdkRegistry ?? CLAUDE_DEFAULT_SDK_REGISTRY,
-      ...(this.#options.fetch === undefined ? {} : { fetch: this.#options.fetch }),
-    });
-    this.#runtime = undefined;
-    this.#catalog = undefined;
-    this.#changed();
+    return this.#loadSdk();
   }
 
   /**
@@ -658,10 +639,6 @@ export class ClaudeInstance implements Instance {
       }
       return availabilityAdvisory(runtime.version, claudeCode);
     },
-    /** Downloads the pinned SDK, and only the SDK, from the npm registry (`sdkRegistry`) into the instance's cache directory. */
-    install: (): Promise<void> => this.#install(),
-    /** The same as `install`: installs the version this driver pins, which a newer driver may have moved. */
-    update: (): Promise<void> => this.#install(),
   };
 
   // Limits.

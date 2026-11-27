@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ari.invalid/spec/v1/extensions/acp.schema.json",
   "title": "ACP driver extension acp",
-  "description": "What the `acp` driver and its flavors (`grok`, `fx`, `kiro`, `acp-registry`, `antigravity`) pass through from the Agent Client Protocol without a core ARI mapping. Drivers list `{ ns: \"acp\", version: \"1\" }` in `capabilities.extensions`. Vendor `_meta` objects arrive as `x:acp.meta` events, session updates the driver has no mapping for arrive as `x:acp.update` events, and `session.ext(\"acp\", method, params)` sends an ACP extension request (a method name starting with `_`) to the agent and resolves with its result.",
+  "description": "What the `acp` driver and its flavors (`grok`, `fx`, `kiro`, `antigravity`) pass through from the Agent Client Protocol without a core ARI mapping. Drivers list `{ ns: \"acp\", version: \"1\" }` in `capabilities.extensions`. Vendor `_meta` objects arrive as `x:acp.meta` events, session updates the driver has no mapping for arrive as `x:acp.update` events, and `session.ext(\"acp\", method, params)` sends an ACP extension request (a method name starting with `_`) to the agent and resolves with its result.",
   "$defs": {
     "AcpMetaEventData": {
       "description": "One vendor `_meta` object as the agent sent it.",

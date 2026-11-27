@@ -353,7 +353,7 @@ export const NativeSessionInfoPageSchema: Effect.Schema.Codec<Wire.NativeSession
   [kit.OtherFields],
 ).annotate({ identifier: "NativeSessionInfoPage" });
 
-/** A provider behind a multi-provider agent, such as an ACP Registry agent. */
+/** A provider behind a multi-provider agent. */
 export const SubProviderSchema: Effect.Schema.Codec<Wire.SubProvider> = Schema.StructWithRest(
   Schema.Struct({
     id: Schema.String,

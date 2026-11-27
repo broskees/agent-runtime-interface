@@ -15,7 +15,7 @@ import { NOT_SET_UP, TSC, installConsumer, packAsPublished, packRepositoryDepend
 import { REPO_ROOT } from "./helpers/spec.ts";
 import { NODE_EXECUTABLE } from "./helpers/runtime.ts";
 
-const DRIVERS = ["pi", "acp", "grok", "fx", "kiro", "acp-registry", "antigravity", "codex", "claude", "opencode", "cursor", "muse"];
+const DRIVERS = ["pi", "acp", "grok", "fx", "kiro", "antigravity", "codex", "claude", "opencode", "cursor", "muse"];
 const SUBPATH_IMPORTS = ["ari", "ari/host", "ari/driver-kit", "ari/node", "ari/wire", "ari/conformance", "ari/effect", "ari/drivers/<name>", "ari/meta/<name>", "ari/cli-manifests", "ari/json-schema/*.json"];
 const EXAMPLES_DIR = path.join(REPO_ROOT, "examples");
 

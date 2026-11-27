@@ -98,8 +98,8 @@ with the differences in the last rows.
 
 ## Optional members
 
-As the [ACP base driver](acp.md#optional-members-44); `test/drivers/kiro/rules.suite.ts`
-checks all 44.
+As the [ACP base driver](acp.md#optional-members-42); `test/drivers/kiro/rules.suite.ts`
+checks all 42.
 
 ## Missing CLI
 

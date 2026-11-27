@@ -46,8 +46,6 @@ METHOD_VERSIONS: dict[str, tuple[int, int]] = {
     "instance/probe": (1, 0),
     "instance/invalidateCaches": (1, 0),
     "instance/maintenance.advisory": (1, 0),
-    "instance/maintenance.install": (1, 0),
-    "instance/maintenance.update": (1, 0),
     "instance/auth.methods": (1, 0),
     "instance/auth.state": (1, 0),
     "instance/auth.reportRuntimeFailure": (1, 0),
@@ -4489,7 +4487,6 @@ class SpawnPurpose(OpenEnum):
     Open: a value this client does not know is kept as a member that is not recognized."""
     PROBE = "probe"
     RUNTIME = "runtime"
-    INSTALL = "install"
 
 
 @dataclass(kw_only=True)
@@ -5764,7 +5761,7 @@ class NativeSessionInfoPage:
 
 @dataclass(kw_only=True)
 class SubProvider:
-    """A provider behind a multi-provider agent, such as an ACP Registry agent."""
+    """A provider behind a multi-provider agent."""
     id: str
     label: str
     description: str | None = None
@@ -11197,14 +11194,6 @@ class GeneratedCalls:
     async def instance_maintenance_advisory(self, params: InstanceTarget) -> NullableUpdateAdvisory:
         """`instance/maintenance.advisory`"""
         return decode_nullable_update_advisory(await self._call("instance/maintenance.advisory", params))
-
-    async def instance_maintenance_install(self, params: InstanceTarget) -> VoidResult:
-        """`instance/maintenance.install`"""
-        return decode_void_result(await self._call("instance/maintenance.install", params))
-
-    async def instance_maintenance_update(self, params: InstanceTarget) -> VoidResult:
-        """`instance/maintenance.update`"""
-        return decode_void_result(await self._call("instance/maintenance.update", params))
 
     async def instance_auth_methods(self, params: InstanceTarget) -> AuthMethodList:
         """`instance/auth.methods`"""

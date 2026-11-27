@@ -122,8 +122,6 @@ export const WIRE_METHODS: readonly WireMethod[] = [
   request("instance/probe", HOST, InstanceProbeParamsSchema),
   request("instance/invalidateCaches", HOST, InstanceTargetSchema),
   request("instance/maintenance.advisory", HOST, InstanceTargetSchema),
-  request("instance/maintenance.install", HOST, InstanceTargetSchema),
-  request("instance/maintenance.update", HOST, InstanceTargetSchema),
   request("instance/auth.methods", HOST, InstanceTargetSchema),
   request("instance/auth.state", HOST, InstanceTargetSchema),
   request("instance/auth.reportRuntimeFailure", HOST, InstanceAuthReportRuntimeFailureParamsSchema),
@@ -244,8 +242,6 @@ export const METHOD_HELPERS: { readonly [method: string]: readonly string[] } = 
 export const OPTIONAL_INSTANCE_MEMBERS = [
   "invalidateCaches",
   "maintenance.advisory",
-  "maintenance.install",
-  "maintenance.update",
   "auth.methods",
   "auth.state",
   "auth.reportRuntimeFailure",

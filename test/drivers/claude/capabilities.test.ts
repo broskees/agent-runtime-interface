@@ -1,11 +1,9 @@
-// Capability honesty for the Claude driver: all 44 optional members of the
+// Capability honesty for the Claude driver: all 42 optional members of the
 // Session and Instance interfaces (inventories D and E) with the driver's
 // outcome for each. A member the driver leaves out is absent (and its
 // capability, if any, is off); auth.complete, which the auth group must
 // carry, rejects with unsupported; each member the driver supports is
-// exercised here against the fake SDK, with a check of its native effect,
-// except maintenance.install and .update, which download the SDK and are
-// exercised against a local npm registry in sdk-install.test.ts.
+// exercised here against the fake SDK, with a check of its native effect.
 // docs/drivers/claude.md gives the reason for each member left out.
 
 import assert from "node:assert/strict";
@@ -38,9 +36,6 @@ export const CLAUDE_OPTIONAL_MEMBERS: { readonly [member: string]: "supported" |
   // Instance (inventory E).
   "Instance.invalidateCaches": "supported",
   "Instance.maintenance.advisory": "supported",
-  // Exercised with a local npm registry in sdk-install.test.ts and through the standalone ari-driver in test/standalone/claude-sdk.e2e.ts.
-  "Instance.maintenance.install": "supported",
-  "Instance.maintenance.update": "supported",
   "Instance.auth.methods": "supported",
   "Instance.auth.state": "supported",
   "Instance.auth.reportRuntimeFailure": "supported",
@@ -66,10 +61,10 @@ export const CLAUDE_OPTIONAL_MEMBERS: { readonly [member: string]: "supported" |
   "Instance.subProviders.disable": "absent",
 };
 
-describe("claude driver: capability honesty for the 44 optional members", () => {
-  test("the table lists exactly the 44 optional members; absent ones are left out and their capabilities are off; auth.complete rejects with unsupported", async () => {
+describe("claude driver: capability honesty for the 42 optional members", () => {
+  test("the table lists exactly the 42 optional members; absent ones are left out and their capabilities are off; auth.complete rejects with unsupported", async () => {
     const expected = [...Object.keys(OPTIONAL_SESSION_MEMBERS).map((member) => `Session.${member}`), ...OPTIONAL_INSTANCE_MEMBERS.map((member) => `Instance.${member}`)].sort();
-    assert.equal(expected.length, 44);
+    assert.equal(expected.length, 42);
     assert.deepEqual(Object.keys(CLAUDE_OPTIONAL_MEMBERS).sort(), expected);
     const rig = await openClaudeRig();
     try {

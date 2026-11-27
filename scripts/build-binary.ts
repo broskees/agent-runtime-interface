@@ -21,9 +21,9 @@
 // The optional vendor SDKs in `peerDependencies` stay outside the bundle, and
 // the executable cannot import a package by name at run time. The `claude`
 // driver therefore loads its SDK by file URL, from the directory its
-// `sdkDirectory` config names or from what `maintenance.install` downloaded
-// (the SDK's licence is Anthropic's, so ARI does not ship it). The other
-// SDK drivers report their SDK missing in `status()`.
+// `sdkDirectory` config names, where the host installed it (the SDK's licence
+// is Anthropic's, so ARI does not ship it, and ARI installs nothing). The
+// other SDK drivers report their SDK missing in `status()`.
 //
 // `--fakes` also compiles the fake native agents the end-to-end tests use,
 // test/drivers/pi/fake-pi.ts as `pi` and test/drivers/acp/standalone-agent.ts

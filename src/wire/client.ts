@@ -404,14 +404,7 @@ function buildInstance(client: WireClient, descriptor: InstanceDescriptor, forge
   if (members.has("catalog.refresh")) instance.catalog.refresh = () => voidCall("catalog.refresh");
   if (members.has("invalidateCaches")) instance.invalidateCaches = () => voidCall("invalidateCaches");
 
-  if (anyOf("maintenance.advisory", "maintenance.install", "maintenance.update")) {
-    const maintenance: NonNullable<Instance["maintenance"]> = {
-      advisory: members.has("maintenance.advisory") ? () => call("maintenance.advisory") : missingAsync("maintenance.advisory"),
-    };
-    if (members.has("maintenance.install")) maintenance.install = () => voidCall("maintenance.install");
-    if (members.has("maintenance.update")) maintenance.update = () => voidCall("maintenance.update");
-    instance.maintenance = maintenance;
-  }
+  if (members.has("maintenance.advisory")) instance.maintenance = { advisory: () => call("maintenance.advisory") };
 
   if (anyOf(...["methods", "state", "reportRuntimeFailure", "start", "complete", "respond", "cancel", "logout", "transferProfile", "transferSession"].map((name) => `auth.${name}`))) {
     const methods = new Remembered(() => call<AuthMethod[]>("auth.methods"));

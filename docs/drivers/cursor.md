@@ -355,7 +355,7 @@ where it has no row. Every difference names its source: the docs page
 
 ## Optional members
 
-Of the 44 optional `Session` and `Instance` members, the driver implements
+Of the 42 optional `Session` and `Instance` members, the driver implements
 `compactThread`, `unloadThread` and the `auth` group. `forkThread` rejects
 with `unsupported{capability: "threads.fork"}` and `rollbackThread` with
 `unsupported{capability: "threads.rollback"}`, before any SDK call: Cursor's

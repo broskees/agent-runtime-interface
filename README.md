@@ -27,15 +27,18 @@ npm install ari
   instance's `status()` reports it unavailable and names what to install, and
   `openSession` rejects with `driver_unavailable`.
 
+ARI installs nothing. It never downloads, unpacks, installs or updates a
+vendor CLI, an agent or an SDK package. The user or the host installs every
+one in this table:
+
 | You use | Also install |
 |---|---|
-| `ari/drivers/claude` | Claude Code 2.1.330 or newer, the user's own `claude` on `PATH` (or `executablePath`); and `@anthropic-ai/claude-agent-sdk`, or nothing: `maintenance.install` downloads it (the only way in the standalone `ari-driver`, besides `sdkDirectory`) |
+| `ari/drivers/claude` | Claude Code 2.1.330 or newer, the user's own `claude` on `PATH` (or `executablePath`); and `@anthropic-ai/claude-agent-sdk` 0.3.330 next to ari, or in a directory that `sdkDirectory` names (the only way for the standalone `ari-driver`) |
 | `ari/drivers/cursor` | `@cursor/sdk` |
 | `ari/drivers/opencode` | the `opencode` CLI, plus `@opencode-ai/sdk` for an OpenCode 1.x server or `@opencode/client` for 2.x |
 | `ari/drivers/muse` | `@muse-code/sdk` and the `muse` CLI |
 | `ari/drivers/pi`, `codex`, `grok`, `fx`, `kiro`, `antigravity` | the agent's own CLI on `PATH` (`pi`, `codex`, `grok`, `fx`, `kiro-cli`, `agy`) |
-| `ari/drivers/acp` | any ACP agent; you configure its command |
-| `ari/drivers/acp-registry` | nothing: it installs registry agents itself, never through `npx` |
+| `ari/drivers/acp` | any ACP agent, such as one from the ACP Registry; you install it and configure its command |
 | `ari/effect` | `effect@^4` |
 
 ## Subpaths
@@ -45,16 +48,16 @@ npm install ari
 | `ari` | The contract: generated wire types, zero-dependency validators that implement Standard Schema v1, call errors and failure classes, the patch and capability helpers, and the `Driver`, `Instance`, `Session` and `HostServices` interfaces | any runtime |
 | `ari/host` | Host toolkit: the event grammar validator (`strict`, `warn`, `repair`), the event reducer, the request ledger, the capability guard and fallback planner, the approval reviewer hook, the replay recorder | any runtime |
 | `ari/driver-kit` | For driver authors: the event sequencer, deterministic IDs, an NDJSON framer, a JSON-RPC 2.0 peer, UTF-8 truncation | any runtime |
-| `ari/node` | Host services for Node: process spawning with environment rules, file-backed secrets, the managed adapter installer, per-instance paths, coordination leases, diagnostics, sign-in callbacks, and `createNodeHostServices` to combine them | Node |
+| `ari/node` | Host services for Node: process spawning with environment rules, file-backed secrets, per-instance paths, coordination leases, diagnostics, sign-in callbacks, and `createNodeHostServices` to combine them | Node |
 | `ari/wire` | ARI over newline-delimited JSON-RPC 2.0 on stdio: `startAriDriver` and `connectDriver` for hosts, `serveDriver` for drivers | Node |
 | `ari/conformance` | The conformance kit: 15 scenarios, a fake host that records every call, a `node:test` adapter, replay fixtures, and an in-memory reference driver that passes every scenario | any runtime |
 | `ari/effect` | Effect services for the runtime interfaces, session events as a `Stream`, tagged call errors, and generated Effect schemas | needs `effect` |
-| `ari/drivers/<name>` | The 12 first-party drivers: `pi`, `acp`, `grok`, `fx`, `kiro`, `acp-registry`, `antigravity`, `codex`, `claude`, `opencode`, `cursor`, `muse` | Node |
+| `ari/drivers/<name>` | The 11 first-party drivers: `pi`, `acp`, `grok`, `fx`, `kiro`, `antigravity`, `codex`, `claude`, `opencode`, `cursor`, `muse` | Node |
 | `ari/meta/<name>` | Each driver's label, icon, config JSON Schema and form hints, without loading the driver | any runtime |
 | `ari/cli-manifests` | CLI launch manifests and the function that builds argv and env for fresh, resume and fork launches | any runtime |
 | `ari/json-schema/*.json` | The wire contract as JSON Schema draft 2020-12, plus `methods.json`, which lists every `ari/wire` method | data |
 
-The package also installs the `ari-driver` bin, which serves a driver over
+The package also ships the `ari-driver` bin, which serves a driver over
 `ari/wire`: `ari-driver pi` for a first-party driver, or
 `ari-driver ./my-driver.js` for any module that exports a driver. Each GitHub
 release also carries a standalone `ari-driver` executable for linux-x64,
@@ -63,7 +66,7 @@ another language needs no Node installed.
 
 The `claude` driver always runs the user's own Claude Code: the `claude` on
 the host's `PATH`, or the one the config's `executablePath` names, never a
-Claude Code that npm or ARI installed beside the SDK. ARI never downloads
+Claude Code that npm installed beside the SDK. ARI never downloads
 Claude Code. It must be 2.1.330 or newer, the version the pinned SDK bundles.
 When it is missing, `status()` reports `driver_unavailable` saying Claude
 Code is not installed and how to install it; when it is older, the error
@@ -74,15 +77,12 @@ reports `driver_unavailable` with the executable's path and what
 
 The standalone executable cannot import a package by name, so `npm install`
 beside it does not give the `claude` driver its SDK. A host that ships only
-the executable provides `@anthropic-ai/claude-agent-sdk` in one of two ways:
-call `maintenance.install` on the instance, which downloads the pinned SDK,
-and only the SDK, from the npm registry (or the config's `sdkRegistry`) into
-the instance's cache directory, checked against the registry's sha512 (or
-sha384, sha256) integrity, with no Node or npm needed, and repairs an install
-that is no longer whole; or set `sdkDirectory` in the driver config to a
-directory where `npm install @anthropic-ai/claude-agent-sdk` ran. ARI does
-not bundle the SDK because its licence is Anthropic's, not MIT; the npm
-package and the executable contain none of its code.
+the executable runs
+`npm install --prefix <directory> @anthropic-ai/claude-agent-sdk@0.3.330`
+and sets `sdkDirectory` in the driver config to that directory. Without it,
+`status()` reports `driver_unavailable` naming that command. ARI does not
+bundle the SDK because its licence is Anthropic's, not MIT; the npm package
+and the executable contain none of its code.
 [docs/drivers/claude.md](docs/drivers/claude.md) has the details.
 
 Each driver has a page in [`docs/drivers/`](docs/drivers/) and a changelog in
@@ -337,6 +337,7 @@ A host never has to wait on an ARI release:
 
 ## Vendor CLIs
 
+ARI installs nothing: the user or the host installs every CLI and SDK.
 ARI runs the vendor CLI the user installed and never downloads, installs or
 updates one. Each CLI driver finds its CLI on `PATH`, or at the path its
 config names, and asks it for its version. The minimum is the lower bound of

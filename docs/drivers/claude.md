@@ -131,10 +131,10 @@ The harness keeps the session apart from your
 Claude setup as the recorder does (see [docs/recordings.md](../recordings.md)),
 with the same handling of a refreshed sign-in, and fails when your
 `settings.json`, `CLAUDE.md`, `~/.claude.json` or installed Claude executable changed. Without
-`ARI_LIVE_RECORD=1` it exits 2 before it loads or starts anything. It passed
-on 2026-11-25 with SDK 0.3.330, when the managed install still brought the
-SDK's own Claude Code 2.1.330; the run with the user's own Claude Code is
-still to come.
+`ARI_LIVE_RECORD=1` it exits 2 before it loads the driver or starts a process.
+The [standalone issue's live follow-up](../issues/2026-11-25-standalone-ari-driver-cannot-run-claude.md#resolution)
+records a completed `ok` turn with an external Claude Code and the separate
+smoke-script failure that prevented the live driver-death check.
 
 The Claude Agent SDK builds the command and exchanges messages over stdin
 and stdout. ARI starts that command through the host process service, including

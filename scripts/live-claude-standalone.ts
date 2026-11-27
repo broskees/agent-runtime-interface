@@ -8,7 +8,7 @@
 //   3. runs one turn, "Reply with exactly the word: ok", on the `haiku` model
 //      with the user's Claude sign-in, and prints every event.
 // It spends the user's Claude quota, so it runs only with ARI_LIVE_RECORD=1,
-// checked before it loads anything else or starts anything. No gate step and
+// checked before it loads the driver or SDK or starts a process. No gate step and
 // no CI workflow sets ARI_LIVE_RECORD, and nothing runs this script for them.
 //
 // Usage: ARI_LIVE_RECORD=1 node scripts/live-claude-standalone.ts [options]
@@ -43,12 +43,20 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 // Type-only: erased before the script runs, so it loads nothing.
 import type { AriEvent } from "../src/index.ts";
+import { reduceEvents } from "../src/host/reducer.ts";
 import { LIVE_RECORD_VARIABLE } from "./record-claude.ts";
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT), "..");
 
 export const LIVE_CHECK_PROMPT = "Reply with exactly the word: ok";
+
+export function completedAssistantText(events: readonly AriEvent[], turnId: string): string {
+  // The opening upsert carries kind; the settling upsert carries the full text.
+  // Fold durable patches by item id rather than reading ephemeral deltas.
+  const { items } = reduceEvents(events.filter((event) => event.turnId === turnId && event.body.type === "item.upsert"));
+  return [...items.values()].filter((item) => item.kind === "assistant_message" && item.status === "completed").map((item) => item.text ?? "").join("");
+}
 
 /** Programs a host without Node or Bun would not have on its PATH. */
 const NODE_AND_BUN_PROGRAMS = ["node", "nodejs", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "bunx"];
@@ -311,7 +319,7 @@ async function main(argv: readonly string[]): Promise<number> {
                 if (terminal?.body.type === "turn.terminal") {
                   log(`turn.terminal ${terminal.body.status}`);
                   if (terminal.body.status !== "completed") throw new SmokeFailure(`the turn ended ${terminal.body.status} (${terminal.body.failure?.class ?? "no failure class"})`);
-                  const reply = events.flatMap(({ body }) => body.type === "item.upsert" && body.item.kind === "assistant_message" && body.item.status === "completed" ? [body.item.text ?? ""] : []).join("");
+                  const reply = completedAssistantText(events, accepted.turnId);
                   if (reply !== "ok") throw new SmokeFailure("the completed reply was not exactly ok");
                   break;
                 }

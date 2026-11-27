@@ -172,3 +172,21 @@ are `test/drivers/claude/sdk-install.test.ts`, `npm-sdk.test.ts`,
 `real-sdk-launch.test.ts`, `availability.test.ts` and
 `test/standalone/claude-sdk.e2e.ts`; `docs/drivers/claude.md` has the
 details.
+
+**Live follow-up (2026-11-26):** The standalone driver installed only SDK
+0.3.330 and used a verified scratch copy of Claude Code 2.1.330 on its PATH.
+The authenticated `haiku` turn returned `ok` and ended `completed`:
+
+```text
+event: {"type":"item.upsert","kind":"assistant_message","status":"running"}
+event: {"type":"item.delta"}
+event: {"type":"item.upsert","status":"completed","text":"ok"}
+event: {"type":"turn.terminal","status":"completed"}
+```
+
+The named user files and installed CLI were unchanged. The smoke script
+incorrectly rejected the reply because the settling patch omitted `kind`.
+The script now folds the item patches before checking the reply. It did not
+retry the live turn or run the separate live driver-death check. The sanitized
+transcript is in the plan's `reports/phase-2/live-exact-3.log`, SHA-256
+`bb319ef81e94a1e6b756bbbfde2d21c49b5df781a801cef60fb2bc13d490028c`.

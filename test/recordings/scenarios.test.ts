@@ -66,6 +66,12 @@ test("the recorders and replay code import the scenario module and hold no scena
     "test/drivers/claude/puppets.ts",
     "test/drivers/claude/replay.test.ts",
     "test/drivers/claude/recorder.test.ts",
+    "scripts/record-codex.ts",
+    ...fs.readdirSync(path.join(REPO_ROOT, "test", "recordings", "codex")).map((name) => `test/recordings/codex/${name}`),
+    "test/drivers/codex/puppets.ts",
+    "test/drivers/codex/fake-codex-cli.ts",
+    "test/drivers/codex/recordings.test.ts",
+    "test/drivers/codex/recorder.test.ts",
   ];
   for (const file of files) {
     const text = fs.readFileSync(path.join(REPO_ROOT, file), "utf8");
@@ -78,7 +84,7 @@ test("the recorders and replay code import the scenario module and hold no scena
       }
     }
   }
-  for (const file of ["scripts/record-claude.ts", "test/recordings/claude/record.ts", "test/recordings/claude/replay.ts", "test/drivers/claude/puppets.ts"]) {
+  for (const file of ["scripts/record-claude.ts", "test/recordings/claude/record.ts", "test/recordings/claude/replay.ts", "test/drivers/claude/puppets.ts", "test/recordings/codex/record.ts", "test/recordings/codex/replay.ts", "test/drivers/codex/puppets.ts"]) {
     assert.match(fs.readFileSync(path.join(REPO_ROOT, file), "utf8"), /recordings\/scenarios\.ts"|\.\.\/scenarios\.ts"/, `${file} imports the scenario module`);
   }
 });

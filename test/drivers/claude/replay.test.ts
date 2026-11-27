@@ -18,7 +18,9 @@ import type { ClaudeRecordOutcome } from "../../recordings/claude/record.ts";
 import { replayClaude } from "../../recordings/claude/replay.ts";
 import { createClaudeReplaySdk } from "../../recordings/claude/replay-sdk.ts";
 import { startTurnAfterItsText } from "../../recordings/late-start-turn.ts";
-import { createSanitiser } from "../../recordings/sanitiser.ts";
+import { PLACEHOLDERS, createSanitiser } from "../../recordings/sanitiser.ts";
+import { CLAUDE_PROTOCOL_WORDS } from "../../recordings/claude/protocol-words.ts";
+import { replacedProtocolWords } from "../../recordings/whole-words.ts";
 import { encodeRecording, parseRecording, readRecording } from "../../recordings/format.ts";
 import type { Frame, Recording, RecordingMetadata } from "../../recordings/format.ts";
 import { SCENARIOS, SCENARIO_NAMES, checkScenario, settledItems } from "../../recordings/scenarios.ts";
@@ -296,7 +298,9 @@ for (const [recordedAs, replayedAs] of [
       assert.equal(outcome.error, undefined, `${outcome.scenario}: ${outcome.error?.message}`);
       const text = fs.readFileSync(outcome.file!, "utf8");
       assert.ok(text.includes('"role":"user"') && text.includes('"type":"user"') && text.includes('"type":"assistant"'), `${outcome.scenario}: the protocol words are intact`);
-      assert.ok(!text.includes('"<USER>"'), `${outcome.scenario}: no whole value became the user placeholder`);
+      // A whole value the SDK's types allow as a protocol word where it is stays; one in a value they type as unknown (a session message's `message`) may go.
+      const frames = (await readRecording(outcome.file!)).frames.map((entry) => entry.frame);
+      assert.deepEqual(replacedProtocolWords(recordedAs, PLACEHOLDERS.user, frames, CLAUDE_PROTOCOL_WORDS), [], `${outcome.scenario}: no protocol word became the user placeholder`);
       await replayClaude(outcome.file!, { user: replayedAs, env: { ...process.env, USER: replayedAs, LOGNAME: replayedAs } });
     }
   });
@@ -466,14 +470,17 @@ function escape(text: string): string {
 test("replay leaves out exactly the ignored fields: a change to one passes, a change to its neighbour fails", async () => {
   assert.deepEqual(
     CLAUDE_IGNORED_FIELDS.map((entry) => `${entry.kind} ${entry.field}`),
-    ["query options.env.CLAUDE_AGENT_SDK_CLIENT_APP", "query options.env.ANTHROPIC_API_KEY"],
+    ["query options.env.CLAUDE_AGENT_SDK_CLIENT_APP", "query options.env.ANTHROPIC_API_KEY", "query options.pathToClaudeCodeExecutable", "query options.mcpServersDelivery"],
   );
   const recording = await recordingOf("simple");
   const index = recording.frames.findIndex((entry) => entry.frame.kind === "query");
-  const env = (frames: Frame[]): { [name: string]: string } => (frames[index]!["options"] as { env: { [name: string]: string } }).env;
+  const options = (frames: Frame[]): { [name: string]: unknown } => frames[index]!["options"] as { [name: string]: unknown };
+  const env = (frames: Frame[]): { [name: string]: string } => options(frames)["env"] as { [name: string]: string };
   const ignored = editedCopy(recording, "client-app", (frames) => {
     env(frames)["CLAUDE_AGENT_SDK_CLIENT_APP"] = "ari/99.0.0";
     env(frames)["ANTHROPIC_API_KEY"] = "<ANTHROPIC_API_KEY>";
+    options(frames)["pathToClaudeCodeExecutable"] = "<HOME>/.local/bin/claude";
+    options(frames)["mcpServersDelivery"] = "argv";
   });
   await replayClaude(ignored.file);
   const neighbour = editedCopy(recording, "auto-memory", (frames) => {

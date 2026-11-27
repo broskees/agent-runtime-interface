@@ -36,7 +36,29 @@ holds its label, icon, config schema and form hints.
 Grok Build CLI `>=1.0.70 <1.1.0`: the launch was read from the installed
 CLI 1.0.70's `--help` (never run against an account) and the ACP registry
 entry `grok-build` 1.0.93. `status()` reports the version `grok --version`
-prints and an `untested_version` advisory outside that range.
+prints, an `untested_version` advisory above that range, and
+`driver_unavailable` below it (next section).
+
+## The user's own `grok`, and its minimum
+
+ARI runs the `grok` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. The minimum is
+Grok Build CLI 1.0.70, the lower bound of the tested range `>=1.0.70 <1.1.0`.
+With an older `grok`, `status()` is `unavailable` with `driver_unavailable`
+(with `installed: true` and the version found), and `openSession` rejects with
+the same error before any agent starts: the only process that runs is `grok
+--version`. The error names the version found, the path, the minimum and
+Grok's update step:
+
+```text
+Grok 1.0.60 (/usr/local/bin/grok) is older than 1.0.70, the oldest version this driver supports. Update the Grok CLI with `grok update`.
+```
+
+The update step is Grok's own: "One command updates Grok for both interactive
+and headless use: `grok update`" ([Grok Build,
+Update](https://docs.x.ai/build/overview#update)). A `grok` above the tested
+range still runs, with an `untested_version` advisory. `grok --version` prints
+`grok 1.0.70 (f50904eaee6c)` (`test/fixtures/cli-version-output/grok.txt`).
 
 ## Resuming conversations ARI did not create
 

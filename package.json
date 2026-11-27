@@ -84,7 +84,7 @@
     "test:bun": "node scripts/test-bun.ts",
     "check:package": "node scripts/check-package.ts",
     "build:binary": "node scripts/build-binary.ts --fakes",
-    "test:binary": "node --test test/standalone/standalone-binary.e2e.ts",
+    "test:binary": "node --test \"test/standalone/*.e2e.ts\"",
     "test:rust": "cd clients/rust && CARGO_BUILD_JOBS=4 cargo test --locked",
     "test:python": "cd clients/python && uv run --locked pytest",
     "test:go": "cd clients/go && go test -count=1 ./...",
@@ -96,6 +96,7 @@
     "record:claude": "node scripts/record-claude.ts",
     "record:opencode": "node scripts/record-opencode.ts",
     "record:antigravity": "node scripts/record-antigravity.ts",
+    "record:codex": "node scripts/record-codex.ts",
     "gate": "pnpm run codegen:check && pnpm run codegen:effect:check && pnpm run codegen:codex:check && pnpm run codegen:acp:check && pnpm run build && pnpm run check:rules && pnpm run typecheck && pnpm run test && pnpm run test:bun && pnpm run check:package && pnpm run codegen:clients:check && pnpm run build:binary && pnpm run test:binary && pnpm run test:clients && pnpm run check:workflows && pnpm run check:recordings",
     "gate:bun": "pnpm run codegen:check && pnpm run codegen:effect:check && pnpm run codegen:codex:check && pnpm run codegen:acp:check && pnpm run build && pnpm run check:rules && pnpm run typecheck && pnpm run test:bun && pnpm run check:package && pnpm run codegen:clients:check && pnpm run build:binary && pnpm run test:binary && pnpm run test:clients && pnpm run check:workflows && pnpm run check:recordings"
   },

@@ -55,17 +55,24 @@ describe("ari/meta/claude", () => {
     const validate = new Ajv2020({ strict: true }).compile(CLAUDE_CONFIG_SCHEMA as object);
     assert.equal(validate(claudeDriver.defaultConfig()), true, JSON.stringify(validate.errors));
     assert.equal(validate(claudeDefaultConfig()), true);
-    assert.equal(validate({ executablePath: "/opt/claude/bin/claude", model: "opus", effort: "high", settingSources: ["project", "local"] }), true);
+    assert.equal(
+      validate({ executablePath: "/opt/claude/bin/claude", model: "opus", effort: "high", settingSources: ["project", "local"], sdkDirectory: "/opt/claude-agent-sdk", sdkRegistry: "https://registry.example.test/npm/" }),
+      true,
+    );
+    assert.equal(validate({ sdkRegistry: "http://127.0.0.1:4873" }), true);
     assert.equal(validate({ effort: "extreme" }), false);
     assert.equal(validate({ settingSources: ["global"] }), false);
     assert.equal(validate({ executablePath: "" }), false);
+    assert.equal(validate({ sdkDirectory: "" }), false);
+    assert.equal(validate({ sdkRegistry: "ftp://registry.example.test" }), false);
     assert.equal(validate({ unknown: true }), false);
   });
 
-  test("ari/meta/claude reaches no Node built-in or package (repository rule c); ari/drivers/claude reaches Node built-ins and, only through import(), the SDK", () => {
+  test("ari/meta/claude reaches no Node built-in or package (repository rule c); ari/drivers/claude reaches Node built-ins and, only through import(), the SDK by name or a file by URL", () => {
     assert.deepEqual(reachableImports(path.join(REPO_ROOT, "src", "meta", "claude.ts")).external, []);
     const driver = reachableImports(path.join(REPO_ROOT, "src", "drivers", "claude", "index.ts")).external;
-    assert.deepEqual(driver.filter((specifier) => !specifier.startsWith("node:")), [CLAUDE_SDK_PACKAGE]);
+    // `file:` is check-rules' name for `import(pathToFileURL(x).href)`: the SDK's entry module in sdkDirectory or a managed install, a file and never a package.
+    assert.deepEqual(driver.filter((specifier) => !specifier.startsWith("node:")), [CLAUDE_SDK_PACKAGE, "file:"]);
   });
 
   test("the CLI manifest is valid for ari/cli-manifests and builds fresh, resume and fork launches without inherited credentials", () => {

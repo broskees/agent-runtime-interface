@@ -14,9 +14,13 @@
 //
 // `probe()` runs only `codex --version`, and `codex login status` when deep
 // and ambient; it never starts an app-server, which could start MCP servers or
-// write state.
+// write state. The driver runs the `codex` the user installed and never
+// installs or updates one: a `codex` older than CODEX_MINIMUM_VERSION is
+// `driver_unavailable` in `status()` and `openSession`, naming
+// CODEX_UPDATE_STEP.
 
-import { callErrors, toCallError } from "../../errors.ts";
+import { AriError, callErrors, toCallError } from "../../errors.ts";
+import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import { JsonRpcError } from "../../driver-kit/json-rpc.ts";
 import { CodexTransferredTokensSchema } from "../../generated/extensions/codex.ts";
@@ -39,7 +43,7 @@ import type {
 } from "../../generated/instance.ts";
 import type { LimitStatus, ResetCreditOutcome } from "../../generated/usage.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
-import { CODEX_INSTALL_HINT, CODEX_TESTED_VERSIONS } from "../../meta/codex.ts";
+import { CODEX_INSTALL_HINT, CODEX_MINIMUM_VERSION, CODEX_TESTED_VERSIONS, CODEX_UPDATE_STEP } from "../../meta/codex.ts";
 import type { CodexDriverConfig } from "../../meta/codex.ts";
 import { CODEX_CAPABILITIES } from "./capabilities.ts";
 import { CodexConnection, callErrorFromCodex } from "./connection.ts";
@@ -204,6 +208,8 @@ export class CodexInstance implements Instance {
   async status(): Promise<InstanceStatus> {
     const probe = await this.probe();
     if (!probe.installed) return { state: "unavailable", installed: false, ...(probe.error === undefined ? {} : { error: probe.error }) };
+    // Installed but older than the minimum: the driver will not run it.
+    if (probe.error?.code === "driver_unavailable") return { state: "unavailable", installed: true, ...(probe.version === undefined ? {} : { version: probe.version }), error: probe.error };
     const auth = await this.#state();
     const advisory = versionAdvisory(probe.version);
     return {
@@ -231,20 +237,26 @@ export class CodexInstance implements Instance {
     for (const wake of waiters) wake();
   }
 
-  /** Runs only `codex --version`, and `codex login status` when deep and ambient. Nothing else. */
+  /** Runs only `codex --version`, and `codex login status` when deep and ambient. Nothing else. A `codex` below the minimum is `driver_unavailable`. */
   async probe(options?: { deep?: boolean }): Promise<ProbeResult> {
     const checkedAt = new Date().toISOString();
     const binary = this.#config.binaryPath;
-    const path = await this.#host.process.resolveExecutable(binary);
+    const env = this.#forwardedEnvironment();
+    // The process owner interprets env as for spawn. Keep path for older hosts.
+    const path = await this.#host.process.resolveExecutable(binary, { env, ...(env["PATH"] === undefined ? {} : { path: env["PATH"] }) });
     if (path === null) return { ok: false, installed: false, error: this.#unavailable().callError, checkedAt };
     let version: string | undefined;
     let ok = false;
     try {
-      const run = await this.#run(["--version"]);
+      const run = await this.#run(["--version"], env);
       version = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(run.stdout)?.[1];
       ok = run.code === 0 && version !== undefined;
     } catch (error) {
       return { ok: false, installed: true, checkedAt, error: toCallError(error) ?? callErrors.transport(String(error)).callError };
+    }
+    if (version !== undefined && compareVersions(version, CODEX_MINIMUM_VERSION) < 0) {
+      const tooOld = new CliTooOldError({ name: "Codex CLI", binary, version, path, minimum: CODEX_MINIMUM_VERSION, updateStep: CODEX_UPDATE_STEP });
+      return { ok: false, installed: true, version, error: tooOld.callError, checkedAt };
     }
     const result: ProbeResult = { ok, installed: true, ...(version === undefined ? {} : { version }), checkedAt };
     if (options?.deep === true) return { ...result, auth: await this.#state() };
@@ -256,8 +268,8 @@ export class CodexInstance implements Instance {
   }
 
   /** Runs `codex <args>` to completion, for probes and the sign-in check. */
-  async #run(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
-    const child = await this.#host.process.spawn({ command: this.#config.binaryPath, args, purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: this.#forwardedEnvironment() });
+  async #run(args: string[], env = this.#forwardedEnvironment()): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    const child = await this.#host.process.spawn({ command: this.#config.binaryPath, args, purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env });
     const [stdout, stderr] = await Promise.all([readAll(child.stdout), readAll(child.stderr)]);
     const exit = await child.exited;
     return { code: exit.code, stdout, stderr };
@@ -683,7 +695,9 @@ export class CodexInstance implements Instance {
 
   async openSession(input: OpenSessionInput): Promise<Session> {
     if (this.#disposed) throw callErrors.invalidState("instance_disposed");
-    if ((await this.#host.process.resolveExecutable(this.#config.binaryPath)) === null) throw this.#unavailable();
+    // A missing `codex`, or one below the minimum, never starts an app-server.
+    const probe = await this.probe();
+    if (probe.error?.code === "driver_unavailable") throw new AriError(probe.error);
     const state = await this.#state();
     if (state.status === "unauthenticated") throw callErrors.authRequired([...CODEX_AUTH_METHODS], "Sign in to Codex first");
     this.#sessionCount += 1;
@@ -713,7 +727,9 @@ export class CodexInstance implements Instance {
 
   async dispose(): Promise<void> {
     this.#disposed = true;
-    for (const session of this.#sessions) await session.close();
+    // Every session ends at once: each waits for its own app-server's process group, which can take the whole
+    // kill grace, and ari-driver ends what is left 2 s after its shutdown began (docs/wire.md, "Lifetime").
+    await Promise.all([...this.#sessions].map((session) => session.close()));
     this.#sessions.clear();
     await this.#restartAccountConnection();
     this.#changed();

@@ -208,7 +208,7 @@ test("the recorder starts agy with a profile, HOME, XDG directories, TMPDIR and 
   const acp = processes.filter((each) => each.args[0] === "acp");
   assert.equal(acp.length, 7, "one agy acp per session");
   const versions = processes.filter((each) => each.args[0] === "--version");
-  assert.equal(versions.length, outcomes.length, "one agy --version per scenario, for the header");
+  assert.equal(versions.length, outcomes.length + acp.length, "one agy --version per header and one per session");
   for (const started of [...acp, ...versions]) {
     const outcome = outcomes.find((each) => started.cwd.startsWith(`${each.workspace}${path.sep}`))!;
     assert.ok(outcome !== undefined, `agy started in a scenario's workspace: ${started.cwd}`);
@@ -220,6 +220,7 @@ test("the recorder starts agy with a profile, HOME, XDG directories, TMPDIR and 
       { HOME: path.join(workspace, "agy-home"), XDG_CONFIG_HOME: path.join(workspace, "xdg-config"), XDG_DATA_HOME: path.join(workspace, "xdg-data"), XDG_STATE_HOME: path.join(workspace, "xdg-state"), XDG_CACHE_HOME: path.join(workspace, "xdg-cache"), XDG_RUNTIME_DIR: path.join(workspace, "xdg-runtime"), TMPDIR: path.join(workspace, "tmp"), DBUS_SESSION_BUS_ADDRESS: `unix:path=${path.join(workspace, "no-session-bus")}` },
       `${outcome.scenario}: agy's own directories, and a session bus nobody listens on`,
     );
+    assert.equal(started.env["AGY_CLI_DISABLE_AUTO_UPDATE"], "true", "neither the probe nor the ACP runtime can auto-update");
     assert.ok(!fs.existsSync(path.join(workspace, "no-session-bus")) || !outcome.workspaceKept);
     assert.deepEqual(
       Object.keys(started.env).filter((name) => /^(GEMINI_|GOOGLE_|GCLOUD_|CLOUDSDK_|AGY_)/.test(name)).sort(),

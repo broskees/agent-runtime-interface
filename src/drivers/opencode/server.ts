@@ -14,6 +14,7 @@
 
 import { callErrors, toCallError } from "../../errors.ts";
 import type { HostServices, SpawnedProcess } from "../../runtime.ts";
+import { OPENCODE_V1_MINIMUM_VERSION, OPENCODE_V2_MINIMUM_VERSION } from "./config.ts";
 import type { OpencodeConfig } from "./config.ts";
 
 export type Generation = 1 | 2;
@@ -53,6 +54,16 @@ function compareVersions(a: string, b: string): number {
     if (difference !== 0) return difference;
   }
   return 0;
+}
+
+/** The oldest supported version of `version`'s generation: the 2.x minimum for 2.x and later, the 1.x minimum for anything older. */
+export function minimumVersionFor(version: string): string {
+  return generationOf(version) === 2 ? OPENCODE_V2_MINIMUM_VERSION : OPENCODE_V1_MINIMUM_VERSION;
+}
+
+/** True when `version` is older than its generation's minimum (`minimumVersionFor`). */
+export function belowMinimum(version: string): boolean {
+  return parseVersion(version) !== undefined && compareVersions(version, minimumVersionFor(version)) < 0;
 }
 
 /** True when `version` lies in a `>=x.y.z <a.b.c` range. */

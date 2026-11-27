@@ -29,7 +29,6 @@ export interface ClaudeRuntime {
   readonly sdk: ClaudeSdkModule;
   readonly version: string | undefined;
   readonly claudeCodeVersion: string | undefined;
-  readonly bundledExecutable: string | null;
 }
 
 export const CLAUDE_FRAME_KINDS: ReadonlyArray<{ readonly kind: string; readonly dir: FrameDirection }> = [
@@ -65,6 +64,18 @@ export const CLAUDE_IGNORED_FIELDS: readonly IgnoredField[] = [
     kind: "query",
     field: "options.env.ANTHROPIC_API_KEY",
     reason: "present only when the recorder ran with ANTHROPIC_API_KEY set; a replay has no key, and a recording holds only its placeholder",
+  },
+  {
+    driver: "claude",
+    kind: "query",
+    field: "options.pathToClaudeCodeExecutable",
+    reason: "the path of the user's claude, which differs between machines (a replay names /ari-replay/claude); recordings made before the driver ran the user's Claude Code have none",
+  },
+  {
+    driver: "claude",
+    kind: "query",
+    field: "options.mcpServersDelivery",
+    reason: "the driver sets it to initialize on every query since it runs the user's Claude Code; recordings made before then have none, and test/drivers/claude/availability.test.ts checks every query sets it",
   },
 ];
 

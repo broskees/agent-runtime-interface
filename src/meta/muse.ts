@@ -29,12 +29,27 @@ export const MUSE_DRIVER_KIND = "muse";
 export const MUSE_SDK_PACKAGE = "@muse-code/sdk";
 
 /**
+ * The oldest `muse` CLI the driver runs: the lower bound of
+ * `MUSE_TESTED_VERSIONS`. An older `muse` is refused with `driver_unavailable`
+ * naming `MUSE_CLI_UPDATE_STEP`; ARI never installs or updates `muse`. (An SDK
+ * outside the range still gets only an advisory.)
+ */
+export const MUSE_MINIMUM_VERSION = "1.4.25";
+
+/**
  * The Muse Code versions this driver is tested against, as a semver range. The
  * SDK versions in lockstep with Muse Code (`@muse-code/sdk` X.Y.Z pairs with
  * Muse Code X.Y.Z, says the SDK's README), so the range covers both the SDK
  * package and the `muse` CLI.
  */
-export const MUSE_TESTED_VERSIONS = ">=1.4.25 <1.4.26";
+export const MUSE_TESTED_VERSIONS = `>=${MUSE_MINIMUM_VERSION} <1.4.26`;
+
+/**
+ * Muse Code's own update step: its changelog sends upgrades to the overview's
+ * installer (https://dev.meta.ai/docs/muse-code/changelog: "For install and
+ * upgrade steps, see the Muse Code overview"; https://dev.meta.ai/docs/muse-code#install).
+ */
+export const MUSE_CLI_UPDATE_STEP = "Update Muse Code by running its installer again: `curl -fsSL https://dev.meta.ai/install.sh | bash`.";
 
 /** Named in "not installed" errors for the SDK package. */
 export const MUSE_SDK_INSTALL_HINT = "Install the Muse SDK beside ari: npm install @muse-code/sdk@1.4.25";

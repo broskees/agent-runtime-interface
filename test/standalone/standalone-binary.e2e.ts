@@ -6,6 +6,15 @@
 // `acp` driver runs the fake ACP agent by its path (over ACP v1 and v2), and
 // each completes a turn whose approval the host answers through `respond`.
 //
+// The binary also keeps the promise that agents end when `ari-driver` dies:
+// serving the agent-group fixture driver (loaded from disk by module path),
+// it is SIGKILLed, or gets SIGHUP, while two agents run, and within 5 s of the
+// signal every agent, grandchild, process group and guard must be gone. It is
+// also SIGKILLed while an agent's launcher is stopped between its spawn and
+// its guard (the driver stops it the moment the spawn returns), and that
+// agent's group must be gone within 5 s too (test/wire/driver-death-scenario.ts,
+// which test/wire/driver-death.test.ts runs under Node).
+//
 // The gate runs it after the binary build (`pnpm run test:binary`); it is not
 // matched by `pnpm run test`, which runs before the binary exists.
 
@@ -17,15 +26,19 @@ import * as path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { firstPartyDrivers } from "../../scripts/build-binary.ts";
+import { createFakeHost } from "../../src/conformance/index.ts";
 import type { AriEvent, Request } from "../../src/index.ts";
 import { createCoordination, createNodeHostServices } from "../../src/node/index.ts";
 import { startAriDriver } from "../../src/wire/index.ts";
+import { createSymlinkedRoot } from "../helpers/symlinked-root.ts";
+import { assertEndedEverything, runDeathInStartupWindow, runDriverDeath } from "../wire/driver-death-scenario.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BUILD = path.join(ROOT, "build", "standalone", "linux-x64");
 const ARI_DRIVER = path.join(BUILD, "ari-driver");
 const FAKE_PI = path.join(BUILD, "fakes", "pi");
 const FAKE_ACP_AGENT = path.join(BUILD, "fakes", "standalone-acp-agent");
+const NODE_SEMANTICS_DRIVER = path.join(ROOT, "test", "standalone", "fixtures", "node-semantics-driver.ts");
 
 const temporary: string[] = [];
 after(() => {
@@ -122,6 +135,38 @@ test("the standalone ari-driver is one native executable that holds every first-
   assert.ok(held.includes("pi") && held.includes("acp"));
 });
 
+test("the standalone ari-driver follows symlinks before `..` and searches an empty PATH entry", async () => {
+  requireBinaries();
+  const where = nodeFreeRoot();
+  const layout = await createSymlinkedRoot("ari-standalone-symlink-");
+  temporary.push(layout.root);
+  // Both spellings exist, so returning the lexically collapsed path is wrong
+  // even if realpath succeeds. The command exists in both PATH locations too.
+  fs.mkdirSync(layout.collapsed("host"));
+  for (const [directory, output] of [[where.project, "1.2.3"], [where.bin, "9.9.9"]] as const) {
+    fs.writeFileSync(path.join(directory, "ari-standalone-path-probe"), `#!/bin/sh\necho ${output}\n`, { mode: 0o755 });
+  }
+  const env = { ...where.env, PATH: `:${where.bin}` };
+  assert.deepEqual(javascriptRuntimesOn(`${where.project}:${where.bin}`), []);
+  const connection = await startAriDriver({ driver: NODE_SEMANTICS_DRIVER, command: [ARI_DRIVER], env, cwd: where.project, envPolicy: { stripAmbient: [] } });
+  try {
+    const instanceId = "node-semantics";
+    const expectedStateDir = layout.real(`host/instances/${instanceId}/state`);
+    const config = { hostRoot: layout.throughSymlink("host"), expectedStateDir };
+    const instance = await connection.driver.create(createFakeHost({ config }), { instanceId, config, environment: {} });
+    try {
+      const probe = await instance.probe();
+      assert.equal(probe.version, "1.2.3", "the current directory wins over the later PATH entry");
+      assert.ok(fs.statSync(expectedStateDir).isDirectory());
+      assert.deepEqual(fs.readdirSync(layout.collapsed("host")), [], "no directories were created in the lexical host root");
+    } finally {
+      await instance.dispose();
+    }
+  } finally {
+    await connection.close();
+  }
+});
+
 for (const { name, run } of RUNS) {
   test(`the standalone ari-driver completes a turn without Node: ${name}`, async () => {
     requireBinaries();
@@ -178,3 +223,23 @@ for (const { name, run } of RUNS) {
     assert.equal(fs.existsSync(path.join(where.home, ".pi")), false);
   });
 }
+
+for (const { death, how } of [
+  { death: "SIGKILL", how: "is SIGKILLed" },
+  { death: "SIGHUP", how: "gets SIGHUP, disposes and exits 0" },
+] as const) {
+  test(`when the standalone ari-driver ${how}, without Node, every agent, grandchild, process group and guard is gone within 5 s`, async () => {
+    requireBinaries();
+    const where = nodeFreeRoot();
+    const outcome = await runDriverDeath({ command: [ARI_DRIVER], death, env: where.env, cwd: where.project });
+    assertEndedEverything(outcome, death);
+  });
+}
+
+test("when the standalone ari-driver is SIGKILLed after an agent's spawn returned but before its guard started, without Node, the agent's group is gone within 5 s", async () => {
+  requireBinaries();
+  const where = nodeFreeRoot();
+  const outcome = await runDeathInStartupWindow({ command: [ARI_DRIVER], pause: "driver", env: where.env, cwd: where.project });
+  assert.deepEqual(outcome.survivors, [], "every agent group, the stopped one included, ended within 5 s of the SIGKILL");
+  assert.equal(outcome.exit.signal, "SIGKILL");
+});

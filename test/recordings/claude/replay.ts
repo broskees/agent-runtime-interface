@@ -18,10 +18,7 @@ import { claudeNativeAnswers } from "./frames.ts";
 import { CLAUDE_PROTOCOL_WORDS } from "./protocol-words.ts";
 import { createClaudeReplaySdk } from "./replay-sdk.ts";
 import type { ClaudeReplay } from "./replay-sdk.ts";
-import { createClaudeLayout, runClaudeScenario } from "./run.ts";
-
-/** Where the replay says its native binary is. The driver needs one to open a session; nothing runs it. */
-export const REPLAY_CLAUDE_BINARY = "/ari-replay/claude";
+import { CLAUDE_STAND_IN_PATH, createClaudeLayout, runClaudeScenario } from "./run.ts";
 
 export interface ClaudeReplayResult {
   readonly run: ScenarioRun;
@@ -58,7 +55,9 @@ export async function replayClaude(source: Recording | string, options: ClaudeRe
     try {
       result = await runClaudeScenario({
         scenario,
-        runtime: { sdk: replay.sdk, version: header.sdkVersion, claudeCodeVersion: header.vendorVersion, bundledExecutable: REPLAY_CLAUDE_BINARY },
+        runtime: { sdk: replay.sdk, version: header.sdkVersion, claudeCodeVersion: header.vendorVersion },
+        // The Claude Code the recording ran; the driver needs one to open a session, and nothing runs it.
+        claudeCode: { path: CLAUDE_STAND_IN_PATH, version: header.vendorVersion },
         layout,
         sourceEnv: env,
         model: header.model,

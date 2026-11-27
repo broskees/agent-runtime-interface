@@ -3,7 +3,9 @@
 // outcome for each. A member the driver leaves out is absent (and its
 // capability, if any, is off); auth.complete, which the auth group must
 // carry, rejects with unsupported; each member the driver supports is
-// exercised here against the fake SDK, with a check of its native effect.
+// exercised here against the fake SDK, with a check of its native effect,
+// except maintenance.install and .update, which download the SDK and are
+// exercised against a local npm registry in sdk-install.test.ts.
 // docs/drivers/claude.md gives the reason for each member left out.
 
 import assert from "node:assert/strict";
@@ -36,8 +38,9 @@ export const CLAUDE_OPTIONAL_MEMBERS: { readonly [member: string]: "supported" |
   // Instance (inventory E).
   "Instance.invalidateCaches": "supported",
   "Instance.maintenance.advisory": "supported",
-  "Instance.maintenance.install": "absent",
-  "Instance.maintenance.update": "absent",
+  // Exercised with a local npm registry in sdk-install.test.ts and through the standalone ari-driver in test/standalone/claude-sdk.e2e.ts.
+  "Instance.maintenance.install": "supported",
+  "Instance.maintenance.update": "supported",
   "Instance.auth.methods": "supported",
   "Instance.auth.state": "supported",
   "Instance.auth.reportRuntimeFailure": "supported",

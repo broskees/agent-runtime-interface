@@ -8,6 +8,13 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
 - Runs the user's own `pi` in RPC mode (`pi --mode rpc`), found through the
   host's `process.resolveExecutable`, one process per thread, with session
   files under the instance's state directory.
+- Runs the `pi` the user installed and never downloads, installs or updates
+  one. A `pi` older than the minimum, 1.6.0 (the lower bound of the tested
+  range), is refused: `status()` is `unavailable` with `driver_unavailable`
+  and `openSession` rejects with it before any Pi process starts in RPC mode,
+  naming the version found, its path, the minimum and the update step, `pi
+  update`. Above the tested range a `pi` still runs, with an
+  `untested_version` advisory.
 - Loads the ARI bridge extension into every Pi process: tool calls gated by
   the ARI runtime mode (`read_only`, `approval_required`,
   `auto_accept_edits`, `full_access`), Pi's working directory reported back,

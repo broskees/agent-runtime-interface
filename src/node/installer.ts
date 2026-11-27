@@ -28,8 +28,14 @@
 // exists. If the system reuses the ID of a process that died holding a lock,
 // the lock stays held until that new process ends.
 //
-// Installs hold only the package's own files. A package that needs its npm
-// dependencies installed next to it must bundle them.
+// Installs hold only the package's own files, plus whatever the optional
+// `prepare` hook adds to the staging directory before the rename. A package
+// that needs its npm dependencies installed next to it must bundle them, or
+// its caller adds them in `prepare`.
+//
+// Repair: with the optional `isIntact` hook, an install whose directory exists
+// but is not whole is moved aside and installed again, under the version's
+// lock. Without it, an existing directory counts as installed.
 //
 // `cacheDir` is kept as given (see os-path.ts); every path below it is built
 // from validated package names, versions and names this module chose.
@@ -65,6 +71,20 @@ export interface AdapterInstallerOptions {
   strip?: number;
   /** Aborting it cancels installs in progress and stops waiting for a version's lock. */
   signal?: AbortSignal;
+  /**
+   * Runs on each complete extraction, in its staging directory, before the
+   * rename publishes it and while the version's lock is held. It may add
+   * files there (a record of what was installed, a second archive); if it
+   * throws, the staging directory is removed and nothing is installed.
+   */
+  prepare?: (staging: { readonly dir: string; readonly pkg: string; readonly version: string }) => Promise<void>;
+  /**
+   * Says whether an installed version is whole. `install()` and `lease()`
+   * move a version it calls broken aside and install it again, under the
+   * version's lock. Without it, an existing version directory counts as
+   * installed.
+   */
+  isIntact?: (installed: InstalledAdapter) => Promise<boolean>;
 }
 
 export interface InstalledAdapter {
@@ -254,17 +274,24 @@ export function createAdapterInstaller(options: AdapterInstallerOptions): Adapte
     }
   };
 
-  /** Installs `pkg@version` unless it is there. The caller holds the version's lock. */
+  /** Installs `pkg@version` unless a whole install is there. The caller holds the version's lock. */
   const installHoldingLock = async (pkg: string, version: string): Promise<InstalledAdapter> => {
     const dir = pathFor(pkg, version);
     const installed: InstalledAdapter = { pkg, version, dir };
-    if (await exists(dir)) return installed;
+    if (await exists(dir)) {
+      if (options.isIntact === undefined || (await options.isIntact(installed))) return installed;
+      // A broken install: out of the final path first, so it is replaced whole or not at all.
+      const brokenDir = appendToPath(packageDirectory(pkg), [`${TRASH_PREFIX}${process.pid}-${randomUUID()}`]);
+      await fs.rename(dir, brokenDir);
+      await fs.rm(brokenDir, { recursive: true, force: true });
+    }
     const stagingDir = appendToPath(packageDirectory(pkg), [`${STAGING_PREFIX}${process.pid}-${randomUUID()}`]);
     await fs.mkdir(stagingDir);
     try {
       const request: TarballRequest = options.signal === undefined ? { pkg, version } : { pkg, version, signal: options.signal };
       const tarball = await options.fetchTarball(request);
       await extractTarball(tarball, stagingDir, options.signal === undefined ? { strip } : { strip, signal: options.signal });
+      if (options.prepare !== undefined) await options.prepare({ dir: stagingDir, pkg, version });
       await fs.rename(stagingDir, dir);
       return installed;
     } catch (error) {
@@ -371,6 +398,14 @@ export interface NpmRegistryFetchOptions {
   registry?: string;
   /** Defaults to the global `fetch`. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Accept only a `dist.integrity` in sha512, sha384 or sha256 (the
+   * algorithms of W3C Subresource Integrity; npm publishes sha512), and
+   * refuse a version whose manifest offers only a sha1 integrity or the sha1
+   * `shasum`. Defaults to false, which falls back to `shasum` for registries
+   * that publish no integrity.
+   */
+  strongIntegrityOnly?: boolean;
 }
 
 async function* readBody(body: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
@@ -403,15 +438,15 @@ async function* checkDigest(
   if (actual !== expected) throw callErrors.protocol("integrity_mismatch", `The tarball of ${label} does not match its published ${algorithm} digest`);
 }
 
-/** The strongest digest npm publishes for a version: an SRI `integrity` (sha512, sha384 or sha256), else the sha1 `shasum`. */
-function publishedDigest(dist: { integrity?: unknown; shasum?: unknown }): { algorithm: string; expected: string; encoding: "base64" | "hex" } | null {
+/** The strongest digest npm publishes for a version: an SRI `integrity` (sha512, sha384 or sha256), else, unless `strongOnly`, the sha1 `shasum`. */
+function publishedDigest(dist: { integrity?: unknown; shasum?: unknown }, strongOnly: boolean): { algorithm: string; expected: string; encoding: "base64" | "hex" } | null {
   if (typeof dist.integrity === "string") {
     for (const algorithm of ["sha512", "sha384", "sha256"]) {
       const entry = dist.integrity.split(/\s+/).find((candidate) => candidate.startsWith(`${algorithm}-`));
       if (entry !== undefined) return { algorithm, expected: entry.slice(algorithm.length + 1).replace(/\?.*$/, ""), encoding: "base64" };
     }
   }
-  if (typeof dist.shasum === "string") return { algorithm: "sha1", expected: dist.shasum.toLowerCase(), encoding: "hex" };
+  if (typeof dist.shasum === "string" && !strongOnly) return { algorithm: "sha1", expected: dist.shasum.toLowerCase(), encoding: "hex" };
   return null;
 }
 
@@ -433,8 +468,16 @@ export function npmRegistryFetch(fetchOptions: NpmRegistryFetchOptions = {}): Ta
     const manifest = (await manifestResponse.json()) as { dist?: { tarball?: unknown; integrity?: unknown; shasum?: unknown } };
     const tarballUrl = manifest.dist?.tarball;
     if (typeof tarballUrl !== "string") throw callErrors.protocol("no_tarball", `The registry manifest of ${label} has no dist.tarball`);
-    const digest = publishedDigest(manifest.dist ?? {});
-    if (digest === null) throw callErrors.protocol("no_integrity", `The registry manifest of ${label} publishes no digest to check the tarball against`);
+    const strongOnly = fetchOptions.strongIntegrityOnly === true;
+    const digest = publishedDigest(manifest.dist ?? {}, strongOnly);
+    if (digest === null) {
+      throw callErrors.protocol(
+        "no_integrity",
+        strongOnly
+          ? `The registry manifest of ${label} publishes no sha512, sha384 or sha256 dist.integrity to check the tarball against (a sha1 integrity or shasum is not accepted)`
+          : `The registry manifest of ${label} publishes no digest to check the tarball against`,
+      );
+    }
     const tarballResponse = await fetchImplementation(new URL(tarballUrl, `${registry}/`), init);
     if (!tarballResponse.ok || tarballResponse.body === null) {
       throw callErrors.transport(`The registry answered ${tarballResponse.status} for the tarball of ${label}`);

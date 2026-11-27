@@ -1,14 +1,15 @@
 # Google Antigravity driver (`ari/drivers/antigravity`)
 
-`ari/drivers/antigravity` runs the Google Antigravity CLI over ACP. It is the
-[ACP base driver](acp.md) with Antigravity's launch and quirks.
-`ari/meta/antigravity` holds its label, icon, config schema and form hints.
+`ari/drivers/antigravity` runs the Google Antigravity CLI the user installed
+over ACP. It is the [ACP base driver](acp.md) with Antigravity's launch and
+quirks. `ari/meta/antigravity` holds its label, icon, config schema and form
+hints. ARI never downloads, installs or updates the Antigravity CLI (`agy`).
 
 ## Launch
 
 `agy acp --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp`
 
-with `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1` and `AGY_CLI_DISABLE_AUTO_UPDATE=1`.
+with `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1` and `AGY_CLI_DISABLE_AUTO_UPDATE=true`.
 The driver sets no other variable: `agy` 1.5.x reads neither
 `AGY_ACP_FORCE_FILE_STORAGE` nor `GEMINI_HOME`, which earlier releases of this
 driver set.
@@ -36,9 +37,10 @@ driver set.
   in for it. Sign it in once with
   `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp`
   (`--login`: "Log in with Google interactively, then exit (ACP terminal
-  auth)", `agy acp --help`). An instance a release before this one ran, with
-  the variables `agy` 1.5.x ignores, used the keyring's sign-in and holds no
-  sign-in file, so it signs in once too.
+  auth)", `agy acp --help`). Use the executable the instance configures.
+  Existing instances with a working profile credential do not need to sign in
+  again. On Linux, `agy` can also use the profile file when the keyring is
+  unreachable.
 - **Ambient Google credentials are stripped.** A host strips them with
   `process.envPolicy.stripAmbient`. The driver cannot strip variables itself
   (`SpawnRequest` adds variables; it removes none), so it declares them and
@@ -61,34 +63,54 @@ driver set.
   calls the host or sends a frame (`test/drivers/antigravity/antigravity.suite.ts`
   watches all three). `checkpointing.workspace` stays false: the driver
   exposes no checkpoint extension.
-- **Managed installs and leases.** With `installation: "managed"`,
-  `maintenance.install()` (and `update()`) reads
-  `<releaseManifestUrl>/<os>_<amd64|arm64>.json` (`version`, `url`,
-  `sha512`), downloads the tar.gz over https, checks its sha512 and installs
-  it through `ari/node`'s adapter installer into
-  `<cacheDir>/adapters/antigravity-cli/<version>`. Every session holds an
-  installer lease on its version until its agent process exits, so cleanup
-  never removes a running CLI. Probes only look on disk; a missing managed
-  install is `unavailable` with `driver_unavailable` naming
-  `antigravity-cli`. `maintenance.advisory()` reports an installed version
-  outside the tested range. Windows builds are a bare `agy.exe`, which the
-  tar-only installer cannot unpack; managed installs are tested on Linux.
 
 ## Config
 
 | Field | Default | Meaning |
 |---|---|---|
-| `installation` | `path` | `path`: run `command`. `managed`: run the version `maintenance.install()` installed. |
-| `command` | `agy` | The user's Antigravity CLI when `installation` is `path`. |
-| `releaseManifestUrl` | Antigravity's release manifests | Where managed installs read releases. |
-| `version` | `latest` | Managed installs: `latest` or a pinned version. |
+| `command` | `agy` | The user's Antigravity CLI: a name found on `PATH`, or a path. |
 | `maxProtocolVersion`, `forkAcrossDirectories`, `configDependencies` | `1`, `false`, `{}` | As for the [ACP base driver](acp.md#config). |
+
+There is no managed install. An earlier version could install `agy` itself
+(`installation: "managed"`, with `releaseManifestUrl` and `version`); those
+settings are gone, and `create()` refuses a config that still names one of
+them with a `validation` error that names them and says how to install `agy`:
+
+```text
+ARI no longer downloads, installs or updates the Antigravity CLI (agy), so the config may not name installation. Remove it; the driver runs the agy on PATH, or the one `command` names. Install the Antigravity CLI yourself: `curl -fsSL https://antigravity.google/cli/install.sh | bash` on macOS and Linux, or `irm https://antigravity.google/cli/install.ps1 | iex` in Windows PowerShell.
+```
+
+The install commands are Google's own
+([Antigravity CLI README, Installation](https://github.com/google-antigravity/antigravity-cli#installation)).
 
 ## Tested versions
 
 The Antigravity CLI `>=1.5.0 <1.6.0` (`agy acp` 1.5.x; the ACP registry
-lists `antigravity-acp` 1.5.2). `status()` reports the version and an
-`untested_version` advisory outside that range.
+lists `antigravity-acp` 1.5.2). `status()` reports the version, an
+`untested_version` advisory above that range, and `driver_unavailable` below
+it (next section).
+
+## The user's own `agy`, and its minimum
+
+ARI runs the `agy` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. The minimum is the
+Antigravity CLI 1.5.0, the lower bound of the tested range `>=1.5.0 <1.6.0`.
+With an older `agy`, `status()` is `unavailable` with `driver_unavailable`
+(with `installed: true` and the version found), and `openSession` rejects with
+the same error before any agent starts: the only process that runs is `agy
+--version`. The error names the version found, the path, the minimum and
+Antigravity's update step:
+
+```text
+Google Antigravity 1.4.9 (/usr/local/bin/agy) is older than 1.5.0, the oldest version this driver supports. Update the Antigravity CLI with `agy update`.
+```
+
+The update step is Antigravity's own: "update your CLI binary to the latest
+version using `agy update`" ([Antigravity CLI, Changelog
+command](https://antigravity.google/docs/cli/commands/changelog/)); `agy
+--help` 1.5.17 lists `update Update CLI`. An `agy` above the tested range
+still runs, with an `untested_version` advisory. `agy --version` prints the
+bare version, such as `1.5.17` (`test/fixtures/cli-version-output/agy.txt`).
 
 ## Resuming conversations ARI did not create
 
@@ -131,11 +153,13 @@ with the differences in the last rows.
 ## Optional members
 
 As the [ACP base driver](acp.md#optional-members-44), except that
-`rollbackThread` is present and rejects `unsupported`, and with
-`installation: "managed"` the instance has `maintenance.advisory`,
-`maintenance.install` and `maintenance.update` (exercised in
-`antigravity.suite.ts`). `test/drivers/antigravity/rules.suite.ts` checks all 44
-for the default `path` installation.
+`rollbackThread` is present and rejects `unsupported`. The instance has no
+`maintenance` member (no `maintenance.install`, `maintenance.update` or
+`maintenance.advisory`): ARI never installs or updates `agy`, so over
+`ari/wire` its `InstanceDescriptor.members` lists none of them.
+`test/drivers/antigravity/rules.suite.ts` checks all 44, and
+`test/standalone/user-installed-cli.e2e.ts` checks the standalone
+`ari-driver`.
 
 ## Missing CLI
 
@@ -148,12 +172,14 @@ with `driver_unavailable` naming `agy`, and `openSession` rejects with
 - ACP registry entry `antigravity-acp` 1.5.2 (https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json),
   and Antigravity's docs link there: https://antigravity.google/docs/ide/extensions.
 - T3 Code's public Antigravity code, read for the launch arguments, the
-  environment it strips and sets, the release manifest and rollback rule only,
-  at commit `67c442a17e6e5d6c9f768714820cecb5f15d4f9b`:
-  https://github.com/pingdotgg/t3code/blob/67c442a17e6e5d6c9f768714820cecb5f15d4f9b/apps/server/src/provider/antigravityAuthSupport.ts,
-  https://github.com/pingdotgg/t3code/blob/67c442a17e6e5d6c9f768714820cecb5f15d4f9b/apps/server/src/provider/antigravityCliRelease.ts,
-  https://github.com/pingdotgg/t3code/blob/67c442a17e6e5d6c9f768714820cecb5f15d4f9b/apps/server/src/provider/AntigravityInstallation.ts and
+  environment it strips and sets, and the rollback rule only, at commit
+  `67c442a17e6e5d6c9f768714820cecb5f15d4f9b`:
+  https://github.com/pingdotgg/t3code/blob/67c442a17e6e5d6c9f768714820cecb5f15d4f9b/apps/server/src/provider/antigravityAuthSupport.ts and
   https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/docs/internals/providers.md (cited by the proposal §1.3).
+- Google's Antigravity CLI README, for the install commands:
+  https://github.com/google-antigravity/antigravity-cli#installation; and
+  the Antigravity CLI docs, for the update step:
+  https://antigravity.google/docs/cli/commands/changelog/.
 - Where `agy` 1.5.x keeps the sign-in, read 2026-11-25:
   - Antigravity CLI issue https://github.com/google-antigravity/antigravity-cli/issues/1610
     (open): 1.5.10 and 1.5.11 keep the Google sign-in in one keyring entry

@@ -34,7 +34,11 @@ The first version. Nothing is published yet.
   in-memory reference driver.
 - `ari/node`: process spawning with environment rules and process-group
   cleanup, file-backed secrets, an atomic managed adapter installer, instance
-  paths, coordination leases, diagnostics and sign-in callbacks.
+  paths, coordination leases, diagnostics and sign-in callbacks. The
+  installer's optional `prepare` hook adds files to an install before it is
+  published, and `isIntact` makes it replace an install that is not whole;
+  `npmRegistryFetch({ strongIntegrityOnly: true })` accepts only a sha512,
+  sha384 or sha256 `dist.integrity`.
 
 ### Wire and clients
 

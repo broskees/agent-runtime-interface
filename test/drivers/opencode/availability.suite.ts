@@ -4,7 +4,9 @@
 // for 1.x, `@opencode/client` for 2.x), or without `opencode`, `create()`
 // works, `status()` reports the driver unavailable naming what to install,
 // and `openSession` rejects with `driver_unavailable`. With them, `status()`
-// reports the version found and an advisory outside the tested range.
+// reports the version found and an advisory above the tested range; an
+// `opencode` older than its generation's minimum is `driver_unavailable`
+// naming `opencode upgrade`, and no server of it starts.
 //
 // The missing-SDK checks run in a child Node process whose module resolution
 // refuses the two packages, exactly as Node does for a package that is not
@@ -12,12 +14,21 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createFakeHost, createMemoryProcess } from "../../../src/conformance/index.ts";
 import type { FakeSpawnRequest } from "../../../src/conformance/index.ts";
-import { OPENCODE_V1_TESTED_VERSIONS, OPENCODE_V2_TESTED_VERSIONS, opencodeDriver } from "../../../src/drivers/opencode/index.ts";
+import {
+  OPENCODE_UPDATE_STEP,
+  OPENCODE_V1_MINIMUM_VERSION,
+  OPENCODE_V1_TESTED_VERSIONS,
+  OPENCODE_V2_MINIMUM_VERSION,
+  OPENCODE_V2_TESTED_VERSIONS,
+  opencodeDriver,
+  parseVersion,
+} from "../../../src/drivers/opencode/index.ts";
 import type { OpencodeConfig } from "../../../src/drivers/opencode/index.ts";
 import { isAriError, toCallError } from "../../../src/index.ts";
 import { NODE_EXECUTABLE } from "../../helpers/runtime.ts";
@@ -145,10 +156,10 @@ test("an external server that cannot be reached is unavailable, without anything
   assert.equal(host.spawns.length, 0);
 });
 
-test("with opencode and its SDK: status reports the version found, and an advisory outside the tested ranges", async () => {
+test("with opencode and its SDK: status reports the version found, with no advisory at each generation's minimum and an advisory above the tested ranges", async () => {
   const cases: Array<[string, string, boolean]> = [
     ["1.19.6", "1.19.6", false],
-    ["1.3.15", "1.3.15", true],
+    ["1.24.0", "1.24.0", false],
     ["opencode v2.1.2", "2.1.2", false],
     ["opencode v2.4.1", "2.4.1", true],
   ];
@@ -168,3 +179,54 @@ test("with opencode and its SDK: status reports the version found, and an adviso
     assert.equal(probe.version, version);
   }
 });
+
+test("an opencode older than its generation's minimum is refused: status is driver_unavailable naming the version, the path, the minimum and `opencode upgrade`; openSession and the catalog reject the same way, and no server starts", async () => {
+  await checkRealVersionOutput();
+  const cases: Array<[string, string, string]> = [
+    ["1.3.15", "1.3.15", OPENCODE_V1_MINIMUM_VERSION],
+    ["1.19.5", "1.19.5", OPENCODE_V1_MINIMUM_VERSION],
+    ["opencode v2.0.21", "2.0.21", OPENCODE_V2_MINIMUM_VERSION],
+    // A release from before 1.x is older than the 1.x minimum.
+    ["0.15.18", "0.15.18", OPENCODE_V1_MINIMUM_VERSION],
+  ];
+  for (const [printed, version, minimum] of cases) {
+    const host = versionHost(printed);
+    const instance = await opencodeDriver.create(host, { instanceId: `old-${version}`, config: opencodeDriver.defaultConfig(), environment: {} });
+    const status = await instance.status();
+    assert.equal(status.state, "unavailable", printed);
+    assert.equal(status.installed, true);
+    assert.equal(status.version, version);
+    assert.equal(status.advisory, undefined);
+    assert.equal(status.error?.code, "driver_unavailable");
+    const error = status.error as { message: string; binary?: string; installHint?: string };
+    assert.equal(error.message, `OpenCode ${version} (/opt/opencode/bin/opencode) is older than ${minimum}, the oldest version this driver supports. ${OPENCODE_UPDATE_STEP}`);
+    assert.equal(error.binary, "opencode");
+    assert.equal(error.installHint, "Update OpenCode with `opencode upgrade`.");
+    const probe = await instance.probe();
+    assert.equal(probe.installed, true);
+    assert.equal(probe.version, version);
+    assert.deepEqual(probe.error, status.error);
+    await assert.rejects(instance.openSession({}), (rejection: unknown) => isAriError(rejection, "driver_unavailable") && rejection.message === error.message);
+    await assert.rejects(instance.catalog.list(), (rejection: unknown) => isAriError(rejection, "driver_unavailable"));
+    assert.ok(
+      host.spawns.every((spawn) => spawn.args?.[0] === "--version"),
+      "only opencode --version ran: no server started",
+    );
+    await instance.dispose();
+  }
+});
+
+async function checkRealVersionOutput(): Promise<void> {
+  for (const [file, version] of [
+    ["opencode-1.txt", "1.19.6"],
+    ["opencode-2.txt", "2.1.2"],
+  ] as const) {
+    const output = fs.readFileSync(path.join(ROOT, "test", "fixtures", "cli-version-output", file), "utf8");
+    assert.equal(parseVersion(output), version);
+    const instance = await opencodeDriver.create(versionHost(output.replace(/\n$/, "")), { instanceId: `real-${version}`, config: opencodeDriver.defaultConfig(), environment: {} });
+    const probe = await instance.probe();
+    assert.equal(probe.version, version, file);
+    assert.equal(probe.ok, true);
+    await instance.dispose();
+  }
+}

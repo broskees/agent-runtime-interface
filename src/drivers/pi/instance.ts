@@ -1,17 +1,20 @@
 // One Pi instance: the user's own `pi`, found on PATH (or at a configured
-// path) through the host. Nothing here runs at import time; a missing `pi`
-// shows in `status()` and makes `openSession` fail with `driver_unavailable`.
+// path) through the host. Nothing here runs at import time; a missing `pi`,
+// or one older than PI_MINIMUM_VERSION, shows in `status()` and makes
+// `openSession` fail with `driver_unavailable`. ARI never installs or updates
+// `pi`.
 //
 // Probes run only `pi --version`, and for a deep probe `pi auth check
 // --provider <p> --json --no-refresh` (`--no-refresh` keeps Pi from writing a
 // refreshed OAuth token, Pi docs cli.md "Credential commands").
 
-import { callErrors } from "../../errors.ts";
+import { AriError, callErrors } from "../../errors.ts";
+import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { AuthMethod, AuthState, InstanceStatus, ModelCatalog, OpenSessionInput, ProbeResult, UpdateAdvisory } from "../../generated/instance.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
 import { BRIDGE_FILE_NAME, PI_BRIDGE_SOURCE } from "./bridge.ts";
-import { PI_CREDENTIAL_VARIABLES, PI_TESTED_VERSIONS } from "./config.ts";
+import { PI_CREDENTIAL_VARIABLES, PI_MINIMUM_VERSION, PI_TESTED_VERSIONS, PI_UPDATE_STEP } from "./config.ts";
 import type { PiConfig } from "./config.ts";
 import { PiProcess } from "./rpc.ts";
 import { PiSession } from "./session.ts";
@@ -110,6 +113,8 @@ export class PiInstance implements Instance {
   async status(): Promise<InstanceStatus> {
     const probe = await this.probe();
     if (!probe.installed) return { state: "unavailable", installed: false, ...(probe.error === undefined ? {} : { error: probe.error }) };
+    // Installed but older than the minimum: the driver will not run it.
+    if (probe.error?.code === "driver_unavailable") return { state: "unavailable", installed: true, ...(probe.version === undefined ? {} : { version: probe.version }), error: probe.error };
     const auth = await this.#state();
     const advisory = probe.version === undefined ? undefined : versionAdvisory(probe.version);
     return {
@@ -137,6 +142,12 @@ export class PiInstance implements Instance {
       return { ok: false, installed: true, error: callErrors.transport(`pi --version failed: ${error instanceof Error ? error.message : String(error)}`).callError, checkedAt };
     }
     const found = version.stdout.trim().split("\n")[0]?.trim();
+    const parsed = found === undefined ? undefined : parseVersion(found);
+    const minimum = parseVersion(PI_MINIMUM_VERSION)!;
+    if (found !== undefined && parsed !== undefined && compareVersions(parsed, minimum) < 0) {
+      const tooOld = new CliTooOldError({ name: "Pi", binary: this.#config.binary, version: found, path: executable, minimum: PI_MINIMUM_VERSION, updateStep: PI_UPDATE_STEP });
+      return { ok: false, installed: true, version: found, error: tooOld.callError, checkedAt };
+    }
     const result: ProbeResult = { ok: version.code === 0, installed: true, ...(found === undefined || found === "" ? {} : { version: found }), checkedAt };
     if (options?.deep === true) return { ...result, auth: await this.#state() };
     return result;
@@ -210,6 +221,9 @@ export class PiInstance implements Instance {
   async openSession(input: OpenSessionInput): Promise<Session> {
     const executable = await this.#host.process.resolveExecutable(this.#config.binary);
     if (executable === null) throw this.#unavailable();
+    // A `pi` below the minimum never starts.
+    const probe = await this.probe();
+    if (probe.error?.code === "driver_unavailable") throw new AriError(probe.error);
     const state = await this.#state();
     if (state.status === "unauthenticated") throw callErrors.authRequired(PI_AUTH_METHODS, state.actionRequired?.reason ?? "Sign in to pi first");
     if (this.#contextWindows.size === 0) await this.catalog.list().catch(() => undefined);

@@ -30,8 +30,9 @@ re-reads the models after changing it.
 ## Tested versions
 
 `>=0.0.13 <0.0.18`: fx 0.0.13 to 0.0.17. `status()` reports the version
-`fx --version` prints and gives an `untested_version` advisory outside that
-range (and the [ACP protocol advisory](acp.md#tested-versions)).
+`fx --version` prints and gives an `untested_version` advisory above that
+range (and the [ACP protocol advisory](acp.md#tested-versions)); below it,
+`driver_unavailable` (next section).
 
 No fx binary ran. The range comes from the release the fake's protocol
 facts come from, the way Kiro's range comes from Kiro's docs and registry
@@ -44,8 +45,29 @@ newest fx release then was 0.0.17, of 2026-11-14
 ([vercel-labs/fx releases](https://github.com/vercel-labs/fx/releases):
 0.0.13 on 2026-10-04 to 0.0.17). fx is pre-1.0, so the range stops at the
 next unreleased patch, 0.0.18. The fake speaks ACP v1 with fx's provider and
-model options; `test/drivers/fx/rules.suite.ts` checks `fx 0.0.17` (no
-advisory) and `fx 0.0.12` (advisory).
+model options; `test/drivers/fx/rules.suite.ts` checks `0.0.13` (no
+advisory), `0.0.18` (advisory) and `0.0.12` (refused).
+
+## The user's own `fx`, and its minimum
+
+ARI runs the `fx` the user installed, found on `PATH` or at the path the
+config names, and never downloads, installs or updates one. The minimum is fx
+0.0.13, the lower bound of the tested range `>=0.0.13 <0.0.18`. With an older
+`fx`, `status()` is `unavailable` with `driver_unavailable` (with `installed:
+true` and the version found), and `openSession` rejects with the same error
+before any agent starts: the only process that runs is `fx --version`. The
+error names the version found, the path, the minimum and fx's update step:
+
+```text
+fx 0.0.12 (/home/me/.local/bin/fx) is older than 0.0.13, the oldest version this driver supports. Update fx with `fx upgrade`.
+```
+
+The update step is fx's own: "fx checks for updates in the background, and `fx
+upgrade` installs the latest release right away" ([fx README,
+Install](https://github.com/vercel-labs/fx#install)). A `fx` above the tested
+range still runs, with an `untested_version` advisory. `fx --version` prints
+the bare version, such as `0.0.17`
+(`test/fixtures/cli-version-output/fx.txt`).
 
 ## Resuming conversations ARI did not create
 

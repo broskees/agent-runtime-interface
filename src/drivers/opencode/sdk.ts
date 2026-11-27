@@ -19,6 +19,7 @@ export interface V1Result {
 }
 
 export interface V1CallOptions {
+  readonly fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
   readonly signal?: AbortSignal;
   readonly sseMaxRetryAttempts?: number;
   readonly onSseError?: (error: unknown) => void;

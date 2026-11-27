@@ -1,7 +1,8 @@
 // The Claude recorder (`pnpm run record:claude`): runs the recording
-// scenarios through the ARI Claude driver against the real Claude Code, by
-// the pinned Claude Agent SDK, and writes one sanitised native recording per
-// scenario. It spends the user's Claude quota, so it runs only with
+// scenarios through the ARI Claude driver against the user's own Claude Code
+// (the `claude` on PATH, which must be at least the version the pinned SDK
+// bundles), by the pinned Claude Agent SDK, and writes one sanitised native
+// recording per scenario. It spends the user's Claude quota, so it runs only with
 // ARI_LIVE_RECORD=1, and it checks that before it loads the SDK or starts
 // anything. No gate step and no CI workflow sets ARI_LIVE_RECORD.
 //
@@ -64,6 +65,9 @@ async function main(argv: readonly string[]): Promise<number> {
   const { SCENARIO_NAMES } = await import("../test/recordings/scenarios.ts");
   const { describeClaudeRun, recordClaude } = await import("../test/recordings/claude/record.ts");
   const { loadClaudeSdk } = await import("../src/drivers/claude/sdk.ts");
+  const { parseClaudeCodeVersion } = await import("../src/drivers/claude/instance.ts");
+  const { resolveExecutable } = await import("../src/node/process.ts");
+  const { execFileSync } = await import("node:child_process");
   let parsed: RecordArguments;
   try {
     parsed = parseRecordArguments(argv, SCENARIO_NAMES, DEFAULT_CLAUDE_RECORDINGS);
@@ -71,11 +75,23 @@ async function main(argv: readonly string[]): Promise<number> {
     process.stderr.write(`record-claude: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
+  // The driver runs the user's own Claude Code: the claude on PATH, whose version the driver then checks.
+  const claudePath = await resolveExecutable("claude", process.env["PATH"]);
+  if (claudePath === null) {
+    process.stderr.write("record-claude: no claude on PATH. Install Claude Code (https://code.claude.com/docs/en/setup) and run this again.\n");
+    return 2;
+  }
+  const claudeVersion = parseClaudeCodeVersion(execFileSync(claudePath, ["--version"], { encoding: "utf8", timeout: 10_000 }));
+  if (claudeVersion === undefined) {
+    process.stderr.write(`record-claude: ${claudePath} --version printed no Claude Code version.\n`);
+    return 2;
+  }
   const outcomes = await recordClaude({
     ...(parsed.scenarios.length === 0 ? {} : { scenarios: parsed.scenarios as Array<(typeof SCENARIO_NAMES)[number]> }),
     outDir: parsed.outDir,
     source: "live",
     env: process.env,
+    claudeCode: { path: claudePath, version: claudeVersion },
     loadSdk: async () => {
       const runtime = await loadClaudeSdk();
       // loadClaudeSdk imports @anthropic-ai/claude-agent-sdk itself, so its module is the SDK's own.

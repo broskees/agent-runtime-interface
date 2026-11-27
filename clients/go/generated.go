@@ -2989,8 +2989,10 @@ type ProcessExit struct {
 
 type ResolveExecutableInput struct {
 	Name string `json:"name"`
-	// A PATH-style list of directories to search instead of the host default.
+	// A PATH-style list of directories to search instead of the host default when `env` is not supplied.
 	Path *string `json:"path,omitzero"`
+	// Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`.
+	Env map[string]string `json:"env,omitzero"`
 }
 
 // Secrets are addressed by namespace and key. Neither may contain `..` or `/`.
@@ -4767,8 +4769,10 @@ func (v HostProcessSpawnParamsStdin) Recognized() bool {
 type HostProcessResolveExecutableParams struct {
 	InstanceID string `json:"instanceId"`
 	Name       string `json:"name"`
-	// A PATH-style list of directories to search instead of the host default.
+	// A PATH-style list of directories to search instead of the host default when `env` is not supplied.
 	Path *string `json:"path,omitzero"`
+	// Explicit additions as in a spawn request. When supplied, the process owner searches as it would for that spawn, ignoring `path`.
+	Env map[string]string `json:"env,omitzero"`
 }
 
 type HostProcessTarget struct {

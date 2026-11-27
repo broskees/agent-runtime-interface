@@ -125,7 +125,7 @@ wait
       // Record the group assertion without stopping the death experiment on
       // a regression. The old SDK-local spawn shares this test's group.
       let guardError: unknown;
-      try { recordAgents(agents, [reported]); } catch (error) { guardError = error; }
+      try { await recordAgents(agents, [reported]); } catch (error) { guardError = error; }
       const killedAt = Date.now();
       assert.equal(connection.child.kill("SIGKILL"), true);
       const survivors = await survivorsAt(agents, killedAt + 5_000);

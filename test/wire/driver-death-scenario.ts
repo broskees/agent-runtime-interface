@@ -110,7 +110,7 @@ export async function runDriverDeath(options: DriverDeathOptions): Promise<Drive
     for (const [index, kind] of AGENT_KINDS.entries()) await startTurn(session, cwd, kind, `turn-${index}`);
     const reported = (await session.ext!("test.agents", "agents", {})) as Array<{ pid: number; grandchildPid: number }>;
     assert.equal(reported.length, AGENT_KINDS.length, "two agents run");
-    recordAgents(agents, reported);
+    await recordAgents(agents, reported);
 
     const endedAt = Date.now();
     if (options.death === "abort") void session.ext!("test.agents", "abort", {}).catch(() => undefined);
@@ -178,7 +178,7 @@ export async function runDeathInStartupWindow(options: StartupWindowOptions): Pr
     } else {
       // One agent that runs normally, guarded, then one stopped between its spawn and its guard.
       await startTurn(session, options.cwd, "plain", "running");
-      recordAgents(agents, (await session.ext!("test.agents", "agents", {})) as Array<{ pid: number; grandchildPid: number }>);
+      await recordAgents(agents, (await session.ext!("test.agents", "agents", {})) as Array<{ pid: number; grandchildPid: number }>);
       for (let attempt = 1; pausedPid === undefined; attempt += 1) {
         const { pid } = (await session.ext!("test.agents", "spawnStopped", {})) as { pid: number };
         if (guardsOf(pid).length === 0 && isStopped(pid)) {

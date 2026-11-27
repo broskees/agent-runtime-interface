@@ -110,21 +110,37 @@ export interface RecordedAgent {
   readonly guardPids: readonly number[];
 }
 
+/** How long, from `recordAgents` on, every recorded agent's guard has to show as one. */
+const GUARD_SHOWS_LIMIT_MS = 5000;
+
 /**
  * Adds every reported agent to `agents`, then checks each: it leads its own
  * group, its grandchild is in that group, and exactly one guard watches it.
  * All are added before any check, so `killRecorded(agents)` cleans them up
  * even when a check fails.
+ *
+ * The launcher forks the guard before it execs the agent, but the guard shows
+ * as one (`/bin/sh -c … ari-agent-guard …`) only once the guard's own exec has
+ * run. On a busy machine that can come after the agent has started and
+ * printed, so the guards are read once the first shows, or once 5 s have
+ * passed.
  */
-export function recordAgents(agents: RecordedAgent[], reported: ReadonlyArray<{ readonly pid: number; readonly grandchildPid: number }>): RecordedAgent[] {
-  const added: RecordedAgent[] = [];
+export async function recordAgents(agents: RecordedAgent[], reported: ReadonlyArray<{ readonly pid: number; readonly grandchildPid: number }>): Promise<RecordedAgent[]> {
+  const added: Array<{ pid: number; grandchildPid: number; groupId: number; guardPids: number[] }> = [];
   for (const { pid, grandchildPid } of reported) {
     assert.ok(Number.isInteger(pid) && pid > 0, `agent pid ${pid}`);
     assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0, `grandchild pid ${grandchildPid}`);
-    const groupId = processGroupOf(pid);
-    const agent: RecordedAgent = { pid, grandchildPid, groupId, guardPids: guardsOf(groupId) };
+    const agent = { pid, grandchildPid, groupId: processGroupOf(pid), guardPids: [] as number[] };
     agents.push(agent);
     added.push(agent);
+  }
+  const deadline = Date.now() + GUARD_SHOWS_LIMIT_MS;
+  for (const agent of added) {
+    for (;;) {
+      agent.guardPids = guardsOf(agent.groupId);
+      if (agent.guardPids.length > 0 || Date.now() >= deadline) break;
+      await delay(10);
+    }
   }
   for (const agent of added) {
     assert.equal(agent.groupId, agent.pid, "the agent leads its own process group");

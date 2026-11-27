@@ -72,5 +72,6 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
   `npm install @anthropic-ai/claude-agent-sdk@0.3.330` next to ari.
 - Removed: `maintenance.install` and `maintenance.update`, which an earlier
   build of this version offered to download the SDK into the instance's
-  cache directory, and the `sdkRegistry` config field they read. The config
-  schema now refuses `sdkRegistry`.
+  cache directory, the `sdkRegistry` config field they read, and the `fetch`
+  option of `createClaudeDriver` they downloaded with. The config schema now
+  refuses `sdkRegistry`.

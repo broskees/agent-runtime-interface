@@ -1129,12 +1129,36 @@ under them.
   scenario failed. The Claude and OpenCode recorders keep their recovery
   files the same way (`test/recordings/recovery.ts`,
   `test/recordings/credential-file.ts`).
-- The copy-back takes no lock for this file: nobody has checked whether
-  `agy` guards its writes with one. So another `agy` that saves a refresh
-  between the copy-back's comparison and its rename (a stat, a write of the
-  staged copy and the rename) is overwritten. The Claude recorder's
-  copy-back takes Claude Code's lock (see "How Claude Code finds the
-  sign-in").
+- Two recorder runs can share one sign-in: they run at once with the same
+  `HOME`, and each `agy` refreshes its own copy. So the copy-back holds a
+  lock of the recorder's own from before it compares the user's file until
+  after it replaced it: an exclusive `flock(2)` lock on the folder that holds
+  the file, `~/.gemini/antigravity-cli/`. Every Antigravity recorder run takes
+  it, so another run cannot put its refresh back between this run's
+  comparison and its replace. The run that comes second finds the file
+  changed and keeps its refresh in its own recovery file. The folder's
+  inode does not change when the file is replaced, the lock adds no file
+  to the user's setup, and the kernel drops it when its holder exits, so it
+  is never left stale. The recorder takes it through util-linux's `flock`
+  command, as the Codex recorder takes Codex's locks (see "How Codex finds
+  the sign-in", `test/recordings/flock.ts`). It waits up to 30 s for another
+  run to let go and never breaks the lock. When `flock` cannot take it, or
+  another run held it all that time, the refresh goes to the recovery file.
+  The holder fails closed: when it does not answer the recorder's release,
+  the lock may have been lost, so the refresh, already written back, goes to
+  the recovery file as well and the run reports it. An unchanged copy takes
+  no lock.
+- The window that remains: `agy` itself takes no such lock that anyone has
+  found, so another `agy` that saves a refresh between the copy-back's
+  comparison and its rename (a stat, a write of the staged copy and the
+  rename) is overwritten. So is a refresh another recorder run puts back in
+  the same moment, if something kills this run's holder between its
+  comparison and its rename; the release then shows the lock lost, and this
+  run keeps its own refresh in its recovery file too.
+  `test/drivers/antigravity/recorder.suite.ts` runs
+  a second recorder run at the first run's comparison, with the same `HOME`;
+  both refreshes survive. The Claude recorder's copy-back takes Claude
+  Code's own lock (see "How Claude Code finds the sign-in").
 - When the recovery file cannot take the value either, the workspace's copy
   holds the only copy. The recorder then keeps that workspace, stops the run,
   and names the workspace and the copy in the error and in the run's last
@@ -1387,8 +1411,20 @@ sign-in, before it starts `codex` ("How Codex finds the sign-in").
   Node 22.23.1 and 24.18.0, two of the versions CI runs, have no `node:ffi`
   (`ERR_UNKNOWN_BUILTIN_MODULE`). Bun's `node:fs` has none either. So the
   recorder holds the lock through util-linux's `flock` command
-  (`test/recordings/codex/sign-in-lock.ts`), from Node and Bun alike. When
+  (`test/recordings/codex/sign-in-lock.ts` and `test/recordings/flock.ts`),
+  from Node and Bun alike. When
   `flock` does not run, the recorder stops before it starts `codex`.
+- How the holder fails closed. `flock --no-fork` takes the lock, then
+  becomes a shell that runs only builtins (`read`, `[`, `echo`, `exit`), so
+  the shell itself holds the lock for as long as it lives, and no command it
+  runs can fail and end it. It says `held` only after it read the recorder's
+  `ready` line, and `released` only after it read the recorder's `release`
+  line, then exits 0. So a holder that says `released` held the lock from
+  `held` until the release. When it does not say `released` and exit 0, the
+  lock may have been lost, and a refresh the recorder already wrote back
+  goes to the recovery file as well. `test/recordings/flock.test.ts` runs
+  the holder with only `flock` and `sh` on `PATH`, and with a holder that
+  ends before it is told to let go.
 - The window that remains: a program that ignores the locks can still write
   between comparison and replacement. The locks do not serialize manual
   edits to the link chain. The recorder checks the resolved path again just
@@ -1538,8 +1574,10 @@ the first prompt.
 You need the Antigravity CLI on `PATH` (`agy --version` prints `1.5.17` for
 the version these docs were written against) and a Google sign-in in
 `~/.gemini/antigravity-cli/antigravity-oauth-token` (see "How Antigravity
-finds the sign-in"). Recording spends your Antigravity quota: eight short
-turns.
+finds the sign-in"). To put a sign-in `agy` refreshed back into that file,
+the recorder also needs util-linux's `flock` on `PATH`; without it, a
+refreshed sign-in goes to the recovery file. Recording spends your
+Antigravity quota: eight short turns.
 
 1. If that file does not exist, sign in once into it with
    `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir "$HOME/.gemini" --app-data-dir antigravity-cli`.

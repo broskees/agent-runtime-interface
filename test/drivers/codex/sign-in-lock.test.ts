@@ -12,6 +12,7 @@ import { after, test } from "node:test";
 import { copyCodexSignIn, returnCodexSignIn } from "../../recordings/codex/record.ts";
 import { takeCodexSignInLock } from "../../recordings/codex/sign-in-lock.ts";
 import { CredentialsKeptError, recoveryFileFor } from "../../recordings/recovery.ts";
+import { dyingHolderBin, lockHolderBin } from "../../helpers/lock-holder-bins.ts";
 
 const temporary: string[] = [];
 after(() => {
@@ -105,6 +106,22 @@ test("when another codex keeps auth.lock past the wait, the copy-back never brea
     other.stop();
     await other.exited;
   }
+});
+
+test("when the holders of Codex's locks end before the copy-back lets go, it takes the locks as lost and also keeps the refreshed sign-in in the recovery file", async () => {
+  const { root, real, credential } = refreshedCopy();
+  // flock runs a holder that says held, then ends without being told to let go; PATH holds only the test's own folders.
+  const env = { PATH: [dyingHolderBin(root), lockHolderBin(root)].join(path.delimiter) };
+  await assert.rejects(
+    returnCodexSignIn(credential, env, 1_000, 1_000),
+    (error: unknown) =>
+      error instanceof CredentialsKeptError &&
+      error.recoveryFile === recoveryFileFor(real) &&
+      error.message.startsWith(`the recorder wrote the sign-in codex refreshed back to ${real}, but the lock on `) &&
+      error.message.includes("may have been lost before it let go"),
+  );
+  const records = JSON.parse(fs.readFileSync(recoveryFileFor(real), "utf8")) as Array<{ id: string; value: string }>;
+  assert.deepEqual(records.map((record) => [record.id, record.value]), [["auth.json", RECORDED]], "the refreshed sign-in is in the recovery file");
 });
 
 test("a copy the recorded codex did not change goes nowhere and takes no lock: the user's Codex home gets no auth.lock", async () => {

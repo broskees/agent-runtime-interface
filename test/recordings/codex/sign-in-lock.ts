@@ -14,28 +14,18 @@
 //
 // Rust's `File::lock` on Linux is flock(2): a lock on the open file, which the
 // kernel drops when its holder closes the file or exits, so no lock is ever
-// left stale, and which a POSIX record lock (fcntl) does not see. Node cannot
-// take one: node:fs has no flock, and node:ffi exists only in Node 26, as an
-// experimental module (Node 22 and 24 lack it, and CI runs both). Bun's
-// node:fs has none either. So the recorder holds the lock through
-// util-linux's `flock` command: `flock` takes it, then runs a shell that says
-// so and waits for its stdin to close. docs/recordings.md, "How Codex finds the
+// left stale, and which a POSIX record lock (fcntl) does not see. Node and Bun
+// cannot take one themselves, so the recorder holds it through util-linux's
+// `flock` command (../flock.ts). docs/recordings.md, "How Codex finds the
 // sign-in", gives the evidence and the window that remains.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import { FLOCK_COMMAND, holdFlock } from "../flock.ts";
+import type { HeldFlock } from "../flock.ts";
 
 /** The file Codex locks around each commit of its sign-in, in its home. */
 export const CODEX_SIGN_IN_LOCK = "auth.lock";
-
-/** The command the recorder takes Codex's lock with. */
-export const FLOCK_COMMAND = "flock";
-
-/** flock's exit code when another holder kept the lock past the wait. */
-const STILL_HELD = 75;
-
-/** What the holder's shell prints once flock holds the lock. */
-const HELD = "held";
 
 type Env = { readonly [name: string]: string | undefined };
 
@@ -58,11 +48,7 @@ export function checkFlockRuns(env: Env): void {
 }
 
 /** Codex's lock, held by the recorder until `release`. */
-export interface HeldCodexSignInLock {
-  readonly file: string;
-  /** Lets go of the lock, and resolves once the holder exited. */
-  release(): Promise<void>;
-}
+export type HeldCodexSignInLock = HeldFlock;
 
 /**
  * Takes one of Codex's file locks through `flock` on
@@ -73,37 +59,5 @@ export interface HeldCodexSignInLock {
 export async function takeCodexSignInLock(file: string, waitMs: number, env: Env, mode = 0o666): Promise<HeldCodexSignInLock | undefined> {
   // As Codex opens it: read-write, created when missing, never truncated.
   fs.closeSync(fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_CREAT, mode));
-  // flock holds the lock itself (--close keeps it from the shell), so killing flock lets go at once.
-  const holder = spawn(FLOCK_COMMAND, ["--exclusive", "--close", "--timeout", String(waitMs / 1000), "--conflict-exit-code", String(STILL_HELD), file, "sh", "-c", `echo ${HELD}; exec cat >/dev/null`], {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { PATH: env["PATH"] ?? "" },
-  });
-  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => holder.once("exit", (code, signal) => resolve({ code, signal })));
-  const failed = new Promise<Error>((resolve) => holder.once("error", resolve));
-  // A holder that already exited closed its stdin: ending it then is no error.
-  holder.stdin.on("error", () => undefined);
-  let errors = "";
-  holder.stderr.setEncoding("utf8").on("data", (chunk: string) => (errors += chunk));
-  let output = "";
-  const held = new Promise<void>((resolve) => {
-    holder.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-      output += chunk;
-      if (output.includes(HELD)) resolve();
-    });
-  });
-  const first = await Promise.race([held.then(() => ({ held: true as const })), exited.then((exit) => ({ exit })), failed.then((error) => ({ error }))]);
-  if ("error" in first) throw new Error(`${FLOCK_COMMAND} could not run: ${first.error.message}`);
-  if ("exit" in first) {
-    if (first.exit.code === STILL_HELD) return undefined;
-    throw new Error(`${FLOCK_COMMAND} exited with ${first.exit.code ?? first.exit.signal} before it held ${file}${errors.trim() === "" ? "" : `: ${errors.trim()}`}`);
-  }
-  return {
-    file,
-    release: async () => {
-      holder.stdin.end();
-      const kill = setTimeout(() => holder.kill("SIGKILL"), 5_000);
-      await exited;
-      clearTimeout(kill);
-    },
-  };
+  return holdFlock(file, waitMs, env);
 }

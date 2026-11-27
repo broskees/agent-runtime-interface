@@ -11,7 +11,11 @@
 // does: ./claude/record.ts, `claudeCredentialLock`). Then the recorder takes
 // the same lock to compare the user's file and replace it, so another session
 // of the agent cannot save a refresh between the two; without the lock, such
-// a save is overwritten. docs/recordings.md says what window remains.
+// a save is overwritten. The Antigravity recorder, whose agent documents no
+// such lock, holds a lock of its own around this copy-back instead, so two
+// recorder runs cannot overwrite each other's refresh
+// (./antigravity/record.ts, `returnAntigravitySignIn`). docs/recordings.md
+// says what window remains.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -76,6 +80,27 @@ function takeLock(lock: CredentialWriteLock): boolean {
 }
 
 /**
+ * Adds `refreshed`, the agent's rewrite of the recorder's copy, to the
+ * recovery file beside the user's file, and throws a CredentialsKeptError
+ * naming it; when even that file cannot take it, a CredentialsNotSavedError:
+ * the copy is then the only place the refreshed sign-in is, and the caller
+ * must keep it. `why` says why the sign-in could not go back.
+ */
+export function keepRefreshedCopy(credential: CopiedCredentialFile, refreshed: Buffer, why: string): never {
+  const recoveryFile = recoveryFileFor(credential.real);
+  try {
+    keepRefreshedCredentials(recoveryFile, [{ id: credential.id, value: refreshed.toString("utf8") }]);
+  } catch (error) {
+    throw new CredentialsNotSavedError(
+      `${why}, and the recorder could not keep the refreshed sign-in in ${recoveryFile} either (${error instanceof Error ? error.message : String(error)}). The refreshed sign-in is only in the recorder's copy, ${credential.copy}.`,
+      credential.copy,
+      recoveryFile,
+    );
+  }
+  throw new CredentialsKeptError(`${why}; it kept the refreshed sign-in in ${recoveryFile}, readable only by you. Write its newest value over ${credential.real}, or sign in again.`, recoveryFile);
+}
+
+/**
  * Puts a copy the agent rewrote back over the user's file, unless the user's
  * file also changed while the recorder ran. With the agent's lock, it holds
  * the lock from before it reads the user's file until after it replaced it.
@@ -91,20 +116,7 @@ export function returnCredentialFile(credential: CopiedCredentialFile, agent: st
   if (!fs.existsSync(credential.copy)) return;
   const now = fs.readFileSync(credential.copy);
   if (now.equals(credential.original)) return;
-  const recoveryFile = recoveryFileFor(credential.real);
-  /** Keeps the refreshed content in the recovery file, or throws CredentialsNotSavedError saying why it could not. */
-  const keep = (why: string): never => {
-    try {
-      keepRefreshedCredentials(recoveryFile, [{ id: credential.id, value: now.toString("utf8") }]);
-    } catch (error) {
-      throw new CredentialsNotSavedError(
-        `${why}, and the recorder could not keep the refreshed sign-in in ${recoveryFile} either (${error instanceof Error ? error.message : String(error)}). The refreshed sign-in is only in the recorder's copy, ${credential.copy}.`,
-        credential.copy,
-        recoveryFile,
-      );
-    }
-    throw new CredentialsKeptError(`${why}; it kept the refreshed sign-in in ${recoveryFile}, readable only by you. Write its newest value over ${credential.real}, or sign in again.`, recoveryFile);
-  };
+  const keep = (why: string): never => keepRefreshedCopy(credential, now, why);
   const lock = credential.lock;
   if (lock !== undefined) {
     let taken: boolean;

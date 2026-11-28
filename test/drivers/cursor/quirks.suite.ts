@@ -251,6 +251,27 @@ test("a read_only thread offers Cursor only reading tools, on creation and on re
   await run.runTool("tool_y", { type: "read", args: { path: path.join(target.cwd, "README.md") }, result: { status: "success", value: { content: "# Project", totalLines: 1, fileSize: 9 } } });
 });
 
+test("a policy without a mode opens the agent with the options of full_access, Cursor's own default set of tools, and the thread reports full_access as the harness's", async () => {
+  const target = await rig();
+  const first = await target.open();
+  const own = await first.session.createThread({ cwd: target.cwd, policy: { interaction: "default", cwd: target.cwd } });
+  const ownOptions = target.world.creations.at(-1);
+  assert.equal(ownOptions?.tools, undefined, "the driver restricted Cursor's tools for a mode the host did not choose");
+  assert.deepEqual(own.effectiveMode, { mode: "full_access", source: "harness" });
+  await first.session.createThread({ cwd: target.cwd, policy: policy(target.cwd, "full_access") });
+  // The SDK options are the ones full_access gives, so the harness's own mode is full_access.
+  assert.deepEqual({ ...target.world.creations.at(-1), name: undefined }, { ...ownOptions, name: undefined });
+  // A turn whose policy names no mode keeps the thread's mode: it is no switch.
+  const { turnId, run } = await target.turn(first.session, own.id, "Look around.", { policy: { interaction: "default", cwd: target.cwd } });
+  await run.endTurn();
+  run.finish();
+  assert.equal((await target.terminal(first.events, turnId)).status, "completed");
+  // A resume that names a mode reopens the agent with that mode's tools, and the thread reports the host's.
+  const resumed = await first.session.resumeThread({ native: { handle: own.handle! }, policy: policy(target.cwd, "read_only") });
+  assert.deepEqual(target.world.resumes.at(-1)?.options?.tools, [...READ_ONLY_TOOLS]);
+  assert.deepEqual(resumed.effectiveMode, { mode: "read_only", interaction: "default", source: "host" });
+});
+
 test("plan mode and a model change reach the run; an unknown model is refused by Cursor", async () => {
   const target = await rig();
   const { session, events } = await target.open();

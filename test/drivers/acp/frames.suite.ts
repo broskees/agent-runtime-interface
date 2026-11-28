@@ -20,13 +20,17 @@ const EXPECTED_RECORDINGS: { readonly [source: string]: number } = {
   // for a release range a CLI below the minimum and the real --version output (1 each), the protocol advisory, resume
   // instructions (2), no driver text, host instructions (2). Four release-range drivers and one protocol-range one: 4 × 12 + 1 × 9.
   "test/drivers/acp/driver-rules.ts": 57,
-  "test/drivers/acp/protocol.suite.ts": 29,
+  // Includes the three runtime-mode tests: the agent's v1 mode, its v2 mode option, and a resume without a mode.
+  "test/drivers/acp/protocol.suite.ts": 32,
   "test/drivers/acp/standalone.suite.ts": 4,
-  // The user's own profile (3), profile instance (2), the host policies (2), rollback (1), the command in both profiles (3), no maintenance (1).
-  "test/drivers/antigravity/antigravity.suite.ts": 12,
+  // The user's own profile (3), profile instance (2), the host policies (2), rollback (1), the command in both profiles (3), no maintenance (1),
+  // agy's own mode (5: its four mode option values and a v1 mode id).
+  "test/drivers/antigravity/antigravity.suite.ts": 17,
   "test/drivers/fx/fx.suite.ts": 1,
-  "test/drivers/grok/grok.suite.ts": 2,
-  "test/drivers/kiro/kiro.suite.ts": 1,
+  // The launch with and without stripping (2), and a thread without a mode (1).
+  "test/drivers/grok/grok.suite.ts": 3,
+  // The autopilot launch (1), and a thread without a mode (1).
+  "test/drivers/kiro/kiro.suite.ts": 2,
 };
 
 test("every frame of every recording the ACP suites made matches ACP's schema, and every recording was checked", () => {

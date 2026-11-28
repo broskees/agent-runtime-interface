@@ -309,6 +309,8 @@ export class FakeMuseWorld {
    * reason and retryability), and nothing is written; undefined takes it.
    */
   refuseSteer: (() => { reason: string; retryable: boolean } | undefined) | undefined;
+  /** The approval mode the host's configuration gives a session started without one (`SessionStartParams.approvalMode`: "server default when omitted"). */
+  defaultApprovalMode: ApprovalMode = "promptUnmatched";
   /** The same for each `turn/unqueue` of a queued turn (the SDK's `Session.run` documents a busy unqueue, `runtime_busy`). */
   refuseUnqueue: (() => { reason: string; retryable: boolean } | undefined) | undefined;
   /**
@@ -794,7 +796,7 @@ export class FakeMuseHost {
         updatedAt: now,
         modelId: params.modelId ?? FAKE_MODELS[0]!.modelId,
         providerId: params.providerId ?? "meta",
-        approvalMode: params.approvalMode ?? "promptUnmatched",
+        approvalMode: params.approvalMode ?? this.world.defaultApprovalMode,
         permissionProfile: params.permissionProfile,
         mcpServers: {},
         configs: [],

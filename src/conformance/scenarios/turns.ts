@@ -39,12 +39,24 @@ async function checkThreadReusable(context: ScenarioContext, opened: OpenedSessi
   context.check(after.status === "completed", `${said}, but the next turn on the thread ended ${brief(after.status)}`);
 }
 
-async function openThread(context: ScenarioContext, rig?: HarnessRig<unknown>) {
+async function openThread(context: ScenarioContext, rig?: HarnessRig<unknown>, mode?: null) {
   const usedRig = rig ?? (await context.rig());
   const created = await context.instance(usedRig);
   const opened = await context.openSession(created);
-  const thread = await context.createThread(opened);
+  const thread = await context.createThread(opened, mode === null ? { mode: null } : {});
   return { rig: usedRig, created, opened, thread };
+}
+
+/** Each `thread.upsert` for the thread that reports its mode must keep saying the harness chose it: the host named none. */
+function checkHarnessModeReports(context: ScenarioContext, opened: OpenedSession, threadId: string): void {
+  for (const event of opened.events.events) {
+    if (event.body.type !== "thread.upsert" || event.body.thread.id !== threadId) continue;
+    const effective = event.body.thread.effectiveMode;
+    if (effective === undefined || effective === null) continue;
+    context.check(effective.source === "harness", `thread.upsert at seq ${event.seq} reports effectiveMode ${brief(effective)}; the host left policy.mode out, so its source is "harness"`);
+  }
+  const reported = context.reduced(opened).threads.get(threadId)?.effectiveMode;
+  context.note(`with no policy.mode the thread reports ${reported?.mode === undefined ? "no mode (the driver does not know the harness's)" : `the harness's mode ${brief(reported.mode)}`}`);
 }
 
 export const grammarScenario: Scenario = {
@@ -106,9 +118,10 @@ export const grammarScenario: Scenario = {
 export const completedScenario: Scenario = {
   id: 2,
   key: "turn-completed",
-  title: "A turn ends by completion",
+  title: "A turn ends by completion, on a thread whose policy leaves the mode to the harness",
   async run(context: ScenarioContext) {
-    const { rig, opened, thread } = await openThread(context);
+    // No policy.mode: the harness keeps its own, and the thread says so (context.createThread checks the thread it returns).
+    const { rig, opened, thread } = await openThread(context, undefined, null);
     const { turnId, native } = await context.beginTurn(opened, rig, thread.id, "Say hello.");
     await context.wait(native.say("Hello there."), "the native agent to stream its reply");
     // Once the driver has reported the message as settled, the turn is still the provider's to end.
@@ -130,6 +143,7 @@ export const completedScenario: Scenario = {
     context.check(text === "Hello there.", `the turn's assistant text is ${brief(text)}; the provider said "Hello there."`);
     checkNothingLeftOpen(context, opened, turnId);
     await checkThreadReusable(context, opened, rig, thread.id, turnId, terminal);
+    checkHarnessModeReports(context, opened, thread.id);
   },
 };
 

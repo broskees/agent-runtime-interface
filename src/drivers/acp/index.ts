@@ -14,8 +14,8 @@ import { createAcpDriver } from "./driver.ts";
 
 export { createAcpDriver, canonicalDirectory, compareVersions, inTestedRange, parseVersion, rangeText } from "./driver.ts";
 export type { AcpFlavor, AcpFlavorContext, AcpProbeTarget, TestedRange } from "./driver.ts";
-export { AcpSession } from "./session.ts";
-export type { AcpSessionSettings } from "./session.ts";
+export { AcpSession, agentModeId } from "./session.ts";
+export type { AcpAgentMode, AcpHarnessMode, AcpSessionSettings } from "./session.ts";
 export { ACP_ERRORS, AcpConnection } from "./connection.ts";
 export type { AcpHandshake, AcpLaunch } from "./connection.ts";
 export { ACP_EXTENSION, ACP_IDENTITY_VERSION, acpCapabilities } from "./capabilities.ts";

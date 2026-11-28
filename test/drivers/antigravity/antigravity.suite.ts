@@ -359,6 +359,50 @@ test("a host policy that strips nothing starts a session, and the variables a ho
   }
 });
 
+test("a policy without a mode leaves agy's own mode: the thread reports its mode option as an ARI mode, plan as the plan interaction, and an id it does not know by name", async () => {
+  // agy 1.5's mode option, as the committed recordings show it.
+  const mode = (current: string) => ({
+    id: "mode",
+    name: "Mode",
+    category: "mode",
+    type: "select",
+    currentValue: current,
+    options: [
+      { value: "default", name: "Default", description: "Ask before edits and commands, per your permission settings." },
+      { value: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
+      { value: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
+      { value: "plan", name: "Plan", description: "Plan carefully before executing a task." },
+    ],
+  });
+  const expected: Array<[string, unknown]> = [
+    ["default", { mode: "approval_required", interaction: "default", source: "harness" }],
+    ["accept-edits", { mode: "auto_accept_edits", interaction: "default", source: "harness" }],
+    ["auto", { mode: "auto", interaction: "default", source: "harness" }],
+    ["plan", { interaction: "plan", source: "harness" }],
+  ];
+  for (const [current, report] of expected) {
+    const rig = await openRig({ name: `antigravity-${current}`, driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG }, executable: "agy", protocol: 1, agentArgs: [...AGY_VERSION, "--config-options", JSON.stringify([mode(current)])] });
+    try {
+      const { session } = await rig.open();
+      const thread = await session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+      assert.deepEqual(thread.effectiveMode, report, `agy mode ${current}`);
+      const sets = rig.harness.frames.filter((frame) => frame.from === "client" && (frame.message as { method?: string }).method === "session/set_config_option");
+      assert.equal(sets.length, 0, "the driver changed agy's mode");
+    } finally {
+      await rig.cleanup();
+    }
+  }
+  // A mode id the driver has no evidence for keeps agy's name; legacy v1 modes count when no mode option is offered.
+  const rig = await openRig({ name: "antigravity-unknown", driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG }, executable: "agy", protocol: 1, agentArgs: [...AGY_VERSION, "--modes", JSON.stringify({ currentModeId: "yolo", availableModes: [{ id: "yolo", name: "Yolo" }] })] });
+  try {
+    const { session } = await rig.open();
+    const thread = await session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+    assert.deepEqual(thread.effectiveMode, { mode: "yolo", source: "harness" });
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 test("permission prompts take fixed choices only, and rollback is refused before any file, host call or frame", async () => {
   const rig = await openRig({ name: "antigravity", driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG }, executable: "agy", protocol: 1, agentArgs: AGY_VERSION });
   try {

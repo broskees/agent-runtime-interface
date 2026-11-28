@@ -7,7 +7,8 @@
 // character).
 //
 // A session's rules are, in this order:
-// 1. the runtime mode's rules;
+// 1. the runtime mode's rules (none when the policy names no mode, so the
+//    user's own OpenCode rules decide);
 // 2. rules the host set through the `opencode.permissionRules` extension;
 // 3. `deny` rules for each host MCP entry of every other thread on the same
 //    server, one for each way OpenCode lets a session reach an entry:
@@ -44,10 +45,12 @@ export function shellPermission(generation: Generation): string {
 
 const rule = (action: string, effect: NativeRule["effect"]): NativeRule => ({ action, resource: "*", effect });
 
-/** The rules that enforce one ARI runtime mode. */
-export function modeRules(mode: RuntimeMode, generation: Generation): NativeRule[] {
+/** The rules that enforce one ARI runtime mode; none for no mode, so OpenCode's own rules (the user's config, the agent's) decide. */
+export function modeRules(mode: RuntimeMode | undefined, generation: Generation): NativeRule[] {
   const shell = shellPermission(generation);
   switch (mode) {
+    case undefined:
+      return [];
     case "full_access":
       return [rule("*", "allow")];
     case "read_only":
@@ -94,7 +97,7 @@ export function collidingName(name: string, others: Iterable<string>): string | 
   return undefined;
 }
 
-export function sessionRules(mode: RuntimeMode, generation: Generation, hostRules: readonly NativeRule[], others: Iterable<string>): NativeRule[] {
+export function sessionRules(mode: RuntimeMode | undefined, generation: Generation, hostRules: readonly NativeRule[], others: Iterable<string>): NativeRule[] {
   return [...modeRules(mode, generation), ...hostRules, ...isolationRules(others, generation)];
 }
 

@@ -17,6 +17,7 @@
 //   --system-prompt         advertise system prompts on session/new
 //   --load                  v1: advertise session/load instead of session/resume
 //   --config-options <json> session config options to offer, in the version's shape
+//   --modes <json>          v1: the SessionModeState (currentModeId, availableModes) each response that opens a session carries
 //   --meta                  put vendor _meta on initialize, updates and tool calls
 //   --print-version <text>  the version --version prints
 //   --answer-protocol <n>   answer initialize with protocol version n (in the --protocol version's shape)
@@ -124,6 +125,12 @@ let approvalCounter = 0;
 let messageCounter = 0;
 let echoCounter = 0;
 const withMeta = flag("--meta");
+const modesArg = option("--modes");
+
+/** v1: the session's mode state on the responses that open a session (session/new, session/resume, session/load, session/fork). */
+function modesV1(): { modes?: acp1.SessionModeState } {
+  return modesArg === undefined ? {} : { modes: JSON.parse(modesArg) as acp1.SessionModeState };
+}
 
 function send(message: unknown): void {
   process.send?.(message);
@@ -254,21 +261,21 @@ function buildV1(): acp1.AgentApp {
     }))
     .onRequest("session/new", async ({ params }) => {
       const session = newSession(params.cwd, params.systemPrompt, params.mcpServers);
-      return { sessionId: session.sessionId, configOptions: optionsOf(session.sessionId) as acp1.SessionConfigOption[], ...meta("session/new") };
+      return { sessionId: session.sessionId, configOptions: optionsOf(session.sessionId) as acp1.SessionConfigOption[], ...modesV1(), ...meta("session/new") };
     })
     .onRequest("session/resume", async ({ params }) => {
       resume(params.sessionId, params.cwd);
-      return { configOptions: optionsOf(params.sessionId) as acp1.SessionConfigOption[] };
+      return { configOptions: optionsOf(params.sessionId) as acp1.SessionConfigOption[], ...modesV1() };
     })
     .onRequest("session/load", async ({ params, client: context }) => {
       const session = resume(params.sessionId, params.cwd);
       // session/load replays the history before it answers.
       for (const prompt of session.prompts) await context.notify("session/update", { sessionId: session.sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: prompt } } });
-      return { configOptions: optionsOf(params.sessionId) as acp1.SessionConfigOption[] };
+      return { configOptions: optionsOf(params.sessionId) as acp1.SessionConfigOption[], ...modesV1() };
     })
     .onRequest("session/fork", async ({ params }) => {
       const forked = fork(params.sessionId, params.cwd);
-      return { sessionId: forked.sessionId, configOptions: optionsOf(forked.sessionId) as acp1.SessionConfigOption[] };
+      return { sessionId: forked.sessionId, configOptions: optionsOf(forked.sessionId) as acp1.SessionConfigOption[], ...modesV1() };
     })
     .onRequest("session/close", async ({ params }) => {
       loaded.delete(params.sessionId);

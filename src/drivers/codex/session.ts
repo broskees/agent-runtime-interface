@@ -37,6 +37,7 @@
 import { callErrors } from "../../errors.ts";
 import { JsonRpcError } from "../../driver-kit/json-rpc.ts";
 import { EventSequencer } from "../../driver-kit/sequencer.ts";
+import { keepingMode } from "../../driver-kit/policy.ts";
 import type { TaskInfo } from "../../generated/background.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ContentBlock } from "../../generated/common.ts";
@@ -85,6 +86,8 @@ import type {
   ThreadGoal,
   ThreadItem,
   ThreadReadState,
+  ThreadSettingsUpdateParams,
+  ThreadSettingsUpdatedNotification,
   ThreadStartParams,
   ToolRequestUserInputParams,
   Turn as CodexTurn,
@@ -95,6 +98,7 @@ import {
   DEFAULT_COMMAND_DECISIONS,
   FILE_CHANGE_DECISIONS,
   approvalOption,
+  codexEffectiveMode,
   codexPolicy,
   decisionFromOptionId,
   failureFromCodex,
@@ -116,6 +120,7 @@ import {
   usageFromCodex,
   userInputText,
 } from "./mapping.ts";
+import type { CodexApprovalSettings, CodexPolicy } from "./mapping.ts";
 
 /** The extension namespaces this driver serves, each at version 1. */
 export const CODEX_EXTENSIONS = ["ari.goal", "codex.goal", "codex.review", "codex.readState", "codex.memory"] as const;
@@ -176,6 +181,8 @@ interface ThreadState {
   thread: Thread;
   readonly nativeId: string;
   policy: RuntimePolicy;
+  /** The approval settings Codex last reported for the thread, or the driver last sent on a turn; undefined before any. */
+  reported: CodexApprovalSettings | undefined;
   model: string | undefined;
   readonly launch: LaunchContext | undefined;
   readonly instructions: string | undefined;
@@ -232,6 +239,21 @@ function isObject(value: unknown): value is { [key: string]: unknown } {
 function joinInstructions(parts: ReadonlyArray<string | undefined>): string | undefined {
   const present = parts.filter((part): part is string => part !== undefined && part.trim() !== "");
   return present.length === 0 ? undefined : present.join("\n\n");
+}
+
+/** The approval settings a `thread/start`, `thread/resume` or `thread/fork` answer reports. */
+function approvalSettings(response: CodexApprovalSettings): CodexApprovalSettings {
+  return { approvalPolicy: response.approvalPolicy, sandbox: response.sandbox, approvalsReviewer: response.approvalsReviewer };
+}
+
+/** A launch with its lists filled in, so two launches that say the same compare equal. */
+function launchShape(launch: LaunchContext | undefined): LaunchContext {
+  return {
+    appendSystemPrompt: launch?.appendSystemPrompt ?? [],
+    developerPrompt: launch?.developerPrompt ?? [],
+    mcpServers: launch?.mcpServers ?? [],
+    dynamicTools: launch?.dynamicTools ?? [],
+  };
 }
 
 /** Codex config overrides that register each MCP server under its given name. */
@@ -313,7 +335,7 @@ export class CodexSession implements Session {
     const instructions = joinInstructions([...(input.launch?.appendSystemPrompt ?? []), ...(input.launch?.developerPrompt ?? []), input.context?.system, input.context?.developer]);
     // The thread runs in createThread's cwd: Codex has one working directory per thread, and its sandbox roots are that directory and `additionalRoots`.
     const started = await this.#startNative(connection, { cwd: input.cwd, policy: input.policy, model, launch: input.launch, instructions, ephemeral: input.persistSession === false });
-    const thread = this.#register(started.nativeId, started.cwd, { ...input.policy, cwd: started.cwd }, started.model, input.launch, instructions, input.title);
+    const thread = this.#register(started.nativeId, started.cwd, { ...input.policy, cwd: started.cwd }, started.settings, started.model, input.launch, instructions, input.title);
     return { ...thread, appliedConfig: { model: started.model, ...(started.reasoningEffort === undefined ? {} : { reasoningEffort: started.reasoningEffort }) } };
   }
 
@@ -321,15 +343,15 @@ export class CodexSession implements Session {
   async #startNative(
     connection: CodexConnection,
     spec: { cwd: string; policy: RuntimePolicy; model: string | undefined; launch: LaunchContext | undefined; instructions: string | undefined; ephemeral: boolean },
-  ): Promise<{ nativeId: string; cwd: string; model: string; reasoningEffort?: string }> {
+  ): Promise<{ nativeId: string; cwd: string; model: string; reasoningEffort?: string; settings: CodexApprovalSettings }> {
     const policy = codexPolicy(spec.policy);
     const config = mcpServerConfig(spec.launch?.mcpServers ?? []);
     const params: ThreadStartParams = {
       cwd: spec.cwd,
-      approvalPolicy: policy.approvalPolicy,
+      ...(policy.approvalPolicy === undefined ? {} : { approvalPolicy: policy.approvalPolicy }),
       ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
       ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
-      approvalsReviewer: policy.approvalsReviewer,
+      ...(policy.approvalsReviewer === undefined ? {} : { approvalsReviewer: policy.approvalsReviewer }),
       ...(spec.model === undefined ? {} : { model: spec.model }),
       ...(spec.instructions === undefined ? {} : { developerInstructions: spec.instructions }),
       ...(Object.keys(config).length === 0 ? {} : { config }),
@@ -342,7 +364,7 @@ export class CodexSession implements Session {
       throw callErrorFromCodex(error, "thread");
     });
     const effort = started.reasoningEffort === null || started.reasoningEffort === undefined ? {} : { reasoningEffort: started.reasoningEffort };
-    return { nativeId: started.thread.id, cwd: started.cwd, model: started.model, ...effort };
+    return { nativeId: started.thread.id, cwd: started.cwd, model: started.model, ...effort, settings: approvalSettings(started) };
   }
 
   async resumeThread(input: ResumeThreadInput): Promise<AppliedThread> {
@@ -351,14 +373,16 @@ export class CodexSession implements Session {
     if (nativeId === null) throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const known = this.#threadsByNative.get(nativeId);
     const knownState = known === undefined ? undefined : this.#threads.get(known);
-    if (knownState !== undefined && !knownState.unloaded && knownState.loaded) return knownState.thread;
+    if (knownState !== undefined && !knownState.unloaded && knownState.loaded) return this.#resumeLoaded(knownState, input);
     if (input.purpose === "history") return this.#readHistory(nativeId, knownState, input);
     const connection = await this.#agent();
     const policyInput = input.policy ?? (knownState?.history === true ? undefined : knownState?.policy);
     const threadId = threadIdFor(nativeId);
     try {
       const resumed = await this.#resumeNative(connection, nativeId, threadId, policyInput, input.launch ?? knownState?.launch, input.config);
-      const thread = this.#register(resumed.nativeId, resumed.cwd, policyInput === undefined ? { mode: "approval_required", interaction: "default", cwd: resumed.cwd } : { ...policyInput, cwd: policyInput.cwd === "" ? resumed.cwd : policyInput.cwd }, resumed.model, input.launch ?? knownState?.launch, resumed.instructions);
+      // No policy names no mode: Codex keeps the thread's saved approval settings, which it reports.
+      const policy: RuntimePolicy = policyInput === undefined ? { interaction: "default", cwd: resumed.cwd } : { ...policyInput, cwd: policyInput.cwd === "" ? resumed.cwd : policyInput.cwd };
+      const thread = this.#register(resumed.nativeId, resumed.cwd, policy, resumed.settings, resumed.model, input.launch ?? knownState?.launch, resumed.instructions);
       await this.#replayHistory(connection, this.#threads.get(thread.id)!, input.quiet === true);
       return { ...thread, appliedConfig: { model: resumed.model } };
     } catch (error) {
@@ -381,8 +405,72 @@ export class CodexSession implements Session {
         },
         { threadId: threadIdFor(fresh.nativeId) },
       );
-      return this.#register(fresh.nativeId, fresh.cwd, { ...input.policy, cwd: fresh.cwd }, fresh.model, launch, instructions);
+      return this.#register(fresh.nativeId, fresh.cwd, { ...input.policy, cwd: fresh.cwd }, fresh.settings, fresh.model, launch, instructions);
     }
+  }
+
+  /**
+   * A resume of a thread this session has loaded. Codex ignores the overrides
+   * of a loaded thread's `thread/resume` (thread_processor.rs:4900–4955), so
+   * the driver sends the policy's approval settings and the model with
+   * `thread/settings/update`, which applies them to the thread's later turns
+   * (app-server-README.md:564–566). Codex takes MCP servers, dynamic tools and
+   * developer instructions only when it loads a thread, and the driver moves
+   * a thread to another directory only by loading it again, so another
+   * launch or `cwd` is refused, naming it: unload the thread, then resume it.
+   * A policy without a mode sends no approval settings, and the thread keeps
+   * its mode. A history read changes nothing.
+   */
+  async #resumeLoaded(state: ThreadState, input: ResumeThreadInput): Promise<AppliedThread> {
+    if (input.purpose === "history") return state.thread;
+    if (input.launch !== undefined && JSON.stringify(launchShape(input.launch)) !== JSON.stringify(launchShape(state.launch))) {
+      throw callErrors.invalidState(
+        "thread_loaded",
+        `Codex takes a thread's MCP servers, dynamic tools and developer instructions only when it loads the thread, and thread ${state.thread.id} is loaded: unload it, then resume it with the new launch`,
+      );
+    }
+    if (input.policy !== undefined && input.policy.cwd !== "" && input.policy.cwd !== state.thread.cwd) {
+      throw callErrors.invalidState("cwd_changed", `Thread ${state.thread.id} is loaded in ${state.thread.cwd}; the driver moves a Codex thread to ${input.policy.cwd} only by loading it again: unload it, then resume it there`);
+    }
+    const policy = input.policy === undefined ? undefined : codexPolicy(input.policy);
+    const model = typeof input.config?.["model"] === "string" && input.config["model"] !== state.model ? input.config["model"] : undefined;
+    const params: ThreadSettingsUpdateParams = {
+      threadId: state.nativeId,
+      ...(policy?.approvalPolicy === undefined ? {} : { approvalPolicy: policy.approvalPolicy }),
+      ...(policy?.approvalsReviewer === undefined ? {} : { approvalsReviewer: policy.approvalsReviewer }),
+      ...(policy?.sandboxPolicy === undefined ? {} : { sandboxPolicy: policy.sandboxPolicy }),
+      ...(policy?.permissions === undefined ? {} : { permissions: policy.permissions }),
+      ...(model === undefined ? {} : { model }),
+    };
+    if (Object.keys(params).length > 1) {
+      const connection = await this.#agent();
+      await connection.client.threadSettingsUpdate(params).catch((error: unknown) => {
+        throw callErrorFromCodex(error, "thread");
+      });
+      if (policy !== undefined) this.#sentSettings(state, policy);
+      if (model !== undefined) state.model = model;
+    }
+    if (input.policy !== undefined) state.policy = keepingMode({ ...input.policy, cwd: state.thread.cwd }, state.policy);
+    this.#refreshMode(state);
+    return { ...state.thread, ...(state.model === undefined ? {} : { appliedConfig: { model: state.model } }) };
+  }
+
+  /** Records approval settings the driver sent and Codex took: Codex keeps them for the thread's later turns. */
+  #sentSettings(state: ThreadState, policy: CodexPolicy): void {
+    const approvalPolicy = policy.approvalPolicy ?? state.reported?.approvalPolicy;
+    const sandbox = policy.sandboxPolicy ?? state.reported?.sandbox;
+    const approvalsReviewer = policy.approvalsReviewer ?? state.reported?.approvalsReviewer;
+    if (approvalPolicy === undefined || sandbox === undefined || approvalsReviewer === undefined) return;
+    state.reported = { approvalPolicy, sandbox, approvalsReviewer };
+    this.#refreshMode(state);
+  }
+
+  /** Records the thread's mode from its policy and Codex's last report, and tells the host when it changed. */
+  #refreshMode(state: ThreadState): void {
+    const effectiveMode = codexEffectiveMode(state.policy, state.reported);
+    if (JSON.stringify(effectiveMode) === JSON.stringify(state.thread.effectiveMode)) return;
+    state.thread = { ...state.thread, effectiveMode };
+    this.#emit({ type: "thread.upsert", thread: { id: state.thread.id, effectiveMode } }, { threadId: state.thread.id });
   }
 
   /**
@@ -400,7 +488,8 @@ export class CodexSession implements Session {
       throw callErrorFromCodex(error, "native session");
     });
     const cwd = read.thread.cwd;
-    this.#register(read.thread.id, cwd, input.policy ?? { mode: "approval_required", interaction: "default", cwd }, read.thread.model ?? undefined, input.launch, undefined);
+    // thread/read reports no approval settings, so the mode stays unknown until a resume loads the thread.
+    this.#register(read.thread.id, cwd, input.policy ?? { interaction: "default", cwd }, undefined, read.thread.model ?? undefined, input.launch, undefined);
     const state = this.#threads.get(threadIdFor(read.thread.id))!;
     state.loaded = false;
     state.unloaded = true;
@@ -432,10 +521,10 @@ export class CodexSession implements Session {
     const forked = await connection.client
       .threadFork({
         threadId: source.nativeId,
-        approvalPolicy: policy.approvalPolicy,
+        ...(policy.approvalPolicy === undefined ? {} : { approvalPolicy: policy.approvalPolicy }),
         ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
         ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
-        approvalsReviewer: policy.approvalsReviewer,
+        ...(policy.approvalsReviewer === undefined ? {} : { approvalsReviewer: policy.approvalsReviewer }),
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(lastTurnId === undefined ? {} : { lastTurnId }),
         ...(source.instructions === undefined ? {} : { developerInstructions: source.instructions }),
@@ -446,7 +535,7 @@ export class CodexSession implements Session {
         throw callErrorFromCodex(error, "thread");
       });
     // The fork's id is new, so it gets the host's tools from the source's launch servers; its own per-thread server comes with its first resume.
-    return this.#register(forked.thread.id, forked.cwd, { ...policyInput, cwd: forked.cwd }, forked.model, source.launch, source.instructions, undefined, {
+    return this.#register(forked.thread.id, forked.cwd, { ...policyInput, cwd: forked.cwd }, approvalSettings(forked), forked.model, source.launch, source.instructions, undefined, {
       threadId: source.thread.id,
       ...(input.at.type === "turn" ? { turnId: input.at.turnId } : {}),
     });
@@ -584,7 +673,8 @@ export class CodexSession implements Session {
 
     if (thread.active !== undefined || thread.pendingStart !== undefined) throw callErrors.invalidState("previous_turn_active", "A turn is still running on this thread");
     const policy = input.policy === undefined ? undefined : codexPolicy(input.policy);
-    if (input.policy !== undefined) thread.policy = input.policy;
+    // A turn whose policy names no mode sends no approval settings, so the thread keeps its mode.
+    if (input.policy !== undefined) thread.policy = keepingMode(input.policy, thread.policy);
     const model = typeof input.config?.["model"] === "string" ? input.config["model"] : undefined;
     const effort = typeof input.config?.["reasoningEffort"] === "string" ? input.config["reasoningEffort"] : this.#runtime.defaultEffort;
     if (model !== undefined) thread.model = model;
@@ -604,8 +694,8 @@ export class CodexSession implements Session {
         ...(policy === undefined
           ? {}
           : {
-              approvalPolicy: policy.approvalPolicy,
-              approvalsReviewer: policy.approvalsReviewer,
+              ...(policy.approvalPolicy === undefined ? {} : { approvalPolicy: policy.approvalPolicy }),
+              ...(policy.approvalsReviewer === undefined ? {} : { approvalsReviewer: policy.approvalsReviewer }),
               ...(policy.sandboxPolicy === undefined ? {} : { sandboxPolicy: policy.sandboxPolicy }),
               ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
               cwd: input.policy!.cwd,
@@ -619,6 +709,8 @@ export class CodexSession implements Session {
         return { status: "accepted", turnId: known.id, accepted: "steered" };
       }
       const turn = known ?? this.#beginTurn(thread, response.turn, true);
+      // Codex keeps a turn's approval settings for later turns; its answer does not repeat them.
+      if (policy !== undefined) this.#sentSettings(thread, policy);
       return { status: "accepted", turnId: turn.id, accepted: "started" };
     } catch (error) {
       if (thread.pendingStart === pending) thread.pendingStart = undefined;
@@ -1003,10 +1095,12 @@ export class CodexSession implements Session {
   /** Loads a thread into the current process when a release, a restart or a crash dropped it. */
   async #ensureLoaded(connection: CodexConnection, thread: ThreadState): Promise<void> {
     if (thread.loaded || thread.unloaded) return;
-    await this.#resumeNative(connection, thread.nativeId, thread.thread.id, thread.policy, thread.launch, undefined).catch((error: unknown) => {
+    const resumed = await this.#resumeNative(connection, thread.nativeId, thread.thread.id, thread.policy, thread.launch, undefined).catch((error: unknown) => {
       throw callErrorFromCodex(error, "native session");
     });
     thread.loaded = true;
+    thread.reported = resumed.settings;
+    this.#refreshMode(thread);
   }
 
   async #resumeNative(
@@ -1016,7 +1110,7 @@ export class CodexSession implements Session {
     policyInput: RuntimePolicy | undefined,
     launch: LaunchContext | undefined,
     config: { [key: string]: unknown } | undefined,
-  ): Promise<{ nativeId: string; cwd: string; model: string; instructions: string | undefined }> {
+  ): Promise<{ nativeId: string; cwd: string; model: string; instructions: string | undefined; settings: CodexApprovalSettings }> {
     const policy = policyInput === undefined ? undefined : codexPolicy(policyInput);
     const instructions = joinInstructions([...(launch?.appendSystemPrompt ?? []), ...(launch?.developerPrompt ?? [])]);
     // The thread id is known here, so the host's tool server for it can be passed under the name the host chose.
@@ -1029,8 +1123,8 @@ export class CodexSession implements Session {
       ...(policy === undefined
         ? {}
         : {
-            approvalPolicy: policy.approvalPolicy,
-            approvalsReviewer: policy.approvalsReviewer,
+            ...(policy.approvalPolicy === undefined ? {} : { approvalPolicy: policy.approvalPolicy }),
+            ...(policy.approvalsReviewer === undefined ? {} : { approvalsReviewer: policy.approvalsReviewer }),
             ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
             ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
           }),
@@ -1039,7 +1133,7 @@ export class CodexSession implements Session {
       ...(instructions === undefined ? {} : { developerInstructions: instructions }),
       config: mcp,
     });
-    return { nativeId: resumed.thread.id, cwd: resumed.cwd, model: resumed.model, instructions };
+    return { nativeId: resumed.thread.id, cwd: resumed.cwd, model: resumed.model, instructions, settings: approvalSettings(resumed) };
   }
 
   async #nativeTurns(connection: CodexConnection, nativeThreadId: string): Promise<CodexTurn[]> {
@@ -1117,6 +1211,7 @@ export class CodexSession implements Session {
     nativeId: string,
     cwd: string,
     policy: RuntimePolicy,
+    reported: CodexApprovalSettings | undefined,
     model: string | undefined,
     launch: LaunchContext | undefined,
     instructions: string | undefined,
@@ -1134,6 +1229,7 @@ export class CodexSession implements Session {
       identityVersion: 1,
       ...(title === undefined ? {} : { title }),
       ...(forkedFrom === undefined ? {} : { forkedFrom }),
+      effectiveMode: codexEffectiveMode(policy, reported),
     };
     if (existing !== undefined) {
       existing.thread = thread;
@@ -1141,12 +1237,14 @@ export class CodexSession implements Session {
       existing.unloaded = false;
       existing.history = false;
       existing.policy = policy;
+      existing.reported = reported;
       if (model !== undefined) existing.model = model;
     } else {
       this.#threads.set(id, {
         thread,
         nativeId,
         policy,
+        reported,
         model,
         launch,
         instructions,
@@ -1437,6 +1535,14 @@ export class CodexSession implements Session {
       case "thread/closed":
         if (thread !== undefined) thread.loaded = false;
         return;
+      case "thread/settings/updated": {
+        // Codex's report of a change to the thread's settings, whoever made it.
+        if (thread === undefined) return;
+        const settings = (params as unknown as ThreadSettingsUpdatedNotification).threadSettings;
+        thread.reported = { approvalPolicy: settings.approvalPolicy, sandbox: settings.sandboxPolicy, approvalsReviewer: settings.approvalsReviewer };
+        this.#refreshMode(thread);
+        return;
+      }
       case "thread/goal/updated": {
         if (thread === undefined) return;
         thread.goalSeq += 1;

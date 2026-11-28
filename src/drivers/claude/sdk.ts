@@ -235,6 +235,8 @@ export type ClaudeRateLimitInfo = {
 export type ClaudeSystemMessage = { type: "system"; subtype: string; uuid: string; session_id: string };
 
 export type ClaudeInitMessage = ClaudeSystemMessage & { subtype: "init"; model: string; cwd: string; claude_code_version: string; slash_commands: string[]; permissionMode: ClaudePermissionMode };
+/** `system/status`: carries `permissionMode` when Claude Code reports its permission mode with the status. */
+export type ClaudeStatusMessage = ClaudeSystemMessage & { subtype: "status"; permissionMode?: ClaudePermissionMode };
 export type ClaudeTaskStartedMessage = ClaudeSystemMessage & {
   subtype: "task_started";
   task_id: string;

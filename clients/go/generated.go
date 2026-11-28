@@ -949,12 +949,37 @@ func (v InteractionMode) Recognized() bool {
 }
 
 type RuntimePolicy struct {
-	Mode            RuntimeMode     `json:"mode"`
+	// Leave it out to keep the harness's own mode: the driver sends the harness no permission override, so it applies the user's own configuration for the workspace. The thread's `effectiveMode` then reports what the harness chose.
+	Mode            *RuntimeMode    `json:"mode,omitzero"`
 	Interaction     InteractionMode `json:"interaction"`
 	Cwd             string          `json:"cwd"`
 	AdditionalRoots []string        `json:"additionalRoots,omitzero"`
 	// Opaque provider-native policy passed through unchanged.
 	Native AnyValue `json:"native,omitzero"`
+}
+
+// The mode a thread runs in, as far as the driver knows. `source` says who chose it: `host` when the host named `policy.mode`, `harness` when the host left it out and the harness applied its own. `mode` is the ARI mode the harness's setting maps to, or the vendor's own name when no ARI mode fits; `interaction` is the interaction mode. Each is absent while the driver does not know it: a driver never guesses either.
+type EffectiveMode struct {
+	Mode        *RuntimeMode        `json:"mode,omitzero"`
+	Interaction *InteractionMode    `json:"interaction,omitzero"`
+	Source      EffectiveModeSource `json:"source"`
+}
+
+// Open: any string is kept; Recognized reports whether this client knows it.
+type EffectiveModeSource string
+
+const (
+	EffectiveModeSourceHost    EffectiveModeSource = "host"
+	EffectiveModeSourceHarness EffectiveModeSource = "harness"
+)
+
+// Recognized reports whether this client knows the value.
+func (v EffectiveModeSource) Recognized() bool {
+	switch v {
+	case EffectiveModeSourceHost, EffectiveModeSourceHarness:
+		return true
+	}
+	return false
 }
 
 type SlashCommand struct {
@@ -4962,11 +4987,13 @@ type AppliedThread struct {
 	ParentThreadID *string     `json:"parentThreadId,omitzero"`
 	ForkedFrom     *ForkOrigin `json:"forkedFrom,omitzero"`
 	// Set when this thread belongs to a provider-native subagent.
-	SubagentID      *string      `json:"subagentId,omitzero"`
-	CreatedAt       *string      `json:"createdAt,omitzero"`
-	UpdatedAt       *string      `json:"updatedAt,omitzero"`
-	IdentityVersion *int64       `json:"identityVersion,omitzero"`
-	AppliedConfig   ConfigValues `json:"appliedConfig,omitzero"`
+	SubagentID      *string `json:"subagentId,omitzero"`
+	CreatedAt       *string `json:"createdAt,omitzero"`
+	UpdatedAt       *string `json:"updatedAt,omitzero"`
+	IdentityVersion *int64  `json:"identityVersion,omitzero"`
+	// The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes.
+	EffectiveMode *EffectiveMode `json:"effectiveMode,omitzero"`
+	AppliedConfig ConfigValues   `json:"appliedConfig,omitzero"`
 }
 
 type NativeHandleRef struct {
@@ -5398,22 +5425,25 @@ type Thread struct {
 	CreatedAt       *string `json:"createdAt,omitzero"`
 	UpdatedAt       *string `json:"updatedAt,omitzero"`
 	IdentityVersion *int64  `json:"identityVersion,omitzero"`
+	// The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes.
+	EffectiveMode *EffectiveMode `json:"effectiveMode,omitzero"`
 }
 
 // Patch form of Thread. Only `id` is required; the upsert that opens a thread carries every field Thread requires.
 type ThreadPatch struct {
-	ID              string               `json:"id"`
-	Native          *NativeRef           `json:"native,omitzero"`
-	Cwd             *string              `json:"cwd,omitzero"`
-	Status          *ThreadStatus        `json:"status,omitzero"`
-	Title           Nullable[string]     `json:"title,omitzero"`
-	Handle          Nullable[string]     `json:"handle,omitzero"`
-	ParentThreadID  Nullable[string]     `json:"parentThreadId,omitzero"`
-	ForkedFrom      Nullable[ForkOrigin] `json:"forkedFrom,omitzero"`
-	SubagentID      Nullable[string]     `json:"subagentId,omitzero"`
-	CreatedAt       Nullable[string]     `json:"createdAt,omitzero"`
-	UpdatedAt       Nullable[string]     `json:"updatedAt,omitzero"`
-	IdentityVersion Nullable[int64]      `json:"identityVersion,omitzero"`
+	ID              string                  `json:"id"`
+	Native          *NativeRef              `json:"native,omitzero"`
+	Cwd             *string                 `json:"cwd,omitzero"`
+	Status          *ThreadStatus           `json:"status,omitzero"`
+	Title           Nullable[string]        `json:"title,omitzero"`
+	Handle          Nullable[string]        `json:"handle,omitzero"`
+	ParentThreadID  Nullable[string]        `json:"parentThreadId,omitzero"`
+	ForkedFrom      Nullable[ForkOrigin]    `json:"forkedFrom,omitzero"`
+	SubagentID      Nullable[string]        `json:"subagentId,omitzero"`
+	CreatedAt       Nullable[string]        `json:"createdAt,omitzero"`
+	UpdatedAt       Nullable[string]        `json:"updatedAt,omitzero"`
+	IdentityVersion Nullable[int64]         `json:"identityVersion,omitzero"`
+	EffectiveMode   Nullable[EffectiveMode] `json:"effectiveMode,omitzero"`
 }
 
 // `user`: started by a host request. `provider_initiated`: the provider started it on its own, for example the next turn of a goal run.

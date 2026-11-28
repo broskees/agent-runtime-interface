@@ -4,7 +4,7 @@
 
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { NativeRef } from "../../generated/common.ts";
-import type { RuntimePolicy } from "../../generated/config.ts";
+import type { EffectiveMode, RuntimePolicy } from "../../generated/config.ts";
 import type { Failure } from "../../generated/errors.ts";
 import type { FileChange, ItemKind, ItemPatch, TodoEntry } from "../../generated/item.ts";
 import type { Question, RequestKind, RequestOption } from "../../generated/request.ts";
@@ -70,9 +70,15 @@ export function subagentIdFor(threadId: string, taskId: string): string {
 
 // Policy.
 
-/** The Claude Code permission mode for an ARI policy. Plan interaction wins over the runtime mode. */
-export function permissionModeFor(policy: Pick<RuntimePolicy, "mode" | "interaction">): ClaudePermissionMode {
+/**
+ * The Claude Code permission mode for an ARI policy. Plan interaction wins
+ * over the runtime mode. Undefined when the policy names no mode and no plan:
+ * the driver then sends none, and Claude Code starts in the mode the user's
+ * settings give it (`permissions.defaultMode`, else its own default).
+ */
+export function permissionModeFor(policy: Pick<RuntimePolicy, "mode" | "interaction">): ClaudePermissionMode | undefined {
   if (policy.interaction === "plan") return "plan";
+  if (policy.mode === undefined) return undefined;
   switch (policy.mode) {
     case "approval_required":
       return "default";
@@ -85,6 +91,34 @@ export function permissionModeFor(policy: Pick<RuntimePolicy, "mode" | "interact
     default:
       return "default";
   }
+}
+
+/** A Claude Code permission mode in ARI terms: the inverse of `permissionModeFor`. `dontAsk` has no ARI mode and keeps its name. */
+const ARI_MODES: { readonly [mode: string]: Pick<EffectiveMode, "mode" | "interaction"> } = {
+  default: { mode: "approval_required", interaction: "default" },
+  acceptEdits: { mode: "auto_accept_edits", interaction: "default" },
+  auto: { mode: "auto", interaction: "default" },
+  bypassPermissions: { mode: "full_access", interaction: "default" },
+  dontAsk: { mode: "dontAsk", interaction: "default" },
+  plan: { interaction: "plan" },
+};
+
+/**
+ * The mode a thread runs in: what Claude Code last reported (`system/init`
+ * at the start of each turn, or a `system/status` that carries one), else
+ * the host's policy. Under the harness's own mode nothing is known until
+ * Claude Code reports, except a plan interaction the driver asked for. Plan
+ * mode has no runtime mode of its own; a host's mode stays the one it chose.
+ */
+export function effectiveModeFor(policy: Pick<RuntimePolicy, "mode" | "interaction">, reported: string | undefined): EffectiveMode {
+  const source = policy.mode === undefined ? "harness" : "host";
+  const hostMode = policy.mode === undefined ? {} : { mode: policy.mode };
+  if (reported === undefined) {
+    if (policy.mode !== undefined) return { ...hostMode, interaction: policy.interaction, source };
+    return policy.interaction === "plan" ? { interaction: "plan", source } : { source };
+  }
+  const mapped = Object.hasOwn(ARI_MODES, reported) ? ARI_MODES[reported]! : { mode: reported };
+  return { ...(mapped.mode === undefined ? hostMode : {}), ...mapped, source };
 }
 
 // Tools.

@@ -535,7 +535,8 @@ const cwd = session.header.cwd;
 
 /** The ARI bridge, when `--extension` names its file: the fake then does what the bridge does. */
 interface BridgeState {
-  readonly mode: string;
+  /** null: the host left the mode to Pi, and the bridge gates nothing. */
+  readonly mode: string | null;
   /** The MCP servers registered through `/ari-mcp`, by name. */
   readonly mcpServers: string[];
 }
@@ -545,8 +546,8 @@ const bridge: BridgeState | undefined = (() => {
   const text = process.env[BRIDGE_SETTINGS_VARIABLE];
   delete process.env[BRIDGE_SETTINGS_VARIABLE];
   try {
-    const parsed = JSON.parse(text ?? "") as { mode?: string };
-    return { mode: parsed.mode ?? "approval_required", mcpServers: [] };
+    const parsed = JSON.parse(text ?? "") as { mode?: string | null };
+    return { mode: parsed.mode === undefined ? "approval_required" : parsed.mode, mcpServers: [] };
   } catch {
     return { mode: "approval_required", mcpServers: [] };
   }
@@ -877,7 +878,7 @@ function nextReply(id: string): Promise<string> {
 }
 
 async function autopilot(current: Run): Promise<void> {
-  if (bridge !== undefined && ["approval_required", "auto_accept_edits", "read_only"].includes(bridge.mode)) {
+  if (bridge !== undefined && bridge.mode !== null && ["approval_required", "auto_accept_edits", "read_only"].includes(bridge.mode)) {
     const id = requestApproval({
       kind: "command",
       command: ["echo", "hello"],

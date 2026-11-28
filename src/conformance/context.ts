@@ -19,6 +19,7 @@ import type { Fixture } from "../generated/fixture.ts";
 import type { EnvPolicy } from "../generated/host.ts";
 import type { OpenSessionInput } from "../generated/instance.ts";
 import type { AppliedThread, StartTurnInput, StartTurnResult } from "../generated/session.ts";
+import type { Thread } from "../generated/thread.ts";
 import { EventGrammar, EventGrammarError, TERMINAL_ITEM_STATUSES } from "../host/event-grammar.ts";
 import { reduceEvents } from "../host/reducer.ts";
 import type { ReducedSession } from "../host/reducer.ts";
@@ -385,17 +386,47 @@ export class ScenarioContext {
     return { session, events, capabilities: () => raw.capabilities(), close };
   }
 
-  /** The policy scenarios use: `mode` if given, else the first mode the session supports. */
-  policy(capabilities: Capabilities, cwd: string, mode?: RuntimeMode): RuntimePolicy {
+  /**
+   * The policy scenarios use: `mode` if given, else the first mode the session
+   * supports. `mode: null` leaves the mode out, so the harness keeps its own.
+   */
+  policy(capabilities: Capabilities, cwd: string, mode?: RuntimeMode | null): RuntimePolicy {
+    if (mode === null) return { interaction: "default", cwd };
     const chosen = mode ?? MODE_PREFERENCE.find((candidate) => hasCapability(capabilities, `runtimePolicy.modes.${candidate}`)) ?? "approval_required";
     return { mode: chosen, interaction: "default", cwd };
   }
 
-  async createThread(opened: OpenedSession, options: { cwd?: string; mode?: RuntimeMode; config?: ConfigValues } = {}): Promise<AppliedThread> {
+  /**
+   * Creates a thread with `policy` (`mode: null` leaves the mode to the
+   * harness) and checks the mode it reports: a host's mode as the host chose
+   * it, or the harness's own, never one the driver made up.
+   */
+  async createThread(opened: OpenedSession, options: { cwd?: string; mode?: RuntimeMode | null; config?: ConfigValues } = {}): Promise<AppliedThread> {
     const cwd = options.cwd ?? this.workspace.cwd;
     const policy = this.policy(opened.capabilities(), cwd, options.mode);
     const input = options.config === undefined ? { cwd, policy } : { cwd, policy, config: options.config };
-    return this.wait(opened.session.createThread(input), "createThread");
+    const thread = await this.wait(opened.session.createThread(input), "createThread");
+    this.checkEffectiveMode(thread.effectiveMode, policy, `the thread createThread returned`);
+    return thread;
+  }
+
+  /**
+   * Checks a thread's `effectiveMode` against the policy that created it:
+   * source `host` and the host's mode when the policy named one, source
+   * `harness` when it left the mode out.
+   */
+  checkEffectiveMode(effective: Thread["effectiveMode"], policy: RuntimePolicy, what: string): void {
+    if (policy.mode === undefined) {
+      this.check(
+        effective?.source === "harness",
+        `${what} has effectiveMode ${brief(effective)}; the host left policy.mode out, so it must say source "harness" (with the harness's mode, or no mode while the driver does not know it)`,
+      );
+      return;
+    }
+    this.check(
+      effective?.source === "host" && effective.mode === policy.mode,
+      `${what} has effectiveMode ${brief(effective)}; the host chose policy.mode ${brief(policy.mode)}, so it must say mode ${brief(policy.mode)} with source "host"`,
+    );
   }
 
   /** Calls `startTurn` with a text prompt and a unique `clientTurnKey`. */

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ari.invalid/spec/v1/config.schema.json",
   "title": "ARI config options and runtime policy",
-  "description": "Config options are modelled on ACP's session config options. Runtime policy carries one of five runtime modes and one of two interaction modes.",
+  "description": "Config options are modelled on ACP's session config options. Runtime policy carries one of five runtime modes, or none to keep the harness's own, and one of two interaction modes.",
   "$defs": {
     "ConfigOptionCategory": {
       "anyOf": [
@@ -72,13 +72,31 @@
     "RuntimePolicy": {
       "type": "object",
       "properties": {
-        "mode": { "$ref": "#/$defs/RuntimeMode" },
+        "mode": {
+          "$ref": "#/$defs/RuntimeMode",
+          "description": "Leave it out to keep the harness's own mode: the driver sends the harness no permission override, so it applies the user's own configuration for the workspace. The thread's `effectiveMode` then reports what the harness chose."
+        },
         "interaction": { "$ref": "#/$defs/InteractionMode" },
         "cwd": { "type": "string" },
         "additionalRoots": { "type": "array", "items": { "type": "string" } },
         "native": { "$ref": "common.schema.json#/$defs/AnyValue", "description": "Opaque provider-native policy passed through unchanged." }
       },
-      "required": ["mode", "interaction", "cwd"]
+      "required": ["interaction", "cwd"]
+    },
+    "EffectiveMode": {
+      "description": "The mode a thread runs in, as far as the driver knows. `source` says who chose it: `host` when the host named `policy.mode`, `harness` when the host left it out and the harness applied its own. `mode` is the ARI mode the harness's setting maps to, or the vendor's own name when no ARI mode fits; `interaction` is the interaction mode. Each is absent while the driver does not know it: a driver never guesses either.",
+      "type": "object",
+      "properties": {
+        "mode": { "$ref": "#/$defs/RuntimeMode" },
+        "interaction": { "$ref": "#/$defs/InteractionMode" },
+        "source": {
+          "anyOf": [
+            { "enum": ["host", "harness"] },
+            { "type": "string" }
+          ]
+        }
+      },
+      "required": ["source"]
     },
     "SlashCommand": {
       "type": "object",

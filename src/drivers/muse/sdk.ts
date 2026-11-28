@@ -141,9 +141,18 @@ export interface MuseModelListParams {
 
 // What the driver reads.
 
+/** `EffectiveApprovalModeState`: the approval mode in effect, as the `Session` object and `session/setApprovalMode` report it. */
+export interface MuseEffectiveApprovalMode {
+  mode: MuseApprovalMode;
+  source: string;
+  lastCommandId: string | null;
+}
+
 export interface MuseSessionView {
   sessionId: string;
   status: string;
+  /** Absent when the host has not folded a mode yet. */
+  approvalMode?: MuseEffectiveApprovalMode;
   activeTurnId: string | null;
   modelId: string | null;
   providerId: string | null;
@@ -279,6 +288,7 @@ export interface MuseSessionSetModelResult {
 
 export interface MuseSessionSetApprovalModeResult {
   status: string;
+  effectiveMode: MuseEffectiveApprovalMode;
 }
 
 export interface MuseSessionCompactResult {
@@ -485,6 +495,12 @@ export interface MuseModelChanged {
   modelId: string;
 }
 
+/** `session/approvalModeChanged`: the approval mode now in effect. */
+export interface MuseApprovalModeChanged {
+  sessionId: string;
+  mode: MuseApprovalMode;
+}
+
 export interface MuseSessionClosed {
   sessionId: string;
   reason: string;
@@ -508,6 +524,7 @@ export interface MuseNotifications {
   "session/contextUsage": MuseContextUsageEvent;
   "session/todoListChanged": MuseTodoListChanged;
   "session/modelChanged": MuseModelChanged;
+  "session/approvalModeChanged": MuseApprovalModeChanged;
   "session/closed": MuseSessionClosed;
   "usage/changed": MuseSubscriptionUsage;
 }

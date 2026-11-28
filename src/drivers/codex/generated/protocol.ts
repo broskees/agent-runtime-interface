@@ -36,6 +36,7 @@ export interface CodexClientRequestMap {
   "thread/backgroundTerminals/terminate": { params: ThreadBackgroundTerminalsTerminateParams; result: ThreadBackgroundTerminalsTerminateResponse };
   "thread/memory/read": { params: ThreadMemoryReadParams; result: ThreadMemoryReadResponse };
   "thread/readState/update": { params: ThreadReadStateUpdateParams; result: ThreadReadStateUpdateResponse };
+  "thread/settings/update": { params: ThreadSettingsUpdateParams; result: ThreadSettingsUpdateResponse };
   "review/start": { params: ReviewStartParams; result: ReviewStartResponse };
   "turn/start": { params: TurnStartParams; result: TurnStartResponse };
   "turn/steer": { params: TurnSteerParams; result: TurnSteerResponse };
@@ -83,6 +84,7 @@ export interface CodexServerNotificationMap {
   "thread/goal/updated": ThreadGoalUpdatedNotification;
   "thread/goal/cleared": ThreadGoalClearedNotification;
   "thread/readState/changed": ThreadReadStateChangedNotification;
+  "thread/settings/updated": ThreadSettingsUpdatedNotification;
   "thread/tokenUsage/updated": ThreadTokenUsageUpdatedNotification;
   "turn/started": TurnStartedNotification;
   "turn/completed": TurnCompletedNotification;
@@ -129,6 +131,7 @@ export const CODEX_CLIENT_REQUEST_METHODS: readonly CodexClientRequestMethod[] =
   "thread/backgroundTerminals/terminate",
   "thread/memory/read",
   "thread/readState/update",
+  "thread/settings/update",
   "review/start",
   "turn/start",
   "turn/steer",
@@ -170,6 +173,7 @@ export const CODEX_SERVER_NOTIFICATION_METHODS: readonly CodexServerNotification
   "thread/goal/updated",
   "thread/goal/cleared",
   "thread/readState/changed",
+  "thread/settings/updated",
   "thread/tokenUsage/updated",
   "turn/started",
   "turn/completed",
@@ -312,6 +316,11 @@ export class CodexAppServerClient {
   /** `thread/readState/update` */
   threadReadStateUpdate(params: CodexClientRequestMap["thread/readState/update"]["params"]): Promise<CodexClientRequestMap["thread/readState/update"]["result"]> {
     return this.#transport.request("thread/readState/update", params) as Promise<CodexClientRequestMap["thread/readState/update"]["result"]>;
+  }
+
+  /** `thread/settings/update` */
+  threadSettingsUpdate(params: CodexClientRequestMap["thread/settings/update"]["params"]): Promise<CodexClientRequestMap["thread/settings/update"]["result"]> {
+    return this.#transport.request("thread/settings/update", params) as Promise<CodexClientRequestMap["thread/settings/update"]["result"]>;
   }
 
   /** `review/start` */
@@ -2772,6 +2781,71 @@ export type ThreadSectionAppearance = {
   color?: string | null;
   icon?: string | null;
 };
+
+export type ThreadSettings = {
+  activePermissionProfile?: ActivePermissionProfile | null;
+  approvalPolicy: AskForApproval;
+  approvalsReviewer: ApprovalsReviewer;
+  collaborationMode: CollaborationMode;
+  cwd: AbsolutePathBuf;
+  /** Saved list of disabled plugin IDs. Does not yet filter plugin capabilities. */
+  disabledPluginIds?: string[];
+  effort?: ReasoningEffort | null;
+  /** Environments configured for future turns, in priority order, primary first. `null` means the server does not expose the selection; [] means none are selected. */
+  environments?: ThreadEnvironment[] | null;
+  model: string;
+  modelProvider: string;
+  /** @deprecated Always `explicitRequestOnly`. Use `effort` for Ultra behavior. */
+  multiAgentMode?: MultiAgentMode;
+  /** @deprecated Reports the saved setting; `friendly` and `pragmatic` no longer select a style. */
+  personality?: Personality | null;
+  sandboxPolicy: SandboxPolicy;
+  serviceTier?: string | null;
+  summary?: ReasoningSummary | null;
+};
+
+export type ThreadSettingsUpdatedNotification = {
+  threadId: string;
+  threadSettings: ThreadSettings;
+};
+
+export type ThreadSettingsUpdateParams = {
+  /** Override the approval policy for subsequent turns. */
+  approvalPolicy?: AskForApproval | null;
+  /** Override where approval requests are routed for subsequent turns. */
+  approvalsReviewer?: ApprovalsReviewer | null;
+  /**
+   * EXPERIMENTAL - Set a pre-set collaboration mode for subsequent turns.
+   *
+   * For `collaboration_mode.settings.developer_instructions`, `null` means "use the built-in instructions for the selected mode".
+   */
+  collaborationMode?: CollaborationMode | null;
+  /** Override the working directory for subsequent turns. */
+  cwd?: string | null;
+  /** Replace this thread's disabled plugin IDs. Omitted/null preserves the list; [] clears it. */
+  disabledPluginIds?: string[] | null;
+  /** Override the reasoning effort for subsequent turns. */
+  effort?: ReasoningEffort | null;
+  /** Replace the environments for future turns without changing the running turn. Omitted/null preserves the selection unless `cwd` is also provided, which selects the default environments for that directory. [] clears the selection. */
+  environments?: TurnEnvironmentParams[] | null;
+  /** Override the model for subsequent turns. */
+  model?: string | null;
+  /** @deprecated Ignored. Use `effort: "ultra"` for proactive multi-agent behavior. */
+  multiAgentMode?: MultiAgentMode | null;
+  /** Select a named permissions profile id for subsequent turns. Cannot be combined with `sandboxPolicy`. */
+  permissions?: string | null;
+  /** @deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions. */
+  personality?: Personality | null;
+  /** Override the sandbox policy for subsequent turns. */
+  sandboxPolicy?: SandboxPolicy | null;
+  /** Override the service tier for subsequent turns. `null` clears the current service tier; omission leaves it unchanged. */
+  serviceTier?: string | null;
+  /** Override the reasoning summary for subsequent turns. */
+  summary?: ReasoningSummary | null;
+  threadId: string;
+};
+
+export type ThreadSettingsUpdateResponse = { [key: string]: unknown };
 
 export type ThreadSortKey = "created_at" | "updated_at" | "recency_at" | "section_position";
 

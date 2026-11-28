@@ -60,9 +60,9 @@ export interface BridgeMcpServer {
   readonly config: { readonly [field: string]: unknown };
 }
 
-/** What the driver passes to the bridge in `ARI_PI_BRIDGE`. */
+/** What the driver passes to the bridge in `ARI_PI_BRIDGE`. `mode: null`: the host left the mode to Pi, so the bridge gates no tool. */
 export interface BridgeSettings {
-  readonly mode: BridgeMode;
+  readonly mode: BridgeMode | null;
 }
 
 /** One option of an approval dialog, as the bridge describes it in the dialog's title. */
@@ -130,6 +130,8 @@ function readSettings() {
   if (text === undefined || text === "") return { mode: "approval_required" };
   try {
     const parsed = JSON.parse(text);
+    // null: the host left the mode to Pi, which asks before nothing, so the bridge gates nothing.
+    if (parsed.mode === null) return { mode: null };
     return { mode: typeof parsed.mode === "string" ? parsed.mode : "approval_required" };
   } catch {
     return { mode: "approval_required" };
@@ -137,7 +139,7 @@ function readSettings() {
 }
 
 function verdictFor(mode, toolName) {
-  if (mode === "full_access" || READ_ONLY_TOOLS.includes(toolName)) return "allow";
+  if (mode === null || mode === "full_access" || READ_ONLY_TOOLS.includes(toolName)) return "allow";
   if (mode === "read_only") return "block";
   if (mode === "auto_accept_edits" && FILE_CHANGE_TOOLS.includes(toolName)) return "allow";
   return "ask";

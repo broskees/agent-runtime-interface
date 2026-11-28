@@ -19,10 +19,11 @@ import type { JsonRpcId, JsonRpcRequestContext } from "../../driver-kit/json-rpc
 import { EventSequencer } from "../../driver-kit/sequencer.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import { truncateUtf8 } from "../../driver-kit/truncate.ts";
+import { keepingMode } from "../../driver-kit/policy.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ContentBlock, NativeRef } from "../../generated/common.ts";
 import type { ConfigValues } from "../../generated/common.ts";
-import type { ConfigOption, RuntimePolicy } from "../../generated/config.ts";
+import type { ConfigOption, EffectiveMode, RuntimePolicy } from "../../generated/config.ts";
 import type { Failure } from "../../generated/errors.ts";
 import type { AriEvent, AriEventBody } from "../../generated/events.ts";
 import type { OpenSessionInput } from "../../generated/instance.ts";
@@ -71,6 +72,42 @@ import {
 } from "./mapping.ts";
 import type { AcpToolCall, AcpVersion } from "./mapping.ts";
 
+/** What an ACP agent reports of its mode for one session: the `mode`-category options it offers, and its v1 `modes.currentModeId`. */
+export interface AcpAgentMode {
+  readonly options: readonly ConfigOption[];
+  readonly modeId: string | undefined;
+}
+
+/** A thread's mode in ARI terms, as far as the agent's report tells; empty when it tells nothing. */
+export type AcpHarnessMode = Pick<EffectiveMode, "mode" | "interaction">;
+
+/**
+ * The agent's own id for its current mode: the value of the select option it
+ * offers in the `mode` category (config options supersede v1 modes), else its
+ * v1 `modes.currentModeId`; undefined when it reports neither.
+ */
+export function agentModeId(agent: AcpAgentMode): string | undefined {
+  const option = agent.options.find((candidate) => candidate.category === "mode" && candidate.type === "select" && typeof candidate.current === "string");
+  return option === undefined ? agent.modeId : (option.current as string);
+}
+
+/** The v1 `modes.currentModeId` of a response that opens a session; v2 has no modes, only config options. */
+function modeIdOf(response: unknown): string | undefined {
+  if (typeof response !== "object" || response === null) return undefined;
+  const modes = (response as { modes?: unknown }).modes;
+  if (typeof modes !== "object" || modes === null) return undefined;
+  const id = (modes as { currentModeId?: unknown }).currentModeId;
+  return typeof id === "string" ? id : undefined;
+}
+
+/** What the driver enforces for a host's mode, and otherwise the agent's report: its mode id, which ARI maps only where a flavor has evidence. */
+function threadMode(policy: RuntimePolicy, agent: AcpAgentMode, harnessMode: ((agent: AcpAgentMode) => AcpHarnessMode) | undefined): EffectiveMode {
+  if (policy.mode !== undefined) return { mode: policy.mode, interaction: policy.interaction, source: "host" };
+  if (harnessMode !== undefined) return { ...harnessMode(agent), source: "harness" };
+  const id = agentModeId(agent);
+  return id === undefined ? { source: "harness" } : { mode: id, source: "harness" };
+}
+
 /** What a driver built on the ACP base gives each session. */
 export interface AcpSessionSettings {
   readonly maxProtocolVersion: AcpVersion;
@@ -84,6 +121,8 @@ export interface AcpSessionSettings {
   readonly adjustCapabilities?: (capabilities: Capabilities) => Capabilities;
   /** Config values a flavor sets from a thread's runtime policy, for agents that enforce a mode through a config option. */
   readonly policyConfig?: (policy: RuntimePolicy) => ConfigValues;
+  /** A flavor's map from the agent's report to a mode, for a thread whose policy names none. */
+  readonly harnessMode?: (agent: AcpAgentMode) => AcpHarnessMode;
   /** Told the config options each time the agent sends a new list. */
   readonly onConfigOptions?: (options: readonly ConfigOption[]) => void;
   /** Told the protocol version an agent answered `initialize` with, including one the driver refuses. */
@@ -172,6 +211,8 @@ interface ThreadState {
   readonly nativeId: string;
   readonly cwd: string;
   policy: RuntimePolicy;
+  /** The agent's v1 `modes.currentModeId` for the session, from the response that opened it and each `current_mode_update`. */
+  modeId: string | undefined;
   readonly mcp: readonly LaunchMcpServer[];
   /** Host instructions for the first prompt (the `first_user_message` channel), sent once. */
   pendingInstructions: string[];
@@ -330,7 +371,7 @@ export class AcpSession implements Session {
     const servers = this.#mcpFor(launch);
     const instructions = this.#instructions(agent, launch, input.context);
     const created = await this.#newNative(agent, cwd, servers, instructions.systemPrompt);
-    const state = this.#register(created.sessionId, cwd, input.policy, servers, input.title);
+    const state = this.#register(created.sessionId, cwd, input.policy, servers, input.title, undefined, modeIdOf(created));
     this.#giveInstructions(state, instructions);
     this.#passMeta(created._meta, "session/new", "result", created.sessionId);
     this.#setOptions(state, created.configOptions ?? undefined);
@@ -359,7 +400,8 @@ export class AcpSession implements Session {
       throw callErrors.validation([{ message: "an ACP agent resumes a session in a directory: pass policy.cwd", path: ["policy", "cwd"] }]);
     }
     const cwd = await this.#settings.canonicalPath(givenCwd);
-    const policy: RuntimePolicy = input.policy ?? known?.policy ?? { mode: "approval_required", interaction: "default", cwd };
+    // No policy names no mode: the driver enforces none, and the agent applies its own.
+    const policy: RuntimePolicy = input.policy ?? known?.policy ?? { interaction: "default", cwd };
     const launch = this.#launchFor(input.launch);
     const servers = this.#mcpFor(launch);
     // The host's launch instructions reach a resumed session as they reach a new one: `system` on the request that
@@ -368,13 +410,16 @@ export class AcpSession implements Session {
     let reason: string;
     try {
       const resumed = await this.#resumeNative(agent, nativeId, cwd, servers, instructions.systemPrompt ?? known?.systemPrompt);
-      const state = known ?? this.#register(nativeId, cwd, { ...policy, cwd }, servers, undefined);
+      const state = known ?? this.#register(nativeId, cwd, { ...policy, cwd }, servers, undefined, undefined, modeIdOf(resumed));
+      if (known !== undefined) known.modeId = modeIdOf(resumed) ?? known.modeId;
       state.generation = this.#generation;
       this.#giveInstructions(state, instructions);
       if (known !== undefined) this.#emit({ type: "thread.upsert", thread: state.thread }, { threadId: state.thread.id });
       this.#applyResumed(state);
       this.#passMeta(resumed?._meta, "session/resume", "result", nativeId);
       this.#setOptions(state, resumed?.configOptions ?? undefined);
+      if (input.policy !== undefined && known !== undefined) state.policy = { ...input.policy, cwd };
+      this.#refreshMode(state);
       await this.#applyConfig(state, this.#withPolicy(input.policy, input.config));
       return { ...state.thread, appliedConfig: this.#currentConfig(state) };
     } catch (error) {
@@ -390,7 +435,7 @@ export class AcpSession implements Session {
       { type: "session.replaced", previousNativeId: nativeId, reason: `The ACP agent could not resume session ${nativeId}: ${reason}`, contextLost: true, showRuntimeNote: true },
       { threadId },
     );
-    const state = this.#register(fresh.sessionId, cwd, { ...policy, cwd }, servers, undefined);
+    const state = this.#register(fresh.sessionId, cwd, { ...policy, cwd }, servers, undefined, undefined, modeIdOf(fresh));
     this.#giveInstructions(state, instructions);
     this.#setOptions(state, fresh.configOptions ?? undefined);
     await this.#applyConfig(state, this.#withPolicy(policy, input.config));
@@ -416,7 +461,8 @@ export class AcpSession implements Session {
     const changes = input.config !== undefined || input.policy !== undefined || (instructions?.firstMessage.length ?? 0) > 0;
     if (changes && thread.active !== undefined) throw callErrors.invalidState("turn_active", `Thread ${thread.thread.id} runs a turn; resume it with new settings once the turn ends`);
     if (instructions !== undefined) this.#giveInstructions(thread, instructions);
-    if (input.policy !== undefined) thread.policy = { ...input.policy, cwd: thread.cwd };
+    if (input.policy !== undefined) thread.policy = keepingMode({ ...input.policy, cwd: thread.cwd }, thread.policy);
+    this.#refreshMode(thread);
     await this.#applyConfig(thread, this.#withPolicy(input.policy, input.config));
     return { ...thread.thread, appliedConfig: this.#currentConfig(thread) };
   }
@@ -442,7 +488,7 @@ export class AcpSession implements Session {
       throw callErrorFrom(error, "session/fork");
     }
     const policy = input.policy ?? { ...source.policy, cwd };
-    const state = this.#register(forked.sessionId, cwd, policy, source.mcp, undefined, { threadId: source.thread.id });
+    const state = this.#register(forked.sessionId, cwd, policy, source.mcp, undefined, { threadId: source.thread.id }, modeIdOf(forked));
     this.#passMeta(forked._meta, "session/fork", "result", forked.sessionId);
     this.#setOptions(state, forked.configOptions ?? undefined);
     await this.#applyConfig(state, this.#withPolicy(policy, input.config));
@@ -475,7 +521,8 @@ export class AcpSession implements Session {
     if (thread.active !== undefined) throw callErrors.invalidState("previous_turn_active", "A turn is still running on this thread");
     const agent = await this.#agent();
     await this.#ensureLoaded(agent, thread);
-    const policy = input.policy ?? thread.policy;
+    // A turn's policy without a mode keeps the thread's: the driver answers that turn's requests as the thread's mode says.
+    const policy = input.policy === undefined ? thread.policy : keepingMode(input.policy, thread.policy);
     await this.#applyConfig(thread, this.#withPolicy(input.policy, input.config));
     const instructions = [...thread.pendingInstructions, ...[input.context?.system, input.context?.developer].filter((text): text is string => text !== undefined && text !== "")];
     const blocks = await this.#promptBlocks(agent, input.content);
@@ -759,7 +806,7 @@ export class AcpSession implements Session {
     this.#applyResumed(thread);
   }
 
-  #register(nativeId: string, cwd: string, policy: RuntimePolicy, servers: readonly LaunchMcpServer[], title: string | undefined, forkedFrom?: Thread["forkedFrom"]): ThreadState {
+  #register(nativeId: string, cwd: string, policy: RuntimePolicy, servers: readonly LaunchMcpServer[], title: string | undefined, forkedFrom: Thread["forkedFrom"] | undefined, modeId: string | undefined): ThreadState {
     const id = deriveId({ kind: "thread", native: strong(nativeId), identityVersion: ACP_IDENTITY_VERSION });
     const thread: Thread = {
       id,
@@ -770,12 +817,14 @@ export class AcpSession implements Session {
       identityVersion: ACP_IDENTITY_VERSION,
       ...(title === undefined ? {} : { title }),
       ...(forkedFrom === undefined ? {} : { forkedFrom }),
+      effectiveMode: threadMode(policy, { options: [], modeId }, this.#settings.harnessMode),
     };
     const state: ThreadState = {
       thread,
       nativeId,
       cwd,
       policy,
+      modeId,
       mcp: servers,
       pendingInstructions: [],
       systemPrompt: undefined,
@@ -799,6 +848,15 @@ export class AcpSession implements Session {
     this.#emit({ type: "config.updated", options: mapped }, { threadId: thread.thread.id });
     // switchModel follows whether the agent offers a model option.
     this.#refreshCapabilities();
+    this.#refreshMode(thread);
+  }
+
+  /** Records the thread's mode from its policy and the agent's report, and tells the host when it changed. */
+  #refreshMode(thread: ThreadState): void {
+    const effectiveMode = threadMode(thread.policy, { options: [...thread.options.values()].map((entry) => entry.ari), modeId: thread.modeId }, this.#settings.harnessMode);
+    if (JSON.stringify(effectiveMode) === JSON.stringify(thread.thread.effectiveMode)) return;
+    thread.thread = { ...thread.thread, effectiveMode };
+    this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, effectiveMode } }, { threadId: thread.thread.id });
   }
 
   /** The host's config values, after the values a flavor derives from the policy (the host's own values win). */
@@ -1236,6 +1294,11 @@ export class AcpSession implements Session {
       case "config_option_update":
         this.#setOptions(thread, (params.update as { configOptions: AcpConfigOption[] }).configOptions);
         return;
+      case "current_mode_update":
+        // The agent's report of its mode. The update still reaches the host as it came, below.
+        thread.modeId = (params.update as { currentModeId: string }).currentModeId;
+        this.#refreshMode(thread);
+        break;
       case "session_info_update": {
         const title = (params.update as { title?: unknown }).title;
         if (typeof title === "string") {

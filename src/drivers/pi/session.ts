@@ -38,6 +38,7 @@
 import { callErrors, toCallError } from "../../errors.ts";
 import { EventSequencer } from "../../driver-kit/sequencer.ts";
 import { truncateUtf8 } from "../../driver-kit/truncate.ts";
+import { keepingMode } from "../../driver-kit/policy.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ConfigValues, ContentBlock } from "../../generated/common.ts";
 import type { ConfigChangePlan, RuntimePolicy } from "../../generated/config.ts";
@@ -134,7 +135,8 @@ interface ActiveTurn {
 /** How a thread's Pi process is started, kept so a parked thread starts the same way again. */
 interface Launch {
   readonly cwd: string;
-  readonly mode: BridgeMode;
+  /** Undefined when the policy names no mode: the bridge then gates nothing, as Pi itself asks before nothing. */
+  readonly mode: BridgeMode | undefined;
   readonly systemPrompts: readonly string[];
   readonly launchMcpServers: NonNullable<LaunchContext["mcpServers"]>;
   model: string | undefined;
@@ -314,7 +316,8 @@ export class PiSession implements Session {
     if (input.purpose === "history" && !held) throw callErrors.unsupported("resumeThread.purpose.history", "pi opens a session file only to run it, and records the launch in it, so the driver cannot read its history without a live runtime");
     if (held) return this.#resumeHeld(known, input);
 
-    const policy = input.policy ?? known?.policy ?? { mode: "approval_required", interaction: "default", cwd: known?.thread.cwd ?? "" };
+    // No policy names no mode: the bridge gates nothing, and Pi runs as the user set it up.
+    const policy: RuntimePolicy = input.policy ?? known?.policy ?? { interaction: "default", cwd: known?.thread.cwd ?? "" };
     const cwd = policy.cwd !== "" ? policy.cwd : (known?.thread.cwd ?? "");
     if (cwd === "") throw callErrors.validation([{ message: "resuming a Pi session this session does not know needs policy.cwd", path: ["policy", "cwd"] }]);
     const launch = this.#launchFor(cwd, policy, input.config, input.launch, undefined);
@@ -365,14 +368,16 @@ export class PiSession implements Session {
    * an ephemeral thread, which has no file to start again on, keeps its launch.
    */
   async #resumeHeld(thread: PiThread, input: ResumeThreadInput): Promise<AppliedThread> {
-    if (input.policy !== undefined && input.policy.mode !== thread.policy.mode) throw callErrors.unsupported("runtimePolicy.switchInSession", `pi reads its runtime mode when it starts; thread ${thread.thread.id} runs ${thread.policy.mode}`);
+    // A policy without a mode keeps the thread's.
+    const policy = input.policy === undefined ? undefined : keepingMode(input.policy, thread.policy);
+    if (policy !== undefined && policy.mode !== thread.policy.mode) throw callErrors.unsupported("runtimePolicy.switchInSession", `pi reads its runtime mode when it starts; thread ${thread.thread.id} runs ${thread.policy.mode ?? "Pi's own mode"}`);
     const launch = input.launch === undefined ? undefined : this.#launchFor(thread.launch.cwd, thread.policy, undefined, input.launch, undefined);
     const relaunch = launch !== undefined && JSON.stringify([launch.systemPrompts, launch.launchMcpServers]) !== JSON.stringify([thread.launch.systemPrompts, thread.launch.launchMcpServers]);
     if ((relaunch || input.config !== undefined) && thread.active !== undefined) throw callErrors.invalidState("turn_active", `Thread ${thread.thread.id} runs a turn; resume it with new settings once the turn ends`);
     if (relaunch && thread.thread.handle === undefined) throw callErrors.invalidState("no_session_file", `Thread ${thread.thread.id} is ephemeral (persistSession: false): pi takes a new launch only when it starts, and there is no session file to start it on`);
     const process = await this.#process(thread);
     await this.#applyConfig(thread, process, input.config);
-    if (input.policy !== undefined) thread.policy = { ...input.policy, cwd: thread.policy.cwd };
+    if (policy !== undefined) thread.policy = { ...policy, cwd: thread.policy.cwd };
     if (relaunch) {
       thread.launch = { ...thread.launch, systemPrompts: launch.systemPrompts, launchMcpServers: launch.launchMcpServers };
       await this.#park(thread);
@@ -538,7 +543,7 @@ export class PiSession implements Session {
     if (input.intent === "queue") return { status: "unsupported", capability: "turns.queue" };
     if (input.intent !== "start" && input.intent !== "steer") return { status: "unsupported", capability: `turns.${input.intent}` };
     if (input.context?.synthetic !== undefined && input.context.synthetic.length > 0) return { status: "unsupported", capability: "context.syntheticContext" };
-    if (input.policy !== undefined && input.policy.mode !== thread.policy.mode) return { status: "unsupported", capability: "runtimePolicy.switchInSession" };
+    if (input.policy !== undefined && keepingMode(input.policy, thread.policy).mode !== thread.policy.mode) return { status: "unsupported", capability: "runtimePolicy.switchInSession" };
     const prompt = await this.#promptOf(input.content);
 
     if (input.intent === "steer") return this.#steer(thread, input, prompt);
@@ -669,14 +674,14 @@ export class PiSession implements Session {
   // Processes
 
   #launchFor(cwd: string, policy: RuntimePolicy, config: ConfigValues | undefined, launch: LaunchContext | undefined, context: CreateThreadInput["context"]): Launch {
-    if (!BRIDGE_MODES.has(policy.mode)) throw callErrors.unsupported(`runtimePolicy.modes.${policy.mode}`);
+    if (policy.mode !== undefined && !BRIDGE_MODES.has(policy.mode)) throw callErrors.unsupported(`runtimePolicy.modes.${policy.mode}`);
     const merged = { ...this.#input.launch, ...launch };
     if ((merged.dynamicTools ?? []).length > 0) throw callErrors.unsupported("tools.dynamicTools");
     const model = typeof config?.["model"] === "string" ? config["model"] : typeof this.#input.config?.["model"] === "string" ? this.#input.config["model"] : this.#context.config.model;
     const thinking = typeof config?.["thinking"] === "string" ? config["thinking"] : typeof this.#input.config?.["thinking"] === "string" ? this.#input.config["thinking"] : this.#context.config.thinking;
     return {
       cwd,
-      mode: policy.mode as BridgeMode,
+      mode: policy.mode as BridgeMode | undefined,
       systemPrompts: [...systemPrompts(this.#input.launch, undefined), ...systemPrompts(launch, context)],
       launchMcpServers: [...(this.#input.launch?.mcpServers ?? []), ...(launch?.mcpServers ?? [])],
       model,
@@ -693,7 +698,7 @@ export class PiSession implements Session {
     if (apiKey !== undefined && launch.model !== undefined) args.push("--api-key", apiKey);
     for (const prompt of launch.systemPrompts) args.push("--append-system-prompt", prompt);
     args.push("--extension", bridgeFile);
-    const settings: BridgeSettings = { mode: launch.mode };
+    const settings: BridgeSettings = { mode: launch.mode ?? null };
     const spawned = await host.process.spawn({
       command: executable,
       args,
@@ -764,6 +769,8 @@ export class PiSession implements Session {
       ...(started.sessionFile === undefined ? {} : { handle: started.sessionFile }),
       identityVersion: IDENTITY_VERSION,
       ...extra,
+      // The bridge enforces a host's mode. Without one Pi runs as the user set it up, and reports no mode: Pi has none of its own, and an extension of the user's may gate its tools.
+      effectiveMode: policy.mode === undefined ? { source: "harness" } : { mode: policy.mode, interaction: policy.interaction, source: "host" },
     };
     if (thread === undefined) {
       thread = { thread: snapshot, policy, launch, process: started.process, starting: undefined, userMessages: 0, steerOrdinals: new Set(), active: undefined, unloaded: false };

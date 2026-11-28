@@ -43,7 +43,8 @@
 //   tools.mcp                        `launch.mcpServers`
 //   mcp.acceptsHostServers           each launch MCP server's `transport` listed
 //   runtimePolicy.modes.<mode>       `policy.mode` on createThread, resumeThread,
-//                                    forkThread or startTurn
+//                                    forkThread or startTurn (a policy without
+//                                    `mode` keeps the harness's own and needs none)
 //   runtimePolicy.interactionModes   `policy.interaction` listed
 //   sessions.switchRuntimeMode       startTurn `policy.mode` other than the thread's
 //   runtimePolicy.switchInSession    startTurn `policy` mode or interaction other
@@ -63,7 +64,10 @@
 // resumeThread, forkThread, readSnapshot, rollbackThread, an unloadThread
 // that succeeded) counts as at least as new as every event read so far.
 // Policies come only from calls: the `policy` of createThread, resumeThread
-// and forkThread, and of each startTurn the driver accepted.
+// and forkThread, and of each startTurn the driver accepted. A thread whose
+// policy named no mode runs the harness's own, which the guard does not know:
+// a startTurn that names a mode for it is a switch. A startTurn whose policy
+// names no mode changes no mode.
 //
 // Where the guard lacks a fact it decides this way. A fork that names a `cwd`
 // for a thread whose directory it does not know counts as cross-directory
@@ -134,7 +138,7 @@ function hasEntries(values: readonly unknown[] | undefined): boolean {
 function policyRequirements(policy: RuntimePolicy | undefined): Requirement[] {
   if (policy === undefined) return [];
   return [
-    { path: `runtimePolicy.modes.${policy.mode}` },
+    ...(policy.mode === undefined ? [] : [{ path: `runtimePolicy.modes.${policy.mode}` }]),
     {
       path: "runtimePolicy.interactionModes",
       isOn: (capabilities) => hasCapability(capabilities, "runtimePolicy.interactionModes", policy.interaction),
@@ -281,9 +285,16 @@ export function guardSession(session: Session): Session {
     const known = policies.get(threadId);
     if (policy === undefined || known === undefined) return [];
     const requirements: Requirement[] = [];
-    if (policy.mode !== known.mode) requirements.push({ path: "sessions.switchRuntimeMode" });
-    if (policy.mode !== known.mode || policy.interaction !== known.interaction) requirements.push({ path: "runtimePolicy.switchInSession" });
+    const switchesMode = policy.mode !== undefined && policy.mode !== known.mode;
+    if (switchesMode) requirements.push({ path: "sessions.switchRuntimeMode" });
+    if (switchesMode || policy.interaction !== known.interaction) requirements.push({ path: "runtimePolicy.switchInSession" });
     return requirements;
+  };
+
+  /** What a turn's accepted policy leaves the thread running: a policy without a mode keeps the thread's. */
+  const afterTurn = (threadId: string, policy: RuntimePolicy): Pick<RuntimePolicy, "mode" | "interaction"> => {
+    const mode = policy.mode ?? policies.get(threadId)?.mode;
+    return mode === undefined ? { interaction: policy.interaction } : { mode, interaction: policy.interaction };
   };
 
   const guarded: Session = {
@@ -333,7 +344,7 @@ export function guardSession(session: Session): Session {
       ]);
       if (unmet !== undefined) return { status: "unsupported", capability: unmet.path };
       const result = await session.startTurn(input);
-      if (result.status === "accepted" && input.policy !== undefined) policies.set(input.threadId, input.policy);
+      if (result.status === "accepted" && input.policy !== undefined) policies.set(input.threadId, afterTurn(input.threadId, input.policy));
       return result;
     },
     interruptTurn: (input) => session.interruptTurn(input),

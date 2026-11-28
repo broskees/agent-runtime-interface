@@ -39,3 +39,17 @@ test("grok runs `grok --permission-mode default agent stdio`, probes with the up
     }
   }
 });
+
+test("grok: a policy without a mode still runs Grok in its default permission mode, which the launch fixes for the process, and reports it as approval_required", async () => {
+  const rig = await openRig({ name: "grok-own-mode", driver: grokDriver, config: { ...GROK_DEFAULT_CONFIG }, executable: "grok", protocol: 1 });
+  try {
+    const { session } = await rig.open();
+    assert.deepEqual(rig.host.spawns.find((spawn) => spawn.purpose === "runtime")!.args, ["--permission-mode", "default", "agent", "stdio"]);
+    const own = await session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+    assert.deepEqual(own.effectiveMode, { mode: "approval_required", interaction: "default", source: "harness" });
+    const hosted = await session.createThread({ cwd: rig.cwd, policy: rig.policy("full_access") });
+    assert.deepEqual(hosted.effectiveMode, { mode: "full_access", interaction: "default", source: "host" });
+  } finally {
+    await rig.cleanup();
+  }
+});

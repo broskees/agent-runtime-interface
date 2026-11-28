@@ -314,6 +314,25 @@ if (result.issues) {
 Unknown enum values and `x:` extension variants validate and come back
 unchanged, so newer drivers never break older hosts.
 
+## Leaving the mode to the harness
+
+`policy.mode` is optional. Leave it out, and the driver sends the harness no
+permission setting, so it runs in the mode the user configured for that
+workspace (Claude Code's `permissions.defaultMode`, Codex's `approval_policy`
+and `sandbox_mode`, and so on):
+
+```ts
+const thread = await session.createThread({ cwd, policy: { interaction: "default", cwd } });
+thread.effectiveMode; // for example { mode: "auto_accept_edits", source: "harness" }
+```
+
+Each thread reports its `effectiveMode`: the ARI mode it runs in, or the
+vendor's own name when no ARI mode fits, and whether the host or the harness
+chose it. Where the harness does not say and the driver cannot know, the mode
+is left out, never guessed. A `thread.upsert` reports it again when it
+changes or becomes known, for example at the start of Claude Code's first
+turn. Each [driver page](docs/drivers/) says what its harness reports.
+
 ## Extensions and escape hatches
 
 A host never has to wait on an ARI release:

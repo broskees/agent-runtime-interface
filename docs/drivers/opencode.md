@@ -182,6 +182,18 @@ come again at the end) and any deny of the thread's own entries that an
 earlier run left. A later `policy` (on a turn or another resume) writes that
 mode's rules as usual.
 
+A policy without `mode` works the same way: a new thread gets no mode rules
+at all, only the host's rules and the `deny` rules for other threads'
+entries, so OpenCode's own rules (the user's config and the agent's) decide
+each permission; a resume keeps the saved rules; a fork keeps the rules
+OpenCode copied from its source. A turn's or a held thread's resume policy
+that names no mode changes no rules, and the thread keeps its mode.
+
+OpenCode reports no mode of its own, and its rules map to no ARI mode the
+driver could name without guessing, so a thread without a host's mode has
+`effectiveMode` `{ source: "harness" }`, with no mode. A host's mode is
+reported with `source: "host"`.
+
 ## MCP servers are per directory
 
 OpenCode registers MCP servers per directory on a server (1.x `POST /mcp`,

@@ -54,3 +54,9 @@
   `sessionModel` is `process_per_session`.
 - Tested against ACP protocol versions 1 and 2 (`testedVersions.range`
   `1 - 2`); `status()` gives an advisory after an agent answers another.
+- A policy without a mode enforces none: every permission request goes to
+  the host, and the agent keeps its own mode. The thread's `effectiveMode`
+  reports the agent's mode id, from its `mode`-category option or v1
+  `modes.currentModeId` and each update, as the agent names it. A flavor maps
+  the ids it has evidence for (`harnessMode`). A cold resume of a known
+  thread now records the resume's policy.

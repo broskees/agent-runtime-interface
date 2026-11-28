@@ -53,3 +53,7 @@
   version command, `agy --version`, only, so a status check never updates
   the binary it checks. Sessions no longer get the switch, in either profile;
   an earlier build gave it to them too.
+- A policy without a mode leaves `agy`'s mode alone. The thread's
+  `effectiveMode` maps `agy`'s `mode` option, as its recorded descriptions
+  say: `default` to `approval_required`, `accept-edits` to
+  `auto_accept_edits`, `auto` to `auto`, `plan` to the plan interaction.

@@ -135,6 +135,17 @@ loading the driver or the SDK.
     (`cwd_changed`), because Cursor keeps a local agent in the directory it
     was created in; a mode Cursor lacks is `unsupported`; dynamic tools are
     `unsupported`. A released or unloaded thread reopens during the resume.
+    A policy that names no mode keeps the thread's, on a resume as on a turn.
+
+## The mode Cursor runs in
+
+Cursor reports no mode. A policy without `mode` opens the agent with the
+options `full_access` gives it (no tool allowlist), the local agent's
+default, in which every tool runs (docs, "Sandbox options"). So the
+thread's `effectiveMode` is `full_access`, with `source: "harness"`: the
+inverse of the driver's own mapping, not a report of Cursor's. Ambient
+settings the host's `settingSources` loads may restrict a thread as they
+would a `full_access` one. A host's mode is reported with `source: "host"`.
 
 ## Host instructions and host tools
 

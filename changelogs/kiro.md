@@ -20,3 +20,6 @@
   `untested_version` advisory.
 - `kiro-cli` gets the host's environment and the instance's `environment`,
   credentials included, minus only the host's `envPolicy.stripAmbient`.
+- A policy without a mode leaves `autopilot` as the user set it; the
+  thread's `effectiveMode` reports it, on as `full_access`, off as
+  `approval_required`.

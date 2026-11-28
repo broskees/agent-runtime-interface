@@ -11,6 +11,14 @@ machine shares the machine's fx login. `fx` gets the host's environment and
 the instance's `environment`, credentials included, minus only what the
 host's `envPolicy.stripAmbient` names (see the [ACP base driver](acp.md)).
 
+## The mode fx reports
+
+A policy without `mode` leaves fx's own: the driver answers no permission
+request itself. fx offers a `mode` option; ARI has no evidence of what its
+values mean, so the thread's `effectiveMode` reports the option's value as
+fx names it, as the [ACP base driver](acp.md#the-mode-the-agent-reports)
+does for any agent, or no mode while fx offers none.
+
 ## Quirk: the model depends on the provider
 
 fx offers a `provider` select and a `model` select whose values change with

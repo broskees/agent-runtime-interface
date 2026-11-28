@@ -45,6 +45,10 @@
 //   the source's on fork (thread_processor.rs:4782–4791, 5788–5794); the
 //   `config` overrides (MCP servers among them) last for that load only.
 //   `turn/start` overrides persist for later turns (turn_processor.rs:865–990).
+//   A thread started without approval settings gets the user's config
+//   (`world.userSettings`). `thread/settings/update` changes a loaded
+//   thread's settings for its later turns and reports an effective change
+//   with `thread/settings/updated` (vendored app-server-README.md:564–566).
 // - An ordinary command approval offers `accept`, at most one exec-policy
 //   amendment and `cancel`; a network approval `accept`, `acceptForSession`,
 //   at most one allowing network amendment and `cancel`

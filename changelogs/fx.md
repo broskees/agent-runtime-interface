@@ -22,3 +22,5 @@
   advisory.
 - `fx` gets the host's environment and the instance's `environment`,
   credentials included, minus only the host's `envPolicy.stripAmbient`.
+- A policy without a mode leaves fx's own; the thread reports fx's `mode`
+  option value as fx names it.

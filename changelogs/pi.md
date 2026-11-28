@@ -64,3 +64,6 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
   host's `envPolicy.stripAmbient`. `PI_CREDENTIAL_VARIABLES` and the CLI
   manifest's `envScrubPrefixes` are gone.
 - `ari/meta/pi`: label, icon, config schema and form hints.
+- A policy without a mode gives the bridge `mode: null`, and it gates no
+  tool. Pi has no mode of its own to report, so the thread's
+  `effectiveMode` has none.

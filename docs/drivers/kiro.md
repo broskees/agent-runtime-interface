@@ -26,6 +26,12 @@ The driver sets it from the thread's runtime mode whenever Kiro offers it:
 off under `approval_required`, on under `full_access`
 (`test/drivers/kiro/kiro.suite.ts`). The host's own config values win.
 
+A policy without `mode` leaves `autopilot` as the user set it. Kiro reports
+it as the option's current value, and the thread's `effectiveMode` maps it
+back through the same rule: on is `full_access`, off is
+`approval_required`, with `source: "harness"`; each change of the option
+updates it. While Kiro offers no `autopilot` option the mode is unknown.
+
 ## Config
 
 | Field | Default | Meaning |

@@ -164,6 +164,38 @@ schema `vendor-schemas/codex/3d86e43b075adeba2193ec5c22ac92f55afd82e6/codex_app_
 | Native turn / item / request ID strength | strong/strong/strong | strong/strong/strong | A request's native id is the server request kind plus its item id (JSON-RPC ids restart at 0 per process). |
 | Policy enforcement | native | native, all five modes | `auto` is `approvalsReviewer: "auto_review"`; every other mode names `"user"`. The driver names the reviewer on every start, resume, fork and per-turn policy, because Codex keeps a thread's reviewer when a request leaves it out (app-server `thread_processor.rs:4782–4791`, `5788–5794`). `policy.native` is passed on: its `approvalPolicy`, `sandbox`, `sandboxPolicy` and `approvalsReviewer` replace the mode's, and its `permissions` (a named profile) goes on start, resume, fork and turn. Codex refuses a profile with a sandbox on one request (schema: `ThreadStartParams.permissions`, `TurnStartParams.permissions`), so a profile wins over the sandbox the mode sets, which is then not sent; a sandbox `native` names itself is sent with it, for Codex to judge. |
 
+### The mode Codex reports
+
+A policy without `mode` sends no `approvalPolicy`, `sandbox` or
+`approvalsReviewer` on start, resume, fork or turn (nor in
+`thread/settings/update`), so Codex applies the user's config
+(`approval_policy`, `sandbox_mode`, `approvals_reviewer`) or, on a resume, the
+thread's saved settings. Codex reports the settings it applied in every
+`thread/start`, `thread/resume` and `thread/fork` answer (`approvalPolicy`,
+`sandbox`, `approvalsReviewer`, all required in the schema) and in each
+`thread/settings/updated` notification. The thread's `effectiveMode` maps
+them back through the inverse of the table above:
+
+| `approvalPolicy` | `sandbox` | `approvalsReviewer` | Mode |
+|---|---|---|---|
+| `untrusted` | `workspaceWrite` | `user` | `approval_required` |
+| `on-request` | `readOnly` | `user` | `read_only` |
+| `on-request` | `workspaceWrite` | `user` | `auto_accept_edits` |
+| `on-request` | `workspaceWrite` | `auto_review` (or its legacy name `guardian_subagent`) | `auto` |
+| `never` | `dangerFullAccess` | `user` | `full_access` |
+
+Any other combination has no ARI mode and keeps Codex's words:
+`<approval policy>/<sandbox>`, with `/<reviewer>` when the reviewer is not
+the user, for example `never/workspace-write` or `granular/read-only`.
+Codex reports no collaboration mode, so a thread without a host mode has no
+`interaction`. A host's mode is reported with `source: "host"`, also mapped
+from what Codex answered. A turn's or a loaded thread's resume policy that
+names no mode sends nothing, and the thread keeps its mode; a turn that
+names one updates the report from the settings it sent, which Codex keeps
+for later turns. A resume without a policy records no mode: an earlier
+build recorded `approval_required` and sent its settings again on a fork and
+on the reload after a release or a restart.
+
 ARI additions the driver declares: `requests.responseModes` `live` and
 `message`; `requests.approvalScopes` `accept`/`once`,
 `accept_for_session`/`session`, `accept_always`/`global` (an exec-policy
@@ -320,6 +352,18 @@ nothing to Codex's config files. A thread Codex has no rollout for, or one
 another process holds open for writing, is replaced by a fresh thread with
 `session.replaced` (`contextLost: true`) when the host passed `policy`;
 without `policy` the error is returned.
+
+A resume of a thread this session has loaded sends no `thread/resume`:
+Codex ignores a loaded thread's overrides (`thread_processor.rs:4900–4955`).
+The policy's approval settings and a new `model` go with
+`thread/settings/update` instead, which applies them to the thread's later
+turns (`app-server-README.md:564–566` of the vendored schema). Codex takes
+MCP servers, dynamic tools and developer instructions only when it loads a
+thread, and `thread/settings/update` has none of them, so a resume with
+another launch is `invalid_state` (`thread_loaded`); one in another
+directory is `invalid_state` (`cwd_changed`). Unload the thread, then resume
+it, to change either. An earlier build returned the loaded thread unchanged
+and reported success.
 
 A resume with `purpose: "history"` reads the thread with `thread/read` and
 loads nothing: no `thread/resume`, so no writer starts, and no MCP server,

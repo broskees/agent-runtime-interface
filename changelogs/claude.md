@@ -101,3 +101,13 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
   schema now refuses `sdkDirectory`. `ari/meta/claude` no longer exports
   `CLAUDE_SDK_INSTALL_COMMAND` or `CLAUDE_STANDALONE_INSTALL_HINT`, and
   `CLAUDE_INSTALL_HINT` names only the npm install next to ari.
+- A policy without a mode sends Claude Code no `permissionMode`, so it starts
+  in the mode the user's settings give it (`permissions.defaultMode`). The
+  thread's `effectiveMode` follows Claude Code's reports, `system/init` at
+  each turn's start and `system/status`: `default`, `acceptEdits`, `auto` and
+  `bypassPermissions` map to their ARI modes, `plan` to the plan
+  interaction, and `dontAsk` keeps its name. Before the first turn the mode
+  is unknown. Leaving plan mode without naming a mode is refused with
+  `unsupported` (`runtimePolicy.switchInSession`).
+- A resume without a policy starts its query with no `permissionMode`; an
+  earlier build sent `default` for it.

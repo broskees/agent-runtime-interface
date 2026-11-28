@@ -67,3 +67,16 @@ First version of the Codex driver.
   gone.
 - Extensions: `ari.goal`, `codex.goal`, `codex.review`, `codex.readState`,
   `codex.memory`, each version `1`.
+- A policy without a mode sends no `approvalPolicy`, `sandbox` or
+  `approvalsReviewer`, so Codex applies the user's config, or on a resume the
+  thread's saved settings. The thread's `effectiveMode` maps the settings
+  Codex reports (start, resume and fork answers, `thread/settings/updated`)
+  back to an ARI mode, or keeps Codex's words, `<approval
+  policy>/<sandbox>[/<reviewer>]`.
+- A resume without a policy records no mode; an earlier build recorded
+  `approval_required` and sent its settings on a later fork and on the reload
+  after a release or a restart.
+- A resume of a loaded thread sends its policy's approval settings and a new
+  model with `thread/settings/update`, and refuses another launch
+  (`invalid_state` `thread_loaded`) or directory (`cwd_changed`); an earlier
+  build returned the loaded thread unchanged.

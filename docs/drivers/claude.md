@@ -271,7 +271,9 @@ exist for it.
 - A resume of a live thread applies a new `model` and `effort` to the running
   query with `setModel` and `applyFlagSettings`, and a new policy's
   permission mode with `setPermissionMode`; `appliedConfig` reports only
-  what the query took. A resume with `purpose: "history"` changes nothing and
+  what the query took. A resume without a policy, or with one that names no
+  mode, starts a new query with no `permissionMode`: an earlier build sent
+  `default` (`approval_required`) for it. A resume with `purpose: "history"` changes nothing and
   reports what the thread runs with.
 - The thread's `effort` (on create, resume and turns) goes to Claude Code as
   the host gave it, in the query's `effort` option or `applyFlagSettings`
@@ -349,6 +351,31 @@ Runtime modes map to permission modes: `approval_required` to `default`,
 `auto_accept_edits` to `acceptEdits`, `auto` to `auto`, `full_access` to
 `bypassPermissions` (the driver sets `allowDangerouslySkipPermissions` so a
 live thread can switch to it), and the `plan` interaction mode to `plan`.
+
+### The mode Claude Code reports
+
+A policy without `mode` sends no `permissionMode`, so Claude Code starts in
+the mode the user's settings give it: `permissions.defaultMode`, else its own
+default (`Options.permissionMode` in `sdk.d.ts`). A plan interaction still
+sends `plan`. Claude Code reports the mode it runs in with the `system/init`
+message at the start of each turn (`SDKSystemMessage.permissionMode`, never
+absent) and with a `system/status` message that carries one
+(`SDKStatusMessage.permissionMode`). `initializationResult()` does not
+report it, so before the first turn the thread's `effectiveMode` is
+`{ source: "harness" }`, with no mode. Each report updates it with a
+`thread.upsert`, mapped back: `default` to `approval_required`,
+`acceptEdits` to `auto_accept_edits`, `auto` to `auto`, `bypassPermissions`
+to `full_access`, `plan` to the `plan` interaction, and `dontAsk`, which no
+ARI mode matches, as `dontAsk`. A new query (a resume, a new launch) starts
+with no report again.
+
+A host's mode is reported with `source: "host"`; a report from Claude Code
+replaces the mode, so a mode Claude Code did not take shows. A turn or a
+resume of a live thread whose policy names no mode sends nothing, and the
+thread keeps its mode. Claude Code leaves plan mode only for a mode the
+driver names, so a policy that leaves `plan` for the default interaction
+without naming a mode is refused: `unsupported` with
+`runtimePolicy.switchInSession`.
 
 ## The 42 optional members
 

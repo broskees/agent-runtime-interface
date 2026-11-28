@@ -129,6 +129,14 @@ It never adds instruction text of its own. Its runtime mode arrives in the
 
 - **Thread**: one Pi session. `native` is Pi's session id (strong); `handle`
   is the session file, which `resumeThread({ native: { handle } })` takes.
+- **Ephemeral thread**: `createThread({ persistSession: false })` runs
+  `pi --no-session`, so Pi keeps the session in memory and writes no file.
+  The thread has no `handle`. It lives as long as its process: `forkThread`
+  (once it holds a message) and `unloadThread` reject with `invalid_state`
+  (`no_session_file`), `canRelease()` is false while it runs, and a thread
+  whose process ended cannot be recovered (`invalid_state`
+  `no_session_file`). A resume of its id finds no file, as for any missing
+  session.
 - **Resume**: `pi --session <file>`, for a file under `<stateDir>/sessions`,
   named by the handle or found by the session id.
   Pi works in the directory the file's header records, wherever pi starts, so
@@ -271,7 +279,7 @@ it has no row. Every difference names its source.
 | `sessions.switchModel` | `true` | Y | Pi's `set_model` before the next prompt. |
 | `sessions.switchRuntimeMode` | `false` | – | The bridge reads its mode once per process. |
 | `sessions.pendingRequestsSurviveRestart` | `false` | not in §1.2 | Extension dialogs die with their process (Pi docs rpc-extension-ui.md). |
-| `sessions.release` | `true` | not in §1.2 | Stops the processes; threads restart with `--session`. |
+| `sessions.release` | `true` | not in §1.2 | Stops the processes; threads restart with `--session`. Vetoed while an ephemeral thread (`persistSession: false`) runs, as stopping it would end it. |
 | `sessions.feedbackUpload` | `false` | not in §1.2 | Pi's RPC has no feedback command (Pi docs rpc-commands.md). |
 | `sessions.contextUsageReuse` | `false` | not in §1.2 | |
 | `threads.createEmpty` | `true` | not in §1.2 | Pi writes no file until a message, so the bridge's `/ari-persist` writes the header before the process stops. |
@@ -279,7 +287,7 @@ it has no row. Every difference names its source.
 | `threads.rollback` | `true` | Y | `/ari-rewind`, persisted as a label entry. |
 | `threads.compact` | `true` | not in §1.2 | Pi's `compact` command. |
 | `threads.injectHistory` | `false` | not in §1.2 | |
-| `threads.unload` | `true` | not in §1.2 | Stops the thread's process; `resumeThread` reopens the same session id, in the same session or a fresh one. |
+| `threads.unload` | `true` | not in §1.2 | Stops the thread's process; `resumeThread` reopens the same session id, in the same session or a fresh one. An ephemeral thread has no file to reopen, so it is not unloaded (`invalid_state`). |
 | `threads.exposesNativeIds` | `true` | not in §1.2 | |
 | `threads.fork.supported` | `true` | Y | `pi --fork <file>`. |
 | `threads.fork.fromTurn` | `true` | Y | Holds the history before the turn. |

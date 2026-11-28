@@ -33,6 +33,8 @@ driver's changelog lists what changed:
 - A resume that fails for a reason other than a missing or held session
   returns the error instead of starting a fresh conversation (`acp` and its
   flavors, `claude`, `pi`).
+- `pi` honours `persistSession: false` with Pi's `--no-session`; an earlier
+  build saved the thread to disk anyway.
 
 ### Contract (`ari`, `ari/json-schema/*`)
 

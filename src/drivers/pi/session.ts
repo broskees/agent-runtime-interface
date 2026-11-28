@@ -177,7 +177,8 @@ interface Started {
   readonly process: PiProcess;
   readonly slot: ProcessSlot;
   readonly sessionId: string;
-  readonly sessionFile: string;
+  /** Undefined for a `--no-session` process, which keeps its session in memory only. */
+  readonly sessionFile: string | undefined;
   /** Pi's own working directory, as the bridge reported it. */
   readonly cwd: string;
   readonly applied: ConfigValues;
@@ -295,7 +296,8 @@ export class PiSession implements Session {
   async createThread(input: CreateThreadInput): Promise<AppliedThread> {
     this.#open();
     const launch = this.#launchFor(input.cwd, input.policy, input.config, input.launch, input.context);
-    const started = await this.#start(launch, []);
+    // An ephemeral thread (`persistSession: false`) runs with Pi's `--no-session`: Pi writes no session file.
+    const started = await this.#start(launch, input.persistSession === false ? ["--no-session"] : []);
     const thread = await this.#register(started, input.policy, launch, input.title === undefined ? {} : { title: input.title });
     if (input.title !== undefined) await started.process.request({ type: "set_session_name", name: input.title }).catch(() => undefined);
     return { ...thread.thread, appliedConfig: started.applied };
@@ -414,6 +416,8 @@ export class PiSession implements Session {
     const source = this.#thread(input.threadId);
     if (source.active !== undefined) throw callErrors.invalidState("turn_active", "Pi cannot fork a thread while its turn runs");
     const transcript = await this.#transcript(source);
+    // Pi forks from a session file (`--fork <file>`); an ephemeral thread has none, and a fresh session would drop its history.
+    if (source.thread.handle === undefined && transcript.userEntries.length > 0) throw callErrors.invalidState("no_session_file", `Thread ${source.thread.id} is ephemeral (persistSession: false): Pi keeps no session file to fork it from`);
     // A fork from a turn holds the history before that turn; at latest, everything.
     const target = input.at.type === "turn" ? this.#userEntryOf(source, transcript, input.at.turnId) : transcript.leafId;
     const policy = input.policy ?? (input.cwd === undefined ? source.policy : { ...source.policy, cwd: input.cwd });
@@ -466,6 +470,7 @@ export class PiSession implements Session {
     this.#open();
     const thread = this.#thread(threadId);
     if (thread.active !== undefined) throw callErrors.invalidState("turn_active");
+    if (thread.thread.handle === undefined) throw callErrors.invalidState("no_session_file", `Thread ${threadId} is ephemeral (persistSession: false): Pi keeps it in memory only, so an unloaded thread could not come back`);
     await this.#park(thread);
     thread.unloaded = true;
     thread.thread = { ...thread.thread, status: "unloaded" };
@@ -476,13 +481,15 @@ export class PiSession implements Session {
     if (this.#closed) return false;
     const busy = [...this.#threads.values()].some((thread) => thread.active !== undefined || thread.starting !== undefined);
     const pending = [...this.#requests.values()].some((request) => !request.resolved);
-    return !busy && !pending;
+    // An ephemeral thread lives only in its process: stopping it would end the thread.
+    const ephemeral = [...this.#threads.values()].some((thread) => thread.thread.handle === undefined && thread.process !== undefined && !thread.process.exited);
+    return !busy && !pending && !ephemeral;
   }
 
   /** Stops every Pi process; each thread starts its process again with `--session` when next used. */
   async release(): Promise<void> {
     this.#open();
-    if (!this.canRelease()) throw callErrors.invalidState("release_vetoed", "A turn, a starting process or a request is still pending");
+    if (!this.canRelease()) throw callErrors.invalidState("release_vetoed", "A turn, a starting process or a request is still pending, or an ephemeral thread lives only in its process");
     for (const thread of this.#threads.values()) await this.#park(thread);
   }
 
@@ -694,11 +701,12 @@ export class PiSession implements Session {
       ]);
       // Pi writes the bridge's session_start status before it reads any command.
       if (slot.cwd === undefined) throw callErrors.protocol("bridge_missing", "The ARI bridge extension did not load in pi");
-      if (typeof state.sessionId !== "string" || typeof state.sessionFile !== "string") throw callErrors.protocol("no_session_file", "pi reported no persisted session file");
+      const ephemeral = sessionArgs.includes("--no-session");
+      if (typeof state.sessionId !== "string" || (!ephemeral && typeof state.sessionFile !== "string")) throw callErrors.protocol("no_session_file", "pi reported no persisted session file");
       const transcript = readTranscript(await process.request<{ entries: unknown; leafId: unknown }>({ type: "get_entries" }));
       const model = piModelSlug(state.model);
       const applied: ConfigValues = { ...(model === undefined ? {} : { model }), ...(typeof state.thinkingLevel === "string" ? { thinking: state.thinkingLevel } : {}) };
-      return { process, slot, sessionId: state.sessionId, sessionFile: state.sessionFile, cwd: slot.cwd, applied, transcript };
+      return { process, slot, sessionId: state.sessionId, sessionFile: typeof state.sessionFile === "string" ? state.sessionFile : undefined, cwd: slot.cwd, applied, transcript };
     } catch (error) {
       await process.close();
       throw toCallError(error) !== undefined ? error : commandError(error, "native session");
@@ -727,7 +735,7 @@ export class PiSession implements Session {
       native: { id: started.sessionId, strength: "strong" },
       cwd: started.cwd,
       status: "idle",
-      handle: started.sessionFile,
+      ...(started.sessionFile === undefined ? {} : { handle: started.sessionFile }),
       identityVersion: IDENTITY_VERSION,
       ...extra,
     };
@@ -775,7 +783,7 @@ export class PiSession implements Session {
     if (thread.process !== undefined && !thread.process.exited) return thread.process;
     if (thread.starting !== undefined) return thread.starting;
     const handle = thread.thread.handle;
-    if (handle === undefined) throw callErrors.invalidState("no_session_file");
+    if (handle === undefined) throw callErrors.invalidState("no_session_file", `Thread ${thread.thread.id} is ephemeral (persistSession: false): Pi kept it in memory only, and its process has ended, so it cannot be recovered`);
     const nativeId = thread.thread.native.id;
     thread.starting = (async () => {
       const started = await this.#start(thread.launch, ["--session", handle]);

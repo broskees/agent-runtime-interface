@@ -38,6 +38,10 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
 - A resume replaces only a missing session file. When the file is there and
   pi fails to open it, the error goes to the caller; an earlier build
   started a fresh session for any error.
+- `persistSession: false` runs `pi --no-session`: Pi writes no session file,
+  and the thread has no `handle`. It cannot be forked, unloaded, released or
+  restarted, and says so with `invalid_state` (`no_session_file`). An
+  earlier build ignored the flag and saved the thread to disk.
 - Turns: start, steer (with `prompt_required` when Pi queued the steer after
   the run ended), interrupt; settlement only on `agent_settled` or process
   exit.

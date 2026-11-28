@@ -174,6 +174,31 @@ test("a resume pi fails for a reason other than a missing session file returns t
   assert.ok(!second.events.some((event) => event.body.type === "session.replaced"));
 });
 
+test("persistSession: false runs pi with --no-session: Pi writes no session file, and the thread says it cannot be resumed, forked, unloaded or released", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const sessions = `${opened.host.paths.stateDir}/sessions`;
+  const files = (): string[] => (fs.existsSync(sessions) ? fs.readdirSync(sessions).filter((name) => name.endsWith(".jsonl")) : []);
+  const before = files();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd), persistSession: false });
+  const spawn = opened.host.spawns.at(-1)!;
+  assert.ok(spawn.args?.includes("--no-session"), `pi ran with ${JSON.stringify(spawn.args)}`);
+  assert.equal(thread.handle, undefined, "an ephemeral thread has no session file to resume by");
+  await simpleTurn(opened, first, thread.id, "Only in memory.");
+  assert.deepEqual(files(), before, "Pi wrote no session file");
+  await assert.rejects(first.session.forkThread!({ threadId: thread.id, at: { type: "latest" } }), (error: unknown) => isAriError(error, "invalid_state"));
+  await assert.rejects(first.session.unloadThread!(thread.id), (error: unknown) => isAriError(error, "invalid_state"));
+  assert.equal(first.session.canRelease(), false, "a release would end the ephemeral thread's only copy");
+  const snapshot = await first.session.readSnapshot!(thread.id);
+  assert.equal(snapshot.turns.length, 1, "the live thread still reads back");
+  // Another session finds no file for it: the resume says the context is lost.
+  const second = await opened.open();
+  const replaced = await second.session.resumeThread({ native: { id: thread.native.id!, strength: "strong" }, policy: policy(opened.cwd) });
+  assert.notEqual(replaced.native.id, thread.native.id);
+  const notice = await opened.until(second.events, (event) => (event.body.type === "session.replaced" ? event.body : undefined), "session.replaced");
+  assert.equal(notice.contextLost, true);
+});
+
 test("a fork into another directory runs Pi's CLI there, and a fork from a turn keeps the history before it", async () => {
   const opened = await rig();
   const session = await opened.open();

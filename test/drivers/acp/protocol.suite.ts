@@ -70,6 +70,33 @@ test("a history resume reports history unavailable: ACP opens a session only liv
   }
 });
 
+for (const protocol of [1, 2] as const) {
+  test(`v${protocol}: a resume the agent refuses for any reason but a missing session returns the agent's error and starts no session; a missing session is replaced`, async () => {
+    const rig = await openRig({ name: "resume errors", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol, lockSessions: true });
+    try {
+      const first = await rig.open();
+      const thread = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+      await first.session.close();
+      // The fake answers a resume of a held session with an internal error (-32603), as ACP has no error for it.
+      await rig.rig.native.lockSession!(thread);
+      const { session, events } = await rig.open();
+      const news = (): number => frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/new").length;
+      const before = news();
+      await assert.rejects(session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy() }), (error) => isAriError(error, "protocol") && /already open in another process/.test(error.message));
+      assert.equal(news(), before, "no fresh session replaced the one the agent refused");
+      assert.ok(!events.some((event) => event.body.type === "session.replaced"));
+
+      const replaced = await session.resumeThread({ native: { handle: "ari-missing-session" }, policy: rig.policy() });
+      assert.notEqual(replaced.native.id, "ari-missing-session");
+      assert.equal(news(), before + 1);
+      const notice = events.find((event) => event.body.type === "session.replaced");
+      assert.ok(notice !== undefined && notice.body.type === "session.replaced" && notice.body.previousNativeId === "ari-missing-session" && notice.body.contextLost === true);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+}
+
 test("a v2 agent negotiates v2", async () => {
   const rig = await openRig({ name: "v2", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
   try {

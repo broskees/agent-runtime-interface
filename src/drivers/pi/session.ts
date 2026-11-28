@@ -318,7 +318,7 @@ export class PiSession implements Session {
     const launch = this.#launchFor(cwd, policy, input.config, input.launch, undefined);
     // A handle's file name carries its session id; a bare id was matched by its file's header.
     const expectedId = "handle" in input.native ? sessionIdInFileName(input.native.handle) : input.native.id;
-    let failure: unknown = sessionFile === undefined ? `no session file in ${this.#sessionsDirectory()} holds session ${target}` : undefined;
+    let failure: string | undefined = sessionFile === undefined ? `no session file in ${this.#sessionsDirectory()} holds session ${target}` : undefined;
     if (sessionFile !== undefined) {
       try {
         const started = await this.#start(launch, ["--session", sessionFile]);
@@ -330,19 +330,20 @@ export class PiSession implements Session {
         await started.process.close();
         failure = `the session file ${sessionFile} does not exist`;
       } catch (error) {
-        failure = error;
+        // The file is there and pi could not open it: that is no missing session, so the error goes to the caller.
+        throw toCallError(error) !== undefined ? error : commandError(error, "native session");
       }
     }
-    if (input.policy === undefined) throw toCallError(failure) !== undefined ? (failure as Error) : callErrors.notFound({ resource: "Pi session", id: target });
+    if (input.policy === undefined) throw callErrors.notFound({ resource: "Pi session", id: target });
 
-    // Fall back to a fresh session, and say so: the old context is gone.
+    // The session file is missing: fall back to a fresh session, and say so, because the old context is gone.
     const fresh = await this.#start(launch, []);
     const threadId = threadIdFor(fresh.sessionId);
     this.#emit(
       {
         type: "session.replaced",
         previousNativeId: target,
-        reason: typeof failure === "string" ? `Pi could not resume the session: ${failure}.` : `Pi could not resume the session: ${failure instanceof Error ? failure.message : String(failure)}`,
+        reason: `Pi could not resume the session: ${failure ?? "it is missing"}.`,
         contextLost: true,
         showRuntimeNote: true,
       },

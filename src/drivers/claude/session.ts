@@ -532,9 +532,13 @@ export class ClaudeSession implements Session {
     try {
       await this.#ensureQuery(thread, { kind: "resume" });
     } catch (error) {
-      // Claude Code refused to resume the session (held by another process, or gone): start afresh and say so.
       this.#forget(thread);
-      return this.#replacement(input, nativeId, `locked: ${errorText(error)}`);
+      // Only a session another process holds, or one Claude Code no longer has, is replaced: start afresh and say so.
+      // Any other failure to start goes to the caller.
+      const text = errorText(error);
+      if (/refused to start \(session_held_by_background\)/.test(text)) return this.#replacement(input, nativeId, `locked: ${text}`);
+      if (/No conversation found with session ID/i.test(text)) return this.#replacement(input, nativeId, `missing: ${text}`);
+      throw error;
     }
     this.#announce(thread);
     if (input.quiet !== true) await this.#replayHistory(thread);

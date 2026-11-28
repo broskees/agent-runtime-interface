@@ -139,7 +139,9 @@ It never adds instruction text of its own. Its runtime mode arrives in the
   the driver sees that its session id does not match the file name, stops
   that process, starts a fresh session and emits `session.replaced` with
   `contextLost: true`. A session id no file holds takes the same fallback
-  without starting Pi on it.
+  without starting Pi on it. Only a missing session falls back: when the file
+  is there and pi fails to open it (a damaged file, a crash, a sign-in
+  error), the error goes to the caller and no fresh session starts.
 - **Turn**: one `prompt` and the run it starts. Pi has no turn id, so a turn
   is named by the position of its prompt among every user message of the
   session file in append order (weak, ordinal). Entries are append-only, so a

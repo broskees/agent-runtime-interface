@@ -56,6 +56,10 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
 - A resume with `purpose: "history"` of a session Claude Code has no
   transcript for is `not_found`; an earlier build started a fresh session
   in its place when the host passed `policy`.
+- A resume replaces only a session Claude Code reports held by another
+  process (`session_held_by_background`) or has no conversation for. Any
+  other failure to start the resumed query goes to the caller; an earlier
+  build started a fresh session for any of them.
 - A configured `executablePath` that names no executable file reports the
   driver unavailable, naming it.
 - Ambient sign-in from `claude auth status --json`, or an API key the

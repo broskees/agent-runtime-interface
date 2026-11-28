@@ -35,6 +35,9 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
 - A resume with `purpose: "history"` of a thread the session does not hold
   live is `unsupported`: Pi opens a session file only to run it. An earlier
   build started `pi` on the file as an interactive resume does.
+- A resume replaces only a missing session file. When the file is there and
+  pi fails to open it, the error goes to the caller; an earlier build
+  started a fresh session for any error.
 - Turns: start, steer (with `prompt_required` when Pi queued the steer after
   the run ended), interrupt; settlement only on `agent_settled` or process
   exit.

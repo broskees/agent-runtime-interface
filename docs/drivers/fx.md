@@ -76,8 +76,9 @@ the bare version, such as `0.0.17`
 The fx driver is the ACP base driver with the `fx acp` launch, so it resumes
 the way [the `acp` driver](acp.md#resuming-conversations-ari-did-not-create)
 does: it asks the agent for any session id the host names, with only the
-host's LaunchContext, and replaces a session the agent cannot resume with a
-fresh one and `session.replaced`. It lists no native sessions.
+host's LaunchContext, replaces a session the agent reports missing with a
+fresh one and `session.replaced`, and returns any other error. It lists no
+native sessions.
 
 ## Capabilities
 

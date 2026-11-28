@@ -30,6 +30,9 @@ driver's changelog lists what changed:
   `opencode`, `claude` and `muse` read the stored thread and leave it
   `unloaded`; `acp` (and its flavors) and `pi`, which can open a session only
   to run it, refuse with `unsupported`. A missing session is `not_found`.
+- A resume that fails for a reason other than a missing or held session
+  returns the error instead of starting a fresh conversation (`acp` and its
+  flavors, `claude`, `pi`).
 
 ### Contract (`ari`, `ari/json-schema/*`)
 

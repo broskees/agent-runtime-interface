@@ -141,8 +141,9 @@ const instance = await acpDriver.create(host, {
   synchronization](https://agentclientprotocol.com/protocol/v2/session-setup.md#current-state-synchronization));
   the driver applies it once the thread is registered, so work already
   `running` becomes a `provider_initiated` turn that the agent's later `idle`
-  settles. An agent that cannot resume the session gets a fresh one, with
-  `session.replaced` and `contextLost: true`.
+  settles. A session the agent reports missing (`resource_not_found`) is
+  replaced by a fresh one, with `session.replaced` and `contextLost: true`;
+  any other refusal goes to the caller.
 - **Host tools.** `launch.mcpServers` go to `session/new` under exactly the
   names the host gave them. ACP fixes a session's MCP servers in
   `session/new`, before an ARI thread id exists, so the driver does not call
@@ -164,11 +165,15 @@ keeps no record of which sessions it started. `resumeThread` sends
 session has not seen, a missing `policy.cwd` is refused with `validation`. The
 request carries only what the host supplied: the host's MCP servers under the
 names it chose, and its launch instructions (`systemPrompt` where the agent
-takes one, the rest in the thread's first prompt). When the agent cannot
-resume the session (missing, held elsewhere, or no resume support), the driver
-starts a fresh session in that directory and emits `session.replaced` with
-`contextLost: true`. The driver lists no native sessions (`nativeSessions` is
-absent). The five flavors below share this behaviour.
+takes one, the rest in the thread's first prompt). When the agent reports
+the session missing (`resource_not_found`), the driver starts a fresh session
+in that directory and emits `session.replaced` with `contextLost: true`. Any
+other error goes to the caller as the agent gave it: ACP has no error for a
+session another process holds, so the driver cannot tell a held session from
+another failure. An agent that can neither resume nor load sessions refuses
+with `unsupported` (`acp.session/resume`). The driver lists no native
+sessions (`nativeSessions` is absent). The five flavors below share this
+behaviour.
 
 A resume with `purpose: "history"` of a session this ARI session does not
 hold is refused with `unsupported` (`resumeThread.purpose.history`), and the
@@ -264,8 +269,8 @@ range. `test/drivers/acp/driver-rules.ts` checks both for all five drivers.
 - ACP authentication (`authenticate`, `auth/login`), elicitation, subagents,
   session list/delete and v1 session modes are not mapped; v1
   `current_mode_update` arrives as `x:acp.update`.
-- A v1 agent that can neither resume nor load sessions gets a fresh session on
-  resume, with `session.replaced` and `contextLost: true`.
+- A v1 agent that can neither resume nor load sessions cannot resume:
+  `resumeThread` refuses with `unsupported` (`acp.session/resume`).
 - A v2 tool call's `kind` and `status` reset by `null` are not applied: an
   ARI item keeps the kind it opened with, and ACP agents do not move a tool
   call back to `pending`. (Under v1, `null` changes nothing anyway.)

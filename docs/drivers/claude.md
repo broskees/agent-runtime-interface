@@ -260,8 +260,10 @@ exist for it.
   `session_held_by_background`), is replaced by a fresh session in the
   policy's directory, with `session.replaced` (`contextLost: true`). Claude
   Code writes a transcript only once a session holds a message, so a thread
-  that never ran a turn cannot be resumed and is replaced too. A resume
-  replays the stored turns as events unless `quiet`.
+  that never ran a turn cannot be resumed and is replaced too. Any other
+  failure to start the resumed query (a crash, a timeout, an API error) goes
+  to the caller, and no fresh session starts. A resume replays the stored
+  turns as events unless `quiet`.
 - A resume of a live thread applies a new `model` and `effort` to the running
   query with `setModel` and `applyFlagSettings`, and a new policy's
   permission mode with `setPermissionMode`; `appliedConfig` reports only
@@ -299,7 +301,8 @@ LaunchContext the host passed: its instructions as the system prompt's
 Claude Code's settings or other files. A session Claude Code has no record of,
 or refuses to resume because another process holds it, is replaced by a fresh
 session with `session.replaced` (`contextLost: true`) when the host passed
-`policy`, and rejects with `not_found` otherwise.
+`policy`, and rejects with `not_found` otherwise. Any other error is
+returned.
 
 ## Capabilities against the proposal's §1.2 Claude column
 

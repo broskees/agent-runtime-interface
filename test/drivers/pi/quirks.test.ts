@@ -158,6 +158,22 @@ test("a history resume reports history unavailable: pi opens a session file only
   assert.ok(!second.events.some((event) => event.body.type === "session.replaced" || event.body.type === "thread.upsert"));
 });
 
+test("a resume pi fails for a reason other than a missing session file returns the error and starts no fresh session", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, first, thread.id, "First.");
+  await first.session.close();
+  // The file is there, but pi cannot open it: its entries remain and its session header is gone.
+  const lines = fs.readFileSync(thread.handle!, "utf8").split("\n").filter((line) => line.trim() !== "");
+  fs.writeFileSync(thread.handle!, `${lines.filter((line) => (JSON.parse(line) as { type?: unknown }).type !== "session").join("\n")}\n`);
+  const second = await opened.open();
+  const spawns = opened.host.spawns.length;
+  await assert.rejects(second.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(opened.cwd) }), (error: unknown) => toCallError(error) !== undefined);
+  assert.equal(opened.host.spawns.length, spawns + 1, "only the failed resume started pi; no fresh session");
+  assert.ok(!second.events.some((event) => event.body.type === "session.replaced"));
+});
+
 test("a fork into another directory runs Pi's CLI there, and a fork from a turn keeps the history before it", async () => {
   const opened = await rig();
   const session = await opened.open();

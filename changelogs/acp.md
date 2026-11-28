@@ -37,6 +37,12 @@
 - A resume with `purpose: "history"` of a session the ARI session does not
   hold is `unsupported`, and nothing reaches the agent: ACP opens a session
   only to run it. An earlier build opened it as an interactive resume does.
+- A resume replaces only a session the agent reports missing
+  (`resource_not_found`). Any other error goes to the caller, and an agent
+  that cannot resume at all refuses with `unsupported`; an earlier build
+  started a fresh session for any of them. ACP has no error for a session
+  another process holds, so the conformance kit's locked-session check does
+  not apply.
 - `switchModel` is declared only while the agent offers a `model` option;
   `sessionModel` is `process_per_session`.
 - Tested against ACP protocol versions 1 and 2 (`testedVersions.range`

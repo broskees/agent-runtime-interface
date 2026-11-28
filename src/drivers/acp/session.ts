@@ -378,12 +378,12 @@ export class AcpSession implements Session {
       await this.#applyConfig(state, this.#withPolicy(input.policy, input.config));
       return { ...state.thread, appliedConfig: this.#currentConfig(state) };
     } catch (error) {
-      if (error instanceof JsonRpcError && error.code === ACP_ERRORS.authRequired) throw callErrorFrom(error, "session/resume");
-      if (!(error instanceof JsonRpcError) && toCallError(error)?.code !== "unsupported") throw callErrorFrom(error, "session/resume");
-      reason = error instanceof Error ? error.message : String(error);
+      // Only a session the agent reports missing is replaced. ACP has no error for a session another process holds,
+      // so any other refusal (and an agent that cannot resume at all) goes to the caller.
+      if (!(error instanceof JsonRpcError) || error.code !== ACP_ERRORS.resourceNotFound) throw callErrorFrom(error, "session/resume");
+      reason = error.message;
     }
-    // The agent could not resume the session (it is missing, locked by another process, or the agent cannot
-    // resume at all): start a fresh one, and say so, because the old context is gone.
+    // The agent has no such session: start a fresh one, and say so, because the old context is gone.
     const fresh = await this.#newNative(agent, cwd, servers, instructions.systemPrompt);
     const threadId = deriveId({ kind: "thread", native: strong(fresh.sessionId), identityVersion: ACP_IDENTITY_VERSION });
     this.#emit(

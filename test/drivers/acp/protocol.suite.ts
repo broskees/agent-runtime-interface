@@ -53,6 +53,23 @@ test("a v1 agent asked for v2 answers with v1, and the driver speaks v1 to it", 
   }
 });
 
+test("a history resume reports history unavailable: ACP opens a session only live, so the driver sends no session/resume, session/load or session/new", async () => {
+  const rig = await openRig({ name: "history", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
+  try {
+    const first = await rig.open();
+    const thread = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    await first.session.close();
+    const { session, events } = await rig.open();
+    const opens = (): number => frameMessages(rig.harness.frames, "client").filter((message) => ["session/resume", "session/load", "session/new"].includes(String(message["method"]))).length;
+    const before = opens();
+    await assert.rejects(session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy(), purpose: "history" }), (error) => isAriError(error, "unsupported"));
+    assert.equal(opens(), before, "a history read opened a session");
+    assert.ok(!events.some((event) => event.body.type === "session.replaced" || event.body.type === "thread.upsert"));
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 test("a v2 agent negotiates v2", async () => {
   const rig = await openRig({ name: "v2", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
   try {

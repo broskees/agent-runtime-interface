@@ -143,6 +143,21 @@ test("resume and rollback use Pi's session files, and a rollback survives a rest
   assert.equal(rebuilt.turns[0]?.id, firstTurn, "turn ids rebuilt from the session file match the live ones");
 });
 
+test("a history resume reports history unavailable: pi opens a session file only to run it, and writes the launch into it, so the driver starts no pi", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, first, thread.id, "First.");
+  await first.session.close();
+  const before = fs.readFileSync(thread.handle!, "utf8");
+  const second = await opened.open();
+  const spawns = opened.host.spawns.length;
+  await assert.rejects(second.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(opened.cwd), purpose: "history" }), (error: unknown) => isAriError(error, "unsupported"));
+  assert.equal(opened.host.spawns.length, spawns, "a history read started pi");
+  assert.equal(fs.readFileSync(thread.handle!, "utf8"), before, "the session file is unchanged");
+  assert.ok(!second.events.some((event) => event.body.type === "session.replaced" || event.body.type === "thread.upsert"));
+});
+
 test("a fork into another directory runs Pi's CLI there, and a fork from a turn keeps the history before it", async () => {
   const opened = await rig();
   const session = await opened.open();

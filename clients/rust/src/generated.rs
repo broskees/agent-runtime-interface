@@ -4221,7 +4221,7 @@ pub struct SessionResumeThreadParams {
     pub policy: Option<RuntimePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<LaunchContext>,
-    /// `history` loads the transcript read-only without a live runtime.
+    /// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<SessionResumeThreadParamsPurpose>,
     /// Skip replaying stored items as events.
@@ -4237,7 +4237,7 @@ pub enum SessionResumeThreadParamsNative {
 }
 
 crate::open_enum! {
-    /// `history` loads the transcript read-only without a live runtime.
+    /// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
     ///
     /// Open: a value this client does not know is kept as `Unrecognized`.
     SessionResumeThreadParamsPurpose {
@@ -4857,7 +4857,7 @@ pub struct ResumeThreadInput {
     pub policy: Option<RuntimePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<LaunchContext>,
-    /// `history` loads the transcript read-only without a live runtime.
+    /// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<ResumeThreadInputPurpose>,
     /// Skip replaying stored items as events.
@@ -4873,7 +4873,7 @@ pub enum ResumeThreadInputNative {
 }
 
 crate::open_enum! {
-    /// `history` loads the transcript read-only without a live runtime.
+    /// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
     ///
     /// Open: a value this client does not know is kept as `Unrecognized`.
     ResumeThreadInputPurpose {

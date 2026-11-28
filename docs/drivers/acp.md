@@ -170,6 +170,12 @@ starts a fresh session in that directory and emits `session.replaced` with
 `contextLost: true`. The driver lists no native sessions (`nativeSessions` is
 absent). The five flavors below share this behaviour.
 
+A resume with `purpose: "history"` of a session this ARI session does not
+hold is refused with `unsupported` (`resumeThread.purpose.history`), and the
+driver sends nothing: ACP opens a session only to run it (`session/resume`,
+`session/load`), so there is no read-only history. A thread this session
+holds is reported as it is.
+
 ## Capabilities
 
 The proposal's §1.2 column for the ACP base, against what this driver

@@ -44,6 +44,38 @@ async function terminal(opened: OpenedCodexSession, turnId: string) {
   return opened.until(() => opened.bodies("turn.terminal").find((body) => body.turnId === turnId), `turn.terminal of ${turnId}`);
 }
 
+describe("a history resume", () => {
+  test("reads the stored thread without a writer: no thread/resume, no MCP config, no policy and no replacement; the thread stays unloaded and its turns read back", async () => {
+    rig = await codexRig();
+    const first = await rig.open();
+    const thread = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const started = await first.session.startTurn({ threadId: thread.id, clientTurnKey: "h-1", intent: "start", content: [{ type: "text", text: "Remember 7." }] });
+    const native = await rig.nextTurn();
+    await native.complete();
+    await terminal(first, (started as { turnId: string }).turnId);
+    await first.session.close();
+
+    const second = await rig.open();
+    const resumes = rig.requests("thread/resume").length;
+    const starts = rig.requests("thread/start").length;
+    const mcpServers = () => rig!.host.calls.filter((call) => call.operation === "hostTools.mcpServerFor").length;
+    const servers = mcpServers();
+    const resumed = await second.session.resumeThread({ native: { handle: thread.handle! }, purpose: "history" });
+    assert.equal(resumed.id, thread.id);
+    assert.equal(resumed.status, "unloaded");
+    assert.equal(rig.requests("thread/resume").length, resumes, "a history read never opens the thread for writing");
+    assert.equal(mcpServers(), servers, "a history read gives Codex no MCP server");
+    const snapshot = await second.session.readSnapshot!(resumed.id);
+    assert.equal(snapshot.turns.length, 1);
+    await assert.rejects(second.session.startTurn({ threadId: resumed.id, clientTurnKey: "h-2", intent: "start", content: [{ type: "text", text: "Again." }] }), (error: unknown) => isAriError(error, "invalid_state"));
+
+    // A thread Codex does not have is not found: a history read never starts a new one.
+    await assert.rejects(second.session.resumeThread({ native: { handle: "019a0000-0000-7000-8000-000000000000" }, purpose: "history", policy: policy(rig.cwd) }), (error: unknown) => isAriError(error, "not_found"));
+    assert.equal(rig.requests("thread/start").length, starts, "no thread was created");
+    assert.equal(second.bodies("session.replaced").length, 0);
+  });
+});
+
 describe("codex quirks", () => {
   test("async questions are message-mode requests that survive their turn's end and a restart, until a user message answers them", async () => {
     rig = await codexRig();

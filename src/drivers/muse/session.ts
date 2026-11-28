@@ -397,6 +397,7 @@ export class MuseSession implements Session {
     const nativeId = "handle" in input.native ? input.native.handle : input.native.id;
     if (nativeId === null || nativeId === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const known = this.#threadsByNative.get(nativeId);
+    if (input.purpose === "history") return this.#readHistory(nativeId, known, input);
     if (known !== undefined && !known.unloaded) {
       if (input.launch !== undefined) await this.#replaceLaunch(known, input.launch);
       await this.#ensureHost(known);
@@ -439,6 +440,38 @@ export class MuseSession implements Session {
         await host.close();
         throw fallback;
       }
+    }
+  }
+
+  /**
+   * A `purpose: "history"` resume: a short-lived host checks the stored
+   * session with `session/read`, which takes no lease and loads nothing, so
+   * no writer starts and no MCP server reaches Muse. A session Muse does not
+   * have is `not_found`, never replaced. Nothing is replayed as events; the
+   * thread stays unloaded and `readSnapshot` reads it. A thread the session
+   * holds is reported as it is.
+   */
+  async #readHistory(nativeId: string, known: ThreadState | undefined, input: ResumeThreadInput): Promise<AppliedThread> {
+    if (known !== undefined) return known.thread;
+    const policyInput = input.policy;
+    if (policyInput === undefined) throw callErrors.validation([{ message: `resumeThread of ${nativeId} needs policy.cwd: this session has not seen the thread`, path: ["policy"] }]);
+    const muse = this.#policy(policyInput);
+    const cwd = await this.#canonical(policyInput.cwd);
+    const host = await this.#startHost(cwd, muse);
+    try {
+      const read = await host.request("session/read", { sessionId: nativeId, excludeItems: true }).catch((error: unknown) => {
+        throw callErrorFromMuse(this.#runtime.sdk, error, "native session");
+      });
+      const launch = input.launch ?? this.#input.launch;
+      const root = read.session.workspaceRoot ?? cwd;
+      const state = this.#register(nativeId, host, { cwd: root, policy: { ...policyInput, cwd: root }, muse, launch, model: read.session.modelId ?? undefined, instructions: launchInstructions(launch, undefined) });
+      state.host = undefined;
+      state.unloaded = true;
+      state.thread = { ...state.thread, status: "unloaded" };
+      this.#emit({ type: "thread.upsert", thread: { id: state.thread.id, status: "unloaded" } }, { threadId: state.thread.id });
+      return { ...state.thread, ...(state.model === undefined ? {} : { appliedConfig: { model: state.model } }) };
+    } finally {
+      await host.close();
     }
   }
 

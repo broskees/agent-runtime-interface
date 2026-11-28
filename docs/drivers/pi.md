@@ -182,6 +182,12 @@ with `validation` otherwise, because it needs `policy.cwd` to start a new
 session. The driver lists no native sessions
 (`nativeSessions` is absent).
 
+A resume with `purpose: "history"` of a thread this session does not hold
+live is refused with `unsupported` (`resumeThread.purpose.history`), and no
+`pi` starts: Pi opens a session file only to run it and records the launch
+in it, so the driver cannot read its history without a live runtime. A
+thread this session holds is reported as it is.
+
 ## Prompt content
 
 Text blocks become the prompt's text, and inline images go in Pi's `images`

@@ -303,6 +303,15 @@ session the server does not have is replaced by a fresh one with
 `session.replaced` when the host passed `policy`, and rejects with `not_found`
 otherwise. The driver lists no native sessions (`nativeSessions` is absent).
 
+A resume with `purpose: "history"` only reads: the driver finds the session
+on the server (a 1.x server for it starts, as for any 1.x thread, and needs
+`policy.cwd`), writes nothing to it (no rules, no MCP entries, no
+instructions) and uses no part of the policy but its directory. It replays
+nothing as events; `readSnapshot` reads the history. The thread stays
+`unloaded`, so a turn needs an interactive resume first (`invalid_state`
+`thread_unloaded`). A session the server does not have is `not_found`, never
+replaced. A thread this session holds is reported as it is.
+
 ## The `opencode.permissionRules` extension
 
 `capabilities.extensions` lists `{ ns: "opencode.permissionRules", version:

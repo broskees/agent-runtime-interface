@@ -307,7 +307,10 @@ export class PiSession implements Session {
     if (target === null || target === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const sessionFile = await this.#sessionFileFor(target, "handle" in input.native ? "handle" : "id");
     const known = [...this.#threads.values()].find((candidate) => candidate.thread.handle === target || candidate.thread.handle === sessionFile || candidate.thread.native.id === target);
-    if (known !== undefined && !known.unloaded && known.process !== undefined) return known.thread;
+    const held = known !== undefined && !known.unloaded && known.process !== undefined;
+    // A history read changes nothing. Pi opens a session file only to run it, and writes the launch into it, so it has no read-only history.
+    if (input.purpose === "history" && !held) throw callErrors.unsupported("resumeThread.purpose.history", "pi opens a session file only to run it, and records the launch in it, so the driver cannot read its history without a live runtime");
+    if (held) return known.thread;
 
     const policy = input.policy ?? known?.policy ?? { mode: "approval_required", interaction: "default", cwd: known?.thread.cwd ?? "" };
     const cwd = policy.cwd !== "" ? policy.cwd : (known?.thread.cwd ?? "");

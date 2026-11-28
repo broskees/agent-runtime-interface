@@ -316,6 +316,14 @@ another process holds open for writing, is replaced by a fresh thread with
 `session.replaced` (`contextLost: true`) when the host passed `policy`;
 without `policy` the error is returned.
 
+A resume with `purpose: "history"` reads the thread with `thread/read` and
+loads nothing: no `thread/resume`, so no writer starts, and no MCP server,
+policy or instruction reaches Codex. It replays nothing as events;
+`readSnapshot` reads the turns with `thread/turns/list`. The thread stays
+`unloaded`, so a turn needs an interactive resume first (`invalid_state`
+`thread_unloaded`). A thread Codex does not have is `not_found`, never
+replaced. A thread this session holds is reported as it is.
+
 ## Host instructions and tools
 
 With no launch context and no `context`, the driver sends no instruction

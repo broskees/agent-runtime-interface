@@ -347,7 +347,13 @@ export class AcpSession implements Session {
     const agent = await this.#agent();
     const knownId = this.#threadsByNative.get(nativeId);
     const known = knownId === undefined ? undefined : this.#threads.get(knownId);
-    if (known !== undefined && known.generation === this.#generation) return { ...known.thread, appliedConfig: this.#currentConfig(known) };
+    const held = known !== undefined && known.generation === this.#generation;
+    // A history read changes nothing. ACP opens a session only live (`session/resume`, `session/load`), so it has no read-only history.
+    if (input.purpose === "history") {
+      if (held) return { ...known.thread, appliedConfig: this.#currentConfig(known) };
+      throw callErrors.unsupported("resumeThread.purpose.history", "An ACP agent opens a session only to run it (session/resume or session/load), so the driver cannot read its history without a live runtime");
+    }
+    if (held) return { ...known.thread, appliedConfig: this.#currentConfig(known) };
     const givenCwd = input.policy?.cwd ?? known?.cwd;
     if (givenCwd === undefined || givenCwd === "") {
       throw callErrors.validation([{ message: "an ACP agent resumes a session in a directory: pass policy.cwd", path: ["policy", "cwd"] }]);

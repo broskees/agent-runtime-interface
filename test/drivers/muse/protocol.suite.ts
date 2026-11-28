@@ -659,6 +659,36 @@ describe("muse driver: Muse's protocol", () => {
     }
   });
 
+  test("a history resume reads the stored session with session/read: no session/resume, no lease, no session/start; the thread stays unloaded and a missing session is not_found", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const first = await start(rig, opened.session, thread, "Remember 7.");
+      await first.native.complete();
+      await terminal(opened, turnIdOf(first.result));
+      await opened.session.close();
+
+      const reader = await rig.open();
+      const resumes = rig.requests("session/resume").length;
+      const starts = rig.requests("session/start").length;
+      const read = await reader.session.resumeThread({ native: thread.native, policy: policy(rig.cwd), purpose: "history" });
+      assert.equal(read.id, thread.id);
+      assert.equal(read.status, "unloaded");
+      assert.equal(rig.requests("session/resume").length, resumes, "a history read never loads the session");
+      assert.equal(rig.world.inspect(thread.native.id!)?.loaded, false, "no host holds the session's lease");
+      const snapshot = await reader.session.readSnapshot!(read.id);
+      assert.equal(snapshot.turns.length, 1);
+      await assert.rejects(reader.session.startTurn({ threadId: read.id, clientTurnKey: "x", intent: "start", content: [{ type: "text", text: "x" }] }), (error) => isAriError(error, "invalid_state"));
+
+      await assert.rejects(reader.session.resumeThread({ native: { handle: "muse-missing-session" }, policy: policy(rig.cwd), purpose: "history" }), (error) => isAriError(error, "not_found"));
+      assert.equal(rig.requests("session/start").length, starts, "no session was started");
+      assert.equal(reader.bodies("session.replaced").length, 0);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("unloadThread drains the thread's host and releases its lease; resumeThread loads it again; release parks every host and the next turn resumes", async () => {
     const rig = await museRig();
     try {

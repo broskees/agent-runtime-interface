@@ -309,6 +309,14 @@ Muse host holds the lease on, is replaced by a fresh session with
 otherwise the error is returned. The driver lists no native sessions
 (`nativeSessions` is absent).
 
+A resume with `purpose: "history"` checks the session with `session/read` on
+a short-lived host, which takes no lease and loads nothing, so no writer
+starts and no MCP server reaches Muse. It replays nothing as events;
+`readSnapshot` reads the history the same way. The thread stays `unloaded`,
+so a turn needs an interactive resume first (`invalid_state`
+`thread_unloaded`). A session Muse does not have is `not_found`, never
+replaced. A thread this session holds is reported as it is.
+
 ## Steer refusal
 
 Muse answers a refused `turn/steer` with -32030 `commandRejected` and a

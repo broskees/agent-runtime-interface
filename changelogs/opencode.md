@@ -39,6 +39,10 @@
   the denies of other threads' entries; an earlier build wrote
   `approval_required` over them, so a saved deny could vanish and a saved
   allow could start asking.
+- A resume with `purpose: "history"` writes nothing to the session (no
+  rules, no MCP entries, no instructions), leaves the thread `unloaded` and
+  never replaces a missing session. An earlier build gave it rules and MCP
+  entries as an interactive resume does.
 - On a shared 1.x server, "always" is offered only for a grant that cannot
   match an MCP resource (a file read's `*` can), because 1.x checks its
   in-memory grants after every session's own rules.

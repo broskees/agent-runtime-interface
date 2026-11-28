@@ -53,6 +53,9 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
 - A resume of a live thread applies a new model and effort to the running
   query, and a new system prompt append by resuming the session in a new
   query; it rejects with `invalid_state` while the thread has work running.
+- A resume with `purpose: "history"` of a session Claude Code has no
+  transcript for is `not_found`; an earlier build started a fresh session
+  in its place when the host passed `policy`.
 - A configured `executablePath` that names no executable file reports the
   driver unavailable, naming it.
 - Ambient sign-in from `claude auth status --json`, or an API key the

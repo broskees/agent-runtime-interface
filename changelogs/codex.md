@@ -26,6 +26,11 @@ First version of the Codex driver.
   server from `hostTools.mcpServerFor` is passed on resume. Codex offers no
   clean way to add it before a new thread's first turn; the driver docs say
   why.
+- A resume with `purpose: "history"` reads the thread with `thread/read`
+  and loads nothing: no `thread/resume`, no MCP server, no policy, no
+  replacement. The thread stays `unloaded`; `readSnapshot` reads its turns.
+  An earlier build opened the thread for writing as an interactive resume
+  does.
 - Runtime modes: the approvals reviewer is named on every start, resume, fork
   and per-turn policy, so `auto` (`auto_review`) and the other modes (`user`)
   reach Codex on every path.

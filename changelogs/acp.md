@@ -34,6 +34,9 @@
 - `resumeThread` passes launch instructions on: `systemPrompt` on
   `session/resume`, `session/load` or the replacing `session/new`, the rest
   in the first prompt.
+- A resume with `purpose: "history"` of a session the ARI session does not
+  hold is `unsupported`, and nothing reaches the agent: ACP opens a session
+  only to run it. An earlier build opened it as an interactive resume does.
 - `switchModel` is declared only while the agent offers a `model` option;
   `sessionModel` is `process_per_session`.
 - Tested against ACP protocol versions 1 and 2 (`testedVersions.range`

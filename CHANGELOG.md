@@ -25,6 +25,11 @@ driver's changelog lists what changed:
 
 - `opencode`: a resume without a policy keeps the session's saved permission
   rules instead of writing `approval_required` over them.
+- A resume with `purpose: "history"` starts no writer, installs no MCP
+  server, rewrites no permission and creates no conversation. `codex`,
+  `opencode`, `claude` and `muse` read the stored thread and leave it
+  `unloaded`; `acp` (and its flavors) and `pi`, which can open a session only
+  to run it, refuse with `unsupported`. A missing session is `not_found`.
 
 ### Contract (`ari`, `ari/json-schema/*`)
 

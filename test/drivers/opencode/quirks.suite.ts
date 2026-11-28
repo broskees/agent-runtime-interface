@@ -499,6 +499,46 @@ describe("a resume without a policy keeps the session's saved rules", () => {
   });
 });
 
+describe("a history resume writes nothing", () => {
+  for (const generation of [1, 2] as const) {
+    test(`${generation}.x: a history resume reads the session without rewriting its rules or adding MCP entries, leaves the thread unloaded, and never creates a session`, async () => {
+      const rig = await rigFor(generation);
+      const first = await rig.open();
+      const a = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd), launch: { mcpServers: [{ name: "workspace-tools", transport: "http", url: "http://127.0.0.1:1/workspace" }] } });
+      await runTurn(rig, first, a.id, "Remember 7.");
+      await first.session.close();
+      const saved = rig.world.sessions.get(a.native.id!)!.rules.map((rule) => ({ ...rule }));
+      const writes = new Set(["session.update", "experimental.mcp.add", "mcp.add", "session.create"]);
+      const before = rig.world.frames.filter((frame) => frame.direction === "request" && writes.has(frame.operation)).length;
+
+      const reader = await rig.open();
+      // 1.x finds a session it has not seen only in a directory: the policy names it, and a history read uses nothing else of it.
+      const resumed = await reader.session.resumeThread({ native: { handle: a.handle! }, purpose: "history", ...(generation === 1 ? { policy: policy(rig.cwd, "full_access") } : {}) });
+      assert.equal(resumed.id, a.id);
+      assert.equal(resumed.status, "unloaded");
+      const snapshot = await reader.session.readSnapshot!(resumed.id);
+      assert.equal(snapshot.turns.length, 1);
+      const after = rig.world.frames.filter((frame) => frame.direction === "request" && writes.has(frame.operation));
+      assert.equal(after.length, before, `a history read wrote ${after.slice(before).map((frame) => frame.operation).join(", ")}`);
+      assert.deepEqual(rig.world.sessions.get(a.native.id!)!.rules, saved, "the session's rules are as OpenCode saved them");
+      await assert.rejects(reader.session.startTurn({ threadId: resumed.id, clientTurnKey: "after-history", intent: "start", content: [{ type: "text", text: "Again." }] }), (error: unknown) => isAriError(error, "invalid_state"));
+
+      // An interactive resume then makes it usable, on the server the history read used.
+      const alive = [...rig.world.servers].filter((server) => server.alive).length;
+      const interactive = await reader.session.resumeThread({ native: { handle: a.handle! }, policy: policy(rig.cwd) });
+      assert.equal(interactive.status, "idle");
+      assert.equal([...rig.world.servers].filter((server) => server.alive).length, alive, "no second server for the thread");
+      await runTurn(rig, reader, interactive.id, "Now interactive.");
+
+      // A session OpenCode does not have is not found: a history read never replaces it.
+      const sessions = rig.world.sessions.size;
+      await assert.rejects(reader.session.resumeThread({ native: { handle: "ses_missing" }, purpose: "history", policy: policy(rig.cwd) }), (error: unknown) => isAriError(error, "not_found"));
+      assert.equal(rig.world.sessions.size, sessions, "no session was created");
+      assert.ok(!reader.events.some((event) => event.body.type === "session.replaced"));
+    });
+  }
+});
+
 describe("approvals never widen", () => {
   for (const generation of [1, 2] as const) {
     test(`${generation}.x: "always" says it reaches the project, a full_access auto-reply would pick "once", and full_access asks nothing`, async () => {

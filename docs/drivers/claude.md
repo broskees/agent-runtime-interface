@@ -267,6 +267,10 @@ exist for it.
   permission mode with `setPermissionMode`; `appliedConfig` reports only
   what the query took. A resume with `purpose: "history"` changes nothing and
   reports what the thread runs with.
+- A resume with `purpose: "history"` of a session the driver does not hold
+  starts no query: it registers the thread `unloaded` for `readSnapshot`. A
+  session Claude Code has no transcript for is `not_found`, never replaced,
+  even when the host passed `policy`.
 - `forkThread` starts a query with `resume` (the source), `forkSession: true`,
   `sessionId` (the fork) and, for a fork from a turn, `resumeSessionAt` set to
   the last transcript entry of that turn (the fork keeps the turn). Claude

@@ -8086,7 +8086,7 @@ class SessionResumeThreadParams:
     policy: RuntimePolicy | None = None
     launch: LaunchContext | None = None
     purpose: SessionResumeThreadParamsPurpose | None = None
-    """`history` loads the transcript read-only without a live runtime."""
+    """`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`."""
     quiet: bool | None = None
     """Skip replaying stored items as events."""
 
@@ -8128,7 +8128,7 @@ def decode_session_resume_thread_params_native(data: Any) -> SessionResumeThread
 
 
 class SessionResumeThreadParamsPurpose(OpenEnum):
-    """`history` loads the transcript read-only without a live runtime.
+    """`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
     
     Open: a value this client does not know is kept as a member that is not recognized."""
     INTERACTIVE = "interactive"
@@ -9617,7 +9617,7 @@ class ResumeThreadInput:
     policy: RuntimePolicy | None = None
     launch: LaunchContext | None = None
     purpose: ResumeThreadInputPurpose | None = None
-    """`history` loads the transcript read-only without a live runtime."""
+    """`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`."""
     quiet: bool | None = None
     """Skip replaying stored items as events."""
 
@@ -9657,7 +9657,7 @@ def decode_resume_thread_input_native(data: Any) -> ResumeThreadInputNative:
 
 
 class ResumeThreadInputPurpose(OpenEnum):
-    """`history` loads the transcript read-only without a live runtime.
+    """`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
     
     Open: a value this client does not know is kept as a member that is not recognized."""
     INTERACTIVE = "interactive"

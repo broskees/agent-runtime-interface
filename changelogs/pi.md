@@ -32,6 +32,9 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
   session the user's own pi keeps. A resume by session id finds the file
   itself and gives Pi the path, so it works from any directory without Pi's
   fork question.
+- A resume with `purpose: "history"` of a thread the session does not hold
+  live is `unsupported`: Pi opens a session file only to run it. An earlier
+  build started `pi` on the file as an interactive resume does.
 - Turns: start, steer (with `prompt_required` when Pi queued the steer after
   the run ended), interrupt; settlement only on `agent_settled` or process
   exit.

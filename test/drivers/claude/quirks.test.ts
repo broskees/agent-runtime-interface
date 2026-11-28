@@ -252,6 +252,22 @@ describe("claude driver quirks", () => {
     }
   });
 
+  test("a history resume of a session Claude Code does not have is not_found: it starts no query and no fresh session, even with a policy", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const queries = rig.world.queries.length;
+      await assert.rejects(
+        rig.session.resumeThread({ native: { handle: "6f0c7d4e-0000-4000-8000-000000000000" }, policy: rig.policy(), purpose: "history" }),
+        (error: { callError?: { code: string } }) => error.callError?.code === "not_found",
+      );
+      assert.equal(rig.world.queries.length, queries, "a history read started a Claude Code process");
+      assert.equal(rig.log.filter((event) => event.body.type === "session.replaced").length, 0);
+      assert.equal(rig.log.filter((event) => event.body.type === "thread.upsert").length, 0, "no thread was announced");
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("LaunchContext.mcpServers with alwaysLoad reach the SDK with alwaysLoad, before the thread's first prompt", async () => {
     const rig = await openClaudeRig({ host: { mcpServerName: () => "host-orchestration" } });
     try {

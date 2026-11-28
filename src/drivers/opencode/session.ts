@@ -125,6 +125,8 @@ interface OcThread {
   active: ActiveTurn | undefined;
   compacting: { resolve(): void; reject(error: unknown): void } | undefined;
   unloaded: boolean;
+  /** Read by a `purpose: "history"` resume: the driver wrote nothing to its session, and it runs no turn until an interactive resume. */
+  history: boolean;
   /** A prompt sent and not yet admitted: its turn opens when the server names its message. */
   pendingPrompt: { readonly input: StartTurnInput; resolve(turn: ActiveTurn): void; reject(error: unknown): void } | undefined;
   /** Steers sent and not yet admitted: their user messages belong to the running turn. */
@@ -255,26 +257,32 @@ export class OpencodeSession implements Session {
     const target = "handle" in input.native ? input.native.handle : input.native.id;
     if (target === null || target === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const known = this.#threads.get(threadIdFor(target));
+    const history = input.purpose === "history";
     if (known !== undefined && !known.unloaded && known.link !== undefined) {
       // A subagent's thread lives as long as its parent's run; OpenCode drives it.
       if (known.parent !== undefined) return { ...known.thread, appliedConfig: this.#applied(known) };
+      // A history read changes nothing: it reports what the thread runs with.
+      if (history) return { ...known.thread, appliedConfig: this.#applied(known) };
       return this.#resumeHeld(known, input);
     }
     const policy = input.policy ?? known?.policy;
-    if (policy !== undefined) this.#checkMode(policy);
+    if (policy !== undefined && !history) this.#checkMode(policy);
     const directory = policy?.cwd !== undefined && policy.cwd !== "" ? await canonicalDirectory(policy.cwd) : known?.directory;
     if (directory === undefined && this.#context.shape.generation === 1) {
       throw callErrors.validation([{ message: "resuming an OpenCode 1.x session this session does not know needs policy.cwd", path: ["policy", "cwd"] }]);
     }
     const launch = this.#resumedLaunch(input, known);
-    const link = await this.#newLink(directory);
+    // A thread a history read left on a live server keeps that server (a 1.x thread's own).
+    const link = known?.link !== undefined && known.link.endpoint.alive ? known.link : await this.#newLink(directory);
     try {
       const found = await link.runtime.getSession(target, directory);
+      if (found !== undefined && history) return this.#historyThread(found, directory, launch, link, known);
+      if (found === undefined && history) throw callErrors.notFound({ resource: "OpenCode session", id: target });
       if (found !== undefined) {
         const cwd = found.directory || directory || "";
         await this.#watch(link, cwd);
         // Without a policy the session keeps the rules it was saved with; the driver adds only the denies of other threads' entries.
-        const savedRules = policy === undefined && known === undefined ? await link.runtime.getRules(found.id, cwd) : undefined;
+        const savedRules = policy === undefined && (known === undefined || known.history) ? await link.runtime.getRules(found.id, cwd) : undefined;
         const thread = this.#register(found.id, cwd, policy, launch, link, {}, undefined);
         if (savedRules !== undefined) thread.savedRules = savedRules;
         if (known !== undefined) thread.hostRules = known.hostRules;
@@ -299,6 +307,22 @@ export class OpencodeSession implements Session {
       if (this.#dedicated() && ![...this.#threads.values()].some((thread) => thread.link === link)) await this.#stopLink(link);
       throw error;
     }
+  }
+
+  /**
+   * A `purpose: "history"` resume of a session the server has: the thread is
+   * registered unloaded, with no policy, and the driver writes nothing to the
+   * session (no rules, no MCP entries, no instructions). It reads through the
+   * server (`readSnapshot`); an interactive resume makes it usable.
+   */
+  #historyThread(found: { id: string; directory: string }, directory: string | undefined, launch: Launch, link: Link, known: OcThread | undefined): AppliedThread {
+    const thread = this.#register(found.id, found.directory || directory || "", undefined, launch, link, {}, undefined);
+    if (known !== undefined) thread.hostRules = known.hostRules;
+    thread.history = true;
+    thread.unloaded = true;
+    thread.thread = { ...thread.thread, status: "unloaded" };
+    this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, status: "unloaded" } }, { threadId: thread.thread.id });
+    return { ...thread.thread, appliedConfig: this.#applied(thread) };
   }
 
   /**
@@ -451,6 +475,7 @@ export class OpencodeSession implements Session {
 
   async #startTurn(input: StartTurnInput): Promise<StartTurnResult> {
     const thread = this.#thread(input.threadId);
+    if (thread.history) throw callErrors.invalidState("thread_unloaded", `Thread ${thread.thread.id} was read for its history; resume it for interactive use first`);
     if (input.intent === "queue") return { status: "unsupported", capability: "turns.queue" };
     if (input.intent === "steer" && !this.#capabilities.turns.steer) return { status: "unsupported", capability: "turns.steer" };
     if (input.intent !== "start" && input.intent !== "steer") return { status: "unsupported", capability: `turns.${input.intent}` };
@@ -709,6 +734,8 @@ export class OpencodeSession implements Session {
       }
       await this.#watch(link, thread.directory);
       thread.link = link;
+      // A thread a history read registered stays as it is: only an interactive resume gives it rules and MCP entries.
+      if (thread.history) return link;
       thread.unloaded = false;
       if (thread.thread.status === "unloaded") {
         thread.thread = { ...thread.thread, status: "idle" };
@@ -832,6 +859,7 @@ export class OpencodeSession implements Session {
       active: undefined,
       compacting: undefined,
       unloaded: false,
+      history: false,
       pendingPrompt: undefined,
       pendingSteers: 0,
       parent,
@@ -842,6 +870,7 @@ export class OpencodeSession implements Session {
     thread.policy = policy;
     thread.link = link;
     thread.unloaded = false;
+    thread.history = false;
     thread.launch = launch;
     this.#threads.set(id, thread);
     this.#bySession.set(sessionId, thread);

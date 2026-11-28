@@ -508,6 +508,8 @@ export class ClaudeSession implements Session {
     }
     const requested = input.policy === undefined ? undefined : await canonicalDirectory(input.policy.cwd);
     const info = nativeId === null ? undefined : await this.#context.sdk.getSessionInfo(nativeId, requested === undefined ? undefined : { dir: requested });
+    // A history read never starts a session: one Claude Code has no transcript for has no history to read.
+    if ((nativeId === null || info === undefined) && input.purpose === "history") throw callErrors.notFound({ resource: "Claude session", id: nativeId ?? "(none)", message: `Claude Code has no transcript for session ${String(nativeId)}, so there is no history to read` });
     if (nativeId === null || info === undefined) return this.#replacement(input, nativeId, "missing");
     const cwd = info.cwd ?? requested;
     if (cwd === undefined) throw callErrors.validation([{ message: "Claude does not record this session's directory; pass policy.cwd", path: ["policy", "cwd"] }]);

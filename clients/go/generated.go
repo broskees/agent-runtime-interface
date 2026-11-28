@@ -4502,7 +4502,7 @@ type SessionResumeThreadParams struct {
 	Config    ConfigValues                    `json:"config,omitzero"`
 	Policy    *RuntimePolicy                  `json:"policy,omitzero"`
 	Launch    *LaunchContext                  `json:"launch,omitzero"`
-	// `history` loads the transcript read-only without a live runtime.
+	// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
 	Purpose *SessionResumeThreadParamsPurpose `json:"purpose,omitzero"`
 	// Skip replaying stored items as events.
 	Quiet *bool `json:"quiet,omitzero"`
@@ -4537,7 +4537,7 @@ func (u *SessionResumeThreadParamsNative) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("SessionResumeThreadParamsNative: no variant matches %s", data)
 }
 
-// `history` loads the transcript read-only without a live runtime.
+// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
 //
 // Open: any string is kept; Recognized reports whether this client knows it.
 type SessionResumeThreadParamsPurpose string
@@ -4974,7 +4974,7 @@ type ResumeThreadInput struct {
 	Config ConfigValues            `json:"config,omitzero"`
 	Policy *RuntimePolicy          `json:"policy,omitzero"`
 	Launch *LaunchContext          `json:"launch,omitzero"`
-	// `history` loads the transcript read-only without a live runtime.
+	// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
 	Purpose *ResumeThreadInputPurpose `json:"purpose,omitzero"`
 	// Skip replaying stored items as events.
 	Quiet *bool `json:"quiet,omitzero"`
@@ -5009,7 +5009,7 @@ func (u *ResumeThreadInputNative) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("ResumeThreadInputNative: no variant matches %s", data)
 }
 
-// `history` loads the transcript read-only without a live runtime.
+// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
 //
 // Open: any string is kept; Recognized reports whether this client knows it.
 type ResumeThreadInputPurpose string

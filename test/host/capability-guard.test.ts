@@ -469,6 +469,27 @@ describe("argument and thread-state gates", () => {
     const unknown = await guarded.startTurn({ threadId: "thread-elsewhere", clientTurnKey: "k2", intent: "start", content: TEXT, policy: { ...SETUP_POLICY, mode: "full_access" } });
     assert.equal(unknown.status, "accepted");
   });
+
+  test("a policy without a mode needs no runtime mode capability; on a turn it changes no mode, and naming a mode for a thread that runs the harness's own is a switch", async () => {
+    const capabilities = argumentGatesOn();
+    for (const mode of ["read_only", "approval_required", "auto_accept_edits", "auto", "full_access"] as const) capabilities.runtimePolicy.modes[mode] = { supported: false, enforcement: "native" };
+    capabilities.sessions.switchRuntimeMode = false;
+    capabilities.runtimePolicy.switchInSession = false;
+    const driver = fakeSession(capabilities);
+    const guarded = guardSession(driver);
+    const harnessPolicy = { interaction: "default", cwd: "/work" } as const;
+    await guarded.createThread({ cwd: "/work", policy: harnessPolicy });
+    const kept = await guarded.startTurn({ threadId: "thread-1", clientTurnKey: "k1", intent: "start", content: TEXT, policy: harnessPolicy });
+    assert.equal(kept.status, "accepted");
+    capabilities.runtimePolicy.modes.approval_required = { supported: true, enforcement: "native" };
+    assert.deepEqual(await guarded.startTurn({ threadId: "thread-1", clientTurnKey: "k2", intent: "start", content: TEXT, policy: SETUP_POLICY }), { status: "unsupported", capability: "sessions.switchRuntimeMode" });
+
+    // On a thread with a host's mode, a turn whose policy names none keeps it: a later turn naming the same mode is no switch.
+    const second = guardSession(fakeSession(capabilities));
+    await second.createThread({ cwd: "/work", policy: SETUP_POLICY });
+    assert.equal((await second.startTurn({ threadId: "thread-1", clientTurnKey: "k3", intent: "start", content: TEXT, policy: harnessPolicy })).status, "accepted");
+    assert.equal((await second.startTurn({ threadId: "thread-1", clientTurnKey: "k4", intent: "start", content: TEXT, policy: SETUP_POLICY })).status, "accepted");
+  });
 });
 
 describe("planFallback", () => {

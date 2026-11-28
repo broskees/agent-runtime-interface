@@ -127,15 +127,15 @@ describe("the runtime mode", () => {
     const second = await rig.open();
     const resumed = await second.session.resumeThread({ native: { handle: thread.handle! }, quiet: true });
     assert.deepEqual(approvalSettingsIn(rig.requests("thread/resume").at(-1)), []);
-    // Codex keeps the thread's saved settings, and says so.
-    assert.deepEqual(resumed.effectiveMode, { mode: "full_access", source: "harness" });
     const fork = await second.session.forkThread!({ threadId: resumed.id, at: { type: "latest" } });
     assert.deepEqual(approvalSettingsIn(rig.requests("thread/fork").at(-1)), [], "the fork sent the approval settings of a mode nobody chose");
-    assert.deepEqual(fork.effectiveMode, { mode: "full_access", source: "harness" });
     await second.session.release();
     await completedTurn(rig, second, resumed.id, "after-release");
     assert.deepEqual(approvalSettingsIn(rig.requests("thread/resume").at(-1)), [], "the reload sent the approval settings of a mode nobody chose");
     assert.equal(rig.world.storedThread(thread.native.id!)!.settings.approvalPolicy, "never");
+    // Codex keeps the thread's saved settings, and says so.
+    assert.deepEqual(resumed.effectiveMode, { mode: "full_access", source: "harness" });
+    assert.deepEqual(fork.effectiveMode, { mode: "full_access", source: "harness" });
   });
 
   test("a resume of a loaded thread applies its policy and model through thread/settings/update, and refuses another launch or directory, naming it", async () => {

@@ -101,11 +101,14 @@ async fn complete_a_turn(driver: &str, config: Value, option_id: &str, expected_
     let mut events = client.session_events(&SessionEventsParams { session_id: session.session_id.clone(), ..Default::default() }).await.expect("session/events");
 
     let project = place.path("project");
-    let policy = RuntimePolicy { mode: RuntimeMode::ApprovalRequired, interaction: InteractionMode::Default, cwd: project.clone(), additional_roots: None, native: None };
+    let policy = RuntimePolicy { mode: Some(RuntimeMode::ApprovalRequired), interaction: InteractionMode::Default, cwd: project.clone(), additional_roots: None, native: None };
     let thread = client
         .session_create_thread(&SessionCreateThreadParams { session_id: session.session_id.clone(), cwd: project.clone(), policy, config: None, launch: None, title: None, force_new: None, persist_session: None, context: None })
         .await
         .expect("session/createThread");
+    // The thread reports the mode it runs in, and that the host chose it.
+    let effective = thread.effective_mode.as_ref().expect("effectiveMode");
+    assert_eq!((effective.mode.as_ref(), &effective.source), (Some(&RuntimeMode::ApprovalRequired), &EffectiveModeSource::Host), "{effective:?}");
     let started = client
         .session_start_turn(&SessionStartTurnParams {
             session_id: session.session_id.clone(),

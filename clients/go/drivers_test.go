@@ -110,9 +110,14 @@ func completeATurn(t *testing.T, driver string, config map[string]any, optionID,
 		t.Fatal("session/events:", err)
 	}
 	project := place.path("project")
-	thread, err := client.SessionCreateThread(ctx, SessionCreateThreadParams{SessionID: session.SessionID, Cwd: project, Policy: RuntimePolicy{Mode: RuntimeModeApprovalRequired, Interaction: InteractionModeDefault, Cwd: project}})
+	mode := RuntimeModeApprovalRequired
+	thread, err := client.SessionCreateThread(ctx, SessionCreateThreadParams{SessionID: session.SessionID, Cwd: project, Policy: RuntimePolicy{Mode: &mode, Interaction: InteractionModeDefault, Cwd: project}})
 	if err != nil {
 		t.Fatal("session/createThread:", err)
+	}
+	// The thread reports the mode it runs in, and that the host chose it.
+	if thread.EffectiveMode == nil || thread.EffectiveMode.Mode == nil || *thread.EffectiveMode.Mode != RuntimeModeApprovalRequired || thread.EffectiveMode.Source != EffectiveModeSourceHost {
+		t.Fatalf("effectiveMode: %+v", thread.EffectiveMode)
 	}
 	started, err := client.SessionStartTurn(ctx, SessionStartTurnParams{SessionID: session.SessionID, ThreadID: thread.ID, ClientTurnKey: "go-1", Intent: StartTurnIntentStart, Content: []ContentBlock{{&TextContent{Text: "Say hello"}}}})
 	if err != nil {

@@ -76,6 +76,9 @@ async def complete_a_turn(driver: str, config: dict[str, Any], option_id: str, e
             project = place.path("project")
             policy = ari.RuntimePolicy(mode=ari.RuntimeMode.APPROVAL_REQUIRED, interaction=ari.InteractionMode.DEFAULT, cwd=project)
             thread = await client.session_create_thread(ari.SessionCreateThreadParams(session_id=session.session_id, cwd=project, policy=policy))
+            # The thread reports the mode it runs in, and that the host chose it.
+            assert thread.effective_mode is not None, thread
+            assert (thread.effective_mode.mode, thread.effective_mode.source) == (ari.RuntimeMode.APPROVAL_REQUIRED, ari.EffectiveModeSource.HOST), thread.effective_mode
             started = await client.session_start_turn(
                 ari.SessionStartTurnParams(session_id=session.session_id, thread_id=thread.id, client_turn_key="python-1", intent=ari.StartTurnIntent.START, content=[ari.TextContent(text="Say hello")])
             )

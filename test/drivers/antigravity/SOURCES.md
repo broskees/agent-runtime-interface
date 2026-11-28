@@ -16,11 +16,15 @@ the file digests, and `test/drivers/acp/vendor.suite.ts` checks them.
   (https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json, read
   2026-11-23): Google's ACP server for Antigravity, distributed as zip
   archives per platform.
-- The CLI launch (`agy acp --gemini-dir <profile> --app-data-dir antigravity-acp`)
+- The CLI launch of `profile: "instance"`
+  (`agy acp --gemini-dir <profile> --app-data-dir antigravity-acp`)
   and the environment it strips and sets come from a public open-source ACP
   client of Antigravity, at the commit cited in `docs/drivers/antigravity.md`
   (the repository rule on host names keeps its name out of `test/`), and from
-  the proposal's §1.3 Antigravity row.
+  the proposal's §1.3 Antigravity row. The default launch, `agy acp` with
+  nothing added, relies on the defaults `agy acp --help` of 1.5.17 states
+  (`--gemini-dir` is `.gemini` in the home directory, `--app-data-dir` is
+  `antigravity-cli`); the fake applies the same defaults.
 - The fake prints a bare version for `--version`, as the real `agy` does
   (`test/fixtures/cli-version-output/agy.txt`, captured from `agy` 1.5.17).
   The driver runs the user's own `agy`; the install and update steps it names

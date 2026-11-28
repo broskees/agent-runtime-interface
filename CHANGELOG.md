@@ -106,6 +106,10 @@ driver's changelog lists what changed:
 - `pi`, `acp` (ACP v1 and v2), the ACP flavors `grok`, `fx`, `kiro` and
   `antigravity`, `codex`, `claude`, `opencode` (1.x and 2.x servers),
   `cursor` and `muse`.
+- `antigravity` uses the user's own `agy` profile and sign-in by default
+  (`profile: "user"`); `profile: "instance"` gives an instance a private
+  profile and sign-in, as every instance had in earlier builds. Only
+  `agy --version` runs with the self-updater off.
 
 ### Removed: every installation feature
 

@@ -1008,15 +1008,21 @@ scenario in its own temp workspace: `cwd/` (the thread's directory, and the
 directory `agy` runs in), `agy-home/`, `xdg-config/`, `xdg-data/`,
 `xdg-state/`, `xdg-cache/`, `xdg-runtime/`, `tmp/` and `instances/` (the
 host's directories; the driver keeps the instance's Antigravity profile in
-`instances/antigravity-recorder/state/profile`). The driver starts
+`instances/antigravity-recorder/state/profile`). The recorder names the
+driver's `profile: "instance"` itself (`antigravityRecorderConfig`), not the
+driver's default, the user's own profile. So the driver starts
 `agy acp --gemini-dir <profile> --app-data-dir antigravity-acp` with
-`AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1` and `AGY_CLI_DISABLE_AUTO_UPDATE=true`
-(docs/drivers/antigravity.md). The recorder's host starts it with the
+`AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1` (docs/drivers/antigravity.md). The
+recorder's host adds `AGY_CLI_DISABLE_AUTO_UPDATE=true` to every request the
+driver makes to start a process (`ANTIGRAVITY_RECORDER_ADDED_ENVIRONMENT`),
+above the process tap, so a recording runs the version its header names and
+never updates the user's `agy`; the driver itself sets it only for
+`agy --version`. The recorder's host starts it with the
 recorder's own environment, less `HOME`, `TMPDIR`, `DBUS_SESSION_BUS_ADDRESS`
 and every `XDG_*` variable, and strips every variable whose name starts with
 `GEMINI_`, `GOOGLE_`, `GCLOUD_`, `CLOUDSDK_` or `AGY_` (its own
-`envPolicy`, `ANTIGRAVITY_RECORDER_ENV_POLICY`), then adds these, the driver's
-own last:
+`envPolicy`, `ANTIGRAVITY_RECORDER_ENV_POLICY`), then adds these, the
+request's own last:
 
 | Variable | Value | Why |
 |---|---|---|
@@ -1026,7 +1032,8 @@ own last:
 | `XDG_RUNTIME_DIR` | `<workspace>/xdg-runtime` | the user's runtime directory holds their session bus and keyring sockets |
 | `TMPDIR` | `<workspace>/tmp` | so a temp path `agy` reports is inside the workspace, and becomes `<WORKSPACE>` |
 | `DBUS_SESSION_BUS_ADDRESS` | `unix:path=<workspace>/no-session-bus`, where nothing listens | D-Bus clients find the session bus at this address (D-Bus Specification, "Well-known Message Bus Instances"); with it unreachable, `agy` cannot reach the Secret Service keyring and keeps its sign-in in its file storage (see "How Antigravity finds the sign-in") |
-| `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` | `1`, from the driver | `agy` 1.5.16 and later use the profile file instead of the shared keyring when this is set. On Linux an unreachable keyring also causes file fallback (docs/drivers/antigravity.md, "A profile per instance"); the recorder keeps the session bus unreachable as a second guard |
+| `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` | `1`, from the driver | `agy` 1.5.16 and later use the profile file instead of the shared keyring when this is set. On Linux an unreachable keyring also causes file fallback (docs/drivers/antigravity.md, "A profile per instance, on request"); the recorder keeps the session bus unreachable as a second guard |
+| `AGY_CLI_DISABLE_AUTO_UPDATE` | `true`, from the recorder's host | the switch of the CLI's self-updater: a recording must not update the `agy` whose version its header names |
 
 A process the driver starts with no working directory (the driver names none
 for `agy acp`) starts in `<workspace>/cwd`, not in the recorder's directory:
@@ -1114,7 +1121,8 @@ under them.
   the driver set, do nothing in `agy` 1.5.x: the 1.5.15 and 1.5.17 binaries
   hold neither name, and the same T3 Code issue found
   `AGY_ACP_FORCE_FILE_STORAGE` missing from 1.5.7 to 1.5.12. The binaries
-  hold `AGY_CLI_FORCE_FILE_TOKEN_STORAGE`, which the driver now sets.
+  hold `AGY_CLI_FORCE_FILE_TOKEN_STORAGE`, which the driver now sets with
+  `profile: "instance"`, the profile the recorder runs.
 - So the recorder copies only that one file: the user's
   `~/.gemini/antigravity-cli/antigravity-oauth-token` (`HOME` from the
   recorder's environment) into `<profile>/antigravity-acp/`, mode 0600 in a

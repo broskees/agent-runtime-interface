@@ -27,5 +27,6 @@ driverRuleTests({
   },
   session: acpSessionMembers(false, { rollbackThread: "unsupported" }),
   instance: acpInstanceMembers(),
-  launch: "agy acp --gemini-dir",
+  // The default config's launch: the user's own profile.
+  launch: "`agy acp`, with no other argument",
 });

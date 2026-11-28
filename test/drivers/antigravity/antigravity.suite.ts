@@ -1,4 +1,7 @@
-// Antigravity's quirks: a profile directory per instance, ambient Google
+// Antigravity's quirks: the user's own `agy` profile and sign-in by default,
+// or a profile directory per instance (`profile: "instance"`), with sign-in
+// and resume following the profile; the self-updater off for the version
+// command only; ambient Google
 // credentials passed through unless the host's environment policy strips them
 // (a policy that strips nothing starts a session), fixed-choice
 // permission prompts, a rollback refused before anything is touched, and the
@@ -19,7 +22,9 @@ import {
   antigravityDriver,
 } from "../../../src/drivers/antigravity/index.ts";
 import type { AntigravityConfig } from "../../../src/drivers/antigravity/index.ts";
+import type { AriEvent } from "../../../src/generated/events.ts";
 import { isAriError } from "../../../src/index.ts";
+import type { Instance, Session } from "../../../src/runtime.ts";
 import { meta } from "../../../src/meta/antigravity.ts";
 import { openRig } from "../acp/rig.ts";
 import { createProcessService } from "../../../src/node/process.ts";
@@ -46,10 +51,39 @@ const GOOGLE_AMBIENT = {
   GEMINI_HOME: "/home/someone/.gemini",
 };
 
-test("each instance gets its own profile directory, and the agent gets the ambient environment as it is, Google credentials included", async () => {
+test("by default an instance runs agy acp on the user's own profile: no profile flags, no file storage switch, no updater switch and no profile directory, and the agent gets the ambient environment as it is, Google credentials included", async () => {
+  assert.equal(ANTIGRAVITY_DEFAULT_CONFIG.profile, "user");
+  // A config saved before `profile` existed names none: it gets the user's own profile too.
+  const { profile: _profile, ...unset } = ANTIGRAVITY_DEFAULT_CONFIG;
+  const instances = await Promise.all(
+    [
+      ["agy-one", { ...ANTIGRAVITY_DEFAULT_CONFIG }],
+      ["agy-two", { ...ANTIGRAVITY_DEFAULT_CONFIG, profile: "user" }],
+      ["agy-unset", unset],
+    ].map(([instanceId, config]) =>
+      openRig({ name: "antigravity", driver: antigravityDriver, config: config as AntigravityConfig, executable: "agy", protocol: 1, agentArgs: AGY_VERSION, instanceId: instanceId as string, fakeHost: { ambientEnvironment: GOOGLE_AMBIENT } }),
+    ),
+  );
+  try {
+    for (const rig of instances) {
+      await rig.open();
+      const runtime = rig.host.spawns.find((spawn) => spawn.purpose === "runtime")!;
+      assert.equal(runtime.command, "agy");
+      assert.deepEqual(runtime.args, ["acp"], "agy finds the user's own profile, settings, conversations and sign-in where it always does");
+      for (const name of ["AGY_CLI_FORCE_FILE_TOKEN_STORAGE", "AGY_CLI_DISABLE_AUTO_UPDATE", "AGY_ACP_FORCE_FILE_STORAGE"]) assert.equal(runtime.environment[name], undefined, `the driver sets no ${name}`);
+      assert.equal(fs.existsSync(`${rig.host.paths.stateDir}/profile`), false, "no private profile directory");
+      // The host strips nothing, so every inherited variable reaches agy unchanged; the driver sets no GEMINI_HOME of its own.
+      for (const [name, value] of Object.entries(GOOGLE_AMBIENT)) assert.equal(runtime.environment[name], value, `${name} passed through`);
+    }
+  } finally {
+    for (const rig of instances) await rig.cleanup();
+  }
+});
+
+test("profile instance gives each instance its own profile directory: agy acp --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp with AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1, and no updater switch", async () => {
   const instances = await Promise.all(
     ["agy-one", "agy-two"].map((instanceId) =>
-      openRig({ name: "antigravity", driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG }, executable: "agy", protocol: 1, agentArgs: AGY_VERSION, instanceId, fakeHost: { ambientEnvironment: GOOGLE_AMBIENT } }),
+      openRig({ name: "antigravity", driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG, profile: "instance" }, executable: "agy", protocol: 1, agentArgs: AGY_VERSION, instanceId, fakeHost: { ambientEnvironment: GOOGLE_AMBIENT } }),
     ),
   );
   try {
@@ -63,11 +97,10 @@ test("each instance gets its own profile directory, and the agent gets the ambie
       assert.deepEqual(runtime.args, ["acp", "--gemini-dir", profile, "--app-data-dir", "antigravity-acp"]);
       // agy 1.5.16 and later keep the sign-in in their file storage, under the profile, only with this variable set.
       assert.equal(runtime.environment["AGY_CLI_FORCE_FILE_TOKEN_STORAGE"], "1");
-      assert.equal(runtime.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
+      assert.equal(runtime.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], undefined, "the driver turns off no self-updater for a session");
       // agy 1.5.x reads neither; the driver sets only what it reads.
       assert.equal(runtime.environment["AGY_ACP_FORCE_FILE_STORAGE"], undefined);
       assert.equal((fs.statSync(profile).mode & 0o777).toString(8), "700");
-      // The host strips nothing, so every inherited variable reaches agy unchanged; the driver sets no GEMINI_HOME of its own.
       for (const [name, value] of Object.entries(GOOGLE_AMBIENT)) assert.equal(runtime.environment[name], value, `${name} passed through`);
     }
     assert.notEqual(profiles[0], profiles[1]);
@@ -107,7 +140,7 @@ function desktopProcessService(layout: AntigravityLayout, machine: { readonly bi
   };
 }
 
-test("two instances on a desktop whose keyring holds a Google sign-in each keep their own sign-in in their own profile, and neither reads or changes the keyring's", async () => {
+test("two instances with profile instance on a desktop whose keyring holds a Google sign-in each keep their own sign-in in their own profile, and neither reads or changes the keyring's", async () => {
   const machine = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-antigravity-desktop-")));
   const fake = fakeAgyOnPath(machine);
   const keyring = path.join(machine, "keyring-gemini-antigravity");
@@ -146,6 +179,149 @@ test("two instances on a desktop whose keyring holds a Google sign-in each keep 
     assert.equal(fs.readFileSync(keyring, "utf8"), keyringSignIn, "the keyring's sign-in is unchanged");
   } finally {
     for (const directory of [signedIn.root, neverSignedIn.root, machine]) fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/** The user's own sign-in file, where `agy` keeps it without a reachable keyring: `~/.gemini/antigravity-cli/antigravity-oauth-token` (`--gemini-dir` defaults to `.gemini`, `--app-data-dir` to `antigravity-cli`, `agy acp --help`). */
+function userSignInFileIn(home: string): string {
+  return path.join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+}
+
+test("instances on the user's own profile all use the user's one Google sign-in, as the user's own agy does: the keyring's on a desktop, else the user's ~/.gemini/antigravity-cli/antigravity-oauth-token, and a refresh goes back there", async () => {
+  const simple = SCENARIOS.find((scenario) => scenario.name === "simple")!;
+  const user = { ...ANTIGRAVITY_DEFAULT_CONFIG };
+  for (const machineKind of ["desktop", "no keyring"] as const) {
+    const machine = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-antigravity-user-")));
+    const fake = fakeAgyOnPath(machine);
+    // The fake stands in for the keyring with this file; an empty name is a machine without one.
+    const keyring = machineKind === "desktop" ? path.join(machine, "keyring-gemini-antigravity") : "";
+    const bus = path.join(machine, "session-bus");
+    fs.writeFileSync(bus, "");
+    const first = createAntigravityLayout("ari-antigravity-user-a-");
+    const second = createAntigravityLayout("ari-antigravity-user-b-");
+    // Both instances run as the same user, so they share one HOME.
+    const home = first.home;
+    const store = keyring === "" ? userSignInFileIn(home) : keyring;
+    const signIn = JSON.stringify({ token: { access_token: "fake-access-user", refresh_token: "fake-refresh-user" }, auth_method: "consumer" });
+    const refreshed = JSON.stringify({ token: { access_token: "fake-access-user2", refresh_token: "fake-refresh-user2" }, auth_method: "consumer" });
+    fs.mkdirSync(path.dirname(store), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(store, signIn, { mode: 0o600 });
+    try {
+      for (const [layout, extra] of [[first, { ARI_FAKE_AGY_REFRESH: refreshed }], [second, {}]] as const) {
+        const service = desktopProcessService({ ...layout, home }, { bin: fake.bin, keyring, bus, env: { ...fake.env, ...extra } });
+        try {
+          await runAntigravityScenario({ scenario: simple, layout, process: service, models: recordingModelChooser({}), timeoutMs: 20_000, config: user });
+        } finally {
+          await service.dispose();
+        }
+      }
+      const acp = fake.processes().filter((each) => each.args[0] === "acp");
+      assert.deepEqual(acp.map((each) => each.args), [["acp"], ["acp"]], machineKind);
+      assert.deepEqual(
+        acp.map((each) => [each.signInStore, each.signInFile, each.signIn]),
+        [
+          [keyring === "" ? "file" : "keyring", store, signIn],
+          [keyring === "" ? "file" : "keyring", store, refreshed],
+        ],
+        `${machineKind}: both used the user's one sign-in, and the second found the first one's refresh`,
+      );
+      assert.equal(fs.readFileSync(store, "utf8"), refreshed, `${machineKind}: the refresh went back to the user's sign-in`);
+      for (const layout of [first, second]) assert.equal(fs.existsSync(layout.profile), false, `${machineKind}: no private profile`);
+    } finally {
+      for (const directory of [first.root, second.root, machine]) fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+/** An Antigravity instance whose agents start through `service`, with the host's directories in `layout`. */
+async function antigravityInstanceOn(layout: AntigravityLayout, service: ProcessService, config: AntigravityConfig, instanceId: string): Promise<Instance> {
+  const base = path.dirname(layout.stateDir);
+  const host = createFakeHost<AntigravityConfig>({ config, envPolicy: ANTIGRAVITY_RECORDER_ENV_POLICY, paths: { stateDir: layout.stateDir, cacheDir: path.join(base, "cache"), tmpDir: path.join(base, "tmp") } });
+  return antigravityDriver.create({ ...host, process: service }, { instanceId, config, environment: {} });
+}
+
+test("resume follows the profile: an instance on the user's own profile resumes a conversation another instance on it had, and an instance with profile instance, which has its own conversations, replaces it with a fresh one and says so", async () => {
+  const machine = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-antigravity-resume-")));
+  const fake = fakeAgyOnPath(machine);
+  const bus = path.join(machine, "session-bus");
+  fs.writeFileSync(bus, "");
+  const layouts = ["a", "b", "c"].map((name) => createAntigravityLayout(`ari-antigravity-resume-${name}-`));
+  const [first, second, third] = layouts as [AntigravityLayout, AntigravityLayout, AntigravityLayout];
+  // One user, so one HOME, and one project folder all three work in.
+  const home = first.home;
+  const cwd = first.cwd;
+  const policy = { cwd, mode: "approval_required", interaction: "default" } as const;
+  const open = async (layout: AntigravityLayout, config: AntigravityConfig, instanceId: string): Promise<{ instance: Instance; session: Session; service: ProcessService }> => {
+    const service = desktopProcessService({ ...layout, home, cwd }, { bin: fake.bin, keyring: "", bus, env: fake.env });
+    const instance = await antigravityInstanceOn(layout, service, config, instanceId);
+    return { instance, session: await instance.openSession({}), service };
+  };
+  const close = async (opened: { instance: Instance; service: ProcessService }): Promise<void> => {
+    await opened.instance.dispose();
+    await opened.service.dispose();
+  };
+  try {
+    const original = await open(first, { ...ANTIGRAVITY_DEFAULT_CONFIG }, "agy-user-a");
+    const thread = await original.session.createThread({ cwd, policy });
+    const handle = thread.handle ?? thread.native.id!;
+    await close(original);
+
+    const user = await open(second, { ...ANTIGRAVITY_DEFAULT_CONFIG }, "agy-user-b");
+    try {
+      const resumed = await user.session.resumeThread({ native: { handle }, policy });
+      assert.equal(resumed.native.id, thread.native.id, "the user's own profile holds the conversation");
+      assert.deepEqual((await keptEvents(user.session)).filter((event) => event.body.type === "session.replaced"), [], "nothing was replaced");
+    } finally {
+      await close(user);
+    }
+
+    const own = await open(third, { ...ANTIGRAVITY_DEFAULT_CONFIG, profile: "instance" }, "agy-instance-c");
+    try {
+      // The fake numbers sessions per profile, so the fresh one may reuse the old id; the event says what happened.
+      await own.session.resumeThread({ native: { handle }, policy });
+      const said = (await keptEvents(own.session)).filter((event) => event.body.type === "session.replaced");
+      assert.deepEqual(
+        said.map((event) => (event.body.type === "session.replaced" ? [event.body.previousNativeId, event.body.contextLost, event.body.reason] : [])),
+        [[thread.native.id, true, `The ACP agent could not resume session ${thread.native.id}: Resource not found: ${thread.native.id}`]],
+        "its own profile does not hold the conversation, so a fresh one replaced it, and the host is told the old context is gone",
+      );
+    } finally {
+      await close(own);
+    }
+    const acp = fake.processes().filter((each) => each.args[0] === "acp");
+    assert.deepEqual(acp.map((each) => each.args), [["acp"], ["acp"], ["acp", "--gemini-dir", third.profile, "--app-data-dir", "antigravity-acp"]]);
+  } finally {
+    for (const directory of [...layouts.map((layout) => layout.root), machine]) fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/** Every event the session kept so far: a kept event comes at once, and when none is left the next would wait, so the macrotask wins. */
+async function keptEvents(session: Session): Promise<AriEvent[]> {
+  const events = session.events({ fromSeq: 1 })[Symbol.asyncIterator]();
+  const kept: AriEvent[] = [];
+  try {
+    for (;;) {
+      const next = await Promise.race([events.next(), new Promise<undefined>((resolve) => setImmediate(() => resolve(undefined)))]);
+      if (next === undefined || next.done === true) return kept;
+      kept.push(next.value);
+    }
+  } finally {
+    await events.return?.();
+  }
+}
+
+test("a profile other than user or instance is refused before anything runs: it would decide whose sign-in agy uses", async () => {
+  for (const profile of ["private", "", "Instance"]) {
+    const config = { ...ANTIGRAVITY_DEFAULT_CONFIG, profile } as unknown as AntigravityConfig;
+    const host = createFakeHost<AntigravityConfig>({ config });
+    await assert.rejects(antigravityDriver.create(host, { instanceId: "bad-profile", config, environment: {} }), (error: unknown) => {
+      assert.ok(isAriError(error, "validation"), String(error));
+      assert.equal(error.message, `The Antigravity profile must be "user" (the user's own agy profile and sign-in) or "instance" (a profile private to this instance), not ${JSON.stringify(profile)}.`);
+      const issues = error.callError.code === "validation" ? (error.callError.issues ?? []) : [];
+      assert.deepEqual(issues.map((issue) => issue.path), [["profile"]]);
+      return true;
+    });
+    assert.deepEqual(host.spawns, [], "nothing ran");
   }
 });
 
@@ -214,9 +390,9 @@ test("permission prompts take fixed choices only, and rollback is refused before
 });
 
 
-test("the driver runs the agy its command config names: agy on PATH by default, or the path the config gives", async () => {
-  for (const command of ["agy", "/opt/antigravity/bin/agy"]) {
-    const rig = await openRig({ name: "antigravity", driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG, command }, executable: "agy", protocol: 1, agentArgs: AGY_VERSION });
+test("the driver runs the agy its command config names: agy on PATH by default, or the path the config gives; only its version command runs with the self-updater off, in either profile", async () => {
+  for (const [command, profile] of [["agy", "user"], ["/opt/antigravity/bin/agy", "user"], ["agy", "instance"]] as const) {
+    const rig = await openRig({ name: "antigravity", driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG, command, profile }, executable: "agy", protocol: 1, agentArgs: AGY_VERSION });
     try {
       assert.equal((await rig.instance.status()).version, "1.5.17");
       await rig.open();
@@ -229,10 +405,12 @@ test("the driver runs the agy its command config names: agy on PATH by default, 
         ],
         "status() and openSession asked that agy for its version",
       );
+      // A status check must not update the binary it checks.
       for (const probe of rig.host.spawns.filter((spawn) => spawn.purpose === "probe")) assert.equal(probe.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
       const runtime = spawns.find((spawn) => spawn.purpose === "runtime");
       assert.equal(runtime?.command, command, "the session runs that agy");
       assert.equal(runtime?.args?.[0], "acp");
+      assert.equal(rig.host.spawns.find((spawn) => spawn.purpose === "runtime")!.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], undefined, `${profile}: the driver turns off no self-updater for a session`);
     } finally {
       await rig.cleanup();
     }

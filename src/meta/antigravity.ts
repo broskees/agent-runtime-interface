@@ -10,7 +10,17 @@ import type { AcpBaseConfig, DriverMeta } from "./acp.ts";
 export interface AntigravityConfig extends AcpBaseConfig {
   /** The Antigravity CLI: a name found on PATH, or a path. */
   readonly command: string;
+  /**
+   * Whose Antigravity profile `agy` uses. `user`, the default (also when
+   * unset): the user's own, with their sign-in, settings and conversations.
+   * `instance`: a profile private to this instance, under its state
+   * directory, with a sign-in of its own.
+   */
+  readonly profile?: "user" | "instance";
 }
+
+/** The values `profile` takes. */
+export const ANTIGRAVITY_PROFILES: readonly string[] = ["user", "instance"];
 
 /**
  * How to install the Antigravity CLI, from Google's own README
@@ -38,13 +48,17 @@ export const ANTIGRAVITY_CONFIG_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
     command: { type: "string", minLength: 1, description: "The Antigravity CLI: a name found on PATH, or a path." },
+    profile: {
+      enum: [...ANTIGRAVITY_PROFILES],
+      description: "Whose Antigravity profile agy uses: user, the user's own sign-in, settings and conversations; or instance, a profile private to this instance with a sign-in of its own. user when unset.",
+    },
     ...ACP_BASE_CONFIG_PROPERTIES,
   },
   required: ["command", "maxProtocolVersion", "forkAcrossDirectories", "configDependencies"],
   additionalProperties: false,
 };
 
-export const ANTIGRAVITY_DEFAULT_CONFIG: AntigravityConfig = { command: "agy", ...ACP_BASE_DEFAULTS };
+export const ANTIGRAVITY_DEFAULT_CONFIG: AntigravityConfig = { command: "agy", profile: "user", ...ACP_BASE_DEFAULTS };
 
 /** The interactive Antigravity CLI, for a host's terminal fallback. */
 export const ANTIGRAVITY_CLI_MANIFEST: CliLaunchManifest = {
@@ -66,6 +80,10 @@ export const meta: DriverMeta = {
   configSchema: ANTIGRAVITY_CONFIG_SCHEMA,
   formHints: {
     command: { label: "Antigravity CLI", placeholder: "agy", description: "Your own Antigravity CLI. Update it with `agy update`." },
+    profile: {
+      label: "Antigravity profile",
+      description: "user: agy uses your own sign-in, settings and conversations, as when you run it. instance: this instance keeps a profile of its own and signs in once on its own.",
+    },
     ...ACP_BASE_FORM_HINTS,
   },
   testedVersions: { range: ">=1.5.0 <1.6.0", what: "the ACP launch of the Antigravity CLI 1.5 series (`agy acp`; ACP registry entry antigravity-acp 1.5.2)" },

@@ -37,7 +37,7 @@ const instance = await acpDriver.create(host, {
 | `env` | `{}` | Extra environment variables for the agent, set over the instance's `environment`. Not for credentials: config is not secret. |
 | `versionArgs` | `["--version"]` | What `probe()` runs to read the agent's version. |
 | `maxProtocolVersion` | `1` | The newest ACP version to request. ACP v2 is in Preview and ACP's migration guide suggests clients request it opt-in, so the default asks for v1; set `2` to ask for v2 (a v1 agent still answers with v1). |
-| `forkAcrossDirectories` | `false` | Whether `forkThread` may move a fork into another directory. |
+| `forkAcrossDirectories` | `true` | Whether `forkThread` asks the agent for a fork into another directory. The agent may refuse a destination; `false` refuses every such fork before the agent hears of it. |
 | `configDependencies` | `{}` | Dependencies between the agent's config options that ACP cannot state, as option id to the ids it depends on. |
 
 ## How ACP maps onto ARI
@@ -201,7 +201,7 @@ declares. "Agent" means it depends on what the agent advertises in
 | Read thread snapshot | – | – | |
 | Roll back thread | Y | – | ACP defines no rollback method in v1 or v2 (the `x-method` tables of `vendor-schemas/acp/schema-v2.0.0-beta.3`); host checkpoints stay in the host (proposal §16) |
 | Fork thread / fork from a turn | –/– | agent/– | Draft `session/fork` ([RFD](https://agentclientprotocol.com/rfds/session-fork.md)), declared when the agent advertises `session.fork`; forking at a position needs session cursors, which this driver does not use |
-| Fork into another directory | (not in §1.2) | config, then agent | The RFD lets an agent refuse a fork into a different `cwd`; `crossCwd` starts from `forkAcrossDirectories`, and turns off (with `capabilities.updated`) when the agent refuses one |
+| Fork into another directory | (not in §1.2) | agent | The RFD lets an agent refuse a fork into a different `cwd`. `crossCwd` follows `forkAcrossDirectories` (default `true`): the driver asks the agent, and a refusal fails that fork with the agent's error while later forks are still asked |
 | Fork from a subagent thread | – | – | |
 | Steer an active turn | – | – | |
 | Steer by interrupt + restart | Y | – | ACP has no method that changes a running prompt: the client cancels it with `session/cancel` and, once the turn ends, sends another `session/prompt` ([v1 prompt turn, "Cancellation"](https://agentclientprotocol.com/protocol/v1/prompt-turn.md#cancellation)). The host does that through `interruptTurn` and `startTurn` (its `planFallback`), so the driver declares no steering |

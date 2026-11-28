@@ -27,7 +27,7 @@ re-reads the models after changing it.
 |---|---|---|
 | `command` | `fx` | The fx executable. |
 | `configDependencies` | `{ "model": ["provider"] }` | Keep it: it is how fx's model list is tied to its provider. |
-| `maxProtocolVersion`, `forkAcrossDirectories` | `1`, `false` | As for the [ACP base driver](acp.md#config). |
+| `maxProtocolVersion`, `forkAcrossDirectories` | `1`, `true` | As for the [ACP base driver](acp.md#config). |
 
 ## Tested versions
 

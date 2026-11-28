@@ -18,8 +18,11 @@
   for every flavor: `grok`, `kiro`, `fx` and `antigravity`.
 - v2 turns are accepted by the `session/prompt` response and settle on the
   `idle` `state_update`; updates are applied as upserts.
-- Fork (draft `session/fork`) when the agent advertises it, with `crossCwd`
-  from config and turned off when the agent refuses another directory.
+- Fork (draft `session/fork`) when the agent advertises it. A fork into
+  another directory is asked of the agent (`forkAcrossDirectories` now
+  defaults to `true`), and a refusal fails that fork with the agent's error.
+  An earlier build refused such forks by default and, after one refusal of
+  any kind, declared `crossCwd` off for the rest of the session.
 - Permission replies use the agent's own option ids; `full_access` answers
   with the narrowest accepting option; enforcement is `client_boundary`.
 - Config options keep `dependsOn` from `configDependencies`.

@@ -193,31 +193,46 @@ test("v2: updates are upserts by id: a tool call is created by its first update 
 });
 
 for (const protocol of [1, 2] as const) {
-  test(`v${protocol}: fork constraints are capabilities; an agent that refuses another directory turns crossCwd off`, async () => {
-    const rig = await openRig({ name: "fork", driver: acpDriver, config: config(2, { forkAcrossDirectories: true }), executable: "fake-acp-agent", protocol, agentArgs: ["--fork"] });
+  test(`v${protocol}: fork constraints are capabilities; by default the driver asks the agent for a fork into another directory, and an agent that refuses one fails only that fork`, async () => {
+    const rig = await openRig({ name: "fork", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol, agentArgs: ["--fork"] });
     try {
-      const { session, events, waitFor } = await rig.open();
+      const { session, events } = await rig.open();
       assert.equal(session.capabilities().threads.fork.supported, true);
-      assert.equal(session.capabilities().threads.fork.crossCwd, true, "declared from the driver's config");
+      assert.equal(session.capabilities().threads.fork.crossCwd, true, "the default config asks the agent");
       assert.equal(session.capabilities().threads.fork.fromTurn, false);
       const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
       const sameDirectory = await session.forkThread!({ threadId: thread.id, at: { type: "latest" } });
       assert.notEqual(sameDirectory.id, thread.id);
       assert.equal(sameDirectory.cwd, rig.cwd);
-      await assert.rejects(session.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: rig.otherCwd }), (error) => isAriError(error, "unsupported") && error.callError.code === "unsupported" && error.callError.capability === "threads.fork.crossCwd");
-      assert.equal(session.capabilities().threads.fork.crossCwd, false, "the refusal is now declared");
-      await waitFor((event) => event.body.type === "capabilities.updated" && event.body.capabilities.threads.fork.crossCwd === false, "capabilities.updated with crossCwd false");
-      // Declared off, a fork into another directory is refused before the agent hears of it.
       const forks = (): number => frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/fork").length;
-      const before = forks();
-      await assert.rejects(session.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: rig.otherCwd }), (error) => isAriError(error, "unsupported"));
-      assert.equal(forks(), before);
-      assert.ok(events.length > 0);
+      for (const attempt of [1, 2]) {
+        const before = forks();
+        // The agent refuses another directory (invalid params): the caller gets the agent's error.
+        await assert.rejects(session.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: rig.otherCwd }), (error) => isAriError(error, "validation") && /forks only within/.test(error.message));
+        assert.equal(forks(), before + 1, `fork ${attempt} into another directory reached the agent`);
+        assert.equal(session.capabilities().threads.fork.crossCwd, true, "one refusal does not turn crossCwd off");
+      }
+      assert.ok(!events.some((event) => event.body.type === "capabilities.updated" && event.body.capabilities.threads.fork.crossCwd === false));
     } finally {
       await rig.cleanup();
     }
   });
 }
+
+test("forkAcrossDirectories: false is the user's choice: crossCwd is off, and a fork into another directory is refused before the agent hears of it", async () => {
+  const rig = await openRig({ name: "fork refused locally", driver: acpDriver, config: config(2, { forkAcrossDirectories: false }), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--fork", "--fork-cross-cwd"] });
+  try {
+    const { session } = await rig.open();
+    assert.equal(session.capabilities().threads.fork.crossCwd, false);
+    const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    const forks = (): number => frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/fork").length;
+    const before = forks();
+    await assert.rejects(session.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: rig.otherCwd }), (error) => isAriError(error, "unsupported") && error.callError.code === "unsupported" && error.callError.capability === "threads.fork.crossCwd");
+    assert.equal(forks(), before);
+  } finally {
+    await rig.cleanup();
+  }
+});
 
 test("an agent that forks across directories gets forks into another directory", async () => {
   const rig = await openRig({ name: "fork across", driver: acpDriver, config: config(2, { forkAcrossDirectories: true }), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--fork", "--fork-cross-cwd"] });

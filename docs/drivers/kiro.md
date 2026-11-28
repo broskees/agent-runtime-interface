@@ -31,7 +31,7 @@ off under `approval_required`, on under `full_access`
 | Field | Default | Meaning |
 |---|---|---|
 | `command` | `kiro-cli` | The Kiro CLI. |
-| `maxProtocolVersion`, `forkAcrossDirectories`, `configDependencies` | `1`, `false`, `{}` | As for the [ACP base driver](acp.md#config). |
+| `maxProtocolVersion`, `forkAcrossDirectories`, `configDependencies` | `1`, `true`, `{}` | As for the [ACP base driver](acp.md#config). |
 
 ## Tested versions
 

@@ -285,7 +285,7 @@ export class AcpSession implements Session {
    */
   readonly #resumed = new Map<string, Array<V1.SessionNotification | V2.UpdateSessionNotification>>();
   #capabilities: Capabilities | undefined;
-  #forkAcrossDirectories: boolean;
+  readonly #forkAcrossDirectories: boolean;
   #connection: Promise<AcpConnection> | undefined;
   #current: AcpConnection | undefined;
   #generation = 0;
@@ -438,12 +438,7 @@ export class AcpSession implements Session {
     try {
       forked = agent.version === 1 ? await agent.requestV1("session/fork", params as V1.ForkSessionRequest) : await agent.requestV2("session/fork", params as V2.ForkSessionRequest);
     } catch (error) {
-      if (crossesDirectory && error instanceof JsonRpcError) {
-        // ACP lets an agent refuse a fork into another directory. From now on the session declares it.
-        this.#forkAcrossDirectories = false;
-        this.#refreshCapabilities();
-        throw callErrors.unsupported("threads.fork.crossCwd", `The ACP agent refused to fork into ${cwd}: ${error.message}`);
-      }
+      // ACP lets an agent refuse a fork into another directory: that refusal is the agent's answer for this fork only.
       throw callErrorFrom(error, "session/fork");
     }
     const policy = input.policy ?? { ...source.policy, cwd };

@@ -30,7 +30,7 @@ holds its label, icon, config schema and form hints.
 | Field | Default | Meaning |
 |---|---|---|
 | `command` | `grok` | The Grok CLI. |
-| `maxProtocolVersion`, `forkAcrossDirectories`, `configDependencies` | `1`, `false`, `{}` | As for the [ACP base driver](acp.md#config). |
+| `maxProtocolVersion`, `forkAcrossDirectories`, `configDependencies` | `1`, `true`, `{}` | As for the [ACP base driver](acp.md#config). |
 
 ## Tested versions
 

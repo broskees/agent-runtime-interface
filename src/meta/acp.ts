@@ -45,7 +45,7 @@ export const ACP_TESTED_SCHEMA_RELEASE = "schema-v2.0.0-beta.3";
 export interface AcpBaseConfig {
   /** The newest ACP protocol version to request in `initialize`. The agent may answer with an older one. */
   readonly maxProtocolVersion: 1 | 2;
-  /** Whether `forkThread` may move a fork into another directory. Many agents reject a different `cwd` on `session/fork`. */
+  /** Whether `forkThread` asks the agent for a fork into another directory, which the agent may refuse. `false` refuses such a fork without asking. */
   readonly forkAcrossDirectories: boolean;
   /** Config option dependencies the agent does not state itself: option id to the ids it depends on. */
   readonly configDependencies: { readonly [optionId: string]: readonly string[] };
@@ -65,7 +65,7 @@ export interface AcpDriverConfig extends AcpBaseConfig {
 /** JSON Schema properties of `AcpBaseConfig`, for flavors to reuse. */
 export const ACP_BASE_CONFIG_PROPERTIES: { readonly [field: string]: JsonSchema } = {
   maxProtocolVersion: { enum: [1, 2], description: "The newest ACP protocol version to request. The agent may answer with version 1." },
-  forkAcrossDirectories: { type: "boolean", description: "Whether forks may move into another directory." },
+  forkAcrossDirectories: { type: "boolean", description: "Whether a fork into another directory is asked of the agent, which may refuse it. False refuses it without asking." },
   configDependencies: {
     type: "object",
     description: "Config option dependencies the agent does not state: option id to the option ids it depends on.",
@@ -75,7 +75,7 @@ export const ACP_BASE_CONFIG_PROPERTIES: { readonly [field: string]: JsonSchema 
 
 export const ACP_BASE_FORM_HINTS: { readonly [field: string]: FormHint } = {
   maxProtocolVersion: { label: "Newest ACP version", description: "ACP v2 is in Preview; choose 2 to ask the agent for it.", advanced: true },
-  forkAcrossDirectories: { label: "Forks may change directory", advanced: true },
+  forkAcrossDirectories: { label: "Ask the agent for forks into another directory", advanced: true },
   configDependencies: { label: "Config option dependencies", advanced: true },
 };
 
@@ -84,7 +84,7 @@ export const ACP_BASE_FORM_HINTS: { readonly [field: string]: FormHint } = {
  * guide suggests clients keep requesting it opt-in; set `maxProtocolVersion`
  * to 2 to ask for it (a v1 agent still answers with v1).
  */
-export const ACP_BASE_DEFAULTS: AcpBaseConfig = { maxProtocolVersion: 1, forkAcrossDirectories: false, configDependencies: {} };
+export const ACP_BASE_DEFAULTS: AcpBaseConfig = { maxProtocolVersion: 1, forkAcrossDirectories: true, configDependencies: {} };
 
 /** A plug in a socket, drawn for this package, monochrome so it follows the theme. */
 export const ACP_ICON: Icon = {

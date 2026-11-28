@@ -39,6 +39,10 @@ driver's changelog lists what changed:
   config and policy, or refuses naming what cannot change (`acp` and its
   flavors, `pi`, `muse`); an earlier build reported success and changed
   nothing.
+- `acp` and its flavors ask the agent for a fork into another directory
+  (`forkAcrossDirectories` defaults to `true`) and let it refuse one
+  destination; an earlier build refused such forks by default and turned
+  `crossCwd` off after one refusal.
 
 ### Contract (`ari`, `ari/json-schema/*`)
 

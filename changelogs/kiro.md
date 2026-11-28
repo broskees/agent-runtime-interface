@@ -4,6 +4,11 @@
 
 - Added the kiro driver (`ari/drivers/kiro`, `ari/meta/kiro`): Kiro CLI's V3
   harness as an ACP agent, `kiro-cli acp --agent-engine=v3 --auth-method=cli`.
+- As an ACP flavor, it takes the base driver's resume and fork changes: a
+  resume replaces only a session the agent reports missing, a resume of a
+  held thread applies or refuses its settings, a history resume is
+  `unsupported`, and a fork into another directory is asked of the agent
+  (`forkAcrossDirectories` defaults to `true`). See the `acp` changelog.
 - Kiro's `autopilot` option follows the thread's runtime mode (off when
   supervised, on under `full_access`). Tested range `>=3.0.0 <4.0.0`.
 - Runs the `kiro-cli` the user installed and never downloads, installs or

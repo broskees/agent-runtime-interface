@@ -31,6 +31,9 @@ First version of the Muse Code driver.
 - A resume of a loaded thread applies a new model with `session/setModel`
   and refuses another runtime mode with `unsupported`; an earlier build
   ignored both and reported success.
+- A `reasoningEffort` the driver does not list goes to Muse in `turn/start`
+  as given, and `planConfigChange` plans it for the next turn; an earlier
+  build refused it with `validation` before Muse saw it.
 - Turns: start, queue (`ifBusy: "queue"`), steer (`turn/steer` with
   `expectedTurnId`; a steer whose turn already ended, `already_terminal`, is
   `prompt_required`; a steer the busy runtime refuses, `runtime_busy`, is sent

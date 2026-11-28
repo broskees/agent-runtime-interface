@@ -327,7 +327,8 @@ export class CodexSession implements Session {
     const params: ThreadStartParams = {
       cwd: spec.cwd,
       approvalPolicy: policy.approvalPolicy,
-      sandbox: policy.sandbox,
+      ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
+      ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
       approvalsReviewer: policy.approvalsReviewer,
       ...(spec.model === undefined ? {} : { model: spec.model }),
       ...(spec.instructions === undefined ? {} : { developerInstructions: spec.instructions }),
@@ -432,7 +433,8 @@ export class CodexSession implements Session {
       .threadFork({
         threadId: source.nativeId,
         approvalPolicy: policy.approvalPolicy,
-        sandbox: policy.sandbox,
+        ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
+        ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
         approvalsReviewer: policy.approvalsReviewer,
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(lastTurnId === undefined ? {} : { lastTurnId }),
@@ -599,7 +601,15 @@ export class CodexSession implements Session {
         input: userInput,
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
-        ...(policy === undefined ? {} : { approvalPolicy: policy.approvalPolicy, approvalsReviewer: policy.approvalsReviewer, sandboxPolicy: policy.sandboxPolicy, cwd: input.policy!.cwd }),
+        ...(policy === undefined
+          ? {}
+          : {
+              approvalPolicy: policy.approvalPolicy,
+              approvalsReviewer: policy.approvalsReviewer,
+              ...(policy.sandboxPolicy === undefined ? {} : { sandboxPolicy: policy.sandboxPolicy }),
+              ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
+              cwd: input.policy!.cwd,
+            }),
         ...(Object.keys(additionalContext).length === 0 ? {} : { additionalContext }),
       });
       const known = this.#turnsByNative.get(response.turn.id);
@@ -1016,7 +1026,14 @@ export class CodexSession implements Session {
     const resumed = await connection.client.threadResume({
       threadId: nativeId,
       excludeTurns: true,
-      ...(policy === undefined ? {} : { approvalPolicy: policy.approvalPolicy, approvalsReviewer: policy.approvalsReviewer, sandbox: policy.sandbox }),
+      ...(policy === undefined
+        ? {}
+        : {
+            approvalPolicy: policy.approvalPolicy,
+            approvalsReviewer: policy.approvalsReviewer,
+            ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
+            ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
+          }),
       ...(policyInput?.cwd === undefined || policyInput.cwd === "" ? {} : { cwd: policyInput.cwd }),
       ...(model === undefined ? {} : { model }),
       ...(instructions === undefined ? {} : { developerInstructions: instructions }),

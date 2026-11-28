@@ -669,8 +669,9 @@ export class ClaudeSession implements Session {
   #applyConfig(thread: ClaudeThread, config: { [key: string]: unknown } | undefined): void {
     const model = config?.["model"];
     if (typeof model === "string" && model !== "") thread.model = model;
+    // Any effort the host names goes to Claude Code, which takes or refuses it.
     const effort = config?.["effort"];
-    if (typeof effort === "string" && ["low", "medium", "high", "xhigh", "max"].includes(effort)) thread.effort = effort as ClaudeDriverConfig["effort"];
+    if (typeof effort === "string" && effort !== "") thread.effort = effort as ClaudeDriverConfig["effort"];
   }
 
   #applied(thread: ClaudeThread): AppliedThread {
@@ -1408,7 +1409,7 @@ export class ClaudeSession implements Session {
       thread.model = model;
     }
     const effort = config?.["effort"];
-    if (typeof effort === "string" && effort !== thread.effort && ["low", "medium", "high", "xhigh", "max"].includes(effort)) {
+    if (typeof effort === "string" && effort !== "" && effort !== thread.effort) {
       await live.query.applyFlagSettings({ effortLevel: effort as NonNullable<ClaudeDriverConfig["effort"]> });
       thread.effort = effort as ClaudeDriverConfig["effort"];
     }

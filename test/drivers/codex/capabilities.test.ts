@@ -280,6 +280,38 @@ describe("capability honesty: the runtime modes Codex enforces natively", () => 
     return native.settings.approvalsReviewer;
   }
 
+  test("a named permissions profile in policy.native reaches Codex on start, turn, resume and fork, in place of the sandbox the mode would set", async () => {
+    const current = await codexRig();
+    try {
+      const first = await current.open();
+      const named = { ...policy(current.cwd), native: { permissions: "team-locked" } };
+      const thread = await first.session.createThread({ cwd: current.cwd, policy: named });
+      const start = current.requests("thread/start").at(-1)!;
+      assert.equal(start["permissions"], "team-locked");
+      assert.equal(start["sandbox"], undefined, "Codex refuses a profile together with a sandbox: the native value wins");
+      assert.equal(start["approvalPolicy"], "untrusted", "the mode still sets the approval policy");
+      const started = await first.session.startTurn({ threadId: thread.id, clientTurnKey: "named-1", intent: "start", content: [{ type: "text", text: "Go." }], policy: named });
+      const turn = current.requests("turn/start").at(-1)!;
+      assert.equal(turn["permissions"], "team-locked");
+      assert.equal(turn["sandboxPolicy"], undefined);
+      await (await current.nextTurn()).complete();
+      await first.until(() => first.bodies("turn.terminal").find((body) => body.turnId === (started as { turnId: string }).turnId), "the turn to end");
+      await first.session.close();
+
+      const second = await current.open();
+      await second.session.resumeThread({ native: { handle: thread.handle! }, policy: named });
+      const resume = current.requests("thread/resume").at(-1)!;
+      assert.equal(resume["permissions"], "team-locked");
+      assert.equal(resume["sandbox"], undefined);
+      await second.session.forkThread!({ threadId: thread.id, at: { type: "latest" }, policy: { ...named, native: { permissions: "team-locked", sandbox: "read-only" } } });
+      const fork = current.requests("thread/fork").at(-1)!;
+      assert.equal(fork["permissions"], "team-locked");
+      assert.equal(fork["sandbox"], "read-only", "a sandbox the host names itself is passed on too, for Codex to judge");
+    } finally {
+      await current.cleanup();
+    }
+  });
+
   test("auto reaches Codex as approvalsReviewer auto_review on start, resume, fork and the next turn, and leaving auto sets it back to user", async () => {
     rig = await codexRig();
     const first = await rig.open();

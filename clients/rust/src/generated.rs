@@ -2194,7 +2194,7 @@ pub struct CodexMemoryReadResult {
     pub summary: Option<String>,
 }
 
-/// Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`, each passed to Codex's `thread/list`. Any other `x:codex.` field is refused.
+/// Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`. Every `x:codex.<field>` goes to Codex's `thread/list` as `<field>`, and Codex validates it; the fields below are those of the pinned protocol. `x:codex.cwd` and `x:codex.cursor` are refused: use `cwd` and `cursor`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CodexNativeSessionFilters {
     #[serde(rename = "x:codex.limit", default, skip_serializing_if = "Option::is_none")]
@@ -2221,6 +2221,14 @@ pub struct CodexNativeSessionFilters {
     pub x_codex_ancestor_thread_id: Option<String>,
     #[serde(rename = "x:codex.projectId", default, skip_serializing_if = "Option::is_none")]
     pub x_codex_project_id: Option<String>,
+    #[serde(rename = "x:codex.sectionId", default, skip_serializing_if = "Option::is_none", with = "crate::wire::double_option")]
+    pub x_codex_section_id: Option<Option<String>>,
+    #[serde(rename = "x:codex.attachedToThreadId", default, skip_serializing_if = "Option::is_none")]
+    pub x_codex_attached_to_thread_id: Option<String>,
+    #[serde(rename = "x:codex.includeAttachedThreads", default, skip_serializing_if = "Option::is_none")]
+    pub x_codex_include_attached_threads: Option<bool>,
+    #[serde(rename = "x:codex.originators", default, skip_serializing_if = "Option::is_none")]
+    pub x_codex_originators: Option<Vec<String>>,
     #[serde(rename = "x:codex.sortKey", default, skip_serializing_if = "Option::is_none")]
     pub x_codex_sort_key: Option<CodexNativeSessionFiltersXCodexSortKey>,
     #[serde(rename = "x:codex.sortDirection", default, skip_serializing_if = "Option::is_none")]

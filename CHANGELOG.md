@@ -43,6 +43,10 @@ driver's changelog lists what changed:
   (`forkAcrossDirectories` defaults to `true`) and let it refuse one
   destination; an earlier build refused such forks by default and turned
   `crossCwd` off after one refusal.
+- Smaller ones: `codex` passes every `x:codex.*` list filter and a named
+  `permissions` profile in `policy.native` to Codex; `claude` accepts any
+  unambiguous `claude --version` output and passes any `effort` on; `muse`
+  passes any `reasoningEffort` on.
 
 ### Contract (`ari`, `ari/json-schema/*`)
 

@@ -132,7 +132,6 @@ export interface MuseSessionRuntime {
   contextWindow(model: string): number | undefined;
 }
 
-const REASONING_EFFORTS: ReadonlySet<string> = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 
 interface TurnState {
   readonly id: string;
@@ -656,8 +655,8 @@ export class MuseSession implements Session {
       if (musePolicy(input.policy) === undefined) return { status: "unsupported", capability: `runtimePolicy.modes.${input.policy.mode}` };
       if (input.policy.mode !== thread.policy.mode) return { status: "unsupported", capability: "sessions.switchRuntimeMode" };
     }
+    // Any effort the host names goes to Muse in turn/start, which takes or refuses it.
     const effort = typeof input.config?.["reasoningEffort"] === "string" ? input.config["reasoningEffort"] : this.#runtime.defaultEffort;
-    if (effort !== undefined && !REASONING_EFFORTS.has(effort)) throw callErrors.validation([{ message: `Muse has no reasoning effort ${effort}`, path: ["config", "reasoningEffort"] }]);
     const turnInstructions = joinInstructions([input.context?.system, input.context?.developer]);
 
     if (input.intent === "steer") {
@@ -896,8 +895,8 @@ export class MuseSession implements Session {
     const unknown = Object.keys(input.changes).filter((key) => key !== "model" && key !== "reasoningEffort");
     if (unknown.length > 0) return { type: "reject", reason: `Muse has no session option ${unknown.join(", ")}` };
     const effort = input.changes["reasoningEffort"];
-    if (effort !== undefined && (typeof effort !== "string" || !REASONING_EFFORTS.has(effort))) return { type: "reject", reason: `Muse has no reasoning effort ${String(effort)}` };
-    // The driver sends `session/setModel` before the next `turn/start`, and the effort with it.
+    if (effort !== undefined && typeof effort !== "string") return { type: "reject", reason: `A Muse reasoning effort is a string, not ${JSON.stringify(effort)}` };
+    // The driver sends `session/setModel` before the next `turn/start`, and the effort with it, for Muse to take or refuse.
     return { type: "apply_next_turn" };
   }
 

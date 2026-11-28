@@ -24,9 +24,11 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
   how to install it (Anthropic's native installer) and `executablePath`. An
   older one: `driver_unavailable` naming the version, its path, the minimum,
   `claude update` and `executablePath`. One whose version cannot be read:
-  `driver_unavailable` naming its path and what it printed. `openSession`
-  rejects the same way before any session starts. A newer one runs, with an
-  `untested_version` advisory. `ari/meta/claude` exports
+  `driver_unavailable` naming its path and what it printed. Any unambiguous
+  version in the output counts, after a banner line or with `+build`
+  metadata; an earlier build accepted only the exact `X.Y.Z (Claude Code)`
+  first line. `openSession` rejects the same way before any session starts.
+  A newer one runs, with an `untested_version` advisory. `ari/meta/claude` exports
   `CLAUDE_CODE_INSTALL_HINT` and `CLAUDE_CODE_UPDATE_HINT`; it no longer
   exports `CLAUDE_BINARY_HINT` or `claudeDirectoryBinaryHint`, and
   `ari/drivers/claude` no longer exports `nativeBinaryCandidates`.
@@ -60,6 +62,8 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
   process (`session_held_by_background`) or has no conversation for. Any
   other failure to start the resumed query goes to the caller; an earlier
   build started a fresh session for any of them.
+- An `effort` value the driver does not list goes to Claude Code as given;
+  an earlier build dropped it silently and kept the thread's earlier effort.
 - A configured `executablePath` that names no executable file reports the
   driver unavailable, naming it.
 - Ambient sign-in from `claude auth status --json`, or an API key the

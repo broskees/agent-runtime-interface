@@ -81,8 +81,12 @@ export function isoFromMillis(millis: number | null | undefined): string | undef
 
 export interface CodexPolicy {
   readonly approvalPolicy: AskForApproval;
-  readonly sandbox: SandboxMode;
-  readonly sandboxPolicy: SandboxPolicy;
+  /** Undefined when a named `permissions` profile takes its place: Codex refuses both on one request. */
+  readonly sandbox?: SandboxMode;
+  /** Undefined when a named `permissions` profile takes its place: Codex refuses both on one request. */
+  readonly sandboxPolicy?: SandboxPolicy;
+  /** A named permissions profile, from `policy.native.permissions`. */
+  readonly permissions?: string | null;
   /**
    * Always named: Codex keeps a thread's reviewer when a resume, a fork or a
    * turn leaves it out (app-server thread_processor.rs:4782–4791, 5788–5794),
@@ -95,7 +99,11 @@ export interface CodexPolicy {
  * ARI's runtime modes in Codex terms. Codex enforces all of them itself: the
  * sandbox limits what commands can touch, the approval policy says when it
  * asks, and the reviewer says who answers (`auto_review` in `auto`, the user
- * otherwise). `policy.native` may override any of the four fields.
+ * otherwise). `policy.native` may override any of the four fields, and may
+ * name a permissions profile (`permissions`), which Codex takes on start,
+ * resume, fork and turn instead of a sandbox. A profile wins over the
+ * sandbox the mode sets, which is then not sent; a sandbox `native` names
+ * itself is sent with it, for Codex to judge.
  */
 export function codexPolicy(policy: RuntimePolicy): CodexPolicy {
   const writableRoots = policy.additionalRoots ?? [];
@@ -121,11 +129,15 @@ export function codexPolicy(policy: RuntimePolicy): CodexPolicy {
   const native = policy.native;
   if (typeof native !== "object" || native === null || Array.isArray(native)) return mapped;
   const overrides = native as Partial<CodexPolicy>;
+  const profile = typeof overrides.permissions === "string";
+  const sandbox = overrides.sandbox ?? (profile ? undefined : mapped.sandbox);
+  const sandboxPolicy = overrides.sandboxPolicy ?? (profile ? undefined : mapped.sandboxPolicy);
   return {
     approvalPolicy: overrides.approvalPolicy ?? mapped.approvalPolicy,
-    sandbox: overrides.sandbox ?? mapped.sandbox,
-    sandboxPolicy: overrides.sandboxPolicy ?? mapped.sandboxPolicy,
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
     approvalsReviewer: overrides.approvalsReviewer ?? mapped.approvalsReviewer,
+    ...(overrides.permissions === undefined ? {} : { permissions: overrides.permissions }),
   };
 }
 

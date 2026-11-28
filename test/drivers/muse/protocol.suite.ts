@@ -12,6 +12,7 @@ import { VirtualClock } from "../../../src/conformance/index.ts";
 import { isAriError } from "../../../src/index.ts";
 import type { Session, StartTurnResult, Thread } from "../../../src/index.ts";
 import { MUSE_CAPABILITIES, threadIdFor, turnIdFor } from "../../../src/drivers/muse/index.ts";
+import { FRAME_LOG } from "./frames.ts";
 import type { FakeMuseTurn } from "./fake-muse.ts";
 import { museRig, policy, until } from "./rig.ts";
 import type { MuseTestRig, OpenedMuseSession } from "./rig.ts";
@@ -885,7 +886,14 @@ describe("muse driver: Muse's protocol", () => {
         ["muse-small-1", 100000],
       ]);
       assert.equal(opened.session.contextWindow!("muse-small-1"), 100000);
-      await assert.rejects(opened.session.startTurn({ threadId: thread.id, clientTurnKey: "bad", intent: "start", content: [{ type: "text", text: "x" }], config: { reasoningEffort: "turbo" } }), (error) => isAriError(error, "validation"));
+      // An effort the pinned protocol does not list goes to Muse as given, for Muse to take or refuse; the driver keeps no list of its own.
+      assert.deepEqual(await opened.session.planConfigChange({ threadId: thread.id, changes: { reasoningEffort: "turbo" } }), { type: "apply_next_turn" });
+      const turbo = await start(rig, opened.session, thread, "Turbo.", { config: { reasoningEffort: "turbo" } });
+      assert.equal(rig.requests("turn/start").at(-1)!["reasoningEffort"], "turbo");
+      await turbo.native.complete();
+      await terminal(opened, turnIdOf(turbo.result));
+      // Those frames carry a value outside @muse-code/sdk 1.4.25's ReasoningEffort on purpose; the wire-type check covers every other frame.
+      FRAME_LOG.frames.splice(0, FRAME_LOG.frames.length, ...FRAME_LOG.frames.filter((frame) => !JSON.stringify(frame.frame).includes('"turbo"')));
     } finally {
       await rig.cleanup();
     }

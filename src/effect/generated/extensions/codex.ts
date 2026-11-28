@@ -167,7 +167,7 @@ export const CodexMemoryReadResultSchema: Effect.Schema.Codec<Wire.CodexMemoryRe
   [kit.OtherFields],
 ).annotate({ identifier: "CodexMemoryReadResult" });
 
-/** Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`, each passed to Codex's `thread/list`. Any other `x:codex.` field is refused. */
+/** Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`. Every `x:codex.<field>` goes to Codex's `thread/list` as `<field>`, and Codex validates it; the fields below are those of the pinned protocol. `x:codex.cwd` and `x:codex.cursor` are refused: use `cwd` and `cursor`. */
 export const CodexNativeSessionFiltersSchema: Effect.Schema.Codec<Wire.CodexNativeSessionFilters> = Schema.StructWithRest(
   Schema.Struct({
     "x:codex.limit": Schema.optional(kit.Integer.check(Schema.isGreaterThanOrEqualTo(1))),
@@ -182,6 +182,10 @@ export const CodexNativeSessionFiltersSchema: Effect.Schema.Codec<Wire.CodexNati
     "x:codex.parentThreadId": Schema.optional(Schema.String),
     "x:codex.ancestorThreadId": Schema.optional(Schema.String),
     "x:codex.projectId": Schema.optional(Schema.String),
+    "x:codex.sectionId": Schema.optional(Schema.Union([Schema.String, Schema.Null])),
+    "x:codex.attachedToThreadId": Schema.optional(Schema.String),
+    "x:codex.includeAttachedThreads": Schema.optional(Schema.Boolean),
+    "x:codex.originators": Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
     "x:codex.sortKey": Schema.optional(Schema.Union([
   Schema.Literals(["created_at", "updated_at", "recency_at", "section_position"]),
   Schema.String,

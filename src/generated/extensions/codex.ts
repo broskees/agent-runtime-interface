@@ -112,7 +112,7 @@ export type CodexMemoryReadResult = {
   summary: string | null;
 };
 
-/** Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`, each passed to Codex's `thread/list`. Any other `x:codex.` field is refused. */
+/** Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`. Every `x:codex.<field>` goes to Codex's `thread/list` as `<field>`, and Codex validates it; the fields below are those of the pinned protocol. `x:codex.cwd` and `x:codex.cursor` are refused: use `cwd` and `cursor`. */
 export type CodexNativeSessionFilters = {
   "x:codex.limit"?: number;
   "x:codex.searchTerm"?: string;
@@ -126,6 +126,10 @@ export type CodexNativeSessionFilters = {
   "x:codex.parentThreadId"?: string;
   "x:codex.ancestorThreadId"?: string;
   "x:codex.projectId"?: string;
+  "x:codex.sectionId"?: string | null;
+  "x:codex.attachedToThreadId"?: string;
+  "x:codex.includeAttachedThreads"?: boolean;
+  "x:codex.originators"?: string[];
   "x:codex.sortKey"?: "created_at" | "updated_at" | "recency_at" | "section_position" | (string & {});
   "x:codex.sortDirection"?: "asc" | "desc" | (string & {});
 };
@@ -501,7 +505,7 @@ export const codexDocument: SchemaDocument = {
       ]
     },
     "CodexNativeSessionFilters": {
-      "description": "Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`, each passed to Codex's `thread/list`. Any other `x:codex.` field is refused.",
+      "description": "Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`. Every `x:codex.<field>` goes to Codex's `thread/list` as `<field>`, and Codex validates it; the fields below are those of the pinned protocol. `x:codex.cwd` and `x:codex.cursor` are refused: use `cwd` and `cursor`.",
       "type": "object",
       "properties": {
         "x:codex.limit": {
@@ -554,6 +558,24 @@ export const codexDocument: SchemaDocument = {
         },
         "x:codex.projectId": {
           "type": "string"
+        },
+        "x:codex.sectionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "x:codex.attachedToThreadId": {
+          "type": "string"
+        },
+        "x:codex.includeAttachedThreads": {
+          "type": "boolean"
+        },
+        "x:codex.originators": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "x:codex.sortKey": {
           "anyOf": [

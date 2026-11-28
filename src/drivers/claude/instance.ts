@@ -153,14 +153,23 @@ interface ClaudeCode {
   readonly version: string;
 }
 
+/** A semantic version: its core and prerelease (group 1), and any `+build` metadata, which does not count for precedence. */
+const SEMVER = /(?<![\d.])(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+[0-9A-Za-z.-]+)?(?!\.?\d)/g;
+
 /**
  * The version in what `claude --version` printed: `2.1.319 (Claude Code)`
- * (Claude Code docs, code.claude.com/docs/en/setup), or the version alone.
- * Undefined for anything else.
+ * (Claude Code docs, code.claude.com/docs/en/setup), wherever it is in the
+ * output (a banner may come first) and without `+build` metadata. The one
+ * version on a line Claude Code labels wins; else the output's only version.
+ * Undefined when there is none, or more than one and no label says which.
  */
 export function parseClaudeCodeVersion(stdout: string): string | undefined {
-  const firstLine = stdout.trim().split(/\r?\n/)[0] ?? "";
-  return /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s+\(Claude Code\))?$/.exec(firstLine.trim())?.[1];
+  const lines = stdout.split(/\r?\n/);
+  const versionsIn = (chosen: readonly string[]): Set<string> => new Set(chosen.flatMap((line) => [...line.matchAll(SEMVER)].map((match) => match[1]!)));
+  const labelled = versionsIn(lines.filter((line) => line.includes("(Claude Code)")));
+  if (labelled.size === 1) return [...labelled][0];
+  const all = versionsIn(lines);
+  return all.size === 1 ? [...all][0] : undefined;
 }
 
 /** The advisory for a Claude Code newer than the one the driver is tested against, or null. */

@@ -303,6 +303,22 @@ describe("claude driver quirks", () => {
     }
   });
 
+  test("an effort value the driver does not list reaches Claude Code as given, at start and on a running query, for Claude Code to take or refuse", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.thread({ config: { effort: "ultra" } });
+      assert.equal(rig.world.queries.at(-1)!.options.effort, "ultra", "the query started with the host's effort");
+      assert.equal(thread.appliedConfig?.["effort"], "ultra");
+      await rig.simpleTurn(thread.id, "Hello.");
+      const resumed = await rig.session.resumeThread({ native: { handle: thread.handle! }, config: { effort: "turbo" } });
+      const flags = rig.world.calls.filter((call) => call.kind === "applyFlagSettings").map((call) => (call.kind === "applyFlagSettings" ? call.settings : undefined));
+      assert.deepEqual(flags.at(-1), { effortLevel: "turbo" }, "the running query got the new effort");
+      assert.equal(resumed.appliedConfig?.["effort"], "turbo");
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("LaunchContext.mcpServers with alwaysLoad reach the SDK with alwaysLoad, before the thread's first prompt", async () => {
     const rig = await openClaudeRig({ host: { mcpServerName: () => "host-orchestration" } });
     try {

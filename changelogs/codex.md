@@ -31,6 +31,15 @@ First version of the Codex driver.
   replacement. The thread stays `unloaded`; `readSnapshot` reads its turns.
   An earlier build opened the thread for writing as an interactive resume
   does.
+- `nativeSessions.list` passes every `x:codex.<field>` to `thread/list` as
+  `<field>` and lets Codex validate it, so `x:codex.sectionId`,
+  `x:codex.attachedToThreadId`, `x:codex.includeAttachedThreads` and
+  `x:codex.originators` work. `x:codex.cwd` and `x:codex.cursor` stay
+  refused, and so does a list of more than 100 thread ids. An earlier build
+  refused any filter it did not list.
+- `policy.native.permissions`, a named permissions profile, reaches Codex on
+  start, resume, fork and turn. It wins over the sandbox the mode sets,
+  which is then not sent; an earlier build dropped it.
 - Runtime modes: the approvals reviewer is named on every start, resume, fork
   and per-turn policy, so `auto` (`auto_review`) and the other modes (`user`)
   reach Codex on every path.

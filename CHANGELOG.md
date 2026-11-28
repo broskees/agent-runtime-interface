@@ -35,6 +35,10 @@ driver's changelog lists what changed:
   flavors, `claude`, `pi`).
 - `pi` honours `persistSession: false` with Pi's `--no-session`; an earlier
   build saved the thread to disk anyway.
+- A resume of a thread the session already holds applies its new launch,
+  config and policy, or refuses naming what cannot change (`acp` and its
+  flavors, `pi`, `muse`); an earlier build reported success and changed
+  nothing.
 
 ### Contract (`ari`, `ari/json-schema/*`)
 

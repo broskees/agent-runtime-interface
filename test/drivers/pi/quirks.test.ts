@@ -199,6 +199,30 @@ test("persistSession: false runs pi with --no-session: Pi writes no session file
   assert.equal(notice.contextLost, true);
 });
 
+test("a resume of a thread the session holds applies its config, restarts pi on the session file for a new launch, and refuses a runtime mode pi cannot switch", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, first, thread.id, "First.");
+  const frames = (type: string) => opened.harness.frames.filter((frame) => frame.direction === "in" && frame.record["type"] === type);
+  const models = frames("set_model").length;
+  const resumed = await first.session.resumeThread({ native: { handle: thread.handle! }, config: { model: "fake/fake-large" } });
+  assert.equal(resumed.id, thread.id);
+  assert.equal(frames("set_model").length, models + 1, "the new model reached pi");
+  assert.equal(resumed.appliedConfig?.["model"], "fake/fake-large");
+
+  // A new launch restarts pi on the session file with it, from the next use on.
+  const spawns = opened.host.spawns.length;
+  await first.session.resumeThread({ native: { handle: thread.handle! }, launch: { appendSystemPrompt: ["ARI_HELD_SYSTEM"] } });
+  await simpleTurn(opened, first, thread.id, "Second.");
+  const restart = opened.host.spawns.slice(spawns).find((spawn) => spawn.args?.includes("--session"));
+  assert.ok(restart !== undefined, "pi started again on the session file");
+  assert.ok(restart.args?.includes("ARI_HELD_SYSTEM"), `the restart carries the new launch: ${JSON.stringify(restart.args)}`);
+  assert.deepEqual((await opened.inspect(thread))?.prompts, ["First.", "Second."], "the restart kept the conversation");
+
+  await assert.rejects(first.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(opened.cwd, "full_access") }), (error: unknown) => isAriError(error, "unsupported"));
+});
+
 test("a fork into another directory runs Pi's CLI there, and a fork from a turn keeps the history before it", async () => {
   const opened = await rig();
   const session = await opened.open();

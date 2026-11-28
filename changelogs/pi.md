@@ -42,6 +42,10 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
   and the thread has no `handle`. It cannot be forked, unloaded, released or
   restarted, and says so with `invalid_state` (`no_session_file`). An
   earlier build ignored the flag and saved the thread to disk.
+- A resume of a thread with a live process applies its config, starts pi
+  again on the session file for a new launch, and refuses another runtime
+  mode with `unsupported`. An earlier build reported success and changed
+  nothing.
 - Turns: start, steer (with `prompt_required` when Pi queued the steer after
   the run ended), interrupt; settlement only on `agent_settled` or process
   exit.

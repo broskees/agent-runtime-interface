@@ -43,6 +43,10 @@
   started a fresh session for any of them. ACP has no error for a session
   another process holds, so the conformance kit's locked-session check does
   not apply.
+- A resume of a session the ARI session holds applies its config and policy
+  and passes its first-prompt instructions on; new MCP servers or a new
+  system prompt, which ACP fixes when a session opens, are refused with
+  `invalid_state`. An earlier build reported success and changed nothing.
 - `switchModel` is declared only while the agent offers a `model` option;
   `sessionModel` is `process_per_session`.
 - Tested against ACP protocol versions 1 and 2 (`testedVersions.range`

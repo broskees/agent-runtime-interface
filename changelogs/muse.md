@@ -28,6 +28,9 @@ First version of the Muse Code driver.
   (no lease) and loads nothing; the thread stays `unloaded`, and a missing
   session is `not_found`. An earlier build loaded the session as an
   interactive resume does.
+- A resume of a loaded thread applies a new model with `session/setModel`
+  and refuses another runtime mode with `unsupported`; an earlier build
+  ignored both and reported success.
 - Turns: start, queue (`ifBusy: "queue"`), steer (`turn/steer` with
   `expectedTurnId`; a steer whose turn already ended, `already_terminal`, is
   `prompt_required`; a steer the busy runtime refuses, `runtime_busy`, is sent

@@ -144,7 +144,7 @@ interface Launch {
 interface PiThread {
   thread: Thread;
   policy: RuntimePolicy;
-  readonly launch: Launch;
+  launch: Launch;
   process: PiProcess | undefined;
   starting: Promise<PiProcess> | undefined;
   /** User-message entries in the session file, in append order: the next prompt's turn ordinal. */
@@ -312,7 +312,7 @@ export class PiSession implements Session {
     const held = known !== undefined && !known.unloaded && known.process !== undefined;
     // A history read changes nothing. Pi opens a session file only to run it, and writes the launch into it, so it has no read-only history.
     if (input.purpose === "history" && !held) throw callErrors.unsupported("resumeThread.purpose.history", "pi opens a session file only to run it, and records the launch in it, so the driver cannot read its history without a live runtime");
-    if (held) return known.thread;
+    if (held) return this.#resumeHeld(known, input);
 
     const policy = input.policy ?? known?.policy ?? { mode: "approval_required", interaction: "default", cwd: known?.thread.cwd ?? "" };
     const cwd = policy.cwd !== "" ? policy.cwd : (known?.thread.cwd ?? "");
@@ -353,6 +353,32 @@ export class PiSession implements Session {
     );
     const thread = await this.#register(fresh, policy, launch, {});
     return { ...thread.thread, appliedConfig: fresh.applied };
+  }
+
+  /**
+   * A resume of a thread this session holds with a live process. Its config
+   * reaches pi at once (`set_model`, `set_thinking_level`). Pi reads its
+   * runtime mode, system prompts and MCP servers when it starts, so a new
+   * launch stops the process, and the next use starts pi again on the session
+   * file with it; a new mode is refused, as on a turn
+   * (`runtimePolicy.switchInSession`). Nothing changes while a turn runs, and
+   * an ephemeral thread, which has no file to start again on, keeps its launch.
+   */
+  async #resumeHeld(thread: PiThread, input: ResumeThreadInput): Promise<AppliedThread> {
+    if (input.policy !== undefined && input.policy.mode !== thread.policy.mode) throw callErrors.unsupported("runtimePolicy.switchInSession", `pi reads its runtime mode when it starts; thread ${thread.thread.id} runs ${thread.policy.mode}`);
+    const launch = input.launch === undefined ? undefined : this.#launchFor(thread.launch.cwd, thread.policy, undefined, input.launch, undefined);
+    const relaunch = launch !== undefined && JSON.stringify([launch.systemPrompts, launch.launchMcpServers]) !== JSON.stringify([thread.launch.systemPrompts, thread.launch.launchMcpServers]);
+    if ((relaunch || input.config !== undefined) && thread.active !== undefined) throw callErrors.invalidState("turn_active", `Thread ${thread.thread.id} runs a turn; resume it with new settings once the turn ends`);
+    if (relaunch && thread.thread.handle === undefined) throw callErrors.invalidState("no_session_file", `Thread ${thread.thread.id} is ephemeral (persistSession: false): pi takes a new launch only when it starts, and there is no session file to start it on`);
+    const process = await this.#process(thread);
+    await this.#applyConfig(thread, process, input.config);
+    if (input.policy !== undefined) thread.policy = { ...input.policy, cwd: thread.policy.cwd };
+    if (relaunch) {
+      thread.launch = { ...thread.launch, systemPrompts: launch.systemPrompts, launchMcpServers: launch.launchMcpServers };
+      await this.#park(thread);
+    }
+    const applied: ConfigValues = { ...(thread.launch.model === undefined ? {} : { model: thread.launch.model }), ...(thread.launch.thinking === undefined ? {} : { thinking: thread.launch.thinking }) };
+    return { ...thread.thread, appliedConfig: applied };
   }
 
   #sessionsDirectory(): string {

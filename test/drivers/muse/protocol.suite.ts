@@ -689,6 +689,22 @@ describe("muse driver: Muse's protocol", () => {
     }
   });
 
+  test("a resume of a loaded thread applies a new model with session/setModel and refuses a runtime mode Muse cannot switch in a session", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const models = rig.requests("session/setModel").length;
+      const resumed = await opened.session.resumeThread({ native: thread.native, config: { model: "muse-small-1" } });
+      assert.equal(resumed.id, thread.id);
+      assert.equal(rig.requests("session/setModel").length, models + 1, "the new model reached Muse");
+      assert.equal(resumed.appliedConfig?.["model"], "muse-small-1");
+      await assert.rejects(opened.session.resumeThread({ native: thread.native, policy: policy(rig.cwd, "full_access") }), (error) => isAriError(error, "unsupported"));
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("unloadThread drains the thread's host and releases its lease; resumeThread loads it again; release parks every host and the next turn resumes", async () => {
     const rig = await museRig();
     try {

@@ -399,9 +399,22 @@ export class MuseSession implements Session {
     const known = this.#threadsByNative.get(nativeId);
     if (input.purpose === "history") return this.#readHistory(nativeId, known, input);
     if (known !== undefined && !known.unloaded) {
+      // A loaded thread takes the resume's settings, or the resume is refused, as on a turn: Muse switches no runtime mode in a session.
+      if (input.policy !== undefined) {
+        if (musePolicy(input.policy) === undefined) throw callErrors.unsupported(`runtimePolicy.modes.${input.policy.mode}`);
+        if (input.policy.mode !== known.policy.mode) throw callErrors.unsupported("sessions.switchRuntimeMode", `Muse sets a session's permission profile when it loads it; thread ${known.thread.id} runs ${known.policy.mode}`);
+      }
       if (input.launch !== undefined) await this.#replaceLaunch(known, input.launch);
-      await this.#ensureHost(known);
-      return known.thread;
+      const host = await this.#ensureHost(known);
+      const model = typeof input.config?.["model"] === "string" ? input.config["model"] : undefined;
+      if (model !== undefined && model !== known.model) {
+        await host.command("session/setModel", { sessionId: known.nativeId, model: { modelId: model, ...(this.#runtime.providerId === undefined ? {} : { providerId: this.#runtime.providerId }) } }).catch((error: unknown) => {
+          throw callErrorFromMuse(this.#runtime.sdk, error, "model");
+        });
+        known.model = model;
+      }
+      if (input.policy !== undefined) known.policy = { ...input.policy, cwd: known.cwd };
+      return { ...known.thread, ...(known.model === undefined ? {} : { appliedConfig: { model: known.model } }) };
     }
     const policyInput = input.policy ?? known?.policy;
     if (policyInput === undefined) throw callErrors.validation([{ message: `resumeThread of ${nativeId} needs policy.cwd: this session has not seen the thread`, path: ["policy"] }]);

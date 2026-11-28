@@ -150,6 +150,15 @@ It never adds instruction text of its own. Its runtime mode arrives in the
   without starting Pi on it. Only a missing session falls back: when the file
   is there and pi fails to open it (a damaged file, a crash, a sign-in
   error), the error goes to the caller and no fresh session starts.
+- **Resume of a held thread**: a resume of a thread whose process runs
+  applies its `config` at once (`set_model`, `set_thinking_level`). Pi reads
+  its system prompts and MCP servers when it starts, so a new `launch` stops
+  the process, and the next use starts pi again on the session file with
+  it. Pi switches no runtime mode in a session, so a resume with another
+  mode is refused with `unsupported` (`runtimePolicy.switchInSession`), as a
+  turn is. Nothing changes while a turn runs (`invalid_state`
+  `turn_active`), and an ephemeral thread keeps its launch (`invalid_state`
+  `no_session_file`).
 - **Turn**: one `prompt` and the run it starts. Pi has no turn id, so a turn
   is named by the position of its prompt among every user message of the
   session file in append order (weak, ordinal). Entries are append-only, so a

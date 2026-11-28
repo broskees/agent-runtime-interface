@@ -353,7 +353,7 @@ export class AcpSession implements Session {
       if (held) return { ...known.thread, appliedConfig: this.#currentConfig(known) };
       throw callErrors.unsupported("resumeThread.purpose.history", "An ACP agent opens a session only to run it (session/resume or session/load), so the driver cannot read its history without a live runtime");
     }
-    if (held) return { ...known.thread, appliedConfig: this.#currentConfig(known) };
+    if (held) return this.#resumeHeld(agent, known, input);
     const givenCwd = input.policy?.cwd ?? known?.cwd;
     if (givenCwd === undefined || givenCwd === "") {
       throw callErrors.validation([{ message: "an ACP agent resumes a session in a directory: pass policy.cwd", path: ["policy", "cwd"] }]);
@@ -395,6 +395,30 @@ export class AcpSession implements Session {
     this.#setOptions(state, fresh.configOptions ?? undefined);
     await this.#applyConfig(state, this.#withPolicy(policy, input.config));
     return { ...state.thread, appliedConfig: this.#currentConfig(state) };
+  }
+
+  /**
+   * A resume of a session this ARI session holds open. Its config and policy
+   * take effect as on a turn (`session/set_config_option`); its first-prompt
+   * instructions go at the top of the next prompt. ACP fixes a session's MCP
+   * servers and system prompt when it opens it, so a resume that brings other
+   * ones is refused, as is any change while a turn runs.
+   */
+  async #resumeHeld(agent: AcpConnection, thread: ThreadState, input: ResumeThreadInput): Promise<AppliedThread> {
+    const launch = input.launch === undefined ? undefined : this.#launchFor(input.launch);
+    const instructions = launch === undefined ? undefined : this.#instructions(agent, launch, undefined);
+    if (launch !== undefined && JSON.stringify(this.#mcpFor(launch)) !== JSON.stringify(thread.mcp)) {
+      throw callErrors.invalidState("session_open", `ACP fixes a session's MCP servers when it opens it, and session ${thread.nativeId} is open: a resume cannot change them`);
+    }
+    if (instructions?.systemPrompt !== undefined && JSON.stringify(instructions.systemPrompt) !== JSON.stringify(thread.systemPrompt)) {
+      throw callErrors.invalidState("session_open", `ACP takes a session's system prompt when it opens it, and session ${thread.nativeId} is open: a resume cannot change it`);
+    }
+    const changes = input.config !== undefined || input.policy !== undefined || (instructions?.firstMessage.length ?? 0) > 0;
+    if (changes && thread.active !== undefined) throw callErrors.invalidState("turn_active", `Thread ${thread.thread.id} runs a turn; resume it with new settings once the turn ends`);
+    if (instructions !== undefined) this.#giveInstructions(thread, instructions);
+    if (input.policy !== undefined) thread.policy = { ...input.policy, cwd: thread.cwd };
+    await this.#applyConfig(thread, this.#withPolicy(input.policy, input.config));
+    return { ...thread.thread, appliedConfig: this.#currentConfig(thread) };
   }
 
   async forkThread(input: ForkThreadInput): Promise<Thread> {

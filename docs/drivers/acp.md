@@ -144,6 +144,13 @@ const instance = await acpDriver.create(host, {
   settles. A session the agent reports missing (`resource_not_found`) is
   replaced by a fresh one, with `session.replaced` and `contextLost: true`;
   any other refusal goes to the caller.
+- **Resume of a held thread.** A resume of a session this ARI session holds
+  open sends no `session/resume`: its `config` and `policy` take effect at
+  once (`session/set_config_option`), and its first-prompt instructions go
+  at the top of the next prompt. ACP fixes a session's MCP servers and
+  system prompt when it opens it, so a resume that brings other ones is
+  refused with `invalid_state` (`session_open`), as is any change while a
+  turn runs (`turn_active`).
 - **Host tools.** `launch.mcpServers` go to `session/new` under exactly the
   names the host gave them. ACP fixes a session's MCP servers in
   `session/new`, before an ARI thread id exists, so the driver does not call

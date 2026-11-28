@@ -97,6 +97,32 @@ for (const protocol of [1, 2] as const) {
   });
 }
 
+test("a resume of a thread the session holds applies its config, policy and first-prompt instructions, and refuses new MCP servers, which ACP fixes when a session opens", async () => {
+  const rig = await openRig({ name: "held resume", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--config-options", JSON.stringify(V2_OPTIONS)] });
+  try {
+    const { session } = await rig.open();
+    const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    const sets = (): Array<{ [key: string]: unknown }> => frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/set_config_option");
+    const resumed = await session.resumeThread({ native: { handle: thread.handle! }, config: { model: "claude" }, policy: rig.policy("full_access"), launch: { developerPrompt: ["ARI_HELD_DEVELOPER"] } });
+    assert.equal(resumed.id, thread.id);
+    assert.equal(sets().length, 1, "the new model reached the agent");
+    assert.deepEqual((sets()[0]!["params"] as { configId: string; value: unknown }).configId, "model");
+    assert.equal(resumed.appliedConfig?.["model"], "claude");
+    const started = await session.startTurn({ threadId: thread.id, clientTurnKey: "after-held-resume", intent: "start", content: [{ type: "text", text: "Go." }] });
+    assert.equal(started.status, "accepted");
+    const native = await rig.nextTurn();
+    const prompt = frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/prompt").at(-1)!;
+    assert.match(JSON.stringify(prompt["params"]), /ARI_HELD_DEVELOPER/, "the resume's instructions reach the next prompt");
+    await native.complete();
+    await assert.rejects(
+      session.resumeThread({ native: { handle: thread.handle! }, launch: { mcpServers: [{ name: "late-tools", transport: "stdio", command: "late-tools" }] } }),
+      (error) => isAriError(error, "invalid_state") && /MCP servers/.test(error.message),
+    );
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 test("a v2 agent negotiates v2", async () => {
   const rig = await openRig({ name: "v2", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
   try {

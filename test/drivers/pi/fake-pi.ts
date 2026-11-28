@@ -66,6 +66,7 @@
 // `--fake-ambient-auth=<authenticated|unauthenticated|unknown|unavailable>` and
 // `--fake-version=<x.y.z>`.
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -287,9 +288,9 @@ class SessionFile {
     return new SessionFile({ type: "session", version: 3, id, timestamp, cwd }, [], file, false, new Set());
   }
 
-  /** `--no-session`: nothing is ever written. */
+  /** `--no-session`: nothing is ever written. Each in-memory session gets an id of its own, as Pi's `SessionManager.inMemory` does (`newSession`, `createSessionId`). */
   static inMemory(cwd: string): SessionFile {
-    return new SessionFile({ type: "session", version: 3, id: sessionIdFor(0), timestamp: new Date().toISOString(), cwd }, [], "", false, new Set());
+    return new SessionFile({ type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd }, [], "", false, new Set());
   }
 
   static open(file: string, dir: string, cwd: string): SessionFile {

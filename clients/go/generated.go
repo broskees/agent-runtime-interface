@@ -2587,22 +2587,26 @@ type CodexMemoryReadResult struct {
 	Summary  *string `json:"summary"`
 }
 
-// Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`, each passed to Codex's `thread/list`. Any other `x:codex.` field is refused.
+// Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`. Every `x:codex.<field>` goes to Codex's `thread/list` as `<field>`, and Codex validates it; the fields below are those of the pinned protocol. `x:codex.cwd` and `x:codex.cursor` are refused: use `cwd` and `cursor`.
 type CodexNativeSessionFilters struct {
-	XCodexLimit              *int64                                        `json:"x:codex.limit,omitzero"`
-	XCodexSearchTerm         *string                                       `json:"x:codex.searchTerm,omitzero"`
-	XCodexArchived           *bool                                         `json:"x:codex.archived,omitzero"`
-	XCodexModelProviders     []string                                      `json:"x:codex.modelProviders,omitzero"`
-	XCodexSourceKinds        []string                                      `json:"x:codex.sourceKinds,omitzero"`
-	XCodexIncludedThreadIDs  []string                                      `json:"x:codex.includedThreadIds,omitzero"`
-	XCodexExcludedThreadIDs  []string                                      `json:"x:codex.excludedThreadIds,omitzero"`
-	XCodexUseStateDbOnly     *bool                                         `json:"x:codex.useStateDbOnly,omitzero"`
-	XCodexCurrentAccountOnly *bool                                         `json:"x:codex.currentAccountOnly,omitzero"`
-	XCodexParentThreadID     *string                                       `json:"x:codex.parentThreadId,omitzero"`
-	XCodexAncestorThreadID   *string                                       `json:"x:codex.ancestorThreadId,omitzero"`
-	XCodexProjectID          *string                                       `json:"x:codex.projectId,omitzero"`
-	XCodexSortKey            *CodexNativeSessionFiltersXCodexSortKey       `json:"x:codex.sortKey,omitzero"`
-	XCodexSortDirection      *CodexNativeSessionFiltersXCodexSortDirection `json:"x:codex.sortDirection,omitzero"`
+	XCodexLimit                  *int64                                        `json:"x:codex.limit,omitzero"`
+	XCodexSearchTerm             *string                                       `json:"x:codex.searchTerm,omitzero"`
+	XCodexArchived               *bool                                         `json:"x:codex.archived,omitzero"`
+	XCodexModelProviders         []string                                      `json:"x:codex.modelProviders,omitzero"`
+	XCodexSourceKinds            []string                                      `json:"x:codex.sourceKinds,omitzero"`
+	XCodexIncludedThreadIDs      []string                                      `json:"x:codex.includedThreadIds,omitzero"`
+	XCodexExcludedThreadIDs      []string                                      `json:"x:codex.excludedThreadIds,omitzero"`
+	XCodexUseStateDbOnly         *bool                                         `json:"x:codex.useStateDbOnly,omitzero"`
+	XCodexCurrentAccountOnly     *bool                                         `json:"x:codex.currentAccountOnly,omitzero"`
+	XCodexParentThreadID         *string                                       `json:"x:codex.parentThreadId,omitzero"`
+	XCodexAncestorThreadID       *string                                       `json:"x:codex.ancestorThreadId,omitzero"`
+	XCodexProjectID              *string                                       `json:"x:codex.projectId,omitzero"`
+	XCodexSectionID              Nullable[string]                              `json:"x:codex.sectionId,omitzero"`
+	XCodexAttachedToThreadID     *string                                       `json:"x:codex.attachedToThreadId,omitzero"`
+	XCodexIncludeAttachedThreads *bool                                         `json:"x:codex.includeAttachedThreads,omitzero"`
+	XCodexOriginators            []string                                      `json:"x:codex.originators,omitzero"`
+	XCodexSortKey                *CodexNativeSessionFiltersXCodexSortKey       `json:"x:codex.sortKey,omitzero"`
+	XCodexSortDirection          *CodexNativeSessionFiltersXCodexSortDirection `json:"x:codex.sortDirection,omitzero"`
 }
 
 // Open: any string is kept; Recognized reports whether this client knows it.
@@ -4502,7 +4506,7 @@ type SessionResumeThreadParams struct {
 	Config    ConfigValues                    `json:"config,omitzero"`
 	Policy    *RuntimePolicy                  `json:"policy,omitzero"`
 	Launch    *LaunchContext                  `json:"launch,omitzero"`
-	// `history` loads the transcript read-only without a live runtime.
+	// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
 	Purpose *SessionResumeThreadParamsPurpose `json:"purpose,omitzero"`
 	// Skip replaying stored items as events.
 	Quiet *bool `json:"quiet,omitzero"`
@@ -4537,7 +4541,7 @@ func (u *SessionResumeThreadParamsNative) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("SessionResumeThreadParamsNative: no variant matches %s", data)
 }
 
-// `history` loads the transcript read-only without a live runtime.
+// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
 //
 // Open: any string is kept; Recognized reports whether this client knows it.
 type SessionResumeThreadParamsPurpose string
@@ -4974,7 +4978,7 @@ type ResumeThreadInput struct {
 	Config ConfigValues            `json:"config,omitzero"`
 	Policy *RuntimePolicy          `json:"policy,omitzero"`
 	Launch *LaunchContext          `json:"launch,omitzero"`
-	// `history` loads the transcript read-only without a live runtime.
+	// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
 	Purpose *ResumeThreadInputPurpose `json:"purpose,omitzero"`
 	// Skip replaying stored items as events.
 	Quiet *bool `json:"quiet,omitzero"`
@@ -5009,7 +5013,7 @@ func (u *ResumeThreadInputNative) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("ResumeThreadInputNative: no variant matches %s", data)
 }
 
-// `history` loads the transcript read-only without a live runtime.
+// `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
 //
 // Open: any string is kept; Recognized reports whether this client knows it.
 type ResumeThreadInputPurpose string

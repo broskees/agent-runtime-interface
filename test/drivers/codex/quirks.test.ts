@@ -44,6 +44,38 @@ async function terminal(opened: OpenedCodexSession, turnId: string) {
   return opened.until(() => opened.bodies("turn.terminal").find((body) => body.turnId === turnId), `turn.terminal of ${turnId}`);
 }
 
+describe("a history resume", () => {
+  test("reads the stored thread without a writer: no thread/resume, no MCP config, no policy and no replacement; the thread stays unloaded and its turns read back", async () => {
+    rig = await codexRig();
+    const first = await rig.open();
+    const thread = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const started = await first.session.startTurn({ threadId: thread.id, clientTurnKey: "h-1", intent: "start", content: [{ type: "text", text: "Remember 7." }] });
+    const native = await rig.nextTurn();
+    await native.complete();
+    await terminal(first, (started as { turnId: string }).turnId);
+    await first.session.close();
+
+    const second = await rig.open();
+    const resumes = rig.requests("thread/resume").length;
+    const starts = rig.requests("thread/start").length;
+    const mcpServers = () => rig!.host.calls.filter((call) => call.operation === "hostTools.mcpServerFor").length;
+    const servers = mcpServers();
+    const resumed = await second.session.resumeThread({ native: { handle: thread.handle! }, purpose: "history" });
+    assert.equal(resumed.id, thread.id);
+    assert.equal(resumed.status, "unloaded");
+    assert.equal(rig.requests("thread/resume").length, resumes, "a history read never opens the thread for writing");
+    assert.equal(mcpServers(), servers, "a history read gives Codex no MCP server");
+    const snapshot = await second.session.readSnapshot!(resumed.id);
+    assert.equal(snapshot.turns.length, 1);
+    await assert.rejects(second.session.startTurn({ threadId: resumed.id, clientTurnKey: "h-2", intent: "start", content: [{ type: "text", text: "Again." }] }), (error: unknown) => isAriError(error, "invalid_state"));
+
+    // A thread Codex does not have is not found: a history read never starts a new one.
+    await assert.rejects(second.session.resumeThread({ native: { handle: "019a0000-0000-7000-8000-000000000000" }, purpose: "history", policy: policy(rig.cwd) }), (error: unknown) => isAriError(error, "not_found"));
+    assert.equal(rig.requests("thread/start").length, starts, "no thread was created");
+    assert.equal(second.bodies("session.replaced").length, 0);
+  });
+});
+
 describe("codex quirks", () => {
   test("async questions are message-mode requests that survive their turn's end and a restart, until a user message answers them", async () => {
     rig = await codexRig();
@@ -502,7 +534,7 @@ describe("codex quirks", () => {
     strictGrammar(opened.events);
   });
 
-  test("native session listing passes Codex-only filters as x:codex.* and refuses unknown ones", async () => {
+  test("native session listing passes every x:codex.* filter to thread/list for Codex to validate, keeps ARI's own cwd and cursor, and keeps Codex's 100-id cap", async () => {
     rig = await codexRig();
     const opened = await rig.open();
     const threads = [];
@@ -518,7 +550,15 @@ describe("codex quirks", () => {
     assert.deepEqual(page.items.map((item) => [item.id, item.handle, item.title]), [[threads[0]!.native.id, threads[0]!.native.id, "alpha task"]]);
     assert.equal((page.items[0] as { [key: string]: unknown })["x:codex.modelProvider"], "openai");
     assert.equal(page.nextCursor, null);
-    await assert.rejects(rig.instance.nativeSessions!.list({ cwd: rig.cwd, "x:codex.bogus": true } as never), (error) => isAriError(error, "validation") && /x:codex\.bogus/.test(error.message + JSON.stringify(error.callError)));
+    // Filters the pinned protocol has and the driver never listed, and one it does not have: all reach Codex, which validates them.
+    const section = await rig.instance.nativeSessions!.list({ cwd: rig.cwd, "x:codex.sectionId": null, "x:codex.attachedToThreadId": threads[0]!.native.id!, "x:codex.includeAttachedThreads": true, "x:codex.bogus": true } as never);
+    assert.deepEqual(rig.requests("thread/list").at(-1), { cwd: rig.cwd, sectionId: null, attachedToThreadId: threads[0]!.native.id, includeAttachedThreads: true, bogus: true });
+    assert.ok(Array.isArray(section.items));
+    // cwd and cursor are ARI's own fields.
+    for (const key of ["x:codex.cwd", "x:codex.cursor"]) {
+      await assert.rejects(rig.instance.nativeSessions!.list({ cwd: rig.cwd, [key]: "elsewhere" } as never), (error) => isAriError(error, "validation") && error.message.includes(key));
+    }
+    await assert.rejects(rig.instance.nativeSessions!.list({ cwd: rig.cwd, "x:other.filter": true } as never), (error) => isAriError(error, "validation"));
     const tooMany = Array.from({ length: 101 }, (_, index) => `thread-${index}`);
     await assert.rejects(rig.instance.nativeSessions!.list({ cwd: rig.cwd, "x:codex.excludedThreadIds": tooMany } as never), (error) => isAriError(error, "validation"));
     await rig.instance.nativeSessions!.archive!(threads[1]!.native.id!);

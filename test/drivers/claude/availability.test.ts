@@ -198,6 +198,25 @@ result = { runtime: Object.keys(runtime).sort(), version: runtime.version, claud
     assert.match(configuredStatus.error!.message, /^Claude Code is not installed at the configured executablePath: claude-nightly names no executable file\./);
   });
 
+  test("any unambiguous version claude --version prints counts: a banner line first, +build metadata; two versions or none are unreadable, and the minimum still holds", async () => {
+    const { parseClaudeCodeVersion } = await import("../../../src/drivers/claude/instance.ts");
+    assert.equal(parseClaudeCodeVersion("2.1.330 (Claude Code)\n"), "2.1.330");
+    assert.equal(parseClaudeCodeVersion("2.1.331+build.7 (Claude Code)\n"), "2.1.331");
+    assert.equal(parseClaudeCodeVersion("Claude Code\n2.1.331\n"), "2.1.331");
+    assert.equal(parseClaudeCodeVersion("A new version is available: 2.1.340\n2.1.331 (Claude Code)\n"), "2.1.331", "the line Claude Code labels wins");
+    assert.equal(parseClaudeCodeVersion("Welcome to Claude!\n"), undefined);
+    assert.equal(parseClaudeCodeVersion("2.1.331\n2.1.340\n"), undefined, "two versions are ambiguous");
+    const rig = await openClaudeRig({ claudeVersionLine: "Claude Code for Linux\n2.1.331+local.3 (Claude Code)" });
+    try {
+      const status = await rig.instance.status();
+      assert.equal(status.state, "ready", JSON.stringify(status));
+    } finally {
+      await rig.cleanup();
+    }
+    const old = await openClaudeRig({ claudeVersionLine: "Claude Code for Linux\n2.1.329+local.3" }).catch((error: unknown) => error);
+    assert.match((old as { callError?: { message: string } }).callError?.message ?? String(old), /^Claude Code 2\.1\.329 at \/fake-user-bin\/claude is older than 2\.1\.330/);
+  });
+
   test("a claude older than the minimum, with the SDK the driver's loader gives, is refused before any query", async () => {
     const rig = await openClaudeRig({ claudeVersionLine: "2.1.329 (Claude Code)" }).catch((error: unknown) => error);
     const callError = (rig as { callError?: { code: string; message: string; binary?: string } }).callError;

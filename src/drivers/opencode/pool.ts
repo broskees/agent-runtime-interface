@@ -122,9 +122,11 @@ export class ServerPool {
       const found = await serverVersion(url, authorization);
       return { generation: found.generation, version: found.version, external: true, url, ...(authorization === undefined ? {} : { authorization }) };
     }
-    const executable = await this.#host.process.resolveExecutable(this.#config.binary);
+    // Found, probed and started with the instance's environment alike. Keep `path` for hosts that read only it.
+    const env = { ...this.#environment };
+    const executable = await this.#host.process.resolveExecutable(this.#config.binary, { env, ...(env["PATH"] === undefined ? {} : { path: env["PATH"] }) });
     if (executable === null) throw this.unavailableBinary();
-    const found = await cliVersion(this.#host, executable);
+    const found = await cliVersion(this.#host, executable, env);
     if (found.ok && found.version !== undefined && belowMinimum(found.version)) throw this.#tooOld(found.version, executable);
     const generation = found.version === undefined ? undefined : generationOf(found.version);
     if (!found.ok || found.version === undefined || generation === undefined) throw callErrors.protocol("unknown_version", `Could not tell the OpenCode version from \`${this.#config.binary} --version\`: ${JSON.stringify(found.output)}`);

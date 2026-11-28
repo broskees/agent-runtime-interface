@@ -3867,7 +3867,7 @@ class CodexMemoryReadResult:
 
 @dataclass(kw_only=True)
 class CodexNativeSessionFilters:
-    """Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`, each passed to Codex's `thread/list`. Any other `x:codex.` field is refused."""
+    """Codex-only filters `nativeSessions.list` accepts next to `cwd` and `cursor`. Every `x:codex.<field>` goes to Codex's `thread/list` as `<field>`, and Codex validates it; the fields below are those of the pinned protocol. `x:codex.cwd` and `x:codex.cursor` are refused: use `cwd` and `cursor`."""
     x_codex_limit: int | None = None
     x_codex_search_term: str | None = None
     x_codex_archived: bool | None = None
@@ -3880,6 +3880,10 @@ class CodexNativeSessionFilters:
     x_codex_parent_thread_id: str | None = None
     x_codex_ancestor_thread_id: str | None = None
     x_codex_project_id: str | None = None
+    x_codex_section_id: str | None | Unset = UNSET
+    x_codex_attached_to_thread_id: str | None = None
+    x_codex_include_attached_threads: bool | None = None
+    x_codex_originators: list[str] | None = None
     x_codex_sort_key: CodexNativeSessionFiltersXCodexSortKey | None = None
     x_codex_sort_direction: CodexNativeSessionFiltersXCodexSortDirection | None = None
 
@@ -3899,6 +3903,10 @@ class CodexNativeSessionFilters:
             x_codex_parent_thread_id=optional(data, "x:codex.parentThreadId", decode_str),
             x_codex_ancestor_thread_id=optional(data, "x:codex.ancestorThreadId", decode_str),
             x_codex_project_id=optional(data, "x:codex.projectId", decode_str),
+            x_codex_section_id=present(data, "x:codex.sectionId", nullable(decode_str)),
+            x_codex_attached_to_thread_id=optional(data, "x:codex.attachedToThreadId", decode_str),
+            x_codex_include_attached_threads=optional(data, "x:codex.includeAttachedThreads", decode_bool),
+            x_codex_originators=optional(data, "x:codex.originators", list_of(decode_str)),
             x_codex_sort_key=optional(data, "x:codex.sortKey", CodexNativeSessionFiltersXCodexSortKey.from_json),
             x_codex_sort_direction=optional(data, "x:codex.sortDirection", CodexNativeSessionFiltersXCodexSortDirection.from_json),
         )
@@ -3929,6 +3937,14 @@ class CodexNativeSessionFilters:
             out["x:codex.ancestorThreadId"] = encode(self.x_codex_ancestor_thread_id)
         if self.x_codex_project_id is not None:
             out["x:codex.projectId"] = encode(self.x_codex_project_id)
+        if not isinstance(self.x_codex_section_id, Unset):
+            out["x:codex.sectionId"] = encode(self.x_codex_section_id)
+        if self.x_codex_attached_to_thread_id is not None:
+            out["x:codex.attachedToThreadId"] = encode(self.x_codex_attached_to_thread_id)
+        if self.x_codex_include_attached_threads is not None:
+            out["x:codex.includeAttachedThreads"] = encode(self.x_codex_include_attached_threads)
+        if self.x_codex_originators is not None:
+            out["x:codex.originators"] = encode(self.x_codex_originators)
         if self.x_codex_sort_key is not None:
             out["x:codex.sortKey"] = encode(self.x_codex_sort_key)
         if self.x_codex_sort_direction is not None:
@@ -8086,7 +8102,7 @@ class SessionResumeThreadParams:
     policy: RuntimePolicy | None = None
     launch: LaunchContext | None = None
     purpose: SessionResumeThreadParamsPurpose | None = None
-    """`history` loads the transcript read-only without a live runtime."""
+    """`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`."""
     quiet: bool | None = None
     """Skip replaying stored items as events."""
 
@@ -8128,7 +8144,7 @@ def decode_session_resume_thread_params_native(data: Any) -> SessionResumeThread
 
 
 class SessionResumeThreadParamsPurpose(OpenEnum):
-    """`history` loads the transcript read-only without a live runtime.
+    """`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
     
     Open: a value this client does not know is kept as a member that is not recognized."""
     INTERACTIVE = "interactive"
@@ -9617,7 +9633,7 @@ class ResumeThreadInput:
     policy: RuntimePolicy | None = None
     launch: LaunchContext | None = None
     purpose: ResumeThreadInputPurpose | None = None
-    """`history` loads the transcript read-only without a live runtime."""
+    """`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`."""
     quiet: bool | None = None
     """Skip replaying stored items as events."""
 
@@ -9657,7 +9673,7 @@ def decode_resume_thread_input_native(data: Any) -> ResumeThreadInputNative:
 
 
 class ResumeThreadInputPurpose(OpenEnum):
-    """`history` loads the transcript read-only without a live runtime.
+    """`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.
     
     Open: a value this client does not know is kept as a member that is not recognized."""
     INTERACTIVE = "interactive"

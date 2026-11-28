@@ -12,6 +12,7 @@ import { VirtualClock } from "../../../src/conformance/index.ts";
 import { isAriError } from "../../../src/index.ts";
 import type { Session, StartTurnResult, Thread } from "../../../src/index.ts";
 import { MUSE_CAPABILITIES, threadIdFor, turnIdFor } from "../../../src/drivers/muse/index.ts";
+import { FRAME_LOG } from "./frames.ts";
 import type { FakeMuseTurn } from "./fake-muse.ts";
 import { museRig, policy, until } from "./rig.ts";
 import type { MuseTestRig, OpenedMuseSession } from "./rig.ts";
@@ -659,6 +660,52 @@ describe("muse driver: Muse's protocol", () => {
     }
   });
 
+  test("a history resume reads the stored session with session/read: no session/resume, no lease, no session/start; the thread stays unloaded and a missing session is not_found", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const first = await start(rig, opened.session, thread, "Remember 7.");
+      await first.native.complete();
+      await terminal(opened, turnIdOf(first.result));
+      await opened.session.close();
+
+      const reader = await rig.open();
+      const resumes = rig.requests("session/resume").length;
+      const starts = rig.requests("session/start").length;
+      const read = await reader.session.resumeThread({ native: thread.native, policy: policy(rig.cwd), purpose: "history" });
+      assert.equal(read.id, thread.id);
+      assert.equal(read.status, "unloaded");
+      assert.equal(rig.requests("session/resume").length, resumes, "a history read never loads the session");
+      assert.equal(rig.world.inspect(thread.native.id!)?.loaded, false, "no host holds the session's lease");
+      const snapshot = await reader.session.readSnapshot!(read.id);
+      assert.equal(snapshot.turns.length, 1);
+      await assert.rejects(reader.session.startTurn({ threadId: read.id, clientTurnKey: "x", intent: "start", content: [{ type: "text", text: "x" }] }), (error) => isAriError(error, "invalid_state"));
+
+      await assert.rejects(reader.session.resumeThread({ native: { handle: "muse-missing-session" }, policy: policy(rig.cwd), purpose: "history" }), (error) => isAriError(error, "not_found"));
+      assert.equal(rig.requests("session/start").length, starts, "no session was started");
+      assert.equal(reader.bodies("session.replaced").length, 0);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a resume of a loaded thread applies a new model with session/setModel and refuses a runtime mode Muse cannot switch in a session", async () => {
+    const rig = await museRig();
+    try {
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const models = rig.requests("session/setModel").length;
+      const resumed = await opened.session.resumeThread({ native: thread.native, config: { model: "muse-small-1" } });
+      assert.equal(resumed.id, thread.id);
+      assert.equal(rig.requests("session/setModel").length, models + 1, "the new model reached Muse");
+      assert.equal(resumed.appliedConfig?.["model"], "muse-small-1");
+      await assert.rejects(opened.session.resumeThread({ native: thread.native, policy: policy(rig.cwd, "full_access") }), (error) => isAriError(error, "unsupported"));
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("unloadThread drains the thread's host and releases its lease; resumeThread loads it again; release parks every host and the next turn resumes", async () => {
     const rig = await museRig();
     try {
@@ -839,7 +886,14 @@ describe("muse driver: Muse's protocol", () => {
         ["muse-small-1", 100000],
       ]);
       assert.equal(opened.session.contextWindow!("muse-small-1"), 100000);
-      await assert.rejects(opened.session.startTurn({ threadId: thread.id, clientTurnKey: "bad", intent: "start", content: [{ type: "text", text: "x" }], config: { reasoningEffort: "turbo" } }), (error) => isAriError(error, "validation"));
+      // An effort the pinned protocol does not list goes to Muse as given, for Muse to take or refuse; the driver keeps no list of its own.
+      assert.deepEqual(await opened.session.planConfigChange({ threadId: thread.id, changes: { reasoningEffort: "turbo" } }), { type: "apply_next_turn" });
+      const turbo = await start(rig, opened.session, thread, "Turbo.", { config: { reasoningEffort: "turbo" } });
+      assert.equal(rig.requests("turn/start").at(-1)!["reasoningEffort"], "turbo");
+      await turbo.native.complete();
+      await terminal(opened, turnIdOf(turbo.result));
+      // Those frames carry a value outside @muse-code/sdk 1.4.25's ReasoningEffort on purpose; the wire-type check covers every other frame.
+      FRAME_LOG.frames.splice(0, FRAME_LOG.frames.length, ...FRAME_LOG.frames.filter((frame) => !JSON.stringify(frame.frame).includes('"turbo"')));
     } finally {
       await rig.cleanup();
     }

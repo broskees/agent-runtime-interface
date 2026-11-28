@@ -132,7 +132,6 @@ export interface MuseSessionRuntime {
   contextWindow(model: string): number | undefined;
 }
 
-const REASONING_EFFORTS: ReadonlySet<string> = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 
 interface TurnState {
   readonly id: string;
@@ -397,10 +396,24 @@ export class MuseSession implements Session {
     const nativeId = "handle" in input.native ? input.native.handle : input.native.id;
     if (nativeId === null || nativeId === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const known = this.#threadsByNative.get(nativeId);
+    if (input.purpose === "history") return this.#readHistory(nativeId, known, input);
     if (known !== undefined && !known.unloaded) {
+      // A loaded thread takes the resume's settings, or the resume is refused, as on a turn: Muse switches no runtime mode in a session.
+      if (input.policy !== undefined) {
+        if (musePolicy(input.policy) === undefined) throw callErrors.unsupported(`runtimePolicy.modes.${input.policy.mode}`);
+        if (input.policy.mode !== known.policy.mode) throw callErrors.unsupported("sessions.switchRuntimeMode", `Muse sets a session's permission profile when it loads it; thread ${known.thread.id} runs ${known.policy.mode}`);
+      }
       if (input.launch !== undefined) await this.#replaceLaunch(known, input.launch);
-      await this.#ensureHost(known);
-      return known.thread;
+      const host = await this.#ensureHost(known);
+      const model = typeof input.config?.["model"] === "string" ? input.config["model"] : undefined;
+      if (model !== undefined && model !== known.model) {
+        await host.command("session/setModel", { sessionId: known.nativeId, model: { modelId: model, ...(this.#runtime.providerId === undefined ? {} : { providerId: this.#runtime.providerId }) } }).catch((error: unknown) => {
+          throw callErrorFromMuse(this.#runtime.sdk, error, "model");
+        });
+        known.model = model;
+      }
+      if (input.policy !== undefined) known.policy = { ...input.policy, cwd: known.cwd };
+      return { ...known.thread, ...(known.model === undefined ? {} : { appliedConfig: { model: known.model } }) };
     }
     const policyInput = input.policy ?? known?.policy;
     if (policyInput === undefined) throw callErrors.validation([{ message: `resumeThread of ${nativeId} needs policy.cwd: this session has not seen the thread`, path: ["policy"] }]);
@@ -439,6 +452,38 @@ export class MuseSession implements Session {
         await host.close();
         throw fallback;
       }
+    }
+  }
+
+  /**
+   * A `purpose: "history"` resume: a short-lived host checks the stored
+   * session with `session/read`, which takes no lease and loads nothing, so
+   * no writer starts and no MCP server reaches Muse. A session Muse does not
+   * have is `not_found`, never replaced. Nothing is replayed as events; the
+   * thread stays unloaded and `readSnapshot` reads it. A thread the session
+   * holds is reported as it is.
+   */
+  async #readHistory(nativeId: string, known: ThreadState | undefined, input: ResumeThreadInput): Promise<AppliedThread> {
+    if (known !== undefined) return known.thread;
+    const policyInput = input.policy;
+    if (policyInput === undefined) throw callErrors.validation([{ message: `resumeThread of ${nativeId} needs policy.cwd: this session has not seen the thread`, path: ["policy"] }]);
+    const muse = this.#policy(policyInput);
+    const cwd = await this.#canonical(policyInput.cwd);
+    const host = await this.#startHost(cwd, muse);
+    try {
+      const read = await host.request("session/read", { sessionId: nativeId, excludeItems: true }).catch((error: unknown) => {
+        throw callErrorFromMuse(this.#runtime.sdk, error, "native session");
+      });
+      const launch = input.launch ?? this.#input.launch;
+      const root = read.session.workspaceRoot ?? cwd;
+      const state = this.#register(nativeId, host, { cwd: root, policy: { ...policyInput, cwd: root }, muse, launch, model: read.session.modelId ?? undefined, instructions: launchInstructions(launch, undefined) });
+      state.host = undefined;
+      state.unloaded = true;
+      state.thread = { ...state.thread, status: "unloaded" };
+      this.#emit({ type: "thread.upsert", thread: { id: state.thread.id, status: "unloaded" } }, { threadId: state.thread.id });
+      return { ...state.thread, ...(state.model === undefined ? {} : { appliedConfig: { model: state.model } }) };
+    } finally {
+      await host.close();
     }
   }
 
@@ -610,8 +655,8 @@ export class MuseSession implements Session {
       if (musePolicy(input.policy) === undefined) return { status: "unsupported", capability: `runtimePolicy.modes.${input.policy.mode}` };
       if (input.policy.mode !== thread.policy.mode) return { status: "unsupported", capability: "sessions.switchRuntimeMode" };
     }
+    // Any effort the host names goes to Muse in turn/start, which takes or refuses it.
     const effort = typeof input.config?.["reasoningEffort"] === "string" ? input.config["reasoningEffort"] : this.#runtime.defaultEffort;
-    if (effort !== undefined && !REASONING_EFFORTS.has(effort)) throw callErrors.validation([{ message: `Muse has no reasoning effort ${effort}`, path: ["config", "reasoningEffort"] }]);
     const turnInstructions = joinInstructions([input.context?.system, input.context?.developer]);
 
     if (input.intent === "steer") {
@@ -850,8 +895,8 @@ export class MuseSession implements Session {
     const unknown = Object.keys(input.changes).filter((key) => key !== "model" && key !== "reasoningEffort");
     if (unknown.length > 0) return { type: "reject", reason: `Muse has no session option ${unknown.join(", ")}` };
     const effort = input.changes["reasoningEffort"];
-    if (effort !== undefined && (typeof effort !== "string" || !REASONING_EFFORTS.has(effort))) return { type: "reject", reason: `Muse has no reasoning effort ${String(effort)}` };
-    // The driver sends `session/setModel` before the next `turn/start`, and the effort with it.
+    if (effort !== undefined && typeof effort !== "string") return { type: "reject", reason: `A Muse reasoning effort is a string, not ${JSON.stringify(effort)}` };
+    // The driver sends `session/setModel` before the next `turn/start`, and the effort with it, for Muse to take or refuse.
     return { type: "apply_next_turn" };
   }
 

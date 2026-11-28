@@ -66,22 +66,8 @@ export const CODEX_AUTH_METHODS: readonly AuthMethod[] = [
   { id: "api-key", kind: "api_key", label: "OpenAI API key", fields: [{ id: "apiKey", label: "API key", secret: true, required: true }] },
 ];
 
-const NATIVE_SESSION_FILTERS: { readonly [key: string]: keyof ThreadListParams } = {
-  "x:codex.limit": "limit",
-  "x:codex.searchTerm": "searchTerm",
-  "x:codex.archived": "archived",
-  "x:codex.modelProviders": "modelProviders",
-  "x:codex.sourceKinds": "sourceKinds",
-  "x:codex.includedThreadIds": "includedThreadIds",
-  "x:codex.excludedThreadIds": "excludedThreadIds",
-  "x:codex.useStateDbOnly": "useStateDbOnly",
-  "x:codex.currentAccountOnly": "currentAccountOnly",
-  "x:codex.parentThreadId": "parentThreadId",
-  "x:codex.ancestorThreadId": "ancestorThreadId",
-  "x:codex.projectId": "projectId",
-  "x:codex.sortKey": "sortKey",
-  "x:codex.sortDirection": "sortDirection",
-};
+/** The `x:codex.` filters that would override ARI's own `cwd` and `cursor`. */
+const ARI_LIST_FIELDS: ReadonlySet<string> = new Set(["cwd", "cursor"]);
 
 // Versions.
 
@@ -642,11 +628,13 @@ export class CodexInstance implements Instance {
   nativeSessions: NonNullable<Instance["nativeSessions"]> = {
     list: async (input: NativeSessionListInput & CodexNativeSessionFilters): Promise<NativeSessionInfoPage> => {
       const filters: Partial<ThreadListParams> = {};
+      // Every `x:codex.<field>` goes to `thread/list` as `<field>`, and Codex validates it.
       for (const [key, value] of Object.entries(input)) {
         if (!key.startsWith("x:")) continue;
-        const native = NATIVE_SESSION_FILTERS[key];
-        if (native === undefined) throw callErrors.validation([{ message: `Codex has no session filter ${key}`, path: [key] }]);
-        if ((key === "x:codex.includedThreadIds" || key === "x:codex.excludedThreadIds") && Array.isArray(value) && value.length > 100) {
+        if (!key.startsWith("x:codex.")) throw callErrors.validation([{ message: `Codex has no session filter ${key}`, path: [key] }]);
+        const native = key.slice("x:codex.".length);
+        if (native === "" || ARI_LIST_FIELDS.has(native)) throw callErrors.validation([{ message: `${key} is not a Codex filter: give the listing's own ${native === "" ? "fields" : native}`, path: [key] }], `${key} is not a Codex filter`);
+        if ((native === "includedThreadIds" || native === "excludedThreadIds") && Array.isArray(value) && value.length > 100) {
           throw callErrors.validation([{ message: `${key} takes at most 100 thread ids`, path: [key] }]);
         }
         (filters as { [key: string]: unknown })[native] = value;

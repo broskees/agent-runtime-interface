@@ -285,7 +285,7 @@ export class AcpSession implements Session {
    */
   readonly #resumed = new Map<string, Array<V1.SessionNotification | V2.UpdateSessionNotification>>();
   #capabilities: Capabilities | undefined;
-  #forkAcrossDirectories: boolean;
+  readonly #forkAcrossDirectories: boolean;
   #connection: Promise<AcpConnection> | undefined;
   #current: AcpConnection | undefined;
   #generation = 0;
@@ -347,7 +347,13 @@ export class AcpSession implements Session {
     const agent = await this.#agent();
     const knownId = this.#threadsByNative.get(nativeId);
     const known = knownId === undefined ? undefined : this.#threads.get(knownId);
-    if (known !== undefined && known.generation === this.#generation) return { ...known.thread, appliedConfig: this.#currentConfig(known) };
+    const held = known !== undefined && known.generation === this.#generation;
+    // A history read changes nothing. ACP opens a session only live (`session/resume`, `session/load`), so it has no read-only history.
+    if (input.purpose === "history") {
+      if (held) return { ...known.thread, appliedConfig: this.#currentConfig(known) };
+      throw callErrors.unsupported("resumeThread.purpose.history", "An ACP agent opens a session only to run it (session/resume or session/load), so the driver cannot read its history without a live runtime");
+    }
+    if (held) return this.#resumeHeld(agent, known, input);
     const givenCwd = input.policy?.cwd ?? known?.cwd;
     if (givenCwd === undefined || givenCwd === "") {
       throw callErrors.validation([{ message: "an ACP agent resumes a session in a directory: pass policy.cwd", path: ["policy", "cwd"] }]);
@@ -372,12 +378,12 @@ export class AcpSession implements Session {
       await this.#applyConfig(state, this.#withPolicy(input.policy, input.config));
       return { ...state.thread, appliedConfig: this.#currentConfig(state) };
     } catch (error) {
-      if (error instanceof JsonRpcError && error.code === ACP_ERRORS.authRequired) throw callErrorFrom(error, "session/resume");
-      if (!(error instanceof JsonRpcError) && toCallError(error)?.code !== "unsupported") throw callErrorFrom(error, "session/resume");
-      reason = error instanceof Error ? error.message : String(error);
+      // Only a session the agent reports missing is replaced. ACP has no error for a session another process holds,
+      // so any other refusal (and an agent that cannot resume at all) goes to the caller.
+      if (!(error instanceof JsonRpcError) || error.code !== ACP_ERRORS.resourceNotFound) throw callErrorFrom(error, "session/resume");
+      reason = error.message;
     }
-    // The agent could not resume the session (it is missing, locked by another process, or the agent cannot
-    // resume at all): start a fresh one, and say so, because the old context is gone.
+    // The agent has no such session: start a fresh one, and say so, because the old context is gone.
     const fresh = await this.#newNative(agent, cwd, servers, instructions.systemPrompt);
     const threadId = deriveId({ kind: "thread", native: strong(fresh.sessionId), identityVersion: ACP_IDENTITY_VERSION });
     this.#emit(
@@ -389,6 +395,30 @@ export class AcpSession implements Session {
     this.#setOptions(state, fresh.configOptions ?? undefined);
     await this.#applyConfig(state, this.#withPolicy(policy, input.config));
     return { ...state.thread, appliedConfig: this.#currentConfig(state) };
+  }
+
+  /**
+   * A resume of a session this ARI session holds open. Its config and policy
+   * take effect as on a turn (`session/set_config_option`); its first-prompt
+   * instructions go at the top of the next prompt. ACP fixes a session's MCP
+   * servers and system prompt when it opens it, so a resume that brings other
+   * ones is refused, as is any change while a turn runs.
+   */
+  async #resumeHeld(agent: AcpConnection, thread: ThreadState, input: ResumeThreadInput): Promise<AppliedThread> {
+    const launch = input.launch === undefined ? undefined : this.#launchFor(input.launch);
+    const instructions = launch === undefined ? undefined : this.#instructions(agent, launch, undefined);
+    if (launch !== undefined && JSON.stringify(this.#mcpFor(launch)) !== JSON.stringify(thread.mcp)) {
+      throw callErrors.invalidState("session_open", `ACP fixes a session's MCP servers when it opens it, and session ${thread.nativeId} is open: a resume cannot change them`);
+    }
+    if (instructions?.systemPrompt !== undefined && JSON.stringify(instructions.systemPrompt) !== JSON.stringify(thread.systemPrompt)) {
+      throw callErrors.invalidState("session_open", `ACP takes a session's system prompt when it opens it, and session ${thread.nativeId} is open: a resume cannot change it`);
+    }
+    const changes = input.config !== undefined || input.policy !== undefined || (instructions?.firstMessage.length ?? 0) > 0;
+    if (changes && thread.active !== undefined) throw callErrors.invalidState("turn_active", `Thread ${thread.thread.id} runs a turn; resume it with new settings once the turn ends`);
+    if (instructions !== undefined) this.#giveInstructions(thread, instructions);
+    if (input.policy !== undefined) thread.policy = { ...input.policy, cwd: thread.cwd };
+    await this.#applyConfig(thread, this.#withPolicy(input.policy, input.config));
+    return { ...thread.thread, appliedConfig: this.#currentConfig(thread) };
   }
 
   async forkThread(input: ForkThreadInput): Promise<Thread> {
@@ -408,12 +438,7 @@ export class AcpSession implements Session {
     try {
       forked = agent.version === 1 ? await agent.requestV1("session/fork", params as V1.ForkSessionRequest) : await agent.requestV2("session/fork", params as V2.ForkSessionRequest);
     } catch (error) {
-      if (crossesDirectory && error instanceof JsonRpcError) {
-        // ACP lets an agent refuse a fork into another directory. From now on the session declares it.
-        this.#forkAcrossDirectories = false;
-        this.#refreshCapabilities();
-        throw callErrors.unsupported("threads.fork.crossCwd", `The ACP agent refused to fork into ${cwd}: ${error.message}`);
-      }
+      // ACP lets an agent refuse a fork into another directory: that refusal is the agent's answer for this fork only.
       throw callErrorFrom(error, "session/fork");
     }
     const policy = input.policy ?? { ...source.policy, cwd };

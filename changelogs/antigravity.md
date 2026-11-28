@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- As for the `acp` driver: `forkAcrossDirectories` now defaults to `true`, so a
+  fork into another directory asks `agy`; a resume replaces a session only when
+  `agy` reports it missing; and resuming a thread the session already holds
+  applies the new config and policy, or refuses naming what cannot change.
 - Added the antigravity driver (`ari/drivers/antigravity`,
   `ari/meta/antigravity`): the Antigravity CLI as an ACP agent, `agy acp`.
 - The config's `profile` chooses whose Antigravity profile `agy` uses.

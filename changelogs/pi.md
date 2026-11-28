@@ -32,6 +32,23 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
   session the user's own pi keeps. A resume by session id finds the file
   itself and gives Pi the path, so it works from any directory without Pi's
   fork question.
+- A resume with `purpose: "history"` of a thread the session does not hold
+  live is `unsupported`: Pi opens a session file only to run it. An earlier
+  build started `pi` on the file as an interactive resume does.
+- A resume replaces only a missing session file. When the file is there and
+  pi fails to open it, the error goes to the caller; an earlier build
+  started a fresh session for any error.
+- `persistSession: false` runs `pi --no-session`: Pi writes no session file,
+  and the thread has no `handle`. It cannot be forked, unloaded, released or
+  restarted, and says so with `invalid_state` (`no_session_file`). An
+  earlier build ignored the flag and saved the thread to disk.
+- A resume of a thread with a live process applies its config, starts pi
+  again on the session file for a new launch, and refuses another runtime
+  mode with `unsupported`. An earlier build reported success and changed
+  nothing.
+- `pi` is looked up with the instance's environment, as Pi's version check
+  and processes already ran: an instance `PATH` picks the `pi` the instance
+  runs. An earlier build looked it up on the host's `PATH`.
 - Turns: start, steer (with `prompt_required` when Pi queued the steer after
   the run ended), interrupt; settlement only on `agent_settled` or process
   exit.

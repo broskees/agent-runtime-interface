@@ -508,6 +508,8 @@ export class ClaudeSession implements Session {
     }
     const requested = input.policy === undefined ? undefined : await canonicalDirectory(input.policy.cwd);
     const info = nativeId === null ? undefined : await this.#context.sdk.getSessionInfo(nativeId, requested === undefined ? undefined : { dir: requested });
+    // A history read never starts a session: one Claude Code has no transcript for has no history to read.
+    if ((nativeId === null || info === undefined) && input.purpose === "history") throw callErrors.notFound({ resource: "Claude session", id: nativeId ?? "(none)", message: `Claude Code has no transcript for session ${String(nativeId)}, so there is no history to read` });
     if (nativeId === null || info === undefined) return this.#replacement(input, nativeId, "missing");
     const cwd = info.cwd ?? requested;
     if (cwd === undefined) throw callErrors.validation([{ message: "Claude does not record this session's directory; pass policy.cwd", path: ["policy", "cwd"] }]);
@@ -530,9 +532,13 @@ export class ClaudeSession implements Session {
     try {
       await this.#ensureQuery(thread, { kind: "resume" });
     } catch (error) {
-      // Claude Code refused to resume the session (held by another process, or gone): start afresh and say so.
       this.#forget(thread);
-      return this.#replacement(input, nativeId, `locked: ${errorText(error)}`);
+      // Only a session another process holds, or one Claude Code no longer has, is replaced: start afresh and say so.
+      // Any other failure to start goes to the caller.
+      const text = errorText(error);
+      if (/refused to start \(session_held_by_background\)/.test(text)) return this.#replacement(input, nativeId, `locked: ${text}`);
+      if (/No conversation found with session ID/i.test(text)) return this.#replacement(input, nativeId, `missing: ${text}`);
+      throw error;
     }
     this.#announce(thread);
     if (input.quiet !== true) await this.#replayHistory(thread);
@@ -663,8 +669,9 @@ export class ClaudeSession implements Session {
   #applyConfig(thread: ClaudeThread, config: { [key: string]: unknown } | undefined): void {
     const model = config?.["model"];
     if (typeof model === "string" && model !== "") thread.model = model;
+    // Any effort the host names goes to Claude Code, which takes or refuses it.
     const effort = config?.["effort"];
-    if (typeof effort === "string" && ["low", "medium", "high", "xhigh", "max"].includes(effort)) thread.effort = effort as ClaudeDriverConfig["effort"];
+    if (typeof effort === "string" && effort !== "") thread.effort = effort as ClaudeDriverConfig["effort"];
   }
 
   #applied(thread: ClaudeThread): AppliedThread {
@@ -1402,7 +1409,7 @@ export class ClaudeSession implements Session {
       thread.model = model;
     }
     const effort = config?.["effort"];
-    if (typeof effort === "string" && effort !== thread.effort && ["low", "medium", "high", "xhigh", "max"].includes(effort)) {
+    if (typeof effort === "string" && effort !== "" && effort !== thread.effort) {
       await live.query.applyFlagSettings({ effortLevel: effort as NonNullable<ClaudeDriverConfig["effort"]> });
       thread.effort = effort as ClaudeDriverConfig["effort"];
     }

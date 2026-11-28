@@ -18,8 +18,11 @@
   for every flavor: `grok`, `kiro`, `fx` and `antigravity`.
 - v2 turns are accepted by the `session/prompt` response and settle on the
   `idle` `state_update`; updates are applied as upserts.
-- Fork (draft `session/fork`) when the agent advertises it, with `crossCwd`
-  from config and turned off when the agent refuses another directory.
+- Fork (draft `session/fork`) when the agent advertises it. A fork into
+  another directory is asked of the agent (`forkAcrossDirectories` now
+  defaults to `true`), and a refusal fails that fork with the agent's error.
+  An earlier build refused such forks by default and, after one refusal of
+  any kind, declared `crossCwd` off for the rest of the session.
 - Permission replies use the agent's own option ids; `full_access` answers
   with the narrowest accepting option; enforcement is `client_boundary`.
 - Config options keep `dependsOn` from `configDependencies`.
@@ -34,6 +37,19 @@
 - `resumeThread` passes launch instructions on: `systemPrompt` on
   `session/resume`, `session/load` or the replacing `session/new`, the rest
   in the first prompt.
+- A resume with `purpose: "history"` of a session the ARI session does not
+  hold is `unsupported`, and nothing reaches the agent: ACP opens a session
+  only to run it. An earlier build opened it as an interactive resume does.
+- A resume replaces only a session the agent reports missing
+  (`resource_not_found`). Any other error goes to the caller, and an agent
+  that cannot resume at all refuses with `unsupported`; an earlier build
+  started a fresh session for any of them. ACP has no error for a session
+  another process holds, so the conformance kit's locked-session check does
+  not apply.
+- A resume of a session the ARI session holds applies its config and policy
+  and passes its first-prompt instructions on; new MCP servers or a new
+  system prompt, which ACP fixes when a session opens, are refused with
+  `invalid_state`. An earlier build reported success and changed nothing.
 - `switchModel` is declared only while the agent offers a `model` option;
   `sessionModel` is `process_per_session`.
 - Tested against ACP protocol versions 1 and 2 (`testedVersions.range`

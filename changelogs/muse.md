@@ -24,6 +24,16 @@ First version of the Muse Code driver.
   with its MCP servers), snapshot (`session/read`; the last turn's status and
   failure from Muse's `lastTurn`), compact (`session/compact`), unload,
   release. Fork and rollback reject with `unsupported`.
+- A resume with `purpose: "history"` checks the session with `session/read`
+  (no lease) and loads nothing; the thread stays `unloaded`, and a missing
+  session is `not_found`. An earlier build loaded the session as an
+  interactive resume does.
+- A resume of a loaded thread applies a new model with `session/setModel`
+  and refuses another runtime mode with `unsupported`; an earlier build
+  ignored both and reported success.
+- A `reasoningEffort` the driver does not list goes to Muse in `turn/start`
+  as given, and `planConfigChange` plans it for the next turn; an earlier
+  build refused it with `validation` before Muse saw it.
 - Turns: start, queue (`ifBusy: "queue"`), steer (`turn/steer` with
   `expectedTurnId`; a steer whose turn already ended, `already_terminal`, is
   `prompt_required`; a steer the busy runtime refuses, `runtime_busy`, is sent

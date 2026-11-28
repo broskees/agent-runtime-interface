@@ -18,6 +18,39 @@ credential still wins over an inherited one. Every driver that starts
 processes passes the instance's `environment` on to them, minus only what the
 host's policy names; the ACP drivers passed none of it before.
 
+ARI does not second-guess the user, the host or the vendor. A driver keeps
+what a session saved, passes a value the vendor validates on to the vendor,
+and reports a failure instead of replacing it with something else. Each
+driver's changelog lists what changed:
+
+- `opencode`: a resume without a policy keeps the session's saved permission
+  rules instead of writing `approval_required` over them.
+- A resume with `purpose: "history"` starts no writer, installs no MCP
+  server, rewrites no permission and creates no conversation. `codex`,
+  `opencode`, `claude` and `muse` read the stored thread and leave it
+  `unloaded`; `acp` (and its flavors) and `pi`, which can open a session only
+  to run it, refuse with `unsupported`. A missing session is `not_found`.
+- A resume that fails for a reason other than a missing or held session
+  returns the error instead of starting a fresh conversation (`acp` and its
+  flavors, `claude`, `pi`).
+- `pi` honours `persistSession: false` with Pi's `--no-session`; an earlier
+  build saved the thread to disk anyway.
+- A resume of a thread the session already holds applies its new launch,
+  config and policy, or refuses naming what cannot change (`acp` and its
+  flavors, `pi`, `muse`); an earlier build reported success and changed
+  nothing.
+- `acp` and its flavors ask the agent for a fork into another directory
+  (`forkAcrossDirectories` defaults to `true`) and let it refuse one
+  destination; an earlier build refused such forks by default and turned
+  `crossCwd` off after one refusal.
+- Smaller ones: `codex` passes every `x:codex.*` list filter and a named
+  `permissions` profile in `policy.native` to Codex; `claude` accepts any
+  unambiguous `claude --version` output and passes any `effort` on; `muse`
+  passes any `reasoningEffort` on.
+- `pi` and `opencode` find, probe and start their CLI with the instance's
+  environment, as `codex` and `muse` do; an earlier build looked the CLI up
+  on the host's `PATH`.
+
 ### Contract (`ari`, `ari/json-schema/*`)
 
 - The ARI wire contract, version 1, as JSON Schema draft 2020-12 under

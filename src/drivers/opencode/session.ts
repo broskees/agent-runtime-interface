@@ -58,7 +58,7 @@ import { failureOf, itemIdFor, permissionOptions, providerTurnIdFor, requestIdFo
 import type { McpEntry, NativeError, NativeEvent, NativeMessage, NativeQuestion, NativeRule, NativeToolState } from "./native.ts";
 import type { Detected, Link, ServerPool } from "./pool.ts";
 import { mcpConfigKey } from "./pool.ts";
-import { childRules, grantCouldReachMcpResources, lastMatchingEffect, sessionRules } from "./rules.ts";
+import { childRules, grantCouldReachMcpResources, isolationRules, lastMatchingEffect, sessionRules } from "./rules.ts";
 
 /** What the instance gives each session. */
 export interface OpencodeSessionContext {
@@ -112,7 +112,10 @@ interface OcThread {
   thread: Thread;
   readonly sessionId: string;
   readonly directory: string;
-  policy: RuntimePolicy;
+  /** Undefined for a thread resumed without a policy: its session keeps the rules OpenCode saved for it (`savedRules`). */
+  policy: RuntimePolicy | undefined;
+  /** The rules OpenCode held for the session when a resume without a policy found it; they stay in place of a mode's. */
+  savedRules: readonly NativeRule[];
   launch: Launch;
   hostRules: NativeRule[];
   /** Host MCP entries this thread put on its server. */
@@ -122,6 +125,8 @@ interface OcThread {
   active: ActiveTurn | undefined;
   compacting: { resolve(): void; reject(error: unknown): void } | undefined;
   unloaded: boolean;
+  /** Read by a `purpose: "history"` resume: the driver wrote nothing to its session, and it runs no turn until an interactive resume. */
+  history: boolean;
   /** A prompt sent and not yet admitted: its turn opens when the server names its message. */
   pendingPrompt: { readonly input: StartTurnInput; resolve(turn: ActiveTurn): void; reject(error: unknown): void } | undefined;
   /** Steers sent and not yet admitted: their user messages belong to the running turn. */
@@ -252,26 +257,34 @@ export class OpencodeSession implements Session {
     const target = "handle" in input.native ? input.native.handle : input.native.id;
     if (target === null || target === "") throw callErrors.validation([{ message: "resumeThread needs a native id or handle", path: ["native"] }]);
     const known = this.#threads.get(threadIdFor(target));
+    const history = input.purpose === "history";
     if (known !== undefined && !known.unloaded && known.link !== undefined) {
       // A subagent's thread lives as long as its parent's run; OpenCode drives it.
       if (known.parent !== undefined) return { ...known.thread, appliedConfig: this.#applied(known) };
+      // A history read changes nothing: it reports what the thread runs with.
+      if (history) return { ...known.thread, appliedConfig: this.#applied(known) };
       return this.#resumeHeld(known, input);
     }
     const policy = input.policy ?? known?.policy;
-    if (policy !== undefined) this.#checkMode(policy);
+    if (policy !== undefined && !history) this.#checkMode(policy);
     const directory = policy?.cwd !== undefined && policy.cwd !== "" ? await canonicalDirectory(policy.cwd) : known?.directory;
     if (directory === undefined && this.#context.shape.generation === 1) {
       throw callErrors.validation([{ message: "resuming an OpenCode 1.x session this session does not know needs policy.cwd", path: ["policy", "cwd"] }]);
     }
     const launch = this.#resumedLaunch(input, known);
-    const link = await this.#newLink(directory);
+    // A thread a history read left on a live server keeps that server (a 1.x thread's own).
+    const link = known?.link !== undefined && known.link.endpoint.alive ? known.link : await this.#newLink(directory);
     try {
       const found = await link.runtime.getSession(target, directory);
+      if (found !== undefined && history) return this.#historyThread(found, directory, launch, link, known);
+      if (found === undefined && history) throw callErrors.notFound({ resource: "OpenCode session", id: target });
       if (found !== undefined) {
         const cwd = found.directory || directory || "";
         await this.#watch(link, cwd);
-        const resumedPolicy = policy ?? { mode: "approval_required" as const, interaction: "default" as const, cwd };
-        const thread = this.#register(found.id, cwd, resumedPolicy, launch, link, {}, undefined);
+        // Without a policy the session keeps the rules it was saved with; the driver adds only the denies of other threads' entries.
+        const savedRules = policy === undefined && (known === undefined || known.history) ? await link.runtime.getRules(found.id, cwd) : undefined;
+        const thread = this.#register(found.id, cwd, policy, launch, link, {}, undefined);
+        if (savedRules !== undefined) thread.savedRules = savedRules;
         if (known !== undefined) thread.hostRules = known.hostRules;
         await this.#applyRules(thread, this.#context.pool.othersOn(link.endpoint, thread.thread.id));
         await this.#giveMcpServers(thread);
@@ -297,6 +310,22 @@ export class OpencodeSession implements Session {
   }
 
   /**
+   * A `purpose: "history"` resume of a session the server has: the thread is
+   * registered unloaded, with no policy, and the driver writes nothing to the
+   * session (no rules, no MCP entries, no instructions). It reads through the
+   * server (`readSnapshot`); an interactive resume makes it usable.
+   */
+  #historyThread(found: { id: string; directory: string }, directory: string | undefined, launch: Launch, link: Link, known: OcThread | undefined): AppliedThread {
+    const thread = this.#register(found.id, found.directory || directory || "", undefined, launch, link, {}, undefined);
+    if (known !== undefined) thread.hostRules = known.hostRules;
+    thread.history = true;
+    thread.unloaded = true;
+    thread.thread = { ...thread.thread, status: "unloaded" };
+    this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, status: "unloaded" } }, { threadId: thread.thread.id });
+    return { ...thread.thread, appliedConfig: this.#applied(thread) };
+  }
+
+  /**
    * A resume of a thread this session holds on a live server: the thread takes
    * what the resume brings (a LaunchContext, config, a policy) from its next
    * turn, as a fresh resume would; its MCP entries follow the new launch.
@@ -305,13 +334,13 @@ export class OpencodeSession implements Session {
     const policy = input.policy === undefined ? undefined : { ...input.policy, cwd: known.directory };
     if (policy !== undefined) {
       this.#checkMode(policy);
-      if (policy.mode !== known.policy.mode && !this.#capabilities.runtimePolicy.switchInSession) throw callErrors.unsupported("runtimePolicy.switchInSession");
+      if (policy.mode !== known.policy?.mode && !this.#capabilities.runtimePolicy.switchInSession) throw callErrors.unsupported("runtimePolicy.switchInSession");
     }
     if (input.config !== undefined) this.#applyConfig(known, input.config);
     // Set first: a server that has to start again gives the thread the new launch's entries.
     known.launch = this.#resumedLaunch(input, known);
     const link = await this.#linkOf(known);
-    if (policy !== undefined && policy.mode !== known.policy.mode) {
+    if (policy !== undefined && policy.mode !== known.policy?.mode) {
       known.policy = policy;
       await this.#applyRules(known, this.#context.pool.othersOn(link.endpoint, known.thread.id));
     }
@@ -349,7 +378,7 @@ export class OpencodeSession implements Session {
     }
     const forked = await link.runtime.fork(source.sessionId, source.directory, before);
     const policy = input.policy ?? source.policy;
-    this.#checkMode(policy);
+    if (policy !== undefined) this.#checkMode(policy);
     const launch: Launch = { launchPrompts: [...source.launch.launchPrompts], contextPrompts: [...source.launch.contextPrompts], mcpServers: [...source.launch.mcpServers], model: source.launch.model, agent: source.launch.agent };
     if (typeof input.config?.["model"] === "string") launch.model = input.config["model"];
     // A 1.x fork gets a server of its own, like every 1.x thread.
@@ -357,6 +386,8 @@ export class OpencodeSession implements Session {
     await this.#watch(forkLink, source.directory);
     const thread = this.#register(forked.id, forked.directory || source.directory, policy, launch, forkLink, { forkedFrom: { threadId: source.thread.id, ...(input.at.type === "turn" ? { turnId: input.at.turnId } : {}) } }, undefined);
     thread.hostRules = [...source.hostRules];
+    // A fork of a thread without a policy keeps the source's saved rules, as its session does.
+    if (policy === undefined) thread.savedRules = source.savedRules;
     await this.#applyRules(thread, this.#context.pool.othersOn(forkLink.endpoint, thread.thread.id));
     await this.#giveMcpServers(thread);
     return thread.thread;
@@ -444,11 +475,12 @@ export class OpencodeSession implements Session {
 
   async #startTurn(input: StartTurnInput): Promise<StartTurnResult> {
     const thread = this.#thread(input.threadId);
+    if (thread.history) throw callErrors.invalidState("thread_unloaded", `Thread ${thread.thread.id} was read for its history; resume it for interactive use first`);
     if (input.intent === "queue") return { status: "unsupported", capability: "turns.queue" };
     if (input.intent === "steer" && !this.#capabilities.turns.steer) return { status: "unsupported", capability: "turns.steer" };
     if (input.intent !== "start" && input.intent !== "steer") return { status: "unsupported", capability: `turns.${input.intent}` };
     if (input.context?.synthetic !== undefined && input.context.synthetic.length > 0) return { status: "unsupported", capability: "context.syntheticContext" };
-    if (input.policy !== undefined && input.policy.mode !== thread.policy.mode) {
+    if (input.policy !== undefined && input.policy.mode !== thread.policy?.mode) {
       if (!this.#capabilities.runtimePolicy.switchInSession) return { status: "unsupported", capability: "runtimePolicy.switchInSession" };
       if (!SUPPORTED_MODES.has(input.policy.mode)) return { status: "unsupported", capability: `runtimePolicy.modes.${input.policy.mode}` };
     }
@@ -458,7 +490,7 @@ export class OpencodeSession implements Session {
     if (thread.active !== undefined || thread.compacting !== undefined) throw callErrors.invalidState("previous_turn_active", `Thread ${thread.thread.id} already runs a turn`);
     this.#applyConfig(thread, input.config);
     const link = await this.#linkOf(thread);
-    if (input.policy !== undefined && input.policy.mode !== thread.policy.mode) {
+    if (input.policy !== undefined && input.policy.mode !== thread.policy?.mode) {
       thread.policy = input.policy;
       await this.#applyRules(thread, this.#context.pool.othersOn(link.endpoint, thread.thread.id));
     }
@@ -702,6 +734,8 @@ export class OpencodeSession implements Session {
       }
       await this.#watch(link, thread.directory);
       thread.link = link;
+      // A thread a history read registered stays as it is: only an interactive resume gives it rules and MCP entries.
+      if (thread.history) return link;
       thread.unloaded = false;
       if (thread.thread.status === "unloaded") {
         thread.thread = { ...thread.thread, status: "idle" };
@@ -797,7 +831,7 @@ export class OpencodeSession implements Session {
     thread.link = undefined;
   }
 
-  #register(sessionId: string, directory: string, policy: RuntimePolicy, launch: Launch, link: Link, extra: Pick<Thread, "title" | "forkedFrom">, parent: OcThread["parent"]): OcThread {
+  #register(sessionId: string, directory: string, policy: RuntimePolicy | undefined, launch: Launch, link: Link, extra: Pick<Thread, "title" | "forkedFrom">, parent: OcThread["parent"]): OcThread {
     const id = threadIdFor(sessionId);
     const existing = this.#threads.get(id);
     const snapshot: Thread = {
@@ -816,6 +850,7 @@ export class OpencodeSession implements Session {
       sessionId,
       directory,
       policy,
+      savedRules: [],
       launch,
       hostRules: [],
       mcpNames: new Set(),
@@ -824,6 +859,7 @@ export class OpencodeSession implements Session {
       active: undefined,
       compacting: undefined,
       unloaded: false,
+      history: false,
       pendingPrompt: undefined,
       pendingSteers: 0,
       parent,
@@ -834,6 +870,7 @@ export class OpencodeSession implements Session {
     thread.policy = policy;
     thread.link = link;
     thread.unloaded = false;
+    thread.history = false;
     thread.launch = launch;
     this.#threads.set(id, thread);
     this.#bySession.set(sessionId, thread);
@@ -843,15 +880,26 @@ export class OpencodeSession implements Session {
 
   /**
    * Writes the thread's permission rules: its mode, the host's rules, and the
-   * denies of every other thread's MCP entries. OpenCode copied the thread's
-   * rules into each subagent session when it created it (2.1.2
-   * `core/src/session.ts` `create`; 1.19.6 `tool/task.ts` keeps the denies),
-   * and never again, so the subagents get the current denies too.
+   * denies of every other thread's MCP entries. A thread resumed without a
+   * policy has no mode: its saved rules stand in its place, less the denies
+   * the driver writes itself (those of other threads' entries, which come
+   * last anyway, and any of the thread's own entries an earlier run left).
+   * OpenCode copied the thread's rules into each subagent session when it
+   * created it (2.1.2 `core/src/session.ts` `create`; 1.19.6 `tool/task.ts`
+   * keeps the denies), and never again, so the subagents get the current
+   * denies too.
    */
   async #applyRules(thread: OcThread, others: string[]): Promise<void> {
     const link = thread.link;
     if (link === undefined) return;
-    await link.runtime.setRules(thread.sessionId, thread.directory, sessionRules(thread.policy.mode, link.runtime.generation, thread.hostRules, others));
+    const generation = link.runtime.generation;
+    if (thread.policy !== undefined) await link.runtime.setRules(thread.sessionId, thread.directory, sessionRules(thread.policy.mode, generation, thread.hostRules, others));
+    else {
+      const own = this.#context.pool.entriesOf(link.endpoint, thread.thread.id).keys();
+      const written = new Set([...isolationRules(others, generation), ...isolationRules(own, generation)].map((rule) => JSON.stringify([rule.action, rule.resource, rule.effect])));
+      const saved = thread.savedRules.filter((rule) => !written.has(JSON.stringify([rule.action, rule.resource, rule.effect])));
+      await link.runtime.setRules(thread.sessionId, thread.directory, [...saved, ...thread.hostRules, ...isolationRules(others, generation)]);
+    }
     for (const child of this.#threads.values()) {
       if (child.parent?.threadId !== thread.thread.id || child.createdRules === undefined) continue;
       await link.runtime.setRules(child.sessionId, child.directory, childRules(child.createdRules, link.runtime.generation, others));
@@ -1343,7 +1391,7 @@ export class OpencodeSession implements Session {
       survivesRestart: false,
       status: "pending",
     };
-    const override = root.policy.mode === "full_access" ? this.#fullAccessOverride(root, asker, event) : undefined;
+    const override = root.policy?.mode === "full_access" ? this.#fullAccessOverride(root, asker, event) : undefined;
     if (override !== undefined) request.fullAccessOverride = override;
     this.#requests.set(id, { request, threadId: root.thread.id, turnId: turn?.id, sessionId: asker.sessionId, nativeId: event.requestId, kind: "permission", questions: [], inFlight: undefined, resolved: false });
     this.#emit({ type: "request.upsert", request }, turn === undefined ? { threadId: root.thread.id } : this.#turnEnvelope(turn));

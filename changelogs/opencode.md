@@ -34,6 +34,19 @@
   before the other threads stop denying them, and reports a removal OpenCode
   did not confirm. A thread that drops an entry another thread still holds is
   denied it from then on, with its subagents.
+- A resume without a policy invents no mode. The session keeps the
+  permission rules OpenCode saved for it, followed by the host's rules and
+  the denies of other threads' entries; an earlier build wrote
+  `approval_required` over them, so a saved deny could vanish and a saved
+  allow could start asking.
+- A resume with `purpose: "history"` writes nothing to the session (no
+  rules, no MCP entries, no instructions), leaves the thread `unloaded` and
+  never replaces a missing session. An earlier build gave it rules and MCP
+  entries as an interactive resume does.
+- `opencode` is looked up, and `opencode --version` runs, with the
+  instance's environment, as its servers already ran: an instance `PATH`
+  picks the `opencode` the instance runs. An earlier build looked it up on
+  the host's `PATH` and checked its version with the host's environment.
 - On a shared 1.x server, "always" is offered only for a grant that cannot
   match an MCP resource (a file read's `*` can), because 1.x checks its
   in-memory grants after every session's own rules.

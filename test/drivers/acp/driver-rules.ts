@@ -355,20 +355,19 @@ export function driverRuleTests<Config>(profile: DriverProfile<Config>): void {
   });
 
   for (const systemPrompt of [true, false]) {
-    test(`${kind}: on resume, the host's launch instructions reach the agent through the channels the driver lists, for a resumed session and for the fresh one that replaces a lost session (agent ${systemPrompt ? "takes" : "does not take"} a system prompt)`, async () => {
+    test(`${kind}: on resume, the host's launch instructions reach the agent through the channels the driver lists, for a resumed session and for the fresh one that replaces a missing session (agent ${systemPrompt ? "takes" : "does not take"} a system prompt)`, async () => {
       const rig = await openRig(rigOptions(profile, systemPrompt ? ["--system-prompt"] : []));
       try {
         const first = await rig.open();
         const kept = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
-        const lost = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
         await first.session.close();
-        // The agent can no longer open `lost`, so resuming it starts a fresh session.
-        await rig.rig.native.lockSession!(lost);
+        // The agent has no session `lost` (resource_not_found), so resuming it starts a fresh session.
+        const lost = "ari-missing-session";
         const { session, waitFor } = await rig.open({ launch: { appendSystemPrompt: ["ARI_RESUME_SYSTEM"], developerPrompt: ["ARI_RESUME_DEVELOPER"] } });
         const resumed = await session.resumeThread({ native: { handle: kept.handle! }, policy: rig.policy() });
-        const replaced = await session.resumeThread({ native: { handle: lost.handle! }, policy: rig.policy() });
+        const replaced = await session.resumeThread({ native: { handle: lost }, policy: rig.policy() });
         assert.equal(resumed.native.id, kept.native.id);
-        assert.notEqual(replaced.native.id, lost.native.id, "a fresh session replaced the lost one");
+        assert.notEqual(replaced.native.id, lost, "a fresh session replaced the missing one");
         for (const thread of [resumed, replaced]) {
           for (const text of ["Begin.", "Again."]) {
             const started = await session.startTurn({ threadId: thread.id, clientTurnKey: `${thread.id}:${text}`, intent: "start", content: [{ type: "text", text }] });

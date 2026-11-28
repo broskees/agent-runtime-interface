@@ -37,7 +37,7 @@ const instance = await acpDriver.create(host, {
 | `env` | `{}` | Extra environment variables for the agent, set over the instance's `environment`. Not for credentials: config is not secret. |
 | `versionArgs` | `["--version"]` | What `probe()` runs to read the agent's version. |
 | `maxProtocolVersion` | `1` | The newest ACP version to request. ACP v2 is in Preview and ACP's migration guide suggests clients request it opt-in, so the default asks for v1; set `2` to ask for v2 (a v1 agent still answers with v1). |
-| `forkAcrossDirectories` | `false` | Whether `forkThread` may move a fork into another directory. |
+| `forkAcrossDirectories` | `true` | Whether `forkThread` asks the agent for a fork into another directory. The agent may refuse a destination; `false` refuses every such fork before the agent hears of it. |
 | `configDependencies` | `{}` | Dependencies between the agent's config options that ACP cannot state, as option id to the ids it depends on. |
 
 ## How ACP maps onto ARI
@@ -141,8 +141,16 @@ const instance = await acpDriver.create(host, {
   synchronization](https://agentclientprotocol.com/protocol/v2/session-setup.md#current-state-synchronization));
   the driver applies it once the thread is registered, so work already
   `running` becomes a `provider_initiated` turn that the agent's later `idle`
-  settles. An agent that cannot resume the session gets a fresh one, with
-  `session.replaced` and `contextLost: true`.
+  settles. A session the agent reports missing (`resource_not_found`) is
+  replaced by a fresh one, with `session.replaced` and `contextLost: true`;
+  any other refusal goes to the caller.
+- **Resume of a held thread.** A resume of a session this ARI session holds
+  open sends no `session/resume`: its `config` and `policy` take effect at
+  once (`session/set_config_option`), and its first-prompt instructions go
+  at the top of the next prompt. ACP fixes a session's MCP servers and
+  system prompt when it opens it, so a resume that brings other ones is
+  refused with `invalid_state` (`session_open`), as is any change while a
+  turn runs (`turn_active`).
 - **Host tools.** `launch.mcpServers` go to `session/new` under exactly the
   names the host gave them. ACP fixes a session's MCP servers in
   `session/new`, before an ARI thread id exists, so the driver does not call
@@ -164,11 +172,21 @@ keeps no record of which sessions it started. `resumeThread` sends
 session has not seen, a missing `policy.cwd` is refused with `validation`. The
 request carries only what the host supplied: the host's MCP servers under the
 names it chose, and its launch instructions (`systemPrompt` where the agent
-takes one, the rest in the thread's first prompt). When the agent cannot
-resume the session (missing, held elsewhere, or no resume support), the driver
-starts a fresh session in that directory and emits `session.replaced` with
-`contextLost: true`. The driver lists no native sessions (`nativeSessions` is
-absent). The five flavors below share this behaviour.
+takes one, the rest in the thread's first prompt). When the agent reports
+the session missing (`resource_not_found`), the driver starts a fresh session
+in that directory and emits `session.replaced` with `contextLost: true`. Any
+other error goes to the caller as the agent gave it: ACP has no error for a
+session another process holds, so the driver cannot tell a held session from
+another failure. An agent that can neither resume nor load sessions refuses
+with `unsupported` (`acp.session/resume`). The driver lists no native
+sessions (`nativeSessions` is absent). The five flavors below share this
+behaviour.
+
+A resume with `purpose: "history"` of a session this ARI session does not
+hold is refused with `unsupported` (`resumeThread.purpose.history`), and the
+driver sends nothing: ACP opens a session only to run it (`session/resume`,
+`session/load`), so there is no read-only history. A thread this session
+holds is reported as it is.
 
 ## Capabilities
 
@@ -183,7 +201,7 @@ declares. "Agent" means it depends on what the agent advertises in
 | Read thread snapshot | – | – | |
 | Roll back thread | Y | – | ACP defines no rollback method in v1 or v2 (the `x-method` tables of `vendor-schemas/acp/schema-v2.0.0-beta.3`); host checkpoints stay in the host (proposal §16) |
 | Fork thread / fork from a turn | –/– | agent/– | Draft `session/fork` ([RFD](https://agentclientprotocol.com/rfds/session-fork.md)), declared when the agent advertises `session.fork`; forking at a position needs session cursors, which this driver does not use |
-| Fork into another directory | (not in §1.2) | config, then agent | The RFD lets an agent refuse a fork into a different `cwd`; `crossCwd` starts from `forkAcrossDirectories`, and turns off (with `capabilities.updated`) when the agent refuses one |
+| Fork into another directory | (not in §1.2) | agent | The RFD lets an agent refuse a fork into a different `cwd`. `crossCwd` follows `forkAcrossDirectories` (default `true`): the driver asks the agent, and a refusal fails that fork with the agent's error while later forks are still asked |
 | Fork from a subagent thread | – | – | |
 | Steer an active turn | – | – | |
 | Steer by interrupt + restart | Y | – | ACP has no method that changes a running prompt: the client cancels it with `session/cancel` and, once the turn ends, sends another `session/prompt` ([v1 prompt turn, "Cancellation"](https://agentclientprotocol.com/protocol/v1/prompt-turn.md#cancellation)). The host does that through `interruptTurn` and `startTurn` (its `planFallback`), so the driver declares no steering |
@@ -258,8 +276,8 @@ range. `test/drivers/acp/driver-rules.ts` checks both for all five drivers.
 - ACP authentication (`authenticate`, `auth/login`), elicitation, subagents,
   session list/delete and v1 session modes are not mapped; v1
   `current_mode_update` arrives as `x:acp.update`.
-- A v1 agent that can neither resume nor load sessions gets a fresh session on
-  resume, with `session.replaced` and `contextLost: true`.
+- A v1 agent that can neither resume nor load sessions cannot resume:
+  `resumeThread` refuses with `unsupported` (`acp.session/resume`).
 - A v2 tool call's `kind` and `status` reset by `null` are not applied: an
   ARI item keeps the kind it opened with, and ACP agents do not move a tool
   call back to `pending`. (Under v1, `null` changes nothing anyway.)

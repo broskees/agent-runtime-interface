@@ -4,6 +4,11 @@
 
 - Added the grok driver (`ari/drivers/grok`, `ari/meta/grok`): Grok Build's
   CLI as an ACP agent, `grok --permission-mode default agent stdio`.
+- As an ACP flavor, it takes the base driver's resume and fork changes: a
+  resume replaces only a session the agent reports missing, a resume of a
+  held thread applies or refuses its settings, a history resume is
+  `unsupported`, and a fork into another directory is asked of the agent
+  (`forkAcrossDirectories` defaults to `true`). See the `acp` changelog.
 - Probes run `grok --version` with the updater off. Tested range
   `>=1.0.70 <1.1.0`.
 - `grok` gets the environment the host gives it, inherited `XAI_` variables

@@ -151,7 +151,7 @@ export const ResumeThreadInputSchema: Effect.Schema.Codec<Wire.ResumeThreadInput
     config: Schema.optional(Schema.suspend(() => ConfigValuesSchema)),
     policy: Schema.optional(Schema.suspend(() => RuntimePolicySchema)),
     launch: Schema.optional(Schema.suspend(() => LaunchContextSchema)),
-    /** `history` loads the transcript read-only without a live runtime. */
+    /** `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`. */
     purpose: Schema.optional(Schema.Union([Schema.Literals(["interactive", "history"]), Schema.String])),
     /** Skip replaying stored items as events. */
     quiet: Schema.optional(Schema.Boolean),

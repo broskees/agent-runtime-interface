@@ -143,6 +143,86 @@ test("resume and rollback use Pi's session files, and a rollback survives a rest
   assert.equal(rebuilt.turns[0]?.id, firstTurn, "turn ids rebuilt from the session file match the live ones");
 });
 
+test("a history resume reports history unavailable: pi opens a session file only to run it, and writes the launch into it, so the driver starts no pi", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, first, thread.id, "First.");
+  await first.session.close();
+  const before = fs.readFileSync(thread.handle!, "utf8");
+  const second = await opened.open();
+  const spawns = opened.host.spawns.length;
+  await assert.rejects(second.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(opened.cwd), purpose: "history" }), (error: unknown) => isAriError(error, "unsupported"));
+  assert.equal(opened.host.spawns.length, spawns, "a history read started pi");
+  assert.equal(fs.readFileSync(thread.handle!, "utf8"), before, "the session file is unchanged");
+  assert.ok(!second.events.some((event) => event.body.type === "session.replaced" || event.body.type === "thread.upsert"));
+});
+
+test("a resume pi fails for a reason other than a missing session file returns the error and starts no fresh session", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, first, thread.id, "First.");
+  await first.session.close();
+  // The file is there, but pi cannot open it: its entries remain and its session header is gone.
+  const lines = fs.readFileSync(thread.handle!, "utf8").split("\n").filter((line) => line.trim() !== "");
+  fs.writeFileSync(thread.handle!, `${lines.filter((line) => (JSON.parse(line) as { type?: unknown }).type !== "session").join("\n")}\n`);
+  const second = await opened.open();
+  const spawns = opened.host.spawns.length;
+  await assert.rejects(second.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(opened.cwd) }), (error: unknown) => toCallError(error) !== undefined);
+  assert.equal(opened.host.spawns.length, spawns + 1, "only the failed resume started pi; no fresh session");
+  assert.ok(!second.events.some((event) => event.body.type === "session.replaced"));
+});
+
+test("persistSession: false runs pi with --no-session: Pi writes no session file, and the thread says it cannot be resumed, forked, unloaded or released", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const sessions = `${opened.host.paths.stateDir}/sessions`;
+  const files = (): string[] => (fs.existsSync(sessions) ? fs.readdirSync(sessions).filter((name) => name.endsWith(".jsonl")) : []);
+  const before = files();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd), persistSession: false });
+  const spawn = opened.host.spawns.at(-1)!;
+  assert.ok(spawn.args?.includes("--no-session"), `pi ran with ${JSON.stringify(spawn.args)}`);
+  assert.equal(thread.handle, undefined, "an ephemeral thread has no session file to resume by");
+  await simpleTurn(opened, first, thread.id, "Only in memory.");
+  assert.deepEqual(files(), before, "Pi wrote no session file");
+  await assert.rejects(first.session.forkThread!({ threadId: thread.id, at: { type: "latest" } }), (error: unknown) => isAriError(error, "invalid_state"));
+  await assert.rejects(first.session.unloadThread!(thread.id), (error: unknown) => isAriError(error, "invalid_state"));
+  assert.equal(first.session.canRelease(), false, "a release would end the ephemeral thread's only copy");
+  const snapshot = await first.session.readSnapshot!(thread.id);
+  assert.equal(snapshot.turns.length, 1, "the live thread still reads back");
+  // Another session finds no file for it: the resume says the context is lost.
+  const second = await opened.open();
+  const replaced = await second.session.resumeThread({ native: { id: thread.native.id!, strength: "strong" }, policy: policy(opened.cwd) });
+  assert.notEqual(replaced.native.id, thread.native.id);
+  const notice = await opened.until(second.events, (event) => (event.body.type === "session.replaced" ? event.body : undefined), "session.replaced");
+  assert.equal(notice.contextLost, true);
+});
+
+test("a resume of a thread the session holds applies its config, restarts pi on the session file for a new launch, and refuses a runtime mode pi cannot switch", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+  await simpleTurn(opened, first, thread.id, "First.");
+  const frames = (type: string) => opened.harness.frames.filter((frame) => frame.direction === "in" && frame.record["type"] === type);
+  const models = frames("set_model").length;
+  const resumed = await first.session.resumeThread({ native: { handle: thread.handle! }, config: { model: "fake/fake-large" } });
+  assert.equal(resumed.id, thread.id);
+  assert.equal(frames("set_model").length, models + 1, "the new model reached pi");
+  assert.equal(resumed.appliedConfig?.["model"], "fake/fake-large");
+
+  // A new launch restarts pi on the session file with it, from the next use on.
+  const spawns = opened.host.spawns.length;
+  await first.session.resumeThread({ native: { handle: thread.handle! }, launch: { appendSystemPrompt: ["ARI_HELD_SYSTEM"] } });
+  await simpleTurn(opened, first, thread.id, "Second.");
+  const restart = opened.host.spawns.slice(spawns).find((spawn) => spawn.args?.includes("--session"));
+  assert.ok(restart !== undefined, "pi started again on the session file");
+  assert.ok(restart.args?.includes("ARI_HELD_SYSTEM"), `the restart carries the new launch: ${JSON.stringify(restart.args)}`);
+  assert.deepEqual((await opened.inspect(thread))?.prompts, ["First.", "Second."], "the restart kept the conversation");
+
+  await assert.rejects(first.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(opened.cwd, "full_access") }), (error: unknown) => isAriError(error, "unsupported"));
+});
+
 test("a fork into another directory runs Pi's CLI there, and a fork from a turn keeps the history before it", async () => {
   const opened = await rig();
   const session = await opened.open();

@@ -162,7 +162,7 @@ schema `vendor-schemas/codex/3d86e43b075adeba2193ec5c22ac92f55afd82e6/codex_app_
 | Accepts system / developer context | Y/Y | developer only | `ThreadStartParams.baseInstructions` replaces Codex's whole base prompt rather than adding to it, so host system and developer text both go to `developerInstructions` (thread start, resume, fork) and per-turn text to `additionalContext`. `context.instructionChannels` is `["developer"]`. |
 | Can generate summaries | Y | – | No request returns a summary: `thread/compact/start` answers `{}` (schema: `ThreadCompactStartResponse`). Handoff summaries in `injectHistory` are accepted. |
 | Native turn / item / request ID strength | strong/strong/strong | strong/strong/strong | A request's native id is the server request kind plus its item id (JSON-RPC ids restart at 0 per process). |
-| Policy enforcement | native | native, all five modes | `auto` is `approvalsReviewer: "auto_review"`; every other mode names `"user"`. The driver names the reviewer on every start, resume, fork and per-turn policy, because Codex keeps a thread's reviewer when a request leaves it out (app-server `thread_processor.rs:4782–4791`, `5788–5794`). |
+| Policy enforcement | native | native, all five modes | `auto` is `approvalsReviewer: "auto_review"`; every other mode names `"user"`. The driver names the reviewer on every start, resume, fork and per-turn policy, because Codex keeps a thread's reviewer when a request leaves it out (app-server `thread_processor.rs:4782–4791`, `5788–5794`). `policy.native` is passed on: its `approvalPolicy`, `sandbox`, `sandboxPolicy` and `approvalsReviewer` replace the mode's, and its `permissions` (a named profile) goes on start, resume, fork and turn. Codex refuses a profile with a sandbox on one request (schema: `ThreadStartParams.permissions`, `TurnStartParams.permissions`), so a profile wins over the sandbox the mode sets, which is then not sent; a sandbox `native` names itself is sent with it, for Codex to judge. |
 
 ARI additions the driver declares: `requests.responseModes` `live` and
 `message`; `requests.approvalScopes` `accept`/`once`,
@@ -294,14 +294,19 @@ params and results are ARI ids. Types are in
 ## Native sessions
 
 `nativeSessions.list({ cwd, cursor })` takes Codex-only filters as `x:codex.*`
-fields (the `CodexNativeSessionFilters` type): `x:codex.limit`,
-`x:codex.searchTerm`, `x:codex.archived`, `x:codex.modelProviders`,
-`x:codex.sourceKinds`, `x:codex.includedThreadIds` and
-`x:codex.excludedThreadIds` (at most 100 each), `x:codex.useStateDbOnly`,
+fields: every `x:codex.<field>` goes to `thread/list` as `<field>`, and Codex
+validates it. The `CodexNativeSessionFilters` type lists those of the pinned
+protocol: `x:codex.limit`, `x:codex.searchTerm`, `x:codex.archived`,
+`x:codex.modelProviders`, `x:codex.sourceKinds`, `x:codex.includedThreadIds`
+and `x:codex.excludedThreadIds` (at most 100 each, Codex's own limit, which
+the driver checks first), `x:codex.useStateDbOnly`,
 `x:codex.currentAccountOnly`, `x:codex.parentThreadId`,
-`x:codex.ancestorThreadId`, `x:codex.projectId`, `x:codex.sortKey` and
-`x:codex.sortDirection`. An unknown `x:codex.` field is refused with
-`validation`. Each listed session carries `x:codex.modelProvider`.
+`x:codex.ancestorThreadId`, `x:codex.projectId`, `x:codex.sectionId`,
+`x:codex.attachedToThreadId`, `x:codex.includeAttachedThreads`,
+`x:codex.originators`, `x:codex.sortKey` and `x:codex.sortDirection`.
+`x:codex.cwd` and `x:codex.cursor` are refused with `validation`: the
+listing's own `cwd` and `cursor` say that. Each listed session carries
+`x:codex.modelProvider`.
 
 ## Resuming conversations ARI did not create
 
@@ -315,6 +320,14 @@ nothing to Codex's config files. A thread Codex has no rollout for, or one
 another process holds open for writing, is replaced by a fresh thread with
 `session.replaced` (`contextLost: true`) when the host passed `policy`;
 without `policy` the error is returned.
+
+A resume with `purpose: "history"` reads the thread with `thread/read` and
+loads nothing: no `thread/resume`, so no writer starts, and no MCP server,
+policy or instruction reaches Codex. It replays nothing as events;
+`readSnapshot` reads the turns with `thread/turns/list`. The thread stays
+`unloaded`, so a turn needs an interactive resume first (`invalid_state`
+`thread_unloaded`). A thread Codex does not have is `not_found`, never
+replaced. A thread this session holds is reported as it is.
 
 ## Host instructions and tools
 

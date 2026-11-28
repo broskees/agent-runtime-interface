@@ -101,7 +101,7 @@ export type ResumeThreadInput = {
   config?: ConfigValues;
   policy?: RuntimePolicy;
   launch?: LaunchContext;
-  /** `history` loads the transcript read-only without a live runtime. */
+  /** `history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`. */
   purpose?: "interactive" | "history" | (string & {});
   /** Skip replaying stored items as events. */
   quiet?: boolean;
@@ -494,7 +494,7 @@ export const sessionDocument: SchemaDocument = {
           "$ref": "#/$defs/LaunchContext"
         },
         "purpose": {
-          "description": "`history` loads the transcript read-only without a live runtime.",
+          "description": "`history` loads the transcript read-only without a live runtime: it starts no writer, installs no MCP server, rewrites no permission and creates no conversation. A session the provider does not have is `not_found`; a driver that cannot read history that way refuses with `unsupported`.",
           "anyOf": [
             {
               "enum": [

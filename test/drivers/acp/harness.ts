@@ -22,7 +22,7 @@ import type {
 } from "../../../src/conformance/index.ts";
 import { NdjsonDecoder } from "../../../src/driver-kit/ndjson.ts";
 import { callErrors } from "../../../src/index.ts";
-import type { HostPaths, SpawnedProcess } from "../../../src/index.ts";
+import type { HostPaths, SpawnedProcess, Thread } from "../../../src/index.ts";
 import type { Driver } from "../../../src/runtime.ts";
 import { createConformanceWorkspace, instanceDirectories, toSpawnedProcess, watchInstanceFiles } from "../../helpers/conformance.ts";
 
@@ -189,6 +189,8 @@ export interface AcpHarnessOptions<Config> {
   readonly agentArgs?: readonly string[];
   readonly inheritedCredentials?: readonly string[];
   readonly notApplicable?: { readonly [key: string]: string };
+  /** Gives the rig's native controls `lockSession`, for driver tests; the conformance kit runs without it (see NOT_APPLICABLE). */
+  readonly lockSessions?: boolean;
   /** Extra host options, such as an explicit `envPolicy`. */
   readonly hostOptions?: (instanceId: string, paths: HostPaths) => Partial<FakeHostOptions<Config>>;
 }
@@ -205,6 +207,8 @@ export interface AcpHarness<Config> extends ConformanceHarness<Config> {
 
 const NOT_APPLICABLE = {
   "turn-failed.usage_limit": "ACP defines no usage-limit error or reset time, so the driver reports every agent failure as provider_error",
+  "session-replaced.locked":
+    "ACP defines no error for a session another process holds (its errors are JSON-RPC's, auth_required and resource_not_found), so the driver replaces only a session the agent reports missing and returns any other error to the caller",
 };
 
 /** The ACP driver (or a flavor) against the SDK-based fake agent, as a child process. */
@@ -274,12 +278,16 @@ export function acpHarness<Config>(options: AcpHarnessOptions<Config>): AcpHarne
             if (next.done === true) throw new Error("the rig was disposed");
             return next.value;
           },
-          lockSession: async (thread) => {
-            const file = path.join(store, `${encodeURIComponent(thread.handle ?? thread.native.id ?? "")}.json`);
-            const stored = JSON.parse(fs.readFileSync(file, "utf8")) as { locked: boolean };
-            stored.locked = true;
-            fs.writeFileSync(file, JSON.stringify(stored));
-          },
+          ...(options.lockSessions === true
+            ? {
+                lockSession: async (thread: Thread) => {
+                  const file = path.join(store, `${encodeURIComponent(thread.handle ?? thread.native.id ?? "")}.json`);
+                  const stored = JSON.parse(fs.readFileSync(file, "utf8")) as { locked: boolean };
+                  stored.locked = true;
+                  fs.writeFileSync(file, JSON.stringify(stored));
+                },
+              }
+            : {}),
           inspectSession: async (thread): Promise<NativeSessionState | undefined> => {
             const sessionId = thread.handle ?? thread.native.id ?? "";
             for (const channel of channels) {

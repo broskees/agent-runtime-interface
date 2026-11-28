@@ -25,8 +25,12 @@ It must be Claude Code **2.1.330** or newer (`CLAUDE_TESTED_CLAUDE_CODE_VERSION`
 in `ari/meta/claude`), the Claude Code the pinned SDK bundles: the SDK's
 `sdk.d.ts` requires "the Claude Code bundled with this SDK or newer" of an
 app that starts its own Claude Code. The driver reads the version with
-`claude --version`, which prints for example `2.1.330 (Claude Code)`, and
-reads it again whenever the file changes, so `claude update` shows at the
+`claude --version`, which prints for example `2.1.330 (Claude Code)`. Any
+unambiguous version counts: a banner line may come first, and `+build`
+metadata is dropped. The one version on a line labelled `(Claude Code)`
+wins; else the output's only version. Output with no version, or with
+several and no label, is unreadable. The driver reads the version again
+whenever the file changes, so `claude update` shows at the
 next `status()` without a restart. `status()` and `probe()` then report:
 
 | What the driver finds | `status()` | The message |
@@ -34,7 +38,7 @@ next `status()` without a restart. `status()` and `probe()` then report:
 | no `claude` on `PATH` | `driver_unavailable`, `binary: "claude"` | `Claude Code is not installed: no claude executable was found on PATH.`, then how to install it (`curl -fsSL https://claude.ai/install.sh \| bash` on macOS, Linux and WSL, `irm https://claude.ai/install.ps1 \| iex` in Windows PowerShell, https://code.claude.com/docs/en/setup) or to set `executablePath` |
 | an `executablePath` that names no executable file | `driver_unavailable`, `binary` the configured value | `Claude Code is not installed at the configured executablePath: ...`, then the same steps |
 | a `claude` older than 2.1.330 | `driver_unavailable`, `binary` its path | `Claude Code 2.1.319 at /path/to/claude is older than 2.1.330, the oldest version this driver runs (...)`, then how to update it (`claude update`, or the upgrade command of the package manager that installed it) or to set `executablePath` |
-| a `claude` whose `--version` prints no version, fails or cannot start | `driver_unavailable`, `binary` its path | `The version of the Claude Code at /path/to/claude cannot be read: ... exited with code 127 and printed "..."`, then the install steps |
+| a `claude` whose `--version` prints no version (or several, none labelled), fails or cannot start | `driver_unavailable`, `binary` its path | `The version of the Claude Code at /path/to/claude cannot be read: ... exited with code 127 and printed "..."`, then the install steps |
 | Claude Code 2.1.330 | ready | |
 | a newer Claude Code | ready, with an `untested_version` advisory | `Claude Code 2.2.0 at /path/to/claude is newer than 2.1.330, the version this driver is tested against: it runs, but this version is untested.` |
 
@@ -260,13 +264,23 @@ exist for it.
   `session_held_by_background`), is replaced by a fresh session in the
   policy's directory, with `session.replaced` (`contextLost: true`). Claude
   Code writes a transcript only once a session holds a message, so a thread
-  that never ran a turn cannot be resumed and is replaced too. A resume
-  replays the stored turns as events unless `quiet`.
+  that never ran a turn cannot be resumed and is replaced too. Any other
+  failure to start the resumed query (a crash, a timeout, an API error) goes
+  to the caller, and no fresh session starts. A resume replays the stored
+  turns as events unless `quiet`.
 - A resume of a live thread applies a new `model` and `effort` to the running
   query with `setModel` and `applyFlagSettings`, and a new policy's
   permission mode with `setPermissionMode`; `appliedConfig` reports only
   what the query took. A resume with `purpose: "history"` changes nothing and
   reports what the thread runs with.
+- The thread's `effort` (on create, resume and turns) goes to Claude Code as
+  the host gave it, in the query's `effort` option or `applyFlagSettings`
+  `effortLevel`. The driver keeps no list of levels: Claude Code takes or
+  refuses the value.
+- A resume with `purpose: "history"` of a session the driver does not hold
+  starts no query: it registers the thread `unloaded` for `readSnapshot`. A
+  session Claude Code has no transcript for is `not_found`, never replaced,
+  even when the host passed `policy`.
 - `forkThread` starts a query with `resume` (the source), `forkSession: true`,
   `sessionId` (the fork) and, for a fork from a turn, `resumeSessionAt` set to
   the last transcript entry of that turn (the fork keeps the turn). Claude
@@ -295,7 +309,8 @@ LaunchContext the host passed: its instructions as the system prompt's
 Claude Code's settings or other files. A session Claude Code has no record of,
 or refuses to resume because another process holds it, is replaced by a fresh
 session with `session.replaced` (`contextLost: true`) when the host passed
-`policy`, and rejects with `not_found` otherwise.
+`policy`, and rejects with `not_found` otherwise. Any other error is
+returned.
 
 ## Capabilities against the proposal's §1.2 Claude column
 

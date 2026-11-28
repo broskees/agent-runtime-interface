@@ -30,7 +30,7 @@ const thread = await session.createThread({ cwd: "/work", policy: { mode: "appro
 
 | Field | Meaning |
 |---|---|
-| `binary` | The `opencode` executable: a name looked up on `PATH` through `host.process.resolveExecutable`, or a path. Default `opencode`. |
+| `binary` | The `opencode` executable: a name looked up through `host.process.resolveExecutable` as a spawn with the instance's `environment` would (its `PATH` when it sets one), or a path. `opencode --version` and every server use that same environment. Default `opencode`. |
 | `serverUrl` | An OpenCode server someone else runs. When set, the driver never starts or stops a server. Its password, if any, is the instance secret `opencode/server-password`, never config. |
 | `model` | The model new threads start with, as `provider/model`. OpenCode's default when left out. |
 | `agent` | The OpenCode agent new threads use (for example `build`). OpenCode's default when left out. |
@@ -173,6 +173,15 @@ matches wins. A thread's rules are, in this order:
 2.x replaces a session's rules on a live session (`session.update`), so the
 mode can change between turns; 1.x keeps it fixed.
 
+A resume without `policy` (2.x can find a session by id alone) invents no
+mode. The session keeps the rules OpenCode saved for it, in their order, in
+place of the mode's rules; the driver adds only the host's rules and the
+`deny` rules for other threads' entries after them. From the saved rules it
+drops only denies it writes itself: those of other threads' entries (they
+come again at the end) and any deny of the thread's own entries that an
+earlier run left. A later `policy` (on a turn or another resume) writes that
+mode's rules as usual.
+
 ## MCP servers are per directory
 
 OpenCode registers MCP servers per directory on a server (1.x `POST /mcp`,
@@ -283,8 +292,9 @@ message, 2.x as the instruction entry), never in its config files.
 The driver resumes any session the OpenCode server holds, including one
 created outside ARI: `resumeThread` asks the server for the id the host named.
 It then gives that session what it gives a session it created: the permission
-rules for the host's runtime policy (plus, on a shared server, deny rules for
-other threads' host MCP entries), the host's MCP servers registered on the
+rules for the host's runtime policy, or the session's saved rules when the
+host passed no policy (plus, on a shared server, deny rules for other
+threads' host MCP entries), the host's MCP servers registered on the
 running server under the names the host chose, and the host's instructions
 through the system channel above. All of it goes through the server's API;
 nothing is written to OpenCode's config files. For OpenCode 1.x, a session
@@ -292,6 +302,15 @@ this ARI session has not seen needs `policy.cwd` (`validation` otherwise). A
 session the server does not have is replaced by a fresh one with
 `session.replaced` when the host passed `policy`, and rejects with `not_found`
 otherwise. The driver lists no native sessions (`nativeSessions` is absent).
+
+A resume with `purpose: "history"` only reads: the driver finds the session
+on the server (a 1.x server for it starts, as for any 1.x thread, and needs
+`policy.cwd`), writes nothing to it (no rules, no MCP entries, no
+instructions) and uses no part of the policy but its directory. It replays
+nothing as events; `readSnapshot` reads the history. The thread stays
+`unloaded`, so a turn needs an interactive resume first (`invalid_state`
+`thread_unloaded`). A session the server does not have is `not_found`, never
+replaced. A thread this session holds is reported as it is.
 
 ## The `opencode.permissionRules` extension
 

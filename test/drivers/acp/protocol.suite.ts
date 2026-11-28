@@ -53,6 +53,76 @@ test("a v1 agent asked for v2 answers with v1, and the driver speaks v1 to it", 
   }
 });
 
+test("a history resume reports history unavailable: ACP opens a session only live, so the driver sends no session/resume, session/load or session/new", async () => {
+  const rig = await openRig({ name: "history", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
+  try {
+    const first = await rig.open();
+    const thread = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    await first.session.close();
+    const { session, events } = await rig.open();
+    const opens = (): number => frameMessages(rig.harness.frames, "client").filter((message) => ["session/resume", "session/load", "session/new"].includes(String(message["method"]))).length;
+    const before = opens();
+    await assert.rejects(session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy(), purpose: "history" }), (error) => isAriError(error, "unsupported"));
+    assert.equal(opens(), before, "a history read opened a session");
+    assert.ok(!events.some((event) => event.body.type === "session.replaced" || event.body.type === "thread.upsert"));
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+for (const protocol of [1, 2] as const) {
+  test(`v${protocol}: a resume the agent refuses for any reason but a missing session returns the agent's error and starts no session; a missing session is replaced`, async () => {
+    const rig = await openRig({ name: "resume errors", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol, lockSessions: true });
+    try {
+      const first = await rig.open();
+      const thread = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+      await first.session.close();
+      // The fake answers a resume of a held session with an internal error (-32603), as ACP has no error for it.
+      await rig.rig.native.lockSession!(thread);
+      const { session, events } = await rig.open();
+      const news = (): number => frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/new").length;
+      const before = news();
+      await assert.rejects(session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy() }), (error) => isAriError(error, "protocol") && /already open in another process/.test(error.message));
+      assert.equal(news(), before, "no fresh session replaced the one the agent refused");
+      assert.ok(!events.some((event) => event.body.type === "session.replaced"));
+
+      const replaced = await session.resumeThread({ native: { handle: "ari-missing-session" }, policy: rig.policy() });
+      assert.notEqual(replaced.native.id, "ari-missing-session");
+      assert.equal(news(), before + 1);
+      const notice = events.find((event) => event.body.type === "session.replaced");
+      assert.ok(notice !== undefined && notice.body.type === "session.replaced" && notice.body.previousNativeId === "ari-missing-session" && notice.body.contextLost === true);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+}
+
+test("a resume of a thread the session holds applies its config, policy and first-prompt instructions, and refuses new MCP servers, which ACP fixes when a session opens", async () => {
+  const rig = await openRig({ name: "held resume", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--config-options", JSON.stringify(V2_OPTIONS)] });
+  try {
+    const { session } = await rig.open();
+    const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    const sets = (): Array<{ [key: string]: unknown }> => frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/set_config_option");
+    const resumed = await session.resumeThread({ native: { handle: thread.handle! }, config: { model: "claude" }, policy: rig.policy("full_access"), launch: { developerPrompt: ["ARI_HELD_DEVELOPER"] } });
+    assert.equal(resumed.id, thread.id);
+    assert.equal(sets().length, 1, "the new model reached the agent");
+    assert.deepEqual((sets()[0]!["params"] as { configId: string; value: unknown }).configId, "model");
+    assert.equal(resumed.appliedConfig?.["model"], "claude");
+    const started = await session.startTurn({ threadId: thread.id, clientTurnKey: "after-held-resume", intent: "start", content: [{ type: "text", text: "Go." }] });
+    assert.equal(started.status, "accepted");
+    const native = await rig.nextTurn();
+    const prompt = frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/prompt").at(-1)!;
+    assert.match(JSON.stringify(prompt["params"]), /ARI_HELD_DEVELOPER/, "the resume's instructions reach the next prompt");
+    await native.complete();
+    await assert.rejects(
+      session.resumeThread({ native: { handle: thread.handle! }, launch: { mcpServers: [{ name: "late-tools", transport: "stdio", command: "late-tools" }] } }),
+      (error) => isAriError(error, "invalid_state") && /MCP servers/.test(error.message),
+    );
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 test("a v2 agent negotiates v2", async () => {
   const rig = await openRig({ name: "v2", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2 });
   try {
@@ -123,31 +193,46 @@ test("v2: updates are upserts by id: a tool call is created by its first update 
 });
 
 for (const protocol of [1, 2] as const) {
-  test(`v${protocol}: fork constraints are capabilities; an agent that refuses another directory turns crossCwd off`, async () => {
-    const rig = await openRig({ name: "fork", driver: acpDriver, config: config(2, { forkAcrossDirectories: true }), executable: "fake-acp-agent", protocol, agentArgs: ["--fork"] });
+  test(`v${protocol}: fork constraints are capabilities; by default the driver asks the agent for a fork into another directory, and an agent that refuses one fails only that fork`, async () => {
+    const rig = await openRig({ name: "fork", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol, agentArgs: ["--fork"] });
     try {
-      const { session, events, waitFor } = await rig.open();
+      const { session, events } = await rig.open();
       assert.equal(session.capabilities().threads.fork.supported, true);
-      assert.equal(session.capabilities().threads.fork.crossCwd, true, "declared from the driver's config");
+      assert.equal(session.capabilities().threads.fork.crossCwd, true, "the default config asks the agent");
       assert.equal(session.capabilities().threads.fork.fromTurn, false);
       const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
       const sameDirectory = await session.forkThread!({ threadId: thread.id, at: { type: "latest" } });
       assert.notEqual(sameDirectory.id, thread.id);
       assert.equal(sameDirectory.cwd, rig.cwd);
-      await assert.rejects(session.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: rig.otherCwd }), (error) => isAriError(error, "unsupported") && error.callError.code === "unsupported" && error.callError.capability === "threads.fork.crossCwd");
-      assert.equal(session.capabilities().threads.fork.crossCwd, false, "the refusal is now declared");
-      await waitFor((event) => event.body.type === "capabilities.updated" && event.body.capabilities.threads.fork.crossCwd === false, "capabilities.updated with crossCwd false");
-      // Declared off, a fork into another directory is refused before the agent hears of it.
       const forks = (): number => frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/fork").length;
-      const before = forks();
-      await assert.rejects(session.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: rig.otherCwd }), (error) => isAriError(error, "unsupported"));
-      assert.equal(forks(), before);
-      assert.ok(events.length > 0);
+      for (const attempt of [1, 2]) {
+        const before = forks();
+        // The agent refuses another directory (invalid params): the caller gets the agent's error.
+        await assert.rejects(session.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: rig.otherCwd }), (error) => isAriError(error, "validation") && /forks only within/.test(error.message));
+        assert.equal(forks(), before + 1, `fork ${attempt} into another directory reached the agent`);
+        assert.equal(session.capabilities().threads.fork.crossCwd, true, "one refusal does not turn crossCwd off");
+      }
+      assert.ok(!events.some((event) => event.body.type === "capabilities.updated" && event.body.capabilities.threads.fork.crossCwd === false));
     } finally {
       await rig.cleanup();
     }
   });
 }
+
+test("forkAcrossDirectories: false is the user's choice: crossCwd is off, and a fork into another directory is refused before the agent hears of it", async () => {
+  const rig = await openRig({ name: "fork refused locally", driver: acpDriver, config: config(2, { forkAcrossDirectories: false }), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--fork", "--fork-cross-cwd"] });
+  try {
+    const { session } = await rig.open();
+    assert.equal(session.capabilities().threads.fork.crossCwd, false);
+    const thread = await session.createThread({ cwd: rig.cwd, policy: rig.policy() });
+    const forks = (): number => frameMessages(rig.harness.frames, "client").filter((message) => message["method"] === "session/fork").length;
+    const before = forks();
+    await assert.rejects(session.forkThread!({ threadId: thread.id, at: { type: "latest" }, cwd: rig.otherCwd }), (error) => isAriError(error, "unsupported") && error.callError.code === "unsupported" && error.callError.capability === "threads.fork.crossCwd");
+    assert.equal(forks(), before);
+  } finally {
+    await rig.cleanup();
+  }
+});
 
 test("an agent that forks across directories gets forks into another directory", async () => {
   const rig = await openRig({ name: "fork across", driver: acpDriver, config: config(2, { forkAcrossDirectories: true }), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--fork", "--fork-cross-cwd"] });

@@ -185,6 +185,8 @@ interface ThreadState {
   loaded: boolean;
   /** The host unloaded it; only `resumeThread` brings it back. */
   unloaded: boolean;
+  /** Read by a `purpose: "history"` resume, which loaded nothing: its policy is a placeholder no resume sends. */
+  history: boolean;
   goal: ThreadGoal | undefined;
   /** Bumped by each goal notification, so an older call's answer does not overwrite a newer goal. */
   goalSeq: number;
@@ -325,7 +327,8 @@ export class CodexSession implements Session {
     const params: ThreadStartParams = {
       cwd: spec.cwd,
       approvalPolicy: policy.approvalPolicy,
-      sandbox: policy.sandbox,
+      ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
+      ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
       approvalsReviewer: policy.approvalsReviewer,
       ...(spec.model === undefined ? {} : { model: spec.model }),
       ...(spec.instructions === undefined ? {} : { developerInstructions: spec.instructions }),
@@ -349,8 +352,9 @@ export class CodexSession implements Session {
     const known = this.#threadsByNative.get(nativeId);
     const knownState = known === undefined ? undefined : this.#threads.get(known);
     if (knownState !== undefined && !knownState.unloaded && knownState.loaded) return knownState.thread;
+    if (input.purpose === "history") return this.#readHistory(nativeId, knownState, input);
     const connection = await this.#agent();
-    const policyInput = input.policy ?? knownState?.policy;
+    const policyInput = input.policy ?? (knownState?.history === true ? undefined : knownState?.policy);
     const threadId = threadIdFor(nativeId);
     try {
       const resumed = await this.#resumeNative(connection, nativeId, threadId, policyInput, input.launch ?? knownState?.launch, input.config);
@@ -381,6 +385,31 @@ export class CodexSession implements Session {
     }
   }
 
+  /**
+   * A `purpose: "history"` resume: Codex reads a stored thread with
+   * `thread/read` (and `readSnapshot` with `thread/turns/list`), neither of
+   * which loads it, so no writer starts, no MCP server or policy reaches
+   * Codex, and a thread Codex does not have is `not_found`, never replaced.
+   * Nothing is replayed as events. The thread stays unloaded until an
+   * interactive resume.
+   */
+  async #readHistory(nativeId: string, known: ThreadState | undefined, input: ResumeThreadInput): Promise<AppliedThread> {
+    if (known !== undefined) return known.thread;
+    const connection = await this.#agent();
+    const read = await connection.client.threadRead({ threadId: nativeId, includeTurns: false }).catch((error: unknown) => {
+      throw callErrorFromCodex(error, "native session");
+    });
+    const cwd = read.thread.cwd;
+    this.#register(read.thread.id, cwd, input.policy ?? { mode: "approval_required", interaction: "default", cwd }, read.thread.model ?? undefined, input.launch, undefined);
+    const state = this.#threads.get(threadIdFor(read.thread.id))!;
+    state.loaded = false;
+    state.unloaded = true;
+    state.history = true;
+    state.thread = { ...state.thread, status: "unloaded" };
+    this.#emit({ type: "thread.upsert", thread: { id: state.thread.id, status: "unloaded" } }, { threadId: state.thread.id });
+    return { ...state.thread, ...(state.model === undefined ? {} : { appliedConfig: { model: state.model } }) };
+  }
+
   async readSnapshot(threadId: string): Promise<ThreadSnapshot> {
     this.#open();
     const thread = this.#thread(threadId);
@@ -404,7 +433,8 @@ export class CodexSession implements Session {
       .threadFork({
         threadId: source.nativeId,
         approvalPolicy: policy.approvalPolicy,
-        sandbox: policy.sandbox,
+        ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
+        ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
         approvalsReviewer: policy.approvalsReviewer,
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(lastTurnId === undefined ? {} : { lastTurnId }),
@@ -571,7 +601,15 @@ export class CodexSession implements Session {
         input: userInput,
         ...(model === undefined ? {} : { model }),
         ...(effort === undefined ? {} : { effort }),
-        ...(policy === undefined ? {} : { approvalPolicy: policy.approvalPolicy, approvalsReviewer: policy.approvalsReviewer, sandboxPolicy: policy.sandboxPolicy, cwd: input.policy!.cwd }),
+        ...(policy === undefined
+          ? {}
+          : {
+              approvalPolicy: policy.approvalPolicy,
+              approvalsReviewer: policy.approvalsReviewer,
+              ...(policy.sandboxPolicy === undefined ? {} : { sandboxPolicy: policy.sandboxPolicy }),
+              ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
+              cwd: input.policy!.cwd,
+            }),
         ...(Object.keys(additionalContext).length === 0 ? {} : { additionalContext }),
       });
       const known = this.#turnsByNative.get(response.turn.id);
@@ -988,7 +1026,14 @@ export class CodexSession implements Session {
     const resumed = await connection.client.threadResume({
       threadId: nativeId,
       excludeTurns: true,
-      ...(policy === undefined ? {} : { approvalPolicy: policy.approvalPolicy, approvalsReviewer: policy.approvalsReviewer, sandbox: policy.sandbox }),
+      ...(policy === undefined
+        ? {}
+        : {
+            approvalPolicy: policy.approvalPolicy,
+            approvalsReviewer: policy.approvalsReviewer,
+            ...(policy.sandbox === undefined ? {} : { sandbox: policy.sandbox }),
+            ...(policy.permissions === undefined ? {} : { permissions: policy.permissions }),
+          }),
       ...(policyInput?.cwd === undefined || policyInput.cwd === "" ? {} : { cwd: policyInput.cwd }),
       ...(model === undefined ? {} : { model }),
       ...(instructions === undefined ? {} : { developerInstructions: instructions }),
@@ -1094,6 +1139,7 @@ export class CodexSession implements Session {
       existing.thread = thread;
       existing.loaded = true;
       existing.unloaded = false;
+      existing.history = false;
       existing.policy = policy;
       if (model !== undefined) existing.model = model;
     } else {
@@ -1108,6 +1154,7 @@ export class CodexSession implements Session {
         pendingStart: undefined,
         loaded: true,
         unloaded: false,
+        history: false,
         goal: undefined,
         goalSeq: 0,
         goalRun: undefined,

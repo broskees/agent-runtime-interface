@@ -252,6 +252,73 @@ describe("claude driver quirks", () => {
     }
   });
 
+  test("a history resume of a session Claude Code does not have is not_found: it starts no query and no fresh session, even with a policy", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const queries = rig.world.queries.length;
+      await assert.rejects(
+        rig.session.resumeThread({ native: { handle: "6f0c7d4e-0000-4000-8000-000000000000" }, policy: rig.policy(), purpose: "history" }),
+        (error: { callError?: { code: string } }) => error.callError?.code === "not_found",
+      );
+      assert.equal(rig.world.queries.length, queries, "a history read started a Claude Code process");
+      assert.equal(rig.log.filter((event) => event.body.type === "session.replaced").length, 0);
+      assert.equal(rig.log.filter((event) => event.body.type === "thread.upsert").length, 0, "no thread was announced");
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a resume Claude Code fails for a reason other than a held or missing session returns the error and starts no fresh session; a held session is still replaced", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.thread();
+      await rig.simpleTurn(thread.id, "Hello.");
+      const other = await rig.openAnother();
+      const query = rig.world.sdk.query;
+      // Claude Code exits while it starts the resume, for a reason that has nothing to do with the session.
+      Object.assign(rig.world.sdk, {
+        query: (params: Parameters<typeof query>[0]) => {
+          const started = query(params);
+          if (params.options?.resume !== undefined) (started as unknown as { crash(error: Error): void }).crash(new Error("Claude Code process exited with code 1: API Error: 500 Internal Server Error"));
+          return started;
+        },
+      });
+      const queries = rig.world.queries.length;
+      await assert.rejects(
+        other.session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy() }),
+        (error: { callError?: { code: string }; message: string }) => error.callError?.code === "transport" && /API Error: 500/.test(error.message),
+      );
+      Object.assign(rig.world.sdk, { query });
+      assert.equal(rig.world.queries.length, queries + 1, "only the failed resume ran; no fresh session started");
+      assert.equal(other.log.filter((event) => event.body.type === "session.replaced").length, 0);
+
+      // A session another process holds is still replaced, and the event says why.
+      rig.world.locked.add(thread.handle!);
+      const replaced = await other.session.resumeThread({ native: { handle: thread.handle! }, policy: rig.policy() });
+      assert.notEqual(replaced.native.id, thread.native.id);
+      const notice = await until(() => other.log.find((event) => event.body.type === "session.replaced"), "session.replaced");
+      assert.ok(notice.body.type === "session.replaced" && /session_held_by_background/.test(notice.body.reason ?? ""), JSON.stringify(notice.body));
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("an effort value the driver does not list reaches Claude Code as given, at start and on a running query, for Claude Code to take or refuse", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.thread({ config: { effort: "ultra" } });
+      assert.equal(rig.world.queries.at(-1)!.options.effort, "ultra", "the query started with the host's effort");
+      assert.equal(thread.appliedConfig?.["effort"], "ultra");
+      await rig.simpleTurn(thread.id, "Hello.");
+      const resumed = await rig.session.resumeThread({ native: { handle: thread.handle! }, config: { effort: "turbo" } });
+      const flags = rig.world.calls.filter((call) => call.kind === "applyFlagSettings").map((call) => (call.kind === "applyFlagSettings" ? call.settings : undefined));
+      assert.deepEqual(flags.at(-1), { effortLevel: "turbo" }, "the running query got the new effort");
+      assert.equal(resumed.appliedConfig?.["effort"], "turbo");
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("LaunchContext.mcpServers with alwaysLoad reach the SDK with alwaysLoad, before the thread's first prompt", async () => {
     const rig = await openClaudeRig({ host: { mcpServerName: () => "host-orchestration" } });
     try {

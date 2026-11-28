@@ -72,7 +72,6 @@ export async function codexRig(
   const host = createFakeHost<CodexDriverConfig>({
     config,
     paths,
-    envScrubPrefixes: codexDriver.cliManifest?.envScrubPrefixes ?? [],
     ambientEnvironment: { HOME: path.join(root, "home"), PATH: "/usr/bin" },
     spawn: async (request) => {
       const process = world.spawn(request);

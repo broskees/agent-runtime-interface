@@ -369,6 +369,15 @@ A CLI above the tested range still runs, with an `untested_version` advisory.
 Each driver's page in [`docs/drivers/`](docs/drivers/) cites the vendor's
 documentation for its update step.
 
+## Environment
+
+ARI passes the environment through. Each driver gives its agent the
+environment the host gives it, credentials such as `ANTHROPIC_API_KEY`
+included, as if the user had run the CLI in that shell. A host that wants a
+variable kept from agents lists it in `envPolicy.stripAmbient`: a name, or a
+prefix ending in `*`. An instance's own credential, stored through its `auth`
+methods, still wins over an inherited one.
+
 ## Versions
 
 ARI keeps three version axes apart:

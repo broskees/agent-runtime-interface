@@ -104,7 +104,6 @@ export async function openClaudeRig(options: ClaudeRigOptions = {}): Promise<Cla
     paths: instanceDirectories(root, "claude-test"),
     spawn: fakeClaudeSpawn(world, options.claudeVersionLine),
     resolveExecutable: async (name) => (name === "claude" ? FAKE_CLAUDE_BINARY : null),
-    envScrubPrefixes: driver.cliManifest?.envScrubPrefixes ?? [],
     ...(options.managedKey === undefined ? {} : { secrets: [{ namespace: "claude", key: "api-key", value: options.managedKey }] }),
     ...options.host,
   });

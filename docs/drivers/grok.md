@@ -19,10 +19,11 @@ holds its label, icon, config schema and form hints.
 - `probe()` runs `grok --version` with `GROK_DISABLE_AUTOUPDATER=1`, so a
   health check never starts Grok's updater; sessions keep the user's update
   setting.
-- The CLI manifest scrubs `XAI_` variables: an instance uses the Grok login
-  it was set up with (`grok login`), never an `XAI_API_KEY` it inherited.
-  Its terminal fallback is `grok`, `grok --resume <id>` and
-  `grok --resume <id> --fork-session` (all in `grok --help`).
+- `grok` gets the environment the host gives it, an inherited
+  `XAI_API_KEY` included, minus only what the host's `envPolicy.stripAmbient`
+  names. The CLI manifest's terminal fallback is `grok`,
+  `grok --resume <id>` and `grok --resume <id> --fork-session` (all in
+  `grok --help`), with the same environment.
 
 ## Config
 

@@ -10,11 +10,12 @@
 
 import { AriError, callErrors } from "../../errors.ts";
 import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
+import { withoutHostStripped } from "../../driver-kit/env-policy.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { AuthMethod, AuthState, InstanceStatus, ModelCatalog, OpenSessionInput, ProbeResult, UpdateAdvisory } from "../../generated/instance.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
 import { BRIDGE_FILE_NAME, PI_BRIDGE_SOURCE } from "./bridge.ts";
-import { PI_CREDENTIAL_VARIABLES, PI_MINIMUM_VERSION, PI_TESTED_VERSIONS, PI_UPDATE_STEP } from "./config.ts";
+import { PI_MINIMUM_VERSION, PI_TESTED_VERSIONS, PI_UPDATE_STEP } from "./config.ts";
 import type { PiConfig } from "./config.ts";
 import { PiProcess } from "./rpc.ts";
 import { PiSession } from "./session.ts";
@@ -37,9 +38,9 @@ export const PI_AUTH_METHODS: AuthMethod[] = [
   { id: "pi-login", kind: "terminal_cli", label: "Sign in with pi", description: "Run `pi auth login <provider>` in a terminal; pi stores the credential itself." },
 ];
 
-/** Runs `pi <args>` to completion through the host and returns its exit code and stdout. */
-async function runPi(host: HostServices<PiConfig>, executable: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
-  const child = await host.process.spawn({ command: executable, args, purpose: "probe", stdin: "ignore", timeoutMs: 15_000 });
+/** Runs `pi <args>` to completion through the host, with the instance's environment, and returns its exit code and stdout. */
+async function runPi(host: HostServices<PiConfig>, executable: string, args: string[], env: { readonly [name: string]: string }): Promise<{ code: number | null; stdout: string }> {
+  const child = await host.process.spawn({ command: executable, args, purpose: "probe", stdin: "ignore", timeoutMs: 15_000, env: { ...env } });
   const decoder = new TextDecoder();
   let stdout = "";
   const drainErrors = (async () => {
@@ -102,9 +103,8 @@ export class PiInstance implements Instance {
     this.id = instanceId;
     this.#host = host;
     this.#config = config;
-    // Credentials the host did not configure for this instance never reach pi.
-    const credentials = new Set<string>(PI_CREDENTIAL_VARIABLES);
-    this.#environment = Object.fromEntries(Object.entries(environment).filter(([name]) => !credentials.has(name)));
+    // Every Pi process gets the instance's environment as given, credentials included, minus only what the host strips.
+    this.#environment = withoutHostStripped(environment, host.process.envPolicy.stripAmbient);
     // Pi session files open from any instance (`--session <file>`), so every Pi instance can continue another's threads.
     this.continuationKey = "pi";
     this.bindingKey = `pi:${config.binary}:${config.provider ?? ""}:${config.model ?? ""}`;
@@ -137,7 +137,7 @@ export class PiInstance implements Instance {
     if (executable === null) return { ok: false, installed: false, error: this.#unavailable().callError, checkedAt };
     let version: { code: number | null; stdout: string };
     try {
-      version = await runPi(this.#host, executable, ["--version"]);
+      version = await runPi(this.#host, executable, ["--version"], this.#environment);
     } catch (error) {
       return { ok: false, installed: true, error: callErrors.transport(`pi --version failed: ${error instanceof Error ? error.message : String(error)}`).callError, checkedAt };
     }
@@ -288,7 +288,7 @@ export class PiInstance implements Instance {
     if (executable === null) return { status: "unavailable", evidence: "active", scope: "ambient" };
     let check: { code: number | null; stdout: string };
     try {
-      check = await runPi(this.#host, executable, ["auth", "check", ...target, "--json", "--no-refresh"]);
+      check = await runPi(this.#host, executable, ["auth", "check", ...target, "--json", "--no-refresh"], this.#environment);
     } catch {
       return { status: "unavailable", evidence: "active", scope: "ambient" };
     }

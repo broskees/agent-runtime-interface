@@ -84,7 +84,6 @@ export const REFERENCE_CONFIG_SCHEMA: JsonSchema = {
 
 export const REFERENCE_CLI_MANIFEST: CliLaunchManifest = {
   binary: "reference-agent",
-  envScrubPrefixes: ["REFERENCE_AGENT_"],
   args: { fresh: [], resume: ["--resume", "{sessionId}"] },
 };
 

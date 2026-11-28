@@ -125,10 +125,11 @@ the tokens. `auth.cancel` sends `account/login/cancel`; `auth.logout` deletes
 the managed credential, or sends `account/logout` for the ambient account.
 
 A runtime auth failure (`auth.reportRuntimeFailure`) poisons the failing
-scope for 30 seconds. Ambient OpenAI credentials (`OPENAI_API_KEY`,
-`CODEX_API_KEY`, `OPENAI_ADMIN_KEY`) never reach Codex: the CLI manifest's
-`envScrubPrefixes` names them, and the driver drops them from the instance's
-own environment too.
+scope for 30 seconds. The environment passes through: `codex --version`,
+`codex login status` and every `codex app-server` get the host's environment
+and the instance's `environment`, credentials such as `OPENAI_API_KEY` and
+`CODEX_API_KEY` included, minus only what the host's `envPolicy.stripAmbient`
+names. A host that wants a variable kept from Codex lists it there.
 
 ## Capabilities against the proposal's §1.2 Codex column
 

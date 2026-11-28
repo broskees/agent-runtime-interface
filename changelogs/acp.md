@@ -11,6 +11,11 @@
   driver instead.
 - ACP clients typed by tables generated from ACP's v1 and v2 JSON Schemas,
   release `schema-v2.0.0-beta.3`, with a drift check (`codegen:acp:check`).
+- Every agent process and version command gets the host's environment and
+  the instance's `environment`, credentials included, minus only the host's
+  `envPolicy.stripAmbient`, with the flavor's own variables over them. An
+  earlier build passed none of the instance's `environment` on. This holds
+  for every flavor: `grok`, `kiro`, `fx` and `antigravity`.
 - v2 turns are accepted by the `session/prompt` response and settle on the
   `idle` `state_update`; updates are applied as upserts.
 - Fork (draft `session/fork`) when the agent advertises it, with `crossCwd`

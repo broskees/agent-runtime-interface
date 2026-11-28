@@ -16,14 +16,14 @@ import { MUSE_CLI_UPDATE_STEP, MUSE_CONFIG_SCHEMA, MUSE_DRIVER_KIND, MUSE_METADA
 import type { MuseDriverConfig } from "../../meta/muse.ts";
 import type { Driver } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
-import { MUSE_CREDENTIAL_VARIABLES, MuseInstance, hasManagedKey } from "./instance.ts";
+import { MuseInstance, hasManagedKey } from "./instance.ts";
 import { loadMuseSdk } from "./sdk.ts";
 import type { MuseSdkRuntime } from "./sdk.ts";
 
 export type { MuseDriverConfig } from "../../meta/muse.ts";
 export { MUSE_CAPABILITIES } from "./capabilities.ts";
 export { MUSE_CLIENT_NAME } from "./host.ts";
-export { MUSE_API_KEY_SECRET, MUSE_AUTH_METHODS, MUSE_CREDENTIAL_VARIABLES, MUSE_POISON_MS, MUSE_SECRET_NAMESPACE, satisfiesVersionRange, versionAdvisory } from "./instance.ts";
+export { MUSE_API_KEY_SECRET, MUSE_AUTH_METHODS, MUSE_POISON_MS, MUSE_SECRET_NAMESPACE, satisfiesVersionRange, versionAdvisory } from "./instance.ts";
 export { MUSE_IDENTITY_VERSION, choiceOption, itemIdFor, musePolicy, planIdFor, requestIdFor, subagentIdFor, threadIdFor, turnIdFor } from "./mapping.ts";
 export { museMcpServers } from "./session.ts";
 export { loadMuseSdk } from "./sdk.ts";
@@ -37,7 +37,6 @@ export { MUSE_CLI_UPDATE_STEP, MUSE_MINIMUM_VERSION, MUSE_TESTED_VERSIONS };
  */
 export const MUSE_CLI_MANIFEST: CliLaunchManifest = {
   binary: "muse",
-  envScrubPrefixes: [...MUSE_CREDENTIAL_VARIABLES],
   args: { fresh: [] },
 };
 

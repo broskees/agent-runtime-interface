@@ -47,5 +47,9 @@ First version of the Codex driver.
   API key or ChatGPT tokens handed over through `auth.transferProfile`
   (format `codex.chatgpt_auth_tokens`); browser sign-in through the host's
   callbacks; device code.
+- Every `codex` process gets the instance's environment, credentials such as
+  `OPENAI_API_KEY` included, minus only the host's `envPolicy.stripAmbient`.
+  `CODEX_CREDENTIAL_VARIABLES` and the CLI manifest's `envScrubPrefixes` are
+  gone.
 - Extensions: `ari.goal`, `codex.goal`, `codex.review`, `codex.readState`,
   `codex.memory`, each version `1`.

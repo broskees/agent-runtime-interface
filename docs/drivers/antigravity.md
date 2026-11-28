@@ -41,20 +41,13 @@ driver set.
   Existing instances with a working profile credential do not need to sign in
   again. On Linux, `agy` can also use the profile file when the keyring is
   unreachable.
-- **Ambient Google credentials are stripped.** A host strips them with
-  `process.envPolicy.stripAmbient`. The driver cannot strip variables itself
-  (`SpawnRequest` adds variables; it removes none), so it declares them and
-  checks the host: the CLI manifest's `envScrubPrefixes` (`GEMINI_`,
-  `GOOGLE_`, `GCLOUD_`, `CLOUDSDK_`, `AGY_`) cover every name in
-  `ANTIGRAVITY_STRIPPED_VARIABLES` (`GEMINI_API_KEY`, `GOOGLE_API_KEY`,
-  `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT`,
-  `GOOGLE_CLOUD_LOCATION`, `GOOGLE_CLOUD_QUOTA_PROJECT`,
-  `GOOGLE_GENAI_USE_VERTEXAI`, `GCLOUD_PROJECT`, `CLOUDSDK_CORE_PROJECT`,
-  `AGY_ACP_CCPA_PROJECT`, `AGY_ACP_ENABLE_OAUTH`, `GEMINI_HOME`), and
-  `openSession` rejects with `invalid_state` (`env_policy_incomplete`, naming
-  the missing ones) when the host's `envPolicy` would let one through. A host
-  that builds its `envPolicy` from the manifest (as the conformance kit's
-  fake host and a manifest-honouring host do, with `PREFIX*` entries) passes.
+- **The environment passes through.** `agy` gets the environment the host
+  gives it, Google credentials such as `GEMINI_API_KEY` and
+  `GOOGLE_APPLICATION_CREDENTIALS` included, as it would in the user's shell.
+  A host that wants a variable kept from the agent lists it in
+  `process.envPolicy.stripAmbient`. A session starts under any policy, one
+  that strips nothing included. The driver adds only
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` and `AGY_CLI_DISABLE_AUTO_UPDATE`.
 - **Fixed-choice prompts.** `requests.allowCustomAnswer` is false; a
   `custom` answer rejects with `unsupported`.
 - **No conversation rollback.** Antigravity can checkpoint the workspace but

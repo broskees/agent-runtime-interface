@@ -175,7 +175,6 @@ test("on real Node host services, the driver finds pi on PATH and completes a tu
     writeDiagnostic: () => undefined,
     // FAKE_PI_TRACE_DIRECTORY tells the fake where to trace its frames; real pi ignores it.
     baseEnv: { PATH: bin, HOME: home, FAKE_PI_TRACE_DIRECTORY: path.join(root, "traces") },
-    envPolicy: { stripAmbient: [...(piDriver.cliManifest?.envScrubPrefixes ?? [])] },
   });
   try {
     const instance = await piDriver.create(host, { instanceId: "pi-node", config, environment: {} });

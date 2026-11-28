@@ -10,9 +10,9 @@
 //   placeholders `{sessionId}` and `{cwd}` are replaced in every argument; a
 //   launch whose arguments use `{sessionId}` needs one. A manifest without
 //   `resume` or `fork` arguments cannot make that launch (`unsupported`).
-// - The environment is the given base minus every variable whose name starts
-//   with one of `envScrubPrefixes` (case-sensitive), plus `extraEnv`, which is
-//   added after scrubbing because the host chose it explicitly.
+// - The environment is the given base as it is, credentials included (only
+//   variables set to `undefined` are left out), plus `extraEnv`. A manifest
+//   removes nothing: the host decides what the CLI's environment holds.
 // - MCP servers reach the CLI as the common `{ "mcpServers": { name: { type,
 //   command, args, env, cwd, url, headers } } }` JSON, by the manifest's
 //   `mcpInjection.mode`: `inline_json` adds `flag` and the JSON text;
@@ -38,7 +38,7 @@ export interface CliLaunchRequest {
   readonly sessionId?: string;
   /** The base environment, for example the host's own. Variables set to `undefined` are left out. */
   readonly env: { readonly [name: string]: string | undefined };
-  /** Variables added after scrubbing. */
+  /** Variables added over `env`. */
   readonly extraEnv?: { readonly [name: string]: string };
   /** MCP servers to hand to the CLI. Their names come from the host. */
   readonly mcpServers?: readonly McpServerConfig[];
@@ -58,17 +58,6 @@ export interface CliLaunch {
 /** Returns `manifest` when it is a valid CLI launch manifest; otherwise throws a `validation` call error naming the bad field. */
 export function validateCliManifest(manifest: unknown): CliLaunchManifest {
   return CliLaunchManifestSchema.parse(manifest);
-}
-
-/** `env` without the variables whose names start with one of `prefixes`, and without `undefined` values. */
-export function scrubEnv(env: { readonly [name: string]: string | undefined }, prefixes: readonly string[]): { [name: string]: string } {
-  const scrubbed: { [name: string]: string } = {};
-  for (const [name, value] of Object.entries(env)) {
-    if (value === undefined) continue;
-    if (prefixes.some((prefix) => name.startsWith(prefix))) continue;
-    scrubbed[name] = value;
-  }
-  return scrubbed;
 }
 
 /** The `{ "mcpServers": { ... } }` JSON text for `servers`, keyed by each server's host-chosen name. */
@@ -107,7 +96,11 @@ export function buildCliLaunch(manifest: unknown, request: CliLaunchRequest): Cl
   if (kindArgs === undefined) throw callErrors.unsupported(`cliManifest.args.${request.kind}`);
 
   const args = kindArgs.map((argument) => fillPlaceholders(argument, request));
-  const env = { ...scrubEnv(request.env, valid.envScrubPrefixes ?? []), ...request.extraEnv };
+  const env: { [name: string]: string } = {};
+  for (const [name, value] of Object.entries(request.env)) {
+    if (value !== undefined) env[name] = value;
+  }
+  Object.assign(env, request.extraEnv);
   const files: Array<{ path: string; contents: string }> = [];
 
   const servers = request.mcpServers ?? [];

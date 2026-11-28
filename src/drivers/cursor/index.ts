@@ -26,7 +26,7 @@ import type { CursorSdkLoader } from "./sdk.ts";
 export { CURSOR_CONFIG_SCHEMA, CURSOR_DRIVER_KIND, CURSOR_INSTALL_HINT, CURSOR_SDK_PACKAGE, CURSOR_TESTED_VERSIONS, defaultCursorConfig } from "./config.ts";
 export type { CursorConfig, CursorSettingSource } from "./config.ts";
 export { cursorCapabilities } from "./capabilities.ts";
-export { CURSOR_AUTH_METHODS, CURSOR_CREDENTIAL_VARIABLES, CURSOR_POISON_MS, CURSOR_SECRET_KEY, CURSOR_SECRET_NAMESPACE, versionAdvisory, versionInRange } from "./instance.ts";
+export { CURSOR_AUTH_METHODS, CURSOR_POISON_MS, CURSOR_SECRET_KEY, CURSOR_SECRET_NAMESPACE, versionAdvisory, versionInRange } from "./instance.ts";
 export { READ_ONLY_TOOLS } from "./session.ts";
 export { IDENTITY_VERSION, failureFromRunError, itemIdFor, itemNative, threadIdFor, turnIdFor } from "./mapping.ts";
 export { loadCursorSdk } from "./sdk.ts";
@@ -46,7 +46,7 @@ export function createCursorDriver<Store>(options: CursorDriverOptions<Store>): 
     configSchema: CURSOR_CONFIG_SCHEMA,
     defaultConfig: defaultCursorConfig,
     async create(host, input) {
-      return new CursorInstance<Store>(host, { ...defaultCursorConfig(), ...input.config }, input.instanceId, options.loadSdk);
+      return new CursorInstance<Store>(host, { ...defaultCursorConfig(), ...input.config }, input.instanceId, input.environment, options.loadSdk);
     },
   };
 }

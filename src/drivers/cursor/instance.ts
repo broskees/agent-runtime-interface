@@ -6,11 +6,12 @@
 //
 // Credentials. The SDK resolves an API key as: the `apiKey` option, then
 // `CURSOR_API_KEY` in the process environment, then the login
-// `Cursor.auth.login()` stored (docs, "Cursor.auth"). The driver always
-// passes `apiKey` itself, so the SDK never falls back to a `CURSOR_API_KEY`
-// the host process inherited: the instance's stored key, else the stored SDK
-// login (the user's ambient sign-in). A `CURSOR_API_KEY` in the instance's
-// environment is dropped like any inherited credential.
+// `Cursor.auth.login()` stored (docs, "Cursor.auth"). The driver passes
+// `apiKey` itself, in the same order with the instance's own key first: the
+// instance's stored key, else an inherited `CURSOR_API_KEY` (the instance's
+// `environment`, else this process's), else the stored SDK login. The
+// inherited key is the ambient account, unless the host's
+// `envPolicy.stripAmbient` names it; then the driver never uses it.
 //
 // State. The instance assumes it alone uses its state directory and the
 // Cursor agent store in it: its sessions coordinate their runs in memory
@@ -20,6 +21,7 @@
 // `invalid_state`. A lock a dead process left is taken over. `dispose` removes it.
 
 import { callErrors } from "../../errors.ts";
+import { strippedByHost } from "../../driver-kit/env-policy.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { AuthMethod, AuthState, InstanceStatus, ModelCatalog, OpenSessionInput, ProbeResult, UpdateAdvisory } from "../../generated/instance.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
@@ -38,8 +40,6 @@ export const CURSOR_POISON_MS = 30_000;
 export const CURSOR_SECRET_NAMESPACE = "cursor";
 export const CURSOR_SECRET_KEY = "api-key";
 
-/** The credential variable Cursor's SDK reads (docs, "Authentication"). Never passed on. */
-export const CURSOR_CREDENTIAL_VARIABLES = ["CURSOR_API_KEY"] as const;
 
 export const CURSOR_AUTH_METHODS: AuthMethod[] = [
   {
@@ -148,6 +148,7 @@ export class CursorInstance<Store> implements Instance {
   readonly bindingKey: string;
   readonly #host: HostServices<CursorConfig>;
   readonly #config: CursorConfig;
+  readonly #environment: { readonly [name: string]: string };
   readonly #loadSdk: CursorSdkLoader<Store>;
   readonly #sessions = new Set<CursorSession<Store>>();
   readonly #createdAgents: CreatedAgents;
@@ -162,10 +163,11 @@ export class CursorInstance<Store> implements Instance {
   #sessionCount = 0;
   #flows = 0;
 
-  constructor(host: HostServices<CursorConfig>, config: CursorConfig, instanceId: string, loadSdk: CursorSdkLoader<Store>) {
+  constructor(host: HostServices<CursorConfig>, config: CursorConfig, instanceId: string, environment: { readonly [name: string]: string }, loadSdk: CursorSdkLoader<Store>) {
     this.id = instanceId;
     this.#host = host;
     this.#config = config;
+    this.#environment = environment;
     this.#loadSdk = loadSdk;
     this.#createdAgents = new CreatedAgents(host.paths.stateDir);
     // Cursor agents live in this instance's own store, so only this instance can continue its threads.
@@ -325,12 +327,25 @@ export class CursorInstance<Store> implements Instance {
     return stored === null ? undefined : new TextDecoder().decode(stored);
   }
 
-  /** The account a session uses: the instance's stored key, else the SDK login the user stored. Never `CURSOR_API_KEY`. */
+  /**
+   * An inherited `CURSOR_API_KEY`: the instance's `environment`'s, else this
+   * process's, where the in-process SDK would read it. None when the host's
+   * `envPolicy.stripAmbient` names it.
+   */
+  #inheritedKey(): string | undefined {
+    if (strippedByHost("CURSOR_API_KEY", this.#host.process.envPolicy.stripAmbient)) return undefined;
+    const key = this.#environment["CURSOR_API_KEY"] ?? process.env["CURSOR_API_KEY"];
+    return key === undefined || key === "" ? undefined : key;
+  }
+
+  /** The account a session uses: the instance's stored key, else an inherited `CURSOR_API_KEY`, else the SDK login the user stored. */
   async #account(): Promise<CursorAccount> {
     const state = await this.#state();
     if (state.status === "unauthenticated") throw callErrors.authRequired(CURSOR_AUTH_METHODS, state.actionRequired?.reason ?? "Sign in to Cursor first");
     const managed = await this.#managedKey();
     if (managed !== undefined) return { apiKey: managed, scope: "managed_profile" };
+    const inherited = this.#inheritedKey();
+    if (inherited !== undefined) return { apiKey: inherited, scope: "ambient" };
     const { sdk } = await this.#sdkOrUnavailable();
     const login = await new sdk.FileCredentialStore().load();
     if (login === undefined) throw callErrors.authRequired(CURSOR_AUTH_METHODS, "No Cursor API key is stored for this instance, and the Cursor SDK has no stored sign-in");
@@ -339,10 +354,11 @@ export class CursorInstance<Store> implements Instance {
 
   /**
    * The verdict before any runtime poison. A stored key is `configured`
-   * (never checked). The ambient account is the SDK's stored sign-in: none,
-   * or an expired one, is `unauthenticated`; otherwise `Cursor.me()` checks
-   * the key: accepted is `authenticated`, refused `unauthenticated`, a
-   * network failure `unavailable`, anything else `unknown`.
+   * (never checked). The ambient account is an inherited `CURSOR_API_KEY`,
+   * else the SDK's stored sign-in: no sign-in, or an expired one, is
+   * `unauthenticated`; otherwise `Cursor.me()` checks the key: accepted is
+   * `authenticated`, refused `unauthenticated`, a network failure
+   * `unavailable`, anything else `unknown`.
    */
   async #baseState(): Promise<AuthState> {
     if ((await this.#managedKey()) !== undefined) return { status: "configured", evidence: "passive", scope: "managed_profile" };
@@ -352,24 +368,31 @@ export class CursorInstance<Store> implements Instance {
     } catch {
       return { status: "unavailable", evidence: "passive", scope: "ambient" };
     }
-    let login;
-    try {
-      login = await new runtime.sdk.FileCredentialStore().load();
-    } catch {
-      return { status: "unavailable", evidence: "passive", scope: "ambient" };
-    }
     const signIn = "Store a Cursor API key for this instance, or sign in with the Cursor SDK (Cursor.auth.login()).";
-    if (login === undefined) return { status: "unauthenticated", evidence: "passive", scope: "ambient", actionRequired: { reason: signIn } };
-    if (login.apiKeyExpiresAtMs !== undefined && login.apiKeyExpiresAtMs <= Date.now()) {
-      return { status: "unauthenticated", evidence: "passive", scope: "ambient", actionRequired: { reason: `The Cursor SDK sign-in expired. ${signIn}` } };
+    let ambient: { readonly apiKey: string; readonly email: string | undefined; readonly refused: string };
+    const inherited = this.#inheritedKey();
+    if (inherited !== undefined) {
+      ambient = { apiKey: inherited, email: undefined, refused: `Cursor refused the CURSOR_API_KEY in the environment. ${signIn}` };
+    } else {
+      let login;
+      try {
+        login = await new runtime.sdk.FileCredentialStore().load();
+      } catch {
+        return { status: "unavailable", evidence: "passive", scope: "ambient" };
+      }
+      if (login === undefined) return { status: "unauthenticated", evidence: "passive", scope: "ambient", actionRequired: { reason: signIn } };
+      if (login.apiKeyExpiresAtMs !== undefined && login.apiKeyExpiresAtMs <= Date.now()) {
+        return { status: "unauthenticated", evidence: "passive", scope: "ambient", actionRequired: { reason: `The Cursor SDK sign-in expired. ${signIn}` } };
+      }
+      ambient = { apiKey: login.apiKey, email: login.email, refused: `Cursor refused the stored sign-in. ${signIn}` };
     }
     try {
-      const user = await runtime.sdk.Cursor.me({ apiKey: login.apiKey });
-      const email = user.userEmail ?? login.email;
+      const user = await runtime.sdk.Cursor.me({ apiKey: ambient.apiKey });
+      const email = user.userEmail ?? ambient.email;
       return { status: "authenticated", evidence: "active", scope: "ambient", ...(email === undefined ? {} : { account: { email } }) };
     } catch (error) {
       const name = errorName(error);
-      if (name === "AuthenticationError") return { status: "unauthenticated", evidence: "active", scope: "ambient", actionRequired: { reason: `Cursor refused the stored sign-in. ${signIn}` } };
+      if (name === "AuthenticationError") return { status: "unauthenticated", evidence: "active", scope: "ambient", actionRequired: { reason: ambient.refused } };
       if (name === "NetworkError") return { status: "unavailable", evidence: "active", scope: "ambient" };
       return { status: "unknown", evidence: "active", scope: "ambient" };
     }

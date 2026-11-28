@@ -35,14 +35,9 @@ export const GROK_DEFAULT_CONFIG: GrokConfig = { command: "grok", ...ACP_BASE_DE
  */
 export const GROK_UPDATE_STEP = "Update the Grok CLI with `grok update`.";
 
-/**
- * The interactive Grok CLI, for a host's terminal fallback. `XAI_` variables
- * (such as `XAI_API_KEY`) are scrubbed: the instance uses the Grok login it
- * was set up with, never a key it happened to inherit.
- */
+/** The interactive Grok CLI, for a host's terminal fallback. */
 export const GROK_CLI_MANIFEST: CliLaunchManifest = {
   binary: "grok",
-  envScrubPrefixes: ["XAI_"],
   args: { fresh: [], resume: ["--resume", "{sessionId}"], fork: ["--resume", "{sessionId}", "--fork-session"] },
 };
 

@@ -1,5 +1,6 @@
 // Scenarios 10 and 12: the five auth states with runtime auth poison and
-// dropped inherited credentials, and side-effect-free probes.
+// inherited credentials that pass through unless the host strips them, and
+// side-effect-free probes.
 
 import type { AuthState, ProbeResult } from "../../generated/instance.ts";
 import { ProbeResultSchema } from "../../generated/instance.ts";
@@ -66,19 +67,24 @@ function spawnLeaks(spawn: FakeSpawnRequest, markers: ReadonlyMap<string, string
   return leaks;
 }
 
-async function checkInheritedCredentialsDropped(context: ScenarioContext): Promise<void> {
-  const rig = await context.rig({ ambientAuth: "authenticated" });
-  const names = rig.inheritedCredentials ?? [];
-  if (names.length === 0) {
-    context.fail("the rig declares no inheritedCredentials; name the provider's credential variables, or give a reason under auth-states.inherited-credentials");
-  }
-  const markers = new Map(names.map((name) => [name, `ari-conformance-inherited-${name.toLowerCase()}`] as const));
+/** The credentials of `markers` that `environment` does not hold under their own name and value. */
+function missingCredentials(environment: { readonly [name: string]: string }, markers: ReadonlyMap<string, string>): string[] {
+  return [...markers].filter(([credential, marker]) => environment[credential] !== marker).map(([credential]) => credential);
+}
+
+/** What reached the agent while one instance ran a probe, a sign-in check and a turn with `markers` in every environment it was given. */
+async function runWithCredentials(
+  context: ScenarioContext,
+  rig: HarnessRig<unknown>,
+  markers: ReadonlyMap<string, string>,
+  stripAmbient: readonly string[],
+): Promise<{ spawns: readonly FakeSpawnRequest[]; observed: ReadonlyArray<{ readonly [name: string]: string }>; reportsEnvironments: boolean }> {
   const values = Object.fromEntries(markers);
   const processEnvironment = (globalThis as { process?: { env?: { [name: string]: string | undefined } } }).process?.env;
-  const saved = new Map(names.map((name) => [name, processEnvironment?.[name]] as const));
+  const saved = new Map([...markers.keys()].map((name) => [name, processEnvironment?.[name]] as const));
   if (processEnvironment !== undefined) Object.assign(processEnvironment, values);
   try {
-    const created = await context.instance(rig, { environment: values, ambientEnvironment: values });
+    const created = await context.instance(rig, { environment: values, ambientEnvironment: values, envPolicy: { stripAmbient: [...stripAmbient] } });
     await context.wait(created.instance.status(), "status()");
     await context.wait(created.instance.probe(), "probe()");
     await context.wait(authOf(context, created).state(), "auth.state()");
@@ -86,22 +92,8 @@ async function checkInheritedCredentialsDropped(context: ScenarioContext): Promi
     const thread = await context.createThread(opened);
     await context.simpleTurn(opened, rig, thread.id, "Hello.");
     await opened.close();
-
     const observed = (await rig.native.observedEnvironments?.()) ?? [];
-    if (created.host.spawns.length === 0 && rig.native.observedEnvironments === undefined) {
-      context.fail(
-        "the driver spawned nothing through the host and the harness reports no native environment, so dropped credentials cannot be checked; add NativeAgent.observedEnvironments, or give a reason under auth-states.inherited-credentials",
-      );
-    }
-    for (const spawn of created.host.spawns) {
-      const leaks = spawnLeaks(spawn, markers);
-      context.check(leaks.length === 0, `inherited credentials reached ${spawn.command}: ${leaks.join(", ")}; drop credentials the instance did not configure`);
-    }
-    for (const environment of observed) {
-      const leaks = environmentLeaks(environment, markers);
-      context.check(leaks.length === 0, `inherited credentials reached the native runtime: ${leaks.join(", ")}; drop credentials the instance did not configure`);
-    }
-    context.note(`inherited ${names.join(", ")} checked across ${created.host.spawns.length} spawn(s) and ${observed.length} native environment(s)`);
+    return { spawns: [...created.host.spawns], observed, reportsEnvironments: rig.native.observedEnvironments !== undefined };
   } finally {
     if (processEnvironment !== undefined) {
       for (const [name, value] of saved) {
@@ -110,6 +102,55 @@ async function checkInheritedCredentialsDropped(context: ScenarioContext): Promi
       }
     }
   }
+}
+
+/**
+ * Inherited credentials pass through: a driver strips nothing on its own. With
+ * the rig's credential variables in the host's ambient environment, the
+ * instance's `environment` and the process environment, and a host policy
+ * that strips nothing, every runtime spawn and every native environment holds
+ * each of them. With the host's `envPolicy.stripAmbient` naming them, none
+ * reaches any spawn, argument or native environment.
+ */
+async function checkInheritedCredentials(context: ScenarioContext): Promise<void> {
+  const rig = await context.rig({ ambientAuth: "authenticated" });
+  const names = rig.inheritedCredentials ?? [];
+  if (names.length === 0) {
+    context.fail("the rig declares no inheritedCredentials; name the provider's credential variables, or give a reason under auth-states.inherited-credentials");
+  }
+  const markers = new Map(names.map((name) => [name, `ari-conformance-inherited-${name.toLowerCase()}`] as const));
+
+  const passed = await runWithCredentials(context, rig, markers, []);
+  const runtimeSpawns = passed.spawns.filter((spawn) => spawn.purpose === "runtime");
+  if (runtimeSpawns.length === 0 && passed.observed.length === 0) {
+    context.fail(
+      passed.reportsEnvironments || passed.spawns.length > 0
+        ? "the driver started no runtime through the host and the harness reported no native environment, so inherited credentials cannot be checked; give a reason under auth-states.inherited-credentials"
+        : "the driver spawned nothing through the host and the harness reports no native environment, so inherited credentials cannot be checked; add NativeAgent.observedEnvironments, or give a reason under auth-states.inherited-credentials",
+    );
+  }
+  for (const spawn of runtimeSpawns) {
+    const missing = missingCredentials(spawn.environment, markers);
+    context.check(missing.length === 0, `credentials the host does not strip were kept from ${spawn.command}: ${missing.join(", ")}; pass the environment through and leave out only what envPolicy.stripAmbient names`);
+  }
+  for (const environment of passed.observed) {
+    const missing = missingCredentials(environment, markers);
+    context.check(missing.length === 0, `credentials the host does not strip were kept from the native runtime: ${missing.join(", ")}; pass the environment through and leave out only what envPolicy.stripAmbient names`);
+  }
+
+  // A fresh rig, so its observed environments are the stripping instance's alone.
+  const stripped = await runWithCredentials(context, await context.rig({ ambientAuth: "authenticated" }), markers, names);
+  for (const spawn of stripped.spawns) {
+    const leaks = spawnLeaks(spawn, markers);
+    context.check(leaks.length === 0, `credentials the host strips reached ${spawn.command}: ${leaks.join(", ")}; leave out what envPolicy.stripAmbient names`);
+  }
+  for (const environment of stripped.observed) {
+    const leaks = environmentLeaks(environment, markers);
+    context.check(leaks.length === 0, `credentials the host strips reached the native runtime: ${leaks.join(", ")}; leave out what envPolicy.stripAmbient names`);
+  }
+  context.note(
+    `inherited ${names.join(", ")} reached ${runtimeSpawns.length} runtime spawn(s) and ${passed.observed.length} native environment(s); with the host stripping them, none of ${stripped.spawns.length} spawn(s) and ${stripped.observed.length} native environment(s) got them`,
+  );
 }
 
 async function checkRuntimePoison(context: ScenarioContext): Promise<void> {
@@ -175,7 +216,7 @@ export const authStatesScenario: Scenario = {
   id: 10,
   key: "auth-states",
   title:
-    "Five-state auth: configured and unavailable never block Send; a runtime auth failure poisons only its own scope and expires; unknown sign-in is reported unknown; inherited credentials are dropped",
+    "Five-state auth: configured and unavailable never block Send; a runtime auth failure poisons only its own scope and expires; unknown sign-in is reported unknown; inherited credentials reach the agent unless the host's envPolicy strips them",
   async run(context: ScenarioContext) {
     // Declared by presence: a driver without sign-in leaves `auth` out.
     {
@@ -196,8 +237,8 @@ export const authStatesScenario: Scenario = {
     if (!context.skipCheck("auth-states.poison", "runtime auth poison")) {
       await checkRuntimePoison(context);
     }
-    if (!context.skipCheck("auth-states.inherited-credentials", "dropping inherited credentials")) {
-      await checkInheritedCredentialsDropped(context);
+    if (!context.skipCheck("auth-states.inherited-credentials", "inherited credentials and the host's envPolicy")) {
+      await checkInheritedCredentials(context);
     }
   },
 };

@@ -16,6 +16,7 @@ import type { ConfigValues } from "../generated/common.ts";
 import type { RuntimeMode, RuntimePolicy } from "../generated/config.ts";
 import type { AriEvent, TurnTerminalBody } from "../generated/events.ts";
 import type { Fixture } from "../generated/fixture.ts";
+import type { EnvPolicy } from "../generated/host.ts";
 import type { OpenSessionInput } from "../generated/instance.ts";
 import type { AppliedThread, StartTurnInput, StartTurnResult } from "../generated/session.ts";
 import { EventGrammar, EventGrammarError, TERMINAL_ITEM_STATUSES } from "../host/event-grammar.ts";
@@ -146,6 +147,8 @@ export interface InstanceOptions {
   readonly environment?: { readonly [name: string]: string };
   /** Added to the host's ambient environment. */
   readonly ambientEnvironment?: { readonly [name: string]: string };
+  /** The host's environment policy, in place of the one the rig's `hostOptions` give (by default, none: the host strips nothing). */
+  readonly envPolicy?: EnvPolicy;
 }
 
 const MODE_PREFERENCE: readonly RuntimeMode[] = ["approval_required", "auto_accept_edits", "auto", "read_only", "full_access"];
@@ -338,8 +341,8 @@ export class ScenarioContext {
     const host = createFakeHost<unknown>({
       label: instanceId,
       config,
-      envScrubPrefixes: rig.driver.cliManifest?.envScrubPrefixes ?? [],
       ...hostOptions,
+      ...(options.envPolicy === undefined ? {} : { envPolicy: options.envPolicy }),
       ambientEnvironment: { ...(hostOptions.ambientEnvironment ?? {}), ...(options.ambientEnvironment ?? {}) },
     });
     this.defer(() => host.dispose());

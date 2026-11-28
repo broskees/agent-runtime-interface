@@ -157,12 +157,18 @@ Claude Code.
   and subagent ids from Claude's task id. A turn Claude starts on its own
   (after a background task finishes) has no prompt of ours and uses an
   ordinal and the first frame's uuid (`turnIds: "weak"`).
-- **Environment.** `Options.env` replaces Claude Code's whole environment. It
-  is the instance's `environment`, minus `ANTHROPIC_API_KEY`,
-  `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` and minus the host's
-  `envPolicy.stripAmbient`, plus the instance's own API key when it has one,
-  plus `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` (a refused resume then comes
-  back as a result naming the reason).
+- **Environment.** `Options.env` replaces Claude Code's whole environment.
+  It is the instance's `environment` as the host gives it, credentials such
+  as `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`
+  included, minus only what the host's `envPolicy.stripAmbient` names. The
+  instance's own API key, when it has one, replaces `ANTHROPIC_API_KEY`, and
+  then the driver leaves out `ANTHROPIC_AUTH_TOKEN`, which Claude Code would
+  use first (Claude Code docs, "Authentication precedence"). The driver adds
+  `CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1` (a refused resume then comes back
+  as a result naming the reason). `claude --version` and `claude auth status
+  --json` run with `inheritEnv: false` in exactly this environment, so the
+  checks and the queries see the same variables and nothing of the host
+  process's own environment.
 
 ## Turns
 

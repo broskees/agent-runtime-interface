@@ -749,8 +749,9 @@ driver hands Claude Code only this environment:
 
 The driver config is `settingSources: []` and the recorder's `model`. The
 host gives the thread no tool server, so the session has no MCP server at
-all. The driver itself strips `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
-`CLAUDE_CODE_OAUTH_TOKEN` from the environment.
+all. The recorder gives the instance no other variable, so no credential of
+the recorder's environment reaches Claude Code; a recorder's
+`ANTHROPIC_API_KEY` becomes the instance's own key.
 
 The sources for these choices (Claude Code and Agent SDK docs, read
 2026-11-24, and the pinned SDK 0.3.330):
@@ -861,7 +862,8 @@ The sources for these choices (Claude Code and Agent SDK docs, read
   reads another entry (Authentication, "Credential management"). There, record
   with `ANTHROPIC_API_KEY`, or with a `.credentials.json` that Claude Code
   wrote when the Keychain refused the write.
-- `CLAUDE_CODE_OAUTH_TOKEN` does not work here: the driver strips it.
+- `CLAUDE_CODE_OAUTH_TOKEN` does not work here: the recorder does not pass it
+  to the instance.
 - With neither a credential file nor `ANTHROPIC_API_KEY`, a live recording
   stops before it starts Claude Code.
 
@@ -1012,8 +1014,9 @@ host's directories; the driver keeps the instance's Antigravity profile in
 (docs/drivers/antigravity.md). The recorder's host starts it with the
 recorder's own environment, less `HOME`, `TMPDIR`, `DBUS_SESSION_BUS_ADDRESS`
 and every `XDG_*` variable, and strips every variable whose name starts with
-`GEMINI_`, `GOOGLE_`, `GCLOUD_`, `CLOUDSDK_` or `AGY_` (the prefixes of the
-driver's CLI manifest), then adds these, the driver's own last:
+`GEMINI_`, `GOOGLE_`, `GCLOUD_`, `CLOUDSDK_` or `AGY_` (its own
+`envPolicy`, `ANTIGRAVITY_RECORDER_ENV_POLICY`), then adds these, the driver's
+own last:
 
 | Variable | Value | Why |
 |---|---|---|
@@ -1270,10 +1273,10 @@ it out.
 Codex reads many `CODEX_` and `OPENAI_` variables: its home and state
 database (`CODEX_HOME`, `CODEX_SQLITE_HOME`), sign-ins (`OPENAI_API_KEY`,
 `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENAI_IDENTITY_TOKEN_FILE`),
-endpoints (`OPENAI_BASE_URL`, `CODEX_AUTHAPI_BASE_URL`) and more. The driver's
-CLI manifest strips only `OPENAI_API_KEY`, `CODEX_API_KEY` and
-`OPENAI_ADMIN_KEY`; the recorder strips them all
-(`CODEX_RECORDER_ENV_POLICY` in `test/recordings/codex/run.ts`).
+endpoints (`OPENAI_BASE_URL`, `CODEX_AUTHAPI_BASE_URL`) and more. The driver
+passes the environment through and strips none of them; the recorder, as the
+host, strips them all (`CODEX_RECORDER_ENV_POLICY` in
+`test/recordings/codex/run.ts`).
 
 A process the driver starts with no working directory (the driver names none
 for `codex app-server`) starts in `<workspace>/cwd`, not in the recorder's

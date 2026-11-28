@@ -55,11 +55,11 @@ describe("ari/meta/muse", () => {
     assert.match(sdk, /await import\(SDK_SPECIFIER\)/);
   });
 
-  test("the CLI manifest is valid for ari/cli-manifests and builds a fresh launch without inherited credentials", () => {
+  test("the CLI manifest is valid for ari/cli-manifests and builds a fresh launch that keeps the environment, credentials included", () => {
     assert.equal(museDriver.cliManifest, MUSE_CLI_MANIFEST);
     assert.deepEqual(validateCliManifest(MUSE_CLI_MANIFEST), MUSE_CLI_MANIFEST);
     const env = { PATH: "/usr/bin", META_API_KEY: "inherited", HOME: "/home/me" };
-    assert.deepEqual(buildCliLaunch(MUSE_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env }), { command: "muse", args: [], env: { PATH: "/usr/bin", HOME: "/home/me" }, cwd: "/w", files: [] });
+    assert.deepEqual(buildCliLaunch(MUSE_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env }), { command: "muse", args: [], env, cwd: "/w", files: [] });
   });
 
   test("the pinned SDK devDependency, the installed SDK, the lockfile and SOURCES.md name the same version and integrity", () => {

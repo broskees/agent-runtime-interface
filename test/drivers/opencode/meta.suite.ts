@@ -80,7 +80,7 @@ test("the CLI manifest is valid and builds fresh and resume launches of opencode
   const env = { PATH: "/usr/bin", OPENCODE_SERVER_PASSWORD: "inherited", OPENCODE_PASSWORD: "inherited", ANTHROPIC_API_KEY: "the user's own" };
   const fresh = buildCliLaunch(manifest, { kind: "fresh", cwd: "/work", env });
   assert.deepEqual(fresh.args, []);
-  assert.deepEqual(fresh.env, { PATH: "/usr/bin", ANTHROPIC_API_KEY: "the user's own" }, "inherited server passwords are scrubbed");
+  assert.deepEqual(fresh.env, env, "the launch keeps the environment, server passwords and credentials included");
   assert.deepEqual(buildCliLaunch(manifest, { kind: "resume", cwd: "/work", env, sessionId: "ses_123" }).args, ["--session", "ses_123"]);
 });
 

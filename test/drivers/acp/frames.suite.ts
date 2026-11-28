@@ -22,9 +22,9 @@ const EXPECTED_RECORDINGS: { readonly [source: string]: number } = {
   "test/drivers/acp/driver-rules.ts": 57,
   "test/drivers/acp/protocol.suite.ts": 24,
   "test/drivers/acp/standalone.suite.ts": 4,
-  "test/drivers/antigravity/antigravity.suite.ts": 7,
+  "test/drivers/antigravity/antigravity.suite.ts": 8,
   "test/drivers/fx/fx.suite.ts": 1,
-  "test/drivers/grok/grok.suite.ts": 1,
+  "test/drivers/grok/grok.suite.ts": 2,
   "test/drivers/kiro/kiro.suite.ts": 1,
 };
 

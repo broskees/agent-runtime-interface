@@ -95,7 +95,7 @@ export interface PiSessionContext {
   readonly executable: string;
   /** The bridge extension file under the instance's cache directory. */
   readonly bridgeFile: string;
-  /** The instance's own environment, without credential variables. */
+  /** The instance's environment as given, minus only what the host's `envPolicy.stripAmbient` names. */
   readonly environment: { readonly [name: string]: string };
   /** A managed API key from the instance's secrets, passed with `--api-key`. */
   readonly apiKey: string | undefined;

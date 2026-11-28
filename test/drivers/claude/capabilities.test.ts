@@ -213,6 +213,38 @@ describe("claude driver: capability honesty for the 42 optional members", () => 
     }
   });
 
+  test("the instance's own key wins over inherited credentials: it replaces ANTHROPIC_API_KEY and leaves out ANTHROPIC_AUTH_TOKEN, which Claude Code would use first; the rest of the environment passes through", async () => {
+    const inherited = { PATH: "/usr/bin:/bin", ANTHROPIC_API_KEY: "sk-ant-inherited-fake", ANTHROPIC_AUTH_TOKEN: "inherited-token-fake", CLAUDE_CODE_OAUTH_TOKEN: "inherited-oauth-fake", ANTHROPIC_BASE_URL: "https://gateway.invalid" };
+    const managed = await openClaudeRig({ managedKey: "sk-ant-managed-fake", environment: inherited });
+    try {
+      await managed.instance.probe({ deep: true });
+      await managed.thread();
+      const query = managed.world.environments().at(-1)!;
+      assert.equal(query["ANTHROPIC_API_KEY"], "sk-ant-managed-fake");
+      assert.equal(query["ANTHROPIC_AUTH_TOKEN"], undefined);
+      assert.equal(query["CLAUDE_CODE_OAUTH_TOKEN"], "inherited-oauth-fake", "Claude Code ranks it below an API key");
+      assert.equal(query["ANTHROPIC_BASE_URL"], "https://gateway.invalid");
+      const version = managed.host.spawns.find((spawn) => spawn.args?.[0] === "--version")!;
+      assert.equal(version.inheritEnv, false);
+      assert.deepEqual(version.environment, query, "the version check gets the query's environment");
+    } finally {
+      await managed.cleanup();
+    }
+    // Without a key of its own, the instance passes every inherited credential on, to the checks and the queries alike.
+    const ambient = await openClaudeRig({ environment: inherited, host: { ambientEnvironment: { ANTHROPIC_API_KEY: "sk-ant-host-process-fake" } } });
+    try {
+      await ambient.instance.probe({ deep: true });
+      await ambient.thread();
+      const query = ambient.world.environments().at(-1)!;
+      for (const [name, value] of Object.entries(inherited)) assert.equal(query[name], value, name);
+      const checks = ambient.host.spawns.filter((spawn) => ["--version", "auth"].includes(spawn.args?.[0] ?? ""));
+      assert.deepEqual([...new Set(checks.map((spawn) => spawn.args?.[0]))], ["--version", "auth"], "both checks ran");
+      for (const check of checks) assert.deepEqual(check.environment, query, `claude ${check.args?.join(" ")} gets the query's environment, not the host process's key`);
+    } finally {
+      await ambient.cleanup();
+    }
+  });
+
   test("an authentication failure in a turn fails it as a permission error and poisons the scope that failed", async () => {
     const rig = await openClaudeRig({ managedKey: "sk-ant-bad" });
     try {

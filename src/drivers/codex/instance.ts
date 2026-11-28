@@ -21,6 +21,7 @@
 
 import { AriError, callErrors, toCallError } from "../../errors.ts";
 import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
+import { withoutHostStripped } from "../../driver-kit/env-policy.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import { JsonRpcError } from "../../driver-kit/json-rpc.ts";
 import { CodexTransferredTokensSchema } from "../../generated/extensions/codex.ts";
@@ -58,8 +59,6 @@ export const CODEX_TOKENS_SECRET = "chatgpt-tokens";
 export const CODEX_TRANSFER_FORMAT = "codex.chatgpt_auth_tokens";
 /** How long a runtime auth failure poisons its scope. */
 export const CODEX_POISON_MS = 30_000;
-/** Ambient variables that carry OpenAI credentials. They never reach Codex: an instance uses only what it configured. */
-export const CODEX_CREDENTIAL_VARIABLES = ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_ADMIN_KEY"] as const;
 
 export const CODEX_AUTH_METHODS: readonly AuthMethod[] = [
   { id: "chatgpt", kind: "oauth_browser", label: "Sign in with ChatGPT" },
@@ -275,14 +274,9 @@ export class CodexInstance implements Instance {
     return { code: exit.code, stdout, stderr };
   }
 
-  /** The instance's own environment, without OpenAI credentials it did not configure. */
+  /** The instance's own environment as given, credentials included, minus only what the host's `envPolicy.stripAmbient` names. */
   #forwardedEnvironment(): { [name: string]: string } {
-    const forwarded: { [name: string]: string } = {};
-    for (const [name, value] of Object.entries(this.#environment)) {
-      if ((CODEX_CREDENTIAL_VARIABLES as readonly string[]).some((variable) => name.startsWith(variable))) continue;
-      forwarded[name] = value;
-    }
-    return forwarded;
+    return withoutHostStripped(this.#environment, this.#host.process.envPolicy.stripAmbient);
   }
 
   async #managed(): Promise<Managed | undefined> {

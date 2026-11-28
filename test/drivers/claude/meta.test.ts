@@ -74,11 +74,11 @@ describe("ari/meta/claude", () => {
     assert.deepEqual(driver.filter((specifier) => !specifier.startsWith("node:")), [CLAUDE_SDK_PACKAGE]);
   });
 
-  test("the CLI manifest is valid for ari/cli-manifests and builds fresh, resume and fork launches without inherited credentials", () => {
+  test("the CLI manifest is valid for ari/cli-manifests and builds fresh, resume and fork launches that keep the environment, credentials included", () => {
     assert.equal(claudeDriver.cliManifest, CLAUDE_CLI_MANIFEST);
     assert.deepEqual(validateCliManifest(CLAUDE_CLI_MANIFEST), CLAUDE_CLI_MANIFEST);
     const env = { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-inherited", ANTHROPIC_AUTH_TOKEN: "t", CLAUDE_CODE_OAUTH_TOKEN: "o", CLAUDE_CONFIG_DIR: "/home/me/.claude" };
-    assert.deepEqual(buildCliLaunch(CLAUDE_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env }), { command: "claude", args: [], env: { PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "/home/me/.claude" }, cwd: "/w", files: [] });
+    assert.deepEqual(buildCliLaunch(CLAUDE_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env }), { command: "claude", args: [], env, cwd: "/w", files: [] });
     assert.deepEqual(buildCliLaunch(CLAUDE_CLI_MANIFEST, { kind: "resume", cwd: "/w", sessionId: "5e551011-0000-4000-8000-000000000001", env }).args, ["--resume", "5e551011-0000-4000-8000-000000000001"]);
     assert.deepEqual(buildCliLaunch(CLAUDE_CLI_MANIFEST, { kind: "fork", cwd: "/w", sessionId: "5e551011-0000-4000-8000-000000000001", env }).args, ["--resume", "5e551011-0000-4000-8000-000000000001", "--fork-session"]);
     const withMcp = buildCliLaunch(CLAUDE_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env, mcpServers: [{ name: "host-tools", transport: "stdio", command: "host-tools" }] });

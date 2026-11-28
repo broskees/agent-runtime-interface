@@ -14,6 +14,12 @@
 // `claude` on the host's PATH) that records its arguments and the lines it
 // reads, and answers the SDK's control requests and one prompt. Nothing
 // reaches the network or starts a real Claude Code.
+//
+// The same fake also records each launch's environment, so the second test
+// shows that Claude Code's `--version` and `auth status` checks and its
+// queries all get one environment: the instance's, credentials included,
+// minus only what the host's `envPolicy.stripAmbient` names, and nothing of
+// the host process's own environment.
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -53,7 +59,7 @@ const readline = require("node:readline");
 const log = process.argv[1] + ".log";
 const record = (entry) => fs.appendFileSync(log, JSON.stringify(entry) + "\\n");
 const args = process.argv.slice(2);
-record({ argv: args, pid: process.pid, cwd: process.cwd(), ambient: process.env.ANTHROPIC_API_KEY, sdk: process.env.CLAUDE_CODE_ENTRYPOINT });
+record({ argv: args, pid: process.pid, cwd: process.cwd(), ambient: process.env.ANTHROPIC_API_KEY, sdk: process.env.CLAUDE_CODE_ENTRYPOINT, env: process.env });
 if (args[0] === "--version") { process.stdout.write("2.1.330 (Claude Code)\\n"); process.exit(0); }
 if (args[0] === "auth") { process.stdout.write(JSON.stringify({ loggedIn: false, authMethod: "none", apiProvider: "firstParty" }) + "\\n"); process.exit(0); }
 process.stderr.write("stderr over the host process pipe\\n");
@@ -91,10 +97,14 @@ function recorded(claude: string): { launches: string[][]; stdin: Array<{ type?:
   };
 }
 
-test("the real SDK starts the user's claude for the driver, emits no MCP argv deprecation warning, and keeps the MCP server off the command line", async () => {
+/**
+ * A temp root with a copy of the pinned SDK in an npm layout (and the decoy
+ * where npm would put the native package), the driver's loader for that copy,
+ * and the fake user's claude in `<root>/bin`.
+ */
+async function realSdkLayout(): Promise<{ root: string; bin: string; project: string; claude: string; decoy: string; loadCopy: () => Promise<ClaudeSdkRuntime> }> {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-claude-real-sdk-")));
   temporary.push(root);
-  // A copy of the pinned SDK in an npm layout, and the decoy where npm would put the native package.
   const pinned = fs.realpathSync(path.join(REPO_ROOT, "node_modules", ...CLAUDE_SDK_PACKAGE.split("/")));
   const sdkPackage = path.join(root, "sdk", "node_modules", ...CLAUDE_SDK_PACKAGE.split("/"));
   fs.mkdirSync(sdkPackage, { recursive: true });
@@ -112,6 +122,11 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
   assert.ok(node !== null, "a node on PATH runs the fake claude");
   const claude = path.join(bin, "claude");
   fs.writeFileSync(claude, fakeClaudeForTheSdk(node), { mode: 0o755 });
+  return { root, bin, project, claude, decoy, loadCopy };
+}
+
+test("the real SDK starts the user's claude for the driver, emits no MCP argv deprecation warning, and keeps the MCP server off the command line", async () => {
+  const { root, bin, project, claude, decoy, loadCopy } = await realSdkLayout();
 
   const warnings: Array<{ code: string | undefined; message: string }> = [];
   const onWarning = (warning: Error & { code?: string }): void => {
@@ -227,5 +242,66 @@ test("the real SDK starts the user's claude for the driver, emits no MCP argv de
   } finally {
     control.close();
     process.off("warning", onWarning);
+  }
+});
+
+test("claude --version, claude auth status and every query get the same environment: the instance's, credentials included, minus only what the host's envPolicy strips", async () => {
+  const { root, bin, project, claude, loadCopy } = await realSdkLayout();
+  // Fake values only. The host process's own environment holds a key too, which no Claude Code process inherits.
+  const hostProcessEnvironment = { PATH: bin, HOME: root, ANTHROPIC_API_KEY: "fake-host-process-key", ARI_TEST_HOST_ONLY: "host" };
+  const instanceEnvironment = { PATH: bin, HOME: root, ANTHROPIC_API_KEY: "fake-instance-key", ARI_TEST_INSTANCE_ONLY: "instance" };
+  const compared = ["PATH", "HOME", "ANTHROPIC_API_KEY", "ARI_TEST_HOST_ONLY", "ARI_TEST_INSTANCE_ONLY"] as const;
+  for (const stripAmbient of [[], ["ANTHROPIC_API_KEY"]]) {
+    fs.rmSync(`${claude}.log`, { force: true });
+    const config: ClaudeDriverConfig = {};
+    const host = await createNodeHostServices<ClaudeDriverConfig>({
+      hostRoot: path.join(root, `host-${stripAmbient.length}`),
+      instanceId: "claude-environment",
+      config: { get: async () => ({ config }) },
+      attachments: { resolve: async () => null },
+      hostTools: {
+        mcpServerFor: async () => {
+          throw new Error("this host serves no tools");
+        },
+      },
+      callbacks: { register: async (flowId) => ({ url: `http://127.0.0.1:9/${flowId}` }) },
+      coordination: createCoordination(),
+      writeDiagnostic: () => undefined,
+      envPolicy: { stripAmbient },
+      baseEnv: hostProcessEnvironment,
+    });
+    const instance = await createClaudeDriver({ loadSdk: loadCopy }).create(host, { instanceId: "claude-environment", config, environment: { ...instanceEnvironment } });
+    try {
+      // status() runs `claude --version` and, with no key of the instance's own, `claude auth status --json`.
+      const status = await instance.status();
+      assert.equal(status.state, "ready", JSON.stringify(status));
+      const session = await instance.openSession({});
+      const events: AriEvent[] = [];
+      void (async () => {
+        for await (const event of session.events()) events.push(event);
+      })();
+      const thread = await session.createThread({ cwd: project, policy: { mode: "approval_required", interaction: "default", cwd: project } });
+      await session.startTurn({ threadId: thread.id, clientTurnKey: "environment-1", intent: "start", content: [{ type: "text", text: "Say hello" }] });
+      const deadline = Date.now() + 20_000;
+      while (events.find((event) => event.body.type === "turn.terminal") === undefined) {
+        if (Date.now() > deadline) throw new Error(`no turn.terminal within 20 s: ${JSON.stringify(events)}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await session.close();
+    } finally {
+      await instance.dispose();
+      await host.dispose();
+    }
+    const launches = fs.readFileSync(`${claude}.log`, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { argv?: string[]; env?: { [name: string]: string } }).filter((entry) => entry.argv !== undefined);
+    const of = (first: string) => launches.filter((entry) => entry.argv![0] === first);
+    assert.equal(of("--version").length, 1, "the version check ran once");
+    assert.equal(of("auth").length, 1, "the auth-status check ran once");
+    assert.equal(of("--output-format").length, 1, "the turn's query launched once");
+    const stripped = stripAmbient.length > 0;
+    const expected = { ...Object.fromEntries(compared.map((name) => [name, undefined])), PATH: bin, HOME: root, ANTHROPIC_API_KEY: stripped ? undefined : "fake-instance-key", ARI_TEST_INSTANCE_ONLY: "instance" };
+    for (const launch of [...of("--version"), ...of("auth"), ...of("--output-format")]) {
+      const seen = Object.fromEntries(compared.map((name) => [name, launch.env?.[name]]));
+      assert.deepEqual(seen, expected, `${launch.argv!.slice(0, 3).join(" ")} under stripAmbient ${JSON.stringify(stripAmbient)}`);
+    }
   }
 });

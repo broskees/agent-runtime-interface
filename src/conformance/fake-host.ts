@@ -1,7 +1,7 @@
 // The fake host: a complete in-memory `HostServices` that records every
 // host-service call a driver makes. Scenarios read the record to check, for
-// example, that `probe()` made no mutating call, or that an inherited
-// credential never reached a spawned process.
+// example, that `probe()` made no mutating call, or that a credential the
+// host strips never reached a spawned process.
 //
 // Everything is in memory except process spawning and executable lookup,
 // which the harness supplies (`spawn`, `resolveExecutable`): the kit is
@@ -11,11 +11,11 @@
 //
 // Spawning applies the host's environment rule. The child's environment is
 // `ambientEnvironment` minus every `envPolicy.stripAmbient` entry (a name, or a
-// prefix when it ends in `*`), plus the request's own `env` additions. The
-// harness's `spawn` receives that environment as `environment` and must give
-// the child exactly that. When the options leave `envPolicy` out, the host
-// strips the prefixes the driver's CLI manifest declares
-// (`cliManifest.envScrubPrefixes`), as a host that honours the manifest does.
+// prefix when it ends in `*`), plus the request's own `env` additions; with
+// `inheritEnv: false`, the request's `env` alone. The harness's `spawn`
+// receives that environment as `environment` and must give the child exactly
+// that. When the options leave `envPolicy` out, the host strips nothing, as
+// the Node host does by default.
 
 import { callErrors } from "../errors.ts";
 import type { AttachmentInfo, ConfigValues } from "../generated/common.ts";
@@ -68,7 +68,7 @@ export interface HostCall {
 
 /** A spawn request as the harness's `spawn` receives it: the driver's request plus the child's whole environment. */
 export interface FakeSpawnRequest extends SpawnRequest {
-  /** The complete environment the child must get: ambient minus `envPolicy.stripAmbient`, plus the request's `env`. */
+  /** The complete environment the child must get: ambient minus `envPolicy.stripAmbient` (none with `inheritEnv: false`), plus the request's `env`. */
   readonly environment: { readonly [name: string]: string };
 }
 
@@ -77,9 +77,8 @@ export interface FakeHostOptions<Config = ConfigValues> {
   readonly config?: Config;
   /** Defaults to virtual paths under `/ari-conformance/<label>/`. */
   readonly paths?: HostPaths;
+  /** Defaults to `{ stripAmbient: [] }`: the host strips nothing. */
   readonly envPolicy?: EnvPolicy;
-  /** The prefixes to strip when `envPolicy` is left out, normally the driver's `cliManifest.envScrubPrefixes`. */
-  readonly envScrubPrefixes?: readonly string[];
   /** The environment a spawned child inherits before stripping. */
   readonly ambientEnvironment?: { readonly [name: string]: string };
   /** Starts a process. Without it, every spawn rejects with `not_found`. */
@@ -138,7 +137,7 @@ export function createFakeHost<Config = ConfigValues>(options: FakeHostOptions<C
     cacheDir: `/ari-conformance/${label}/cache`,
     tmpDir: `/ari-conformance/${label}/tmp`,
   };
-  const envPolicy: EnvPolicy = options.envPolicy ?? { stripAmbient: (options.envScrubPrefixes ?? []).map((prefix) => `${prefix}*`) };
+  const envPolicy: EnvPolicy = options.envPolicy ?? { stripAmbient: [] };
   const calls: HostCall[] = [];
   const spawns: FakeSpawnRequest[] = [];
   const diagnosticEntries: DiagnosticEntry[] = [];
@@ -214,7 +213,8 @@ export function createFakeHost<Config = ConfigValues>(options: FakeHostOptions<C
       async spawn(request) {
         record("process.spawn", request);
         const environment: { [name: string]: string } = {};
-        for (const [name, value] of Object.entries(options.ambientEnvironment ?? {})) {
+        const inherited = request.inheritEnv === false ? {} : (options.ambientEnvironment ?? {});
+        for (const [name, value] of Object.entries(inherited)) {
           if (!stripped(name, envPolicy)) environment[name] = value;
         }
         Object.assign(environment, request.env ?? {});

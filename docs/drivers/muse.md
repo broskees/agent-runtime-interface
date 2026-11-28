@@ -93,10 +93,11 @@ to the minimum: an SDK outside the range gets only the advisory. `muse
   order (a running turn ends `cancelled`, the session closes with reason
   `hostShutdown`, the writer lease is released) and the process exits. The next
   turn, or `resumeThread`, starts a host and sends `session/resume`.
-- **Environment.** Every `muse serve` gets `MUSE_NO_AUTO_UPDATE=1`. An
-  inherited `META_API_KEY` never reaches Muse: the CLI manifest's
-  `envScrubPrefixes` names it for hosts, and the driver drops it from the
-  instance environment. A managed key (below) is passed as `META_API_KEY`.
+- **Environment.** Every `muse` process gets the host's environment and the
+  instance's `environment`, an inherited `META_API_KEY` included, minus only
+  what the host's `envPolicy.stripAmbient` names, plus `MUSE_NO_AUTO_UPDATE=1`. A
+  managed key (below) is passed as `META_API_KEY` and wins over an inherited
+  one.
 - **Workspace roots** are canonical (`fs.realpath`), so a workspace reached
   through a symbolic link gives the same thread.
 
@@ -350,9 +351,9 @@ driver reads the reason:
 
 ## CLI manifest
 
-`MUSE_CLI_MANIFEST` is `{ binary: "muse", envScrubPrefixes: ["META_API_KEY"],
-args: { fresh: [] } }`. It names no resume or fork arguments and no MCP
-injection, because Muse's public documentation names no such CLI flags.
+`MUSE_CLI_MANIFEST` is `{ binary: "muse", args: { fresh: [] } }`. It names no
+resume or fork arguments and no MCP injection, because Muse's public
+documentation names no such CLI flags.
 
 ## Conformance
 

@@ -20,6 +20,7 @@
 // per name and the second would replace the first.
 
 import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
+import { withoutHostStripped } from "../../driver-kit/env-policy.ts";
 import { callErrors } from "../../errors.ts";
 import type { HostServices } from "../../runtime.ts";
 import type { ServerShape } from "./capabilities.ts";
@@ -85,9 +86,11 @@ export class ServerPool {
   constructor(host: HostServices<OpencodeConfig>, config: OpencodeConfig, environment: { readonly [name: string]: string }, loaders: OpencodeSdkLoaders) {
     this.#host = host;
     this.#config = config;
-    // Every server the driver starts gets its own password; an inherited one never reaches it.
+    // The instance's environment as given, minus only what the host strips, and minus the password variables: every
+    // server the driver starts gets its own password there, a launch variable the driver sets itself.
     const passwords = new Set<string>(OPENCODE_PASSWORD_VARIABLES);
-    this.#environment = Object.fromEntries(Object.entries(environment).filter(([name]) => !passwords.has(name)));
+    const given = withoutHostStripped(environment, host.process.envPolicy.stripAmbient);
+    this.#environment = Object.fromEntries(Object.entries(given).filter(([name]) => !passwords.has(name)));
     this.#loaders = loaders;
   }
 

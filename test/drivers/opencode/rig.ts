@@ -49,7 +49,7 @@ export async function openOpencodeTestRig(options: OpencodeTestRigOptions): Prom
   const world = harness.worlds.at(-1)!;
   const config: OpencodeConfig = { ...(rig.config ?? rig.driver.defaultConfig()), ...options.config };
   const hostOptions = await rig.hostOptions!("opencode-test", { managedProfile: false });
-  const host = createFakeHost<OpencodeConfig>({ ...hostOptions, config, envScrubPrefixes: rig.driver.cliManifest?.envScrubPrefixes ?? [], label: "opencode-test", ...options.host });
+  const host = createFakeHost<OpencodeConfig>({ ...hostOptions, config, label: "opencode-test", ...options.host });
   const driver = options.loadSdk === undefined ? rig.driver : createOpencodeDriver({ loadSdk: options.loadSdk });
   const instance = await driver.create(host, { instanceId: "opencode-test", config, environment: {} });
   const sessions: Session[] = [];

@@ -5,9 +5,13 @@
 - Added the antigravity driver (`ari/drivers/antigravity`,
   `ari/meta/antigravity`): the Antigravity CLI as an ACP agent,
   `agy acp --gemini-dir <profile> --app-data-dir antigravity-acp`.
-- A profile directory per instance; ambient Google credentials stripped
-  through the host's `envPolicy`, which the driver checks; fixed-choice
-  prompts; `rollbackThread` refused before anything is touched.
+- A profile directory per instance; fixed-choice prompts; `rollbackThread`
+  refused before anything is touched.
+- `agy` gets the environment the host gives it, Google credentials included;
+  only the host's `envPolicy.stripAmbient` keeps a variable out. A session
+  starts under any policy: the `env_policy_incomplete` refusal and
+  `ANTIGRAVITY_STRIPPED_VARIABLES` of an earlier build are gone, and so are the
+  CLI manifest's `envScrubPrefixes`.
 - Runs the `agy` the user installed (`command`, by default `agy` on `PATH`)
   and never downloads, installs or updates one. The managed install an earlier
   build offered (`installation: "managed"`, `releaseManifestUrl`, `version`,

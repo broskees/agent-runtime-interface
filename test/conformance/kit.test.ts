@@ -299,7 +299,7 @@ describe("the fake host", () => {
   test("spawns with the ambient environment minus stripped names and prefixes, plus explicit additions", async () => {
     let seen: { [name: string]: string } | undefined;
     const host = createFakeHost({
-      envScrubPrefixes: ["VENDOR_"],
+      envPolicy: { stripAmbient: ["VENDOR_*"] },
       ambientEnvironment: { PATH: "/bin", VENDOR_API_KEY: "ambient", VENDOR_TOKEN: "ambient", OTHER: "kept" },
       spawn: async (request) => {
         seen = { ...request.environment };
@@ -310,6 +310,16 @@ describe("the fake host", () => {
     await host.process.spawn({ command: "agent", env: { VENDOR_API_KEY: "configured" } });
     assert.deepEqual(seen, { PATH: "/bin", OTHER: "kept", VENDOR_API_KEY: "configured" });
     assert.deepEqual(host.spawns[0]?.environment, seen);
+
+    // Without an envPolicy the host strips nothing, credentials included.
+    const open = createFakeHost({ ambientEnvironment: { PATH: "/bin", VENDOR_API_KEY: "ambient" }, spawn: async () => ({}) as SpawnedProcess });
+    assert.deepEqual(open.process.envPolicy, { stripAmbient: [] });
+    await open.process.spawn({ command: "agent" });
+    assert.deepEqual(open.spawns[0]?.environment, { PATH: "/bin", VENDOR_API_KEY: "ambient" });
+
+    // inheritEnv: false starts from nothing: the child gets the request's env alone.
+    await open.process.spawn({ command: "agent", env: { ONLY: "this" }, inheritEnv: false });
+    assert.deepEqual(open.spawns[1]?.environment, { ONLY: "this" });
 
     const exact = createFakeHost({ envPolicy: { stripAmbient: ["SECRET"] }, ambientEnvironment: { SECRET: "x", SECRET_2: "y" }, spawn: async () => ({}) as SpawnedProcess });
     await exact.process.spawn({ command: "agent" });

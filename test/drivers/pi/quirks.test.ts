@@ -62,6 +62,25 @@ async function simpleTurn(opened: PiTestRig, session: Awaited<ReturnType<PiTestR
   return started.turnId;
 }
 
+test("every pi process gets the instance's environment, credentials included; the host's stripAmbient alone keeps a credential out", async () => {
+  // Fake values only.
+  const environment = { ANTHROPIC_API_KEY: "sk-ant-fake-instance", OPENAI_API_KEY: "sk-fake-instance" };
+  for (const stripAmbient of [[], ["ANTHROPIC_*"]]) {
+    const opened = await rig({ environment, config: { provider: "fake" }, host: { envPolicy: { stripAmbient } } });
+    const state = await opened.instance.auth!.state();
+    assert.equal(state.status, "authenticated", "pi auth check ran and answered");
+    const session = await opened.open();
+    await session.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd) });
+    const spawns = opened.host.spawns;
+    for (const first of ["--version", "auth", "--mode"]) assert.ok(spawns.some((spawn) => spawn.args?.[0] === first), `pi ${first} ran`);
+    for (const spawn of spawns) {
+      const what = `pi ${spawn.args?.slice(0, 2).join(" ")} under stripAmbient ${JSON.stringify(stripAmbient)}`;
+      assert.equal(spawn.environment["ANTHROPIC_API_KEY"], stripAmbient.length === 0 ? "sk-ant-fake-instance" : undefined, what);
+      assert.equal(spawn.environment["OPENAI_API_KEY"], "sk-fake-instance", what);
+    }
+  }
+});
+
 test("the driver runs the user's own pi, found through resolveExecutable, in RPC mode with strict JSONL framing", async () => {
   const opened = await rig();
   const session = await opened.open();

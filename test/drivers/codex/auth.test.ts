@@ -35,6 +35,28 @@ describe("codex sign-in", () => {
     }
   });
 
+  test("codex gets the instance's environment, credentials included, in its checks and its app-server; the host's stripAmbient alone keeps a credential out", async () => {
+    // Fake values only.
+    const environment = { OPENAI_API_KEY: "sk-fake-instance", CODEX_API_KEY: "fake-codex-key", OPENAI_ADMIN_KEY: "fake-admin-key" };
+    for (const stripAmbient of [[], ["OPENAI_*"]]) {
+      rig = await codexRig({ environment, host: { envPolicy: { stripAmbient } } });
+      await rig.instance.probe({ deep: true });
+      const opened = await rig.open();
+      await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+      const spawns = rig.host.spawns;
+      for (const first of ["--version", "login", "app-server"]) assert.ok(spawns.some((spawn) => spawn.args?.[0] === first), `codex ${first} ran`);
+      const stripped = stripAmbient.length > 0;
+      for (const spawn of spawns) {
+        const what = `codex ${spawn.args?.slice(0, 2).join(" ")} under stripAmbient ${JSON.stringify(stripAmbient)}`;
+        assert.equal(spawn.environment["OPENAI_API_KEY"], stripped ? undefined : "sk-fake-instance", what);
+        assert.equal(spawn.environment["OPENAI_ADMIN_KEY"], stripped ? undefined : "fake-admin-key", what);
+        assert.equal(spawn.environment["CODEX_API_KEY"], "fake-codex-key", what);
+      }
+      await rig.cleanup();
+      rig = undefined;
+    }
+  });
+
   test("an API key entered through auth.respond makes a managed profile: Codex's home is the instance's state directory", async () => {
     rig = await codexRig({ ambientAuth: "unauthenticated" });
     assert.deepEqual(rig.instance.auth!.methods().map((method) => [method.id, method.kind]), [["chatgpt", "oauth_browser"], ["device-code", "device_code"], ["api-key", "api_key"]]);

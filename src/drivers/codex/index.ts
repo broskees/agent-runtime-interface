@@ -14,7 +14,7 @@ import { CODEX_CONFIG_SCHEMA, CODEX_DRIVER_KIND, CODEX_METADATA, CODEX_MINIMUM_V
 import type { CodexDriverConfig } from "../../meta/codex.ts";
 import type { Driver } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
-import { CODEX_CREDENTIAL_VARIABLES, CodexInstance, managedKindOf } from "./instance.ts";
+import { CodexInstance, managedKindOf } from "./instance.ts";
 
 export type { CodexDriverConfig } from "../../meta/codex.ts";
 export { CODEX_CAPABILITIES } from "./capabilities.ts";
@@ -22,7 +22,6 @@ export { CODEX_EXTENSIONS, mcpServerConfig } from "./session.ts";
 export {
   CODEX_API_KEY_SECRET,
   CODEX_AUTH_METHODS,
-  CODEX_CREDENTIAL_VARIABLES,
   CODEX_POISON_MS,
   CODEX_SECRET_NAMESPACE,
   CODEX_TOKENS_SECRET,
@@ -42,7 +41,6 @@ export { CODEX_MINIMUM_VERSION, CODEX_TESTED_VERSIONS, CODEX_UPDATE_STEP };
  */
 export const CODEX_CLI_MANIFEST: CliLaunchManifest = {
   binary: "codex",
-  envScrubPrefixes: [...CODEX_CREDENTIAL_VARIABLES],
   args: { fresh: [], resume: ["resume", "{sessionId}"], fork: ["fork", "{sessionId}"] },
 };
 

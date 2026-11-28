@@ -32,6 +32,8 @@ export interface PiTestRigOptions {
   readonly host?: Partial<FakeHostOptions<PiConfig>>;
   readonly managedProfile?: boolean;
   readonly fakeVersion?: string;
+  /** `CreateInstanceRequest.environment`; empty when left out. */
+  readonly environment?: { readonly [name: string]: string };
 }
 
 export async function openPiTestRig(options: PiTestRigOptions = {}): Promise<PiTestRig> {
@@ -40,8 +42,8 @@ export async function openPiTestRig(options: PiTestRigOptions = {}): Promise<PiT
   const rig = await harness.setup({ scenario: "driver-test", workspace, ambientAuth: "authenticated" });
   const config: PiConfig = { ...(rig.config ?? piDriver.defaultConfig()), ...options.config };
   const hostOptions = await rig.hostOptions!("pi-test", { managedProfile: options.managedProfile ?? false });
-  const host = createFakeHost<PiConfig>({ ...hostOptions, config, envScrubPrefixes: piDriver.cliManifest?.envScrubPrefixes ?? [], label: "pi-test", ...options.host });
-  const instance = await piDriver.create(host, { instanceId: "pi-test", config, environment: {} });
+  const host = createFakeHost<PiConfig>({ ...hostOptions, config, label: "pi-test", ...options.host });
+  const instance = await piDriver.create(host, { instanceId: "pi-test", config, environment: { ...(options.environment ?? {}) } });
   const sessions: Session[] = [];
   const until = async <T>(events: readonly AriEvent[], find: (event: AriEvent) => T | undefined, what: string): Promise<T> => {
     const deadline = Date.now() + 10_000;

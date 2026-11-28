@@ -55,7 +55,7 @@ test("the CLI manifest is valid and builds fresh, resume and fork launches of pi
   const env = { PATH: "/usr/bin", ANTHROPIC_API_KEY: "inherited", OPENAI_API_KEY: "inherited", PI_CODING_AGENT_DIR: "/home/u/.pi/agent" };
   const fresh = buildCliLaunch(manifest, { kind: "fresh", cwd: "/work", env });
   assert.deepEqual(fresh.args, []);
-  assert.deepEqual(fresh.env, { PATH: "/usr/bin", PI_CODING_AGENT_DIR: "/home/u/.pi/agent" }, "credential variables are scrubbed");
+  assert.deepEqual(fresh.env, env, "the launch keeps the environment, credential variables included");
   assert.deepEqual(buildCliLaunch(manifest, { kind: "resume", cwd: "/work", env, sessionId: "/s/a.jsonl" }).args, ["--session", "/s/a.jsonl"]);
   assert.deepEqual(buildCliLaunch(manifest, { kind: "fork", cwd: "/other", env, sessionId: "/s/a.jsonl" }).args, ["--fork", "/s/a.jsonl"]);
 });

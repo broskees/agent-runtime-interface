@@ -215,10 +215,11 @@ image URL becomes its URI.
   `model` there is nothing to check, so the state is `unknown`.
 - Method `pi-login` tells the user to run `pi auth login <provider>`.
 - A runtime auth failure poisons its scope for 30 seconds.
-- Credential variables Pi reads (`PI_CREDENTIAL_VARIABLES`, from Pi's
-  providers docs) are the CLI manifest's `envScrubPrefixes`, and the driver
-  drops them from the instance's own environment, so only credentials the
-  instance configured reach Pi.
+- The environment passes through. `pi --version`, `pi auth check` and every
+  Pi process get the host's environment and the instance's `environment`,
+  credential variables such as `ANTHROPIC_API_KEY` included, minus only what
+  the host's `envPolicy.stripAmbient` names. A managed key, passed with
+  `--api-key`, wins over an inherited one.
 
 ## The user's own `pi`, and its minimum
 

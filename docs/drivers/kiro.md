@@ -15,6 +15,9 @@ holds its label, icon, config schema and form hints.
   `kiro-cli login`.
 - Kiro advertises `loadSession`, so stored sessions come back through
   `session/load` (the driver suppresses the replayed history).
+- `kiro-cli` gets the host's environment and the instance's `environment`,
+  credentials included, minus only what the host's `envPolicy.stripAmbient`
+  names (see the [ACP base driver](acp.md)).
 
 ## Quirk: autopilot follows the runtime mode
 

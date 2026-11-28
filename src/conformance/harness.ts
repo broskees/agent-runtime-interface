@@ -105,8 +105,9 @@ export interface HarnessRig<Config = unknown> {
   /**
    * Environment variables that carry credentials for this provider, such as
    * an API key variable. The auth scenario sets each one in the host's ambient
-   * environment, the instance's `environment` and the process environment,
-   * and checks that none reaches the native agent.
+   * environment, the instance's `environment` and the process environment. It
+   * checks that each reaches the native agent while the host strips nothing,
+   * and that none does once the host's `envPolicy.stripAmbient` names them.
    */
   readonly inheritedCredentials?: readonly string[];
   /**

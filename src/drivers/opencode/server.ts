@@ -95,9 +95,9 @@ async function readAll(stream: AsyncIterable<Uint8Array>): Promise<string> {
   return text + decoder.decode();
 }
 
-/** Runs `opencode --version` through the host and returns its version. Only ever spawns the CLI with `--version`. */
-export async function cliVersion(host: HostServices<OpencodeConfig>, executable: string): Promise<{ version: string | undefined; ok: boolean; output: string }> {
-  const child = await host.process.spawn({ command: executable, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 15_000 });
+/** Runs `opencode --version` through the host, with the instance's environment, and returns its version. Only ever spawns the CLI with `--version`. */
+export async function cliVersion(host: HostServices<OpencodeConfig>, executable: string, env: { readonly [name: string]: string }): Promise<{ version: string | undefined; ok: boolean; output: string }> {
+  const child = await host.process.spawn({ command: executable, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 15_000, env: { ...env } });
   const [stdout] = await Promise.all([readAll(child.stdout), readAll(child.stderr)]);
   const exit = await child.exited;
   return { version: parseVersion(stdout), ok: exit.code === 0, output: stdout.trim() };

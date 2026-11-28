@@ -23,7 +23,7 @@ const thread = await session.createThread({ cwd: "/work", policy: { mode: "appro
 
 | Field | Meaning |
 |---|---|
-| `binary` | The `pi` executable: a name looked up on `PATH` through `host.process.resolveExecutable`, or a path. Default `pi`. |
+| `binary` | The `pi` executable: a name looked up through `host.process.resolveExecutable` as a spawn with the instance's `environment` would (its `PATH` when it sets one), or a path. The version check and every `pi` process use that same environment. Default `pi`. |
 | `provider` | The provider whose sign-in `pi auth check` reports, for example `anthropic`. |
 | `model` | The model new threads start with, as `provider/id` (Pi's `--model`). Pi's default when left out. |
 | `thinking` | The thinking level new threads start with (Pi's `--thinking`). |

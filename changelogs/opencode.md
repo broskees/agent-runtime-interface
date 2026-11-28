@@ -43,6 +43,10 @@
   rules, no MCP entries, no instructions), leaves the thread `unloaded` and
   never replaces a missing session. An earlier build gave it rules and MCP
   entries as an interactive resume does.
+- `opencode` is looked up, and `opencode --version` runs, with the
+  instance's environment, as its servers already ran: an instance `PATH`
+  picks the `opencode` the instance runs. An earlier build looked it up on
+  the host's `PATH` and checked its version with the host's environment.
 - On a shared 1.x server, "always" is offered only for a grant that cannot
   match an MCP resource (a file read's `*` can), because 1.x checks its
   in-memory grants after every session's own rules.

@@ -11,11 +11,18 @@ import { fileURLToPath } from "node:url";
 import { createFakeHost } from "../../src/conformance/index.ts";
 import { codexDriver } from "../../src/drivers/codex/index.ts";
 import { museDriver } from "../../src/drivers/muse/index.ts";
+import { opencodeDriver } from "../../src/drivers/opencode/index.ts";
+import { piDriver } from "../../src/drivers/pi/index.ts";
 import { isAriError } from "../../src/index.ts";
 import { createProcessService } from "../../src/node/index.ts";
 import type { Driver } from "../../src/runtime.ts";
 
-function checkProbePath<Config>(driver: Driver<Config>, command: string, old: string, minimum: string, key: "PATH" | "Path", legacyLookup = false): void {
+/**
+ * `spawns` is how the driver names the executable it runs: by `name`, for the
+ * process owner to find with the same environment, or by the `path` its
+ * lookup found.
+ */
+function checkProbePath<Config>(driver: Driver<Config>, command: string, old: string, minimum: string, key: "PATH" | "Path", legacyLookup = false, spawns: "name" | "path" = "name", printed = (version: string) => `${command} ${version}`): void {
   const selection = key === "PATH" ? "the instance PATH, not the host PATH" : "the host PATH, ignoring instance Path on POSIX";
   test(`${command} probes and names the executable selected by ${selection}${legacyLookup ? " with a host that only reads path" : ""}`, async () => {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ari-cli-probe-path-")));
@@ -25,7 +32,7 @@ function checkProbePath<Config>(driver: Driver<Config>, command: string, old: st
     const supportedBinary = path.join(key === "PATH" ? hostBin : instanceBin, command);
     for (const directory of [hostBin, instanceBin]) fs.mkdirSync(directory);
     for (const [binary, version] of [[oldBinary, old], [supportedBinary, minimum]] as const) {
-      fs.writeFileSync(binary, `#!/bin/sh\n[ "$*" = --version ] || exit 64\nprintf '%s\\n' '${command} ${version}'\n`, { mode: 0o755 });
+      fs.writeFileSync(binary, `#!/bin/sh\n[ "$*" = --version ] || exit 64\nprintf '%s\\n' '${printed(version)}'\n`, { mode: 0o755 });
     }
     const process = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: {
       PATH: hostBin,
@@ -58,7 +65,8 @@ function checkProbePath<Config>(driver: Driver<Config>, command: string, old: st
         assert.ok(status.error.message.includes(`(${oldBinary})`), status.error.message);
         assert.ok(!status.error.message.includes(supportedBinary), status.error.message);
         await assert.rejects(instance.openSession({}), (error: unknown) => isAriError(error, "driver_unavailable") && error.message === status.error?.message);
-        assert.deepEqual(requests, [[command, "--version"], [command, "--version"]], "only the version command runs, through the host");
+        const ran = spawns === "name" ? command : oldBinary;
+        assert.deepEqual(requests, [[ran, "--version"], [ran, "--version"]], "only the version command runs, through the host");
       } finally {
         await instance.dispose();
       }
@@ -75,6 +83,14 @@ for (const key of ["PATH", "Path"] as const) {
 }
 checkProbePath(codexDriver, "codex", "0.100.0", "0.172.0", "PATH", true);
 checkProbePath(museDriver, "muse", "1.4.7", "1.4.25", "PATH", true);
+// Pi and OpenCode run the path their lookup found; the lookup, the probe and the launch all use the instance's environment.
+for (const key of ["PATH", "Path"] as const) {
+  // pi --version prints the version alone.
+  checkProbePath(piDriver, "pi", "1.5.0", "1.6.0", key, false, "path", (version) => version);
+  checkProbePath(opencodeDriver, "opencode", "1.0.0", "1.19.6", key, false, "path");
+}
+checkProbePath(piDriver, "pi", "1.5.0", "1.6.0", "PATH", true, "path", (version) => version);
+checkProbePath(opencodeDriver, "opencode", "1.0.0", "1.19.6", "PATH", true, "path");
 
 for (const command of ["codex", "muse"]) {
   for (const scenario of ["Path override", "case collision"]) {

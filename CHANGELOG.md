@@ -47,6 +47,9 @@ driver's changelog lists what changed:
   `permissions` profile in `policy.native` to Codex; `claude` accepts any
   unambiguous `claude --version` output and passes any `effort` on; `muse`
   passes any `reasoningEffort` on.
+- `pi` and `opencode` find, probe and start their CLI with the instance's
+  environment, as `codex` and `muse` do; an earlier build looked the CLI up
+  on the host's `PATH`.
 
 ### Contract (`ari`, `ari/json-schema/*`)
 

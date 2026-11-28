@@ -30,7 +30,7 @@ const thread = await session.createThread({ cwd: "/work", policy: { mode: "appro
 
 | Field | Meaning |
 |---|---|
-| `binary` | The `opencode` executable: a name looked up on `PATH` through `host.process.resolveExecutable`, or a path. Default `opencode`. |
+| `binary` | The `opencode` executable: a name looked up through `host.process.resolveExecutable` as a spawn with the instance's `environment` would (its `PATH` when it sets one), or a path. `opencode --version` and every server use that same environment. Default `opencode`. |
 | `serverUrl` | An OpenCode server someone else runs. When set, the driver never starts or stops a server. Its password, if any, is the instance secret `opencode/server-password`, never config. |
 | `model` | The model new threads start with, as `provider/model`. OpenCode's default when left out. |
 | `agent` | The OpenCode agent new threads use (for example `build`). OpenCode's default when left out. |

@@ -133,7 +133,7 @@ export class PiInstance implements Instance {
 
   async probe(options?: { deep?: boolean }): Promise<ProbeResult> {
     const checkedAt = new Date().toISOString();
-    const executable = await this.#host.process.resolveExecutable(this.#config.binary);
+    const executable = await this.#resolvePi();
     if (executable === null) return { ok: false, installed: false, error: this.#unavailable().callError, checkedAt };
     let version: { code: number | null; stdout: string };
     try {
@@ -190,7 +190,7 @@ export class PiInstance implements Instance {
   catalog = {
     /** Pi's model list from `get_available_models`, in a Pi process that loads no extensions and no session. */
     list: async (): Promise<ModelCatalog> => {
-      const executable = await this.#host.process.resolveExecutable(this.#config.binary);
+      const executable = await this.#resolvePi();
       if (executable === null) throw this.#unavailable();
       const spawned = await this.#host.process.spawn({
         command: executable,
@@ -219,7 +219,7 @@ export class PiInstance implements Instance {
   };
 
   async openSession(input: OpenSessionInput): Promise<Session> {
-    const executable = await this.#host.process.resolveExecutable(this.#config.binary);
+    const executable = await this.#resolvePi();
     if (executable === null) throw this.#unavailable();
     // A `pi` below the minimum never starts.
     const probe = await this.probe();
@@ -253,6 +253,12 @@ export class PiInstance implements Instance {
     this.#sessions.clear();
   }
 
+  /** Finds `pi` as a spawn with the instance's environment would: the lookup, the probes and every launch use the same environment. Keep `path` for hosts that read only it. */
+  #resolvePi(): Promise<string | null> {
+    const env = { ...this.#environment };
+    return this.#host.process.resolveExecutable(this.#config.binary, { env, ...(env["PATH"] === undefined ? {} : { path: env["PATH"] }) });
+  }
+
   #unavailable() {
     return callErrors.driverUnavailable({ binary: this.#config.binary, installHint: "Install pi (https://pi.dev) and make sure `pi` is on PATH, or set the driver's binary config." }, `Pi is not installed: ${this.#config.binary} was not found`);
   }
@@ -284,7 +290,7 @@ export class PiInstance implements Instance {
     const target = this.#config.provider !== undefined ? ["--provider", this.#config.provider] : this.#config.model !== undefined ? ["--model", this.#config.model] : undefined;
     // Pi picks its provider itself when none is configured, so there is nothing to check.
     if (target === undefined) return { status: "unknown", evidence: "passive", scope: "ambient" };
-    const executable = await this.#host.process.resolveExecutable(this.#config.binary);
+    const executable = await this.#resolvePi();
     if (executable === null) return { status: "unavailable", evidence: "active", scope: "ambient" };
     let check: { code: number | null; stdout: string };
     try {

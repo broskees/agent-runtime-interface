@@ -46,6 +46,9 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
   again on the session file for a new launch, and refuses another runtime
   mode with `unsupported`. An earlier build reported success and changed
   nothing.
+- `pi` is looked up with the instance's environment, as Pi's version check
+  and processes already ran: an instance `PATH` picks the `pi` the instance
+  runs. An earlier build looked it up on the host's `PATH`.
 - Turns: start, steer (with `prompt_required` when Pi queued the steer after
   the run ended), interrupt; settlement only on `agent_settled` or process
   exit.

@@ -18,6 +18,14 @@ credential still wins over an inherited one. Every driver that starts
 processes passes the instance's `environment` on to them, minus only what the
 host's policy names; the ACP drivers passed none of it before.
 
+ARI does not second-guess the user, the host or the vendor. A driver keeps
+what a session saved, passes a value the vendor validates on to the vendor,
+and reports a failure instead of replacing it with something else. Each
+driver's changelog lists what changed:
+
+- `opencode`: a resume without a policy keeps the session's saved permission
+  rules instead of writing `approval_required` over them.
+
 ### Contract (`ari`, `ari/json-schema/*`)
 
 - The ARI wire contract, version 1, as JSON Schema draft 2020-12 under

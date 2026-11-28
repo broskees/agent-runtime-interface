@@ -34,6 +34,11 @@
   before the other threads stop denying them, and reports a removal OpenCode
   did not confirm. A thread that drops an entry another thread still holds is
   denied it from then on, with its subagents.
+- A resume without a policy invents no mode. The session keeps the
+  permission rules OpenCode saved for it, followed by the host's rules and
+  the denies of other threads' entries; an earlier build wrote
+  `approval_required` over them, so a saved deny could vanish and a saved
+  allow could start asking.
 - On a shared 1.x server, "always" is offered only for a grant that cannot
   match an MCP resource (a file read's `*` can), because 1.x checks its
   in-memory grants after every session's own rules.

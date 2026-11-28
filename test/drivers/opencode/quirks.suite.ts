@@ -461,6 +461,44 @@ describe("MCP isolation on a shared server", () => {
   });
 });
 
+describe("a resume without a policy keeps the session's saved rules", () => {
+  test("2.x: a cold resume without a policy invents no mode: the saved rules stay as they were, and only the denies of other threads' entries are added", async () => {
+    const rig = await rigFor(2);
+    const first = await rig.open();
+    const a = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    await first.session.close();
+    // The rules OpenCode saved for the session, which ARI did not write: an allow of one command and a deny.
+    const saved = [
+      { action: "shell", resource: "git *", effect: "allow" as const },
+      { action: "webfetch", resource: "*", effect: "deny" as const },
+    ];
+    // A deny of the thread's own host entry that an earlier run wrote while another thread held the name.
+    const staleOwnDeny = { action: `${sanitizeMcpName(nameOf(a.id))}_*`, resource: "*", effect: "deny" as const };
+    rig.world.sessions.get(a.native.id!)!.rules = [...saved, staleOwnDeny].map((rule) => ({ ...rule }));
+    // Another thread on the same server holds an entry of its own.
+    const other = await rig.open();
+    const c = await other.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+
+    const resumer = await rig.open();
+    const resumed = await resumer.session.resumeThread({ native: { handle: a.handle! } });
+    assert.equal(resumed.id, a.id);
+    const session = rig.world.sessions.get(a.native.id!)!;
+    assert.deepEqual(session.rules.slice(0, saved.length), saved, "the saved rules stay first and unchanged");
+    const added = session.rules.slice(saved.length);
+    assert.ok(added.length > 0, "the other thread's entry is denied");
+    assert.ok(
+      added.every((rule) => rule.effect === "deny" && (rule.action.includes(sanitizeMcpName(nameOf(c.id))) || rule.resource.includes(nameOf(c.id)))),
+      `only denies of the other thread's entry were added: ${JSON.stringify(added)}`,
+    );
+    const server = liveServer(rig);
+    assert.equal(server.decide(session, "shell", ["git status"]), "allow", "the saved allow still holds; no approval_required rule asks instead");
+    assert.equal(server.decide(session, "webfetch", ["https://example.com"]), "deny", "the saved deny still holds");
+    assert.deepEqual(reaches(rig, server, session, nameOf(c.id)), { tool: false, list: false, read: false }, "the other thread's entry stays out of reach");
+    assert.deepEqual(reaches(rig, server, session, nameOf(a.id)), { tool: true, list: true, read: true }, "the thread reaches its own entry");
+    await runTurn(rig, resumer, resumed.id, "After the resume.");
+  });
+});
+
 describe("approvals never widen", () => {
   for (const generation of [1, 2] as const) {
     test(`${generation}.x: "always" says it reaches the project, a full_access auto-reply would pick "once", and full_access asks nothing`, async () => {

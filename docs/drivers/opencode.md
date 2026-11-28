@@ -173,6 +173,15 @@ matches wins. A thread's rules are, in this order:
 2.x replaces a session's rules on a live session (`session.update`), so the
 mode can change between turns; 1.x keeps it fixed.
 
+A resume without `policy` (2.x can find a session by id alone) invents no
+mode. The session keeps the rules OpenCode saved for it, in their order, in
+place of the mode's rules; the driver adds only the host's rules and the
+`deny` rules for other threads' entries after them. From the saved rules it
+drops only denies it writes itself: those of other threads' entries (they
+come again at the end) and any deny of the thread's own entries that an
+earlier run left. A later `policy` (on a turn or another resume) writes that
+mode's rules as usual.
+
 ## MCP servers are per directory
 
 OpenCode registers MCP servers per directory on a server (1.x `POST /mcp`,
@@ -283,8 +292,9 @@ message, 2.x as the instruction entry), never in its config files.
 The driver resumes any session the OpenCode server holds, including one
 created outside ARI: `resumeThread` asks the server for the id the host named.
 It then gives that session what it gives a session it created: the permission
-rules for the host's runtime policy (plus, on a shared server, deny rules for
-other threads' host MCP entries), the host's MCP servers registered on the
+rules for the host's runtime policy, or the session's saved rules when the
+host passed no policy (plus, on a shared server, deny rules for other
+threads' host MCP entries), the host's MCP servers registered on the
 running server under the names the host chose, and the host's instructions
 through the system channel above. All of it goes through the server's API;
 nothing is written to OpenCode's config files. For OpenCode 1.x, a session

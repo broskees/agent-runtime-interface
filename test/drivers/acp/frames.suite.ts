@@ -22,7 +22,8 @@ const EXPECTED_RECORDINGS: { readonly [source: string]: number } = {
   "test/drivers/acp/driver-rules.ts": 57,
   "test/drivers/acp/protocol.suite.ts": 24,
   "test/drivers/acp/standalone.suite.ts": 4,
-  "test/drivers/antigravity/antigravity.suite.ts": 8,
+  // The user's own profile (3), profile instance (2), the host policies (2), rollback (1), the command in both profiles (3), no maintenance (1).
+  "test/drivers/antigravity/antigravity.suite.ts": 12,
   "test/drivers/fx/fx.suite.ts": 1,
   "test/drivers/grok/grok.suite.ts": 2,
   "test/drivers/kiro/kiro.suite.ts": 1,

@@ -7,47 +7,89 @@ hints. ARI never downloads, installs or updates the Antigravity CLI (`agy`).
 
 ## Launch
 
-`agy acp --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp`
+The config's `profile` chooses whose Antigravity profile `agy` uses.
 
-with `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1` and `AGY_CLI_DISABLE_AUTO_UPDATE=true`.
+- `profile: "user"`, the default (also when the config names no `profile`):
+  `agy acp`, with no other argument and no variable of the driver's. `agy`
+  uses the user's own profile, settings, conversations and sign-in, as when
+  the user runs it.
+- `profile: "instance"`:
+  `agy acp --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp`
+  with `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1`. The instance gets a profile of
+  its own.
+
 The driver sets no other variable: `agy` 1.5.x reads neither
 `AGY_ACP_FORCE_FILE_STORAGE` nor `GEMINI_HOME`, which earlier releases of this
-driver set.
+driver set. Only the version command, `agy --version`, runs with
+`AGY_CLI_DISABLE_AUTO_UPDATE=true`, the switch of the CLI's self-updater (next
+section).
 
 ## Quirks
 
-- **A profile per instance.** Each instance's sign-in, settings and session
-  files live in its own `<stateDir>/profile` (mode 0700, created when a
-  session opens, never by a probe), so two instances never share a Google
-  account. `agy` 1.5.x keeps a Google sign-in in the OS keyring (Apple
-  Keychain, the Secret Service on Linux, Windows Credential Manager), in one
-  entry, service `gemini` and account `antigravity`, whatever `--gemini-dir`
-  and `--app-data-dir` say, so every `agy` on the machine would share it, the
-  user's own included. With `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` set it keeps
-  the sign-in in its file storage instead,
-  `<stateDir>/profile/antigravity-acp/antigravity-oauth-token`, and logs
-  "Using file-based token storage because AGY_CLI_FORCE_FILE_TOKEN_STORAGE is
-  set". It neither reads nor changes the keyring's entry then.
-  `test/drivers/antigravity/antigravity.suite.ts` runs two instances against
-  a fake `agy` that keeps its sign-in where 1.5.16 does, on a machine whose
-  keyring holds one, and shows each finds and refreshes only its own
-  profile's.
-- **Each instance signs in once.** A new instance has no sign-in of its own,
-  also when the user's own `agy` is signed in, and the driver does not sign
-  in for it. Sign it in once with
-  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp`
-  (`--login`: "Log in with Google interactively, then exit (ACP terminal
-  auth)", `agy acp --help`). Use the executable the instance configures.
-  Existing instances with a working profile credential do not need to sign in
-  again. On Linux, `agy` can also use the profile file when the keyring is
-  unreachable.
+- **The user's own profile, by default.** With `profile: "user"` the driver
+  adds nothing to `agy acp`, so `agy` finds everything where it always does:
+  `--gemini-dir` defaults to `.gemini` in the home directory and
+  `--app-data-dir` to `antigravity-cli` (`agy acp --help`). It reads the
+  user's settings, rules, skills and MCP servers from `~/.gemini/`
+  (Antigravity's docs, "Customization discovery" and "Settings"), keeps its
+  conversations there, and finds the user's Google sign-in where it keeps it:
+  in the OS keyring (Apple Keychain, the Secret Service on Linux, Windows
+  Credential Manager), service `gemini` and account `antigravity`, or in
+  `~/.gemini/antigravity-cli/antigravity-oauth-token` when the keyring is
+  bypassed or unreachable ("Local silent keyring sign-in" on Antigravity's
+  "Authenticate" page; [How Antigravity finds the
+  sign-in](../recordings.md#how-antigravity-finds-the-sign-in)). Every
+  instance with `profile: "user"` shares that one Google account, its quota
+  and its conversations, with each other and with the user's own `agy`; a
+  token one of them refreshes is the one all of them use next.
+  `test/drivers/antigravity/antigravity.suite.ts` runs two such instances
+  against a fake `agy`, on a desktop whose keyring holds the user's sign-in
+  and on a machine without a keyring, and shows both use the user's one
+  sign-in and the second finds the first one's refresh.
+- **A profile per instance, on request.** With `profile: "instance"` the
+  instance's sign-in, settings and session files live in its own
+  `<stateDir>/profile` (mode 0700, created when a session opens, never by a
+  probe), so two such instances never share a Google account. The profile
+  flags and `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` always go together: `agy`
+  1.5.x keeps a Google sign-in in the OS keyring's one entry, service
+  `gemini` and account `antigravity`, whatever `--gemini-dir` and
+  `--app-data-dir` say, so with the flags alone every `agy` on the machine
+  would share it, the user's own included. With
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` set it keeps the sign-in in its file
+  storage instead, `<stateDir>/profile/antigravity-acp/antigravity-oauth-token`,
+  and logs "Using file-based token storage because
+  AGY_CLI_FORCE_FILE_TOKEN_STORAGE is set". It neither reads nor changes the
+  keyring's entry then. `test/drivers/antigravity/antigravity.suite.ts` runs
+  two such instances against a fake `agy` that keeps its sign-in where 1.5.16
+  does, on a machine whose keyring holds one, and shows each finds and
+  refreshes only its own profile's.
+- **Signing in.** The driver signs in for no instance; `agy` says when it
+  needs a sign-in, and an ACP `-32000` reaches the host as `auth_required`
+  with `agy`'s own message ([acp.md](acp.md#optional-members-42)). Use the
+  executable the instance configures; `--login` is "Log in with Google
+  interactively, then exit (ACP terminal auth)" (`agy acp --help`).
+  - `profile: "user"`: an instance is signed in when the user's own `agy` is.
+    Otherwise sign that in once with `agy acp --login`, with no other flag or
+    variable, so `agy` keeps the sign-in where it chooses, as for the user's
+    own runs.
+  - `profile: "instance"`: a new instance has no sign-in of its own, also when
+    the user's own `agy` is signed in. Sign it in once with
+    `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 agy acp --login --gemini-dir <stateDir>/profile --app-data-dir antigravity-acp`.
+    Existing instances with a working profile credential do not need to sign
+    in again. On Linux, `agy` can also use the profile file when the keyring
+    is unreachable.
+- **The self-updater runs as `agy` decides.** `status()` and `openSession`
+  run `agy --version` with `AGY_CLI_DISABLE_AUTO_UPDATE=true`, so a status
+  check never updates the binary it checks. `agy acp` gets no such switch
+  from the driver, in either profile.
 - **The environment passes through.** `agy` gets the environment the host
   gives it, Google credentials such as `GEMINI_API_KEY` and
   `GOOGLE_APPLICATION_CREDENTIALS` included, as it would in the user's shell.
   A host that wants a variable kept from the agent lists it in
   `process.envPolicy.stripAmbient`. A session starts under any policy, one
   that strips nothing included. The driver adds only
-  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE` and `AGY_CLI_DISABLE_AUTO_UPDATE`.
+  `AGY_CLI_FORCE_FILE_TOKEN_STORAGE`, with `profile: "instance"`, and
+  `AGY_CLI_DISABLE_AUTO_UPDATE`, to `agy --version`.
 - **Fixed-choice prompts.** `requests.allowCustomAnswer` is false; a
   `custom` answer rejects with `unsupported`.
 - **No conversation rollback.** Antigravity can checkpoint the workspace but
@@ -62,6 +104,7 @@ driver set.
 | Field | Default | Meaning |
 |---|---|---|
 | `command` | `agy` | The user's Antigravity CLI: a name found on `PATH`, or a path. |
+| `profile` | `user` | Whose Antigravity profile `agy` uses: `user`, the user's own sign-in, settings and conversations; or `instance`, a profile private to the instance, `<stateDir>/profile`, with a sign-in of its own ([Launch](#launch)). A config without it gets `user`; `create()` refuses any other value with a `validation` error. |
 | `maxProtocolVersion`, `forkAcrossDirectories`, `configDependencies` | `1`, `false`, `{}` | As for the [ACP base driver](acp.md#config). |
 
 There is no managed install. An earlier version could install `agy` itself
@@ -112,10 +155,19 @@ resumes the way [the `acp`
 driver](acp.md#resuming-conversations-ari-did-not-create) does: it asks the
 agent for any session id the host names, with only the host's LaunchContext,
 and replaces a session the agent cannot resume with a fresh one and
-`session.replaced`. It lists no native sessions. Each instance runs `agy` with
-its own profile directory, which holds that instance's session files, so a
-session the user's own `agy` keeps in their profile is not found there and is
-replaced.
+`session.replaced`. It lists no native sessions. What `agy` finds follows the
+profile:
+
+- `profile: "user"`: `agy` looks in the user's own profile, so it resumes a
+  session the user's own `agy` keeps there, or one another such instance
+  started.
+- `profile: "instance"`: the instance's profile directory holds only that
+  instance's session files, so a session the user's own `agy` or another
+  instance keeps is not found there and is replaced.
+
+`test/drivers/antigravity/antigravity.suite.ts` resumes one session in both
+profiles. Every instance's `continuationKey` is `antigravity:<command>`, in
+both profiles, as before.
 
 ## Capabilities
 
@@ -195,4 +247,14 @@ with `driver_unavailable` naming `agy`, and `openSession` rejects with
     and the log text "Using file-based token storage because %s is set", and
     hold neither `AGY_ACP_FORCE_FILE_STORAGE` nor `GEMINI_HOME` (read with
     `strings`).
-  - `agy acp --help` of 1.5.17: `--gemini-dir`, `--app-data-dir` and `--login`.
+  - `agy acp --help` of 1.5.17: `--gemini-dir`, `--app-data-dir` and `--login`,
+    and the defaults `profile: "user"` relies on: `--gemini-dir` defaults to
+    `.gemini` in the home directory and `--app-data-dir` to `antigravity-cli`.
+  - Antigravity's "Authenticate" page (https://antigravity.google/docs/install),
+    "Local silent keyring sign-in": "When launching `agy` on your local
+    machine, the CLI attempts to access your operating system's native secure
+    keyring".
+- Antigravity's docs "Customization discovery"
+  (https://antigravity.google/docs/customization-discovery) and "Settings"
+  (https://antigravity.google/docs/settings), read 2026-11-25, for the
+  user's setup under `~/.gemini/`.

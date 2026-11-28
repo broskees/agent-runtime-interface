@@ -7,10 +7,12 @@
 // (../stdio/tap.ts), sanitises every frame, writes
 // `<outDir>/<scenario>.ndjson`, and checks the scenario's assertions.
 //
-// The user's Antigravity setup stays out and unchanged: `agy` gets its own
-// HOME, XDG directories, TMPDIR and profile inside the workspace, none of the
-// user's GEMINI_*, GOOGLE_*, GCLOUD_*, CLOUDSDK_* or AGY_* variables, the
-// driver's AGY_CLI_FORCE_FILE_TOKEN_STORAGE, and an unreachable session bus,
+// The user's Antigravity setup stays out and unchanged: the driver runs with
+// `profile: "instance"`, and `agy` gets its own HOME, XDG directories, TMPDIR
+// and profile inside the workspace, none of the user's GEMINI_*, GOOGLE_*,
+// GCLOUD_*, CLOUDSDK_* or AGY_* variables, the driver's
+// AGY_CLI_FORCE_FILE_TOKEN_STORAGE, the recorder host's
+// AGY_CLI_DISABLE_AUTO_UPDATE (./run.ts), and an unreachable session bus,
 // so it cannot reach the user's keyring and keeps its sign-in in the copied
 // file. After each scenario the recorder logs what `agy`'s own log says about
 // where it kept the sign-in (`tokenStorageLog`). It works in the workspace's
@@ -130,7 +132,7 @@ export function tokenStorageLog(directory: string): string[] {
   return [...found];
 }
 
-/** The version `<command> --version` prints, run through the recorder's own process service (not recorded), or "unknown". It runs with auto-update off, as the driver runs `agy acp`. */
+/** The version `<command> --version` prints, run through the recorder's own process service (not recorded), or "unknown". It runs with auto-update off, as the driver's version command does. */
 export async function agentVersion(service: ProcessService, command: string): Promise<string> {
   try {
     const child = await service.spawn({ command, args: ["--version"], env: { AGY_CLI_DISABLE_AUTO_UPDATE: "true" }, purpose: "probe", stdin: "ignore", timeoutMs: 10_000 });

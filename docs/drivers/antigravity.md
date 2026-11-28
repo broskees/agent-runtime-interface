@@ -105,7 +105,7 @@ section).
 |---|---|---|
 | `command` | `agy` | The user's Antigravity CLI: a name found on `PATH`, or a path. |
 | `profile` | `user` | Whose Antigravity profile `agy` uses: `user`, the user's own sign-in, settings and conversations; or `instance`, a profile private to the instance, `<stateDir>/profile`, with a sign-in of its own ([Launch](#launch)). A config without it gets `user`; `create()` refuses any other value with a `validation` error. |
-| `maxProtocolVersion`, `forkAcrossDirectories`, `configDependencies` | `1`, `false`, `{}` | As for the [ACP base driver](acp.md#config). |
+| `maxProtocolVersion`, `forkAcrossDirectories`, `configDependencies` | `1`, `true`, `{}` | As for the [ACP base driver](acp.md#config): a fork into another directory asks `agy`, which may refuse it. |
 
 There is no managed install. An earlier version could install `agy` itself
 (`installation: "managed"`, with `releaseManifestUrl` and `version`); those
@@ -154,8 +154,9 @@ The Antigravity driver is the ACP base driver with the `agy acp` launch, so it
 resumes the way [the `acp`
 driver](acp.md#resuming-conversations-ari-did-not-create) does: it asks the
 agent for any session id the host names, with only the host's LaunchContext,
-and replaces a session the agent cannot resume with a fresh one and
-`session.replaced`. It lists no native sessions. What `agy` finds follows the
+and replaces a session only when the agent reports it missing
+(`resource_not_found`), with a fresh one and `session.replaced`; any other
+error goes to the caller. It lists no native sessions. What `agy` finds follows the
 profile:
 
 - `profile: "user"`: `agy` looks in the user's own profile, so it resumes a

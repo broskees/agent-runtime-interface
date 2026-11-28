@@ -20,7 +20,8 @@ import { ANTIGRAVITY_SIGN_IN_FILE, profileSignInFile, userSignInFile } from "../
 import { AntigravitySignInMissingError, AntigravityWorkspaceCustomizedError, AntigravityWorkspaceInHomeError, antigravityEnvironment, describeAntigravityRun, failuresOf, recordAntigravity } from "../../recordings/antigravity/record.ts";
 import type { AntigravityRecordOutcome } from "../../recordings/antigravity/record.ts";
 import { replayAntigravity } from "../../recordings/antigravity/replay.ts";
-import { ANTIGRAVITY_RECORDER_ENV_POLICY, AntigravityModelChoiceError, createAntigravityLayout, defaultAntigravityModel } from "../../recordings/antigravity/run.ts";
+import { ANTIGRAVITY_RECORDER_ADDED_ENVIRONMENT, ANTIGRAVITY_RECORDER_ENV_POLICY, AntigravityModelChoiceError, antigravityRecorderConfig, createAntigravityLayout, defaultAntigravityModel } from "../../recordings/antigravity/run.ts";
+import { ANTIGRAVITY_DEFAULT_CONFIG } from "../../../src/drivers/antigravity/index.ts";
 import { holdFlock } from "../../recordings/flock.ts";
 import { dyingHolderBin, lockHolderBin } from "../../helpers/lock-holder-bins.ts";
 import { RecordingNotWrittenError, recoveryFileFor } from "../../recordings/recovery.ts";
@@ -197,7 +198,7 @@ async function recordWithFake(env: { [name: string]: string }, scenarios: readon
   return { outDir, outcomes, fake, log };
 }
 
-/** The Google and Antigravity variables the recorded agy acp may get: the driver's own, its file storage switch among them. */
+/** The Google and Antigravity variables the recorded agy acp may get: the driver's file storage switch, and the updater switch the recorder's host adds. */
 const ALLOWED_AGENT_VARIABLES = ["AGY_CLI_DISABLE_AUTO_UPDATE", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE"];
 
 test("the fake agy, given the user's own environment, loads every seeded setting, MCP entry, instruction, rule and skill, so a leak would show", () => {
@@ -360,6 +361,12 @@ test("agy's environment is the recorder's less HOME, the XDG directories, TMPDIR
   } finally {
     fs.rmSync(layout.root, { recursive: true, force: true });
   }
+});
+
+test("the recorder names profile instance itself, whatever the driver's default, and its host adds only the self-updater's switch to what the driver starts", () => {
+  assert.equal(ANTIGRAVITY_DEFAULT_CONFIG.profile, "user", "the driver's default is the user's own profile");
+  assert.deepEqual(antigravityRecorderConfig(), { ...ANTIGRAVITY_DEFAULT_CONFIG, profile: "instance" });
+  assert.deepEqual(ANTIGRAVITY_RECORDER_ADDED_ENVIRONMENT, { AGY_CLI_DISABLE_AUTO_UPDATE: "true" });
 });
 
 // The sign-in.

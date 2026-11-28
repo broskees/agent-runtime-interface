@@ -94,10 +94,23 @@ export function createAntigravityLayout(prefix: string): AntigravityLayout {
   return layout;
 }
 
-/** The driver config every recording and replay uses: the user's `agy` on PATH, with the driver's defaults. */
+/**
+ * The driver config every recording and replay uses: the user's `agy` on
+ * PATH, with the driver's defaults, but a profile private to the recorder's
+ * instance (`profile: "instance"`), so `agy` keeps its sign-in, settings and
+ * conversations in the workspace and never reaches the user's.
+ */
 export function antigravityRecorderConfig(): AntigravityConfig {
-  return { ...ANTIGRAVITY_DEFAULT_CONFIG };
+  return { ...ANTIGRAVITY_DEFAULT_CONFIG, profile: "instance" };
 }
+
+/**
+ * The variable the recorder's host adds to every `agy` it starts: the
+ * self-updater's switch. The driver sets it only for `agy --version`; the
+ * recorder keeps it for `agy acp` too, so a recording runs the version its
+ * header names and never changes the user's `agy`.
+ */
+export const ANTIGRAVITY_RECORDER_ADDED_ENVIRONMENT: { readonly [name: string]: string } = { AGY_CLI_DISABLE_AUTO_UPDATE: "true" };
 
 /**
  * The environment rule of the recorder's host, its own choice: it keeps the
@@ -243,6 +256,8 @@ export interface AntigravityScenarioInput {
   readonly mayApprove?: NonNullable<Parameters<typeof runScenario>[1]["mayApprove"]>;
   /** Wraps each session the host opens; tests use it to play a host that behaves differently. */
   readonly wrapSession?: (session: Session) => Session;
+  /** The driver config; `antigravityRecorderConfig()` when left out. Tests use it to run the user's own profile. */
+  readonly config?: AntigravityConfig;
 }
 
 export interface AntigravityScenarioResult {
@@ -251,14 +266,24 @@ export interface AntigravityScenarioResult {
   readonly diagnostics: readonly DiagnosticEntry[];
 }
 
-/** A host with the recorder's process service and no tool server for threads: the recorded session gets no MCP server at all. */
+/**
+ * A host with the recorder's process service and no tool server for threads:
+ * the recorded session gets no MCP server at all. Its process service adds
+ * ANTIGRAVITY_RECORDER_ADDED_ENVIRONMENT to every spawn request before the
+ * request reaches `process`, so the process tap records it and replay
+ * compares it.
+ */
 function recorderHost(layout: AntigravityLayout, process: HostServices["process"]): HostServices<AntigravityConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[] } {
   const base = path.dirname(layout.stateDir);
   const paths = { stateDir: layout.stateDir, cacheDir: path.join(base, "cache"), tmpDir: path.join(base, "tmp") };
   const host = createFakeHost<AntigravityConfig>({ paths, envPolicy: ANTIGRAVITY_RECORDER_ENV_POLICY });
   return {
     ...host,
-    process,
+    process: {
+      envPolicy: process.envPolicy,
+      resolveExecutable: (name, options) => process.resolveExecutable(name, options),
+      spawn: (request) => process.spawn({ ...request, env: { ...ANTIGRAVITY_RECORDER_ADDED_ENVIRONMENT, ...request.env } }),
+    },
     hostTools: {
       ...host.hostTools,
       mcpServerFor: async () => {
@@ -272,7 +297,7 @@ function recorderHost(layout: AntigravityLayout, process: HostServices["process"
 export async function runAntigravityScenario(input: AntigravityScenarioInput): Promise<AntigravityScenarioResult> {
   const driver = createAntigravityDriver();
   const host = recorderHost(input.layout, input.process);
-  const instance = await driver.create(host, { instanceId: ANTIGRAVITY_RECORDER_INSTANCE_ID, config: antigravityRecorderConfig(), environment: {} });
+  const instance = await driver.create(host, { instanceId: ANTIGRAVITY_RECORDER_INSTANCE_ID, config: input.config ?? antigravityRecorderConfig(), environment: {} });
   try {
     const run = await runScenario(input.scenario, {
       openSession: async () => {

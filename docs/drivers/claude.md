@@ -361,8 +361,10 @@ sends `plan`. Claude Code reports the mode it runs in with the `system/init`
 message at the start of each turn (`SDKSystemMessage.permissionMode`, never
 absent) and with a `system/status` message that carries one
 (`SDKStatusMessage.permissionMode`). `initializationResult()` does not
-report it, so before the first turn the thread's `effectiveMode` is
-`{ source: "harness" }`, with no mode. Each report updates it with a
+report it, and the SDK's `resolveSettings` gives only a
+`permissions.defaultMode` the settings name, not the mode Claude Code falls
+back to without one, so before the first turn the thread's `effectiveMode`
+is `{ source: "harness" }`, with no mode. Each report updates it with a
 `thread.upsert`, mapped back: `default` to `approval_required`,
 `acceptEdits` to `auto_accept_edits`, `auto` to `auto`, `bypassPermissions`
 to `full_access`, `plan` to the `plan` interaction, and `dontAsk`, which no

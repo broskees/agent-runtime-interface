@@ -366,6 +366,74 @@ test("vendor _meta reaches the host as x:acp.meta events, and updates the driver
   }
 });
 
+/** The effectiveMode each thread.upsert for the thread reported, in order. */
+function modeReports(events: readonly AriEvent[], threadId: string): unknown[] {
+  return events.flatMap((event) => (event.body.type === "thread.upsert" && event.body.thread.id === threadId && event.body.thread.effectiveMode !== undefined ? [event.body.thread.effectiveMode] : []));
+}
+
+test("v1: a policy without a mode leaves the agent's own: the driver answers no request itself, and the thread reports the agent's mode id and each current_mode_update", async () => {
+  const modes = { currentModeId: "ask", availableModes: [{ id: "ask", name: "Ask" }, { id: "architect", name: "Architect" }] };
+  const rig = await openRig({ name: "agent mode", driver: acpDriver, config: config(1), executable: "fake-acp-agent", protocol: 1, agentArgs: ["--modes", JSON.stringify(modes)] });
+  try {
+    const { session, events, waitFor } = await rig.open();
+    const thread = await session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+    // ACP has no mode of ARI's, so the driver reports the agent's own id.
+    assert.deepEqual(thread.effectiveMode, { mode: "ask", source: "harness" });
+    await session.startTurn({ threadId: thread.id, clientTurnKey: "k1", intent: "start", content: [{ type: "text", text: "Run it" }] });
+    const native = (await rig.nextTurn()) as FakeNativeTurn;
+    await native.raw({ sessionUpdate: "current_mode_update", currentModeId: "architect" });
+    await until(() => (modeReports(events, thread.id).some((mode) => (mode as { mode?: string }).mode === "architect") ? true : undefined), "the architect report");
+    assert.deepEqual(modeReports(events, thread.id).at(-1), { mode: "architect", source: "harness" });
+    // No mode: the driver answers no permission request itself; the host does.
+    const handle = await native.requestApproval({ kind: "command", command: ["make"], options: [{ optionId: "allow", label: "Allow", decision: "accept" }, { optionId: "deny", label: "Deny", decision: "decline" }] });
+    const upsert = await waitFor((event) => event.body.type === "request.upsert" && event.body.request.status === "pending", "the pending request");
+    await session.respond({ requestId: upsert.body.type === "request.upsert" ? upsert.body.request.id : "", responseKey: "r1", optionId: "allow" });
+    assert.equal(await handle.nextReply(), "allow");
+    await native.complete();
+    await waitFor((event) => event.body.type === "turn.terminal", "turn.terminal");
+
+    // A host's mode is the one the driver enforces, and the thread says the host chose it.
+    const hosted = await session.createThread({ cwd: rig.cwd, policy: rig.policy("full_access") });
+    assert.deepEqual(hosted.effectiveMode, { mode: "full_access", interaction: "default", source: "host" });
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+test("v2: a policy without a mode reports the value of the agent's mode-category option, and each change of it", async () => {
+  const options = [...V2_OPTIONS, { configId: "mode", name: "Mode", category: "mode", type: "select", currentValue: "code", options: [{ value: "code", name: "Code" }, { value: "review", name: "Review" }] }];
+  const rig = await openRig({ name: "mode option", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol: 2, agentArgs: ["--config-options", JSON.stringify(options)] });
+  try {
+    const { session, events } = await rig.open();
+    const thread = await session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+    assert.deepEqual(thread.effectiveMode, { mode: "code", source: "harness" });
+    await session.startTurn({ threadId: thread.id, clientTurnKey: "k1", intent: "start", content: [{ type: "text", text: "Go" }], config: { mode: "review" } });
+    const native = await rig.nextTurn();
+    await until(() => (modeReports(events, thread.id).some((mode) => (mode as { mode?: string }).mode === "review") ? true : undefined), "the review report");
+    await native.complete();
+  } finally {
+    await rig.cleanup();
+  }
+});
+
+test("v1: a resume in another session with a policy that names no mode enforces none: the thread reports the agent's own mode", async () => {
+  const modes = { currentModeId: "ask", availableModes: [{ id: "ask", name: "Ask" }] };
+  const rig = await openRig({ name: "resume no policy", driver: acpDriver, config: config(1), executable: "fake-acp-agent", protocol: 1, agentArgs: ["--modes", JSON.stringify(modes)] });
+  try {
+    const first = await rig.open();
+    const thread = await first.session.createThread({ cwd: rig.cwd, policy: rig.policy("full_access") });
+    await first.session.startTurn({ threadId: thread.id, clientTurnKey: "k1", intent: "start", content: [{ type: "text", text: "Hi" }] });
+    await (await rig.nextTurn()).complete();
+    await first.waitFor((event) => event.body.type === "turn.terminal", "turn.terminal");
+    const second = await rig.open();
+    // The cwd comes from the policy only: give one without a mode.
+    const resumed = await second.session.resumeThread({ native: { handle: thread.handle! }, policy: { interaction: "default", cwd: rig.cwd } });
+    assert.deepEqual(resumed.effectiveMode, { mode: "ask", source: "harness" });
+  } finally {
+    await rig.cleanup();
+  }
+});
+
 test("policy enforcement is declared client_boundary for every runtime mode", async () => {
   for (const protocol of [1, 2] as const) {
     const rig = await openRig({ name: "policy", driver: acpDriver, config: config(2), executable: "fake-acp-agent", protocol });

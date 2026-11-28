@@ -43,9 +43,10 @@
 
 import { callErrors } from "../../errors.ts";
 import { EventSequencer } from "../../driver-kit/sequencer.ts";
+import { keepingMode } from "../../driver-kit/policy.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ContentBlock } from "../../generated/common.ts";
-import type { ConfigChangePlan, RuntimePolicy } from "../../generated/config.ts";
+import type { ConfigChangePlan, EffectiveMode, RuntimePolicy } from "../../generated/config.ts";
 import type { Failure } from "../../generated/errors.ts";
 import type { AriEvent, AriEventBody } from "../../generated/events.ts";
 import type { SpawnRequest } from "../../generated/host.ts";
@@ -172,6 +173,8 @@ interface ThreadState {
   cwd: string;
   policy: RuntimePolicy;
   muse: MusePolicy;
+  /** The approval mode Muse last reported for the session (its `Session`, `session/setApprovalMode`, `session/approvalModeChanged`). */
+  approvalMode: string | undefined;
   launch: LaunchContext | undefined;
   model: string | undefined;
   /** Host instructions not yet sent: they go before the host's text in the next turn. */
@@ -192,6 +195,19 @@ interface PendingRequest {
   native: { readonly type: "approval"; value: MuseApprovalRequest } | { readonly type: "userInput"; value: MuseUserInputRequest };
   resolved: boolean;
   inFlight: string | undefined;
+}
+
+/**
+ * A thread's mode: the host's, which the driver sets as Muse's approval mode
+ * and permission profile, or, when the policy names none, the approval mode
+ * Muse reports, in Muse's own words (`promptUnmatched`, `allowAll`,
+ * `onRequest`, `denyUnmatched`). ARI maps none of them: Muse does not report
+ * the permission profile, which decides who answers (an AI reviewer or the
+ * user) and whether a sandbox holds.
+ */
+function effectiveModeOf(policy: RuntimePolicy, approvalMode: string | undefined): EffectiveMode {
+  if (policy.mode !== undefined) return { mode: policy.mode, interaction: policy.interaction, source: "host" };
+  return approvalMode === undefined ? { source: "harness" } : { mode: approvalMode, source: "harness" };
 }
 
 function isObject(value: unknown): value is { [key: string]: unknown } {
@@ -372,8 +388,8 @@ export class MuseSession implements Session {
         .command("session/start", {
           sessionId: nativeId,
           workspaceRoot: spec.cwd,
-          approvalMode: spec.muse.approvalMode,
-          permissionProfile: spec.muse.permissionProfile,
+          ...(spec.muse.approvalMode === undefined ? {} : { approvalMode: spec.muse.approvalMode }),
+          ...(spec.muse.permissionProfile === undefined ? {} : { permissionProfile: spec.muse.permissionProfile }),
           ...(spec.model === undefined ? {} : { modelId: spec.model }),
           ...(this.#runtime.providerId === undefined ? {} : { providerId: this.#runtime.providerId }),
           ...(config === undefined ? {} : { config }),
@@ -383,7 +399,7 @@ export class MuseSession implements Session {
         });
       if (started.session.sessionId !== nativeId) throw callErrors.protocol("session identity", `Muse started session ${started.session.sessionId} where the driver asked for ${nativeId}`);
       const model = started.session.modelId ?? spec.model;
-      const state = this.#register(nativeId, host, { cwd: spec.cwd, policy: spec.policy, muse: spec.muse, launch: spec.launch, model, instructions: spec.instructions, ...(spec.title === undefined ? {} : { title: spec.title }) });
+      const state = this.#register(nativeId, host, { cwd: spec.cwd, policy: spec.policy, muse: spec.muse, approvalMode: started.session.approvalMode?.mode, launch: spec.launch, model, instructions: spec.instructions, ...(spec.title === undefined ? {} : { title: spec.title }) });
       void this.#readModels(host, nativeId);
       return { thread: { ...state.thread, ...(model === undefined ? {} : { appliedConfig: { model } }) }, model };
     } finally {
@@ -399,9 +415,11 @@ export class MuseSession implements Session {
     if (input.purpose === "history") return this.#readHistory(nativeId, known, input);
     if (known !== undefined && !known.unloaded) {
       // A loaded thread takes the resume's settings, or the resume is refused, as on a turn: Muse switches no runtime mode in a session.
-      if (input.policy !== undefined) {
-        if (musePolicy(input.policy) === undefined) throw callErrors.unsupported(`runtimePolicy.modes.${input.policy.mode}`);
-        if (input.policy.mode !== known.policy.mode) throw callErrors.unsupported("sessions.switchRuntimeMode", `Muse sets a session's permission profile when it loads it; thread ${known.thread.id} runs ${known.policy.mode}`);
+      // A policy without a mode keeps the thread's.
+      const policy = input.policy === undefined ? undefined : keepingMode(input.policy, known.policy);
+      if (policy !== undefined) {
+        if (musePolicy(policy) === undefined) throw callErrors.unsupported(`runtimePolicy.modes.${policy.mode}`);
+        if (policy.mode !== known.policy.mode) throw callErrors.unsupported("sessions.switchRuntimeMode", `Muse sets a session's permission profile when it loads it; thread ${known.thread.id} runs ${known.policy.mode ?? "Muse's own mode"}`);
       }
       if (input.launch !== undefined) await this.#replaceLaunch(known, input.launch);
       const host = await this.#ensureHost(known);
@@ -412,7 +430,7 @@ export class MuseSession implements Session {
         });
         known.model = model;
       }
-      if (input.policy !== undefined) known.policy = { ...input.policy, cwd: known.cwd };
+      if (policy !== undefined) known.policy = { ...policy, cwd: known.cwd };
       return { ...known.thread, ...(known.model === undefined ? {} : { appliedConfig: { model: known.model } }) };
     }
     const policyInput = input.policy ?? known?.policy;
@@ -476,7 +494,7 @@ export class MuseSession implements Session {
       });
       const launch = input.launch ?? this.#input.launch;
       const root = read.session.workspaceRoot ?? cwd;
-      const state = this.#register(nativeId, host, { cwd: root, policy: { ...policyInput, cwd: root }, muse, launch, model: read.session.modelId ?? undefined, instructions: launchInstructions(launch, undefined) });
+      const state = this.#register(nativeId, host, { cwd: root, policy: { ...policyInput, cwd: root }, muse, approvalMode: read.session.approvalMode?.mode, launch, model: read.session.modelId ?? undefined, instructions: launchInstructions(launch, undefined) });
       state.host = undefined;
       state.unloaded = true;
       state.thread = { ...state.thread, status: "unloaded" };
@@ -522,15 +540,20 @@ export class MuseSession implements Session {
       const resumed = await host.command("session/resume", {
         sessionId: nativeId,
         excludeItems: quiet,
-        permissionProfile: muse.permissionProfile,
+        ...(muse.permissionProfile === undefined ? {} : { permissionProfile: muse.permissionProfile }),
         ...(model === undefined ? {} : { modelId: model }),
         ...(config === undefined ? {} : { config }),
       });
-      await host.command("session/setApprovalMode", { sessionId: nativeId, mode: muse.approvalMode }).catch((error: unknown) => {
-        throw callErrorFromMuse(this.#runtime.sdk, error, "session");
-      });
+      // No mode: the session keeps the approval mode Muse restored for it.
+      const set =
+        muse.approvalMode === undefined
+          ? undefined
+          : await host.command("session/setApprovalMode", { sessionId: nativeId, mode: muse.approvalMode }).catch((error: unknown) => {
+              throw callErrorFromMuse(this.#runtime.sdk, error, "session");
+            });
       const cwd = resumed.session.workspaceRoot ?? spec.cwd;
-      const state = this.#register(nativeId, host, { cwd, policy: { ...spec.policy, cwd }, muse, launch, model: resumed.session.modelId ?? model, instructions: spec.instructions });
+      const approvalMode = set?.effectiveMode.mode ?? resumed.session.approvalMode?.mode;
+      const state = this.#register(nativeId, host, { cwd, policy: { ...spec.policy, cwd }, muse, approvalMode, launch, model: resumed.session.modelId ?? model, instructions: spec.instructions });
       if (!quiet) this.#replay(state, resumed.history.items ?? resumed.history.snapshot?.state.items ?? [], resumed.session.activeTurnId, resumed.lastTurn);
       // The turn Muse still runs, history or not: its open requests come again right after this answer (`pendingRequests`), and they belong to it.
       const activeTurnId = resumed.session.activeTurnId;
@@ -652,8 +675,10 @@ export class MuseSession implements Session {
     if (thread.unloaded) throw callErrors.invalidState("thread_unloaded", "Resume the thread first");
     if (input.intent !== "start" && input.intent !== "steer" && input.intent !== "queue") return { status: "unsupported", capability: `turns.${input.intent}` };
     if (input.policy !== undefined) {
-      if (musePolicy(input.policy) === undefined) return { status: "unsupported", capability: `runtimePolicy.modes.${input.policy.mode}` };
-      if (input.policy.mode !== thread.policy.mode) return { status: "unsupported", capability: "sessions.switchRuntimeMode" };
+      // A policy without a mode keeps the thread's.
+      const policy = keepingMode(input.policy, thread.policy);
+      if (musePolicy(policy) === undefined) return { status: "unsupported", capability: `runtimePolicy.modes.${policy.mode}` };
+      if (policy.mode !== thread.policy.mode) return { status: "unsupported", capability: "sessions.switchRuntimeMode" };
     }
     // Any effort the host names goes to Muse in turn/start, which takes or refuses it.
     const effort = typeof input.config?.["reasoningEffort"] === "string" ? input.config["reasoningEffort"] : this.#runtime.defaultEffort;
@@ -928,6 +953,14 @@ export class MuseSession implements Session {
     return thread;
   }
 
+  /** Records the thread's mode from its policy and Muse's last report, and tells the host when it changed. */
+  #refreshMode(thread: ThreadState): void {
+    const effectiveMode = effectiveModeOf(thread.policy, thread.approvalMode);
+    if (JSON.stringify(effectiveMode) === JSON.stringify(thread.thread.effectiveMode)) return;
+    thread.thread = { ...thread.thread, effectiveMode };
+    this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, effectiveMode } }, { threadId: thread.thread.id });
+  }
+
   #policy(policy: RuntimePolicy): MusePolicy {
     const muse = musePolicy(policy);
     if (muse === undefined) throw callErrors.unsupported(`runtimePolicy.modes.${policy.mode}`, `Muse supports the runtime modes ${MUSE_SUPPORTED_MODES.join(" and ")}`);
@@ -980,14 +1013,17 @@ export class MuseSession implements Session {
       const host = await this.#startHost(thread.cwd, thread.muse);
       try {
         const config = await this.#sessionConfig(host, thread.thread.id, thread.launch);
-        await host.command("session/resume", {
+        const resumed = await host.command("session/resume", {
           sessionId: thread.nativeId,
           excludeItems: true,
-          permissionProfile: thread.muse.permissionProfile,
+          ...(thread.muse.permissionProfile === undefined ? {} : { permissionProfile: thread.muse.permissionProfile }),
           ...(thread.model === undefined ? {} : { modelId: thread.model }),
           ...(config === undefined ? {} : { config }),
         });
-        await host.command("session/setApprovalMode", { sessionId: thread.nativeId, mode: thread.muse.approvalMode });
+        const approvalMode = thread.muse.approvalMode;
+        const set = approvalMode === undefined ? undefined : await host.command("session/setApprovalMode", { sessionId: thread.nativeId, mode: approvalMode });
+        thread.approvalMode = set?.effectiveMode.mode ?? resumed.session.approvalMode?.mode ?? thread.approvalMode;
+        this.#refreshMode(thread);
       } catch (error) {
         await host.close();
         throw callErrorFromMuse(this.#runtime.sdk, error, "native session");
@@ -1052,7 +1088,7 @@ export class MuseSession implements Session {
   #register(
     nativeId: string,
     host: MuseHost,
-    spec: { cwd: string; policy: RuntimePolicy; muse: MusePolicy; launch: LaunchContext | undefined; model: string | undefined; instructions: string | undefined; title?: string },
+    spec: { cwd: string; policy: RuntimePolicy; muse: MusePolicy; approvalMode: string | undefined; launch: LaunchContext | undefined; model: string | undefined; instructions: string | undefined; title?: string },
   ): ThreadState {
     const id = threadIdFor(nativeId);
     const thread: Thread = {
@@ -1063,6 +1099,7 @@ export class MuseSession implements Session {
       handle: nativeId,
       ...(spec.title === undefined ? {} : { title: spec.title }),
       identityVersion: this.#runtime.capabilities.identity.identityVersion,
+      effectiveMode: effectiveModeOf(spec.policy, spec.approvalMode),
     };
     const existing = this.#threads.get(id);
     if (existing !== undefined) {
@@ -1072,6 +1109,7 @@ export class MuseSession implements Session {
       existing.cwd = spec.cwd;
       existing.policy = spec.policy;
       existing.muse = spec.muse;
+      existing.approvalMode = spec.approvalMode;
       existing.launch = spec.launch;
       existing.unloaded = false;
       existing.instructions = spec.instructions;
@@ -1083,6 +1121,7 @@ export class MuseSession implements Session {
         cwd: spec.cwd,
         policy: spec.policy,
         muse: spec.muse,
+        approvalMode: spec.approvalMode,
         launch: spec.launch,
         model: spec.model,
         instructions: spec.instructions,
@@ -1388,6 +1427,10 @@ export class MuseSession implements Session {
       }
       case "session/modelChanged":
         thread.model = (params as unknown as MuseNotifications["session/modelChanged"]).modelId;
+        return;
+      case "session/approvalModeChanged":
+        thread.approvalMode = (params as unknown as MuseNotifications["session/approvalModeChanged"]).mode;
+        this.#refreshMode(thread);
         return;
       default:
         return;

@@ -45,6 +45,10 @@
 //   the source's on fork (thread_processor.rs:4782–4791, 5788–5794); the
 //   `config` overrides (MCP servers among them) last for that load only.
 //   `turn/start` overrides persist for later turns (turn_processor.rs:865–990).
+//   A thread started without approval settings gets the user's config
+//   (`world.userSettings`). `thread/settings/update` changes a loaded
+//   thread's settings for its later turns and reports an effective change
+//   with `thread/settings/updated` (vendored app-server-README.md:564–566).
 // - An ordinary command approval offers `accept`, at most one exec-policy
 //   amendment and `cancel`; a network approval `accept`, `acceptForSession`,
 //   at most one allowing network amendment and `cancel`
@@ -566,6 +570,8 @@ export class FakeAppServer {
         return this.#resumeThread(params);
       case "thread/fork":
         return this.#forkThread(params);
+      case "thread/settings/update":
+        return this.#updateSettings(params);
       case "thread/read": {
         const thread = this.thread(params["threadId"] as string);
         if (params["includeTurns"] === true && !thread.materialized) throw new RpcFailure(-32600, `thread ${thread.id} is not materialized yet; includeTurns is unavailable before first user message`);
@@ -769,9 +775,9 @@ export class FakeAppServer {
       terminals: [],
       subagents: [],
       settings: {
-        approvalPolicy: params["approvalPolicy"] ?? "on-request",
-        approvalsReviewer: (params["approvalsReviewer"] as string | undefined) ?? "user",
-        sandbox: (params["sandbox"] as string | undefined) ?? "workspace-write",
+        approvalPolicy: params["approvalPolicy"] ?? this.world.userSettings.approvalPolicy,
+        approvalsReviewer: (params["approvalsReviewer"] as string | undefined) ?? this.world.userSettings.approvalsReviewer,
+        sandbox: (params["sandbox"] as string | undefined) ?? this.world.userSettings.sandbox,
         mcpServers: mcpServerNames(params["config"]),
       },
       launches: [params],
@@ -920,6 +926,40 @@ export class FakeAppServer {
       // An active goal on an idle thread: Codex starts working on it at once.
       if (goal.status === "active" && !this.world.activeTurns().some((turn) => turn.threadId === thread.id)) this.world.startGoalTurn(this, thread);
     });
+  }
+
+  /**
+   * `thread/settings/update` changes a loaded thread's settings for its later
+   * turns, answers once Core took them, and reports an effective change with
+   * `thread/settings/updated`, which is no per-request acknowledgment
+   * (app-server-README.md:564–566).
+   */
+  #updateSettings(params: JsonObject): unknown {
+    const thread = this.#loadedThread(params["threadId"] as string);
+    const before = JSON.stringify(thread.settings);
+    const sandboxPolicy = params["sandboxPolicy"];
+    thread.settings = {
+      ...thread.settings,
+      ...(params["approvalPolicy"] === undefined || params["approvalPolicy"] === null ? {} : { approvalPolicy: params["approvalPolicy"] }),
+      ...(typeof params["approvalsReviewer"] === "string" ? { approvalsReviewer: params["approvalsReviewer"] } : {}),
+      ...(isObject(sandboxPolicy) ? { sandbox: SANDBOX_MODES[String(sandboxPolicy["type"])] ?? "workspace-write" } : {}),
+    };
+    if (JSON.stringify(thread.settings) === before) return {};
+    const model = (params["model"] as string | undefined) ?? "fake-large";
+    return new Answer({}, () =>
+      this.notify("thread/settings/updated", {
+        threadId: thread.id,
+        threadSettings: {
+          approvalPolicy: thread.settings.approvalPolicy as JsonObject,
+          approvalsReviewer: thread.settings.approvalsReviewer,
+          collaborationMode: { mode: "default", settings: { model } },
+          cwd: thread.cwd,
+          model,
+          modelProvider: "openai",
+          sandboxPolicy: this.#sandboxPolicy(thread.settings.sandbox),
+        },
+      }),
+    );
   }
 
   #startTurn(params: JsonObject): unknown {
@@ -1085,6 +1125,8 @@ export class FakeCodexWorld {
     extensions: [],
   };
   rateLimits: RateLimitSnapshot = { primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1_900_000_000 }, secondary: { usedPercent: 3, windowDurationMins: 10_080, resetsAt: 1_900_500_000 } };
+  /** The approval settings the user's `config.toml` gives a thread started without them (`approval_policy`, `sandbox_mode`, `approvals_reviewer`). */
+  userSettings: { approvalPolicy: unknown; approvalsReviewer: string; sandbox: string } = { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write" };
   readonly options: FakeCodexOptions;
   readonly #turns = new Map<string, FakeTurn>();
   readonly #logins = new Map<string, { server: FakeAppServer; kind: string }>();

@@ -871,7 +871,9 @@ crate::open_enum! {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimePolicy {
-    pub mode: RuntimeMode,
+    /// Leave it out to keep the harness's own mode: the driver sends the harness no permission override, so it applies the user's own configuration for the workspace. The thread's `effectiveMode` then reports what the harness chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<RuntimeMode>,
     pub interaction: InteractionMode,
     pub cwd: String,
     #[serde(rename = "additionalRoots", default, skip_serializing_if = "Option::is_none")]
@@ -879,6 +881,24 @@ pub struct RuntimePolicy {
     /// Opaque provider-native policy passed through unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::wire::present")]
     pub native: Option<AnyValue>,
+}
+
+/// The mode a thread runs in, as far as the driver knows. `source` says who chose it: `host` when the host named `policy.mode`, `harness` when the host left it out and the harness applied its own. `mode` is the ARI mode the harness's setting maps to, or the vendor's own name when no ARI mode fits; `interaction` is the interaction mode. Each is absent while the driver does not know it: a driver never guesses either.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectiveMode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<RuntimeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<InteractionMode>,
+    pub source: EffectiveModeSource,
+}
+
+crate::open_enum! {
+    /// Open: a value this client does not know is kept as `Unrecognized`.
+    EffectiveModeSource {
+        Host = "host",
+        Harness = "harness",
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -4847,6 +4867,9 @@ pub struct AppliedThread {
     pub updated_at: Option<String>,
     #[serde(rename = "identityVersion", default, skip_serializing_if = "Option::is_none")]
     pub identity_version: Option<i64>,
+    /// The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes.
+    #[serde(rename = "effectiveMode", default, skip_serializing_if = "Option::is_none")]
+    pub effective_mode: Option<EffectiveMode>,
     #[serde(rename = "appliedConfig", default, skip_serializing_if = "Option::is_none")]
     pub applied_config: Option<ConfigValues>,
 }
@@ -5287,6 +5310,9 @@ pub struct Thread {
     pub updated_at: Option<String>,
     #[serde(rename = "identityVersion", default, skip_serializing_if = "Option::is_none")]
     pub identity_version: Option<i64>,
+    /// The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes.
+    #[serde(rename = "effectiveMode", default, skip_serializing_if = "Option::is_none")]
+    pub effective_mode: Option<EffectiveMode>,
 }
 
 /// Patch form of Thread. Only `id` is required; the upsert that opens a thread carries every field Thread requires.
@@ -5315,6 +5341,8 @@ pub struct ThreadPatch {
     pub updated_at: Option<Option<String>>,
     #[serde(rename = "identityVersion", default, skip_serializing_if = "Option::is_none", with = "crate::wire::double_option")]
     pub identity_version: Option<Option<i64>>,
+    #[serde(rename = "effectiveMode", default, skip_serializing_if = "Option::is_none", with = "crate::wire::double_option")]
+    pub effective_mode: Option<Option<EffectiveMode>>,
 }
 
 crate::open_enum! {

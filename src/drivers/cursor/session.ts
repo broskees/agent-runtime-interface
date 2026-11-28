@@ -50,9 +50,10 @@
 
 import { callErrors, toCallError } from "../../errors.ts";
 import { EventSequencer } from "../../driver-kit/sequencer.ts";
+import { keepingMode } from "../../driver-kit/policy.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ConfigValues, ContentBlock } from "../../generated/common.ts";
-import type { ConfigChangePlan, RuntimePolicy } from "../../generated/config.ts";
+import type { ConfigChangePlan, EffectiveMode, RuntimePolicy } from "../../generated/config.ts";
 import type { AriEventBody, AriEvent } from "../../generated/events.ts";
 import type { Failure } from "../../generated/errors.ts";
 import type { OpenSessionInput } from "../../generated/instance.ts";
@@ -103,6 +104,15 @@ export interface CursorSessionContext<Store> {
 export const READ_ONLY_TOOLS: readonly string[] = ["read", "grep", "glob", "ls", "semSearch", "readLints", "readTodos", "updateTodos", "createPlan"];
 
 const SUPPORTED_MODES: ReadonlySet<string> = new Set(["read_only", "full_access"]);
+
+/**
+ * A thread's mode. Without a mode the driver opens the agent with the options
+ * it gives `full_access` (no tool allowlist), which a local agent runs with
+ * every tool ("Sandbox options"), so the harness's own mode is `full_access`.
+ */
+function effectiveModeOf(policy: RuntimePolicy): EffectiveMode {
+  return policy.mode === undefined ? { mode: "full_access", source: "harness" } : { mode: policy.mode, interaction: policy.interaction, source: "host" };
+}
 const SUPPORTED_INTERACTIONS: ReadonlySet<string> = new Set(["default", "plan"]);
 const SUPPORTED_OPTIONS: ReadonlySet<string> = new Set(["model"]);
 
@@ -261,7 +271,8 @@ export class CursorSession<Store> implements Session {
    */
   async #resumeKnown(thread: CursorThread, input: ResumeThreadInput): Promise<AppliedThread> {
     const launch = this.#launch(input.launch);
-    const policy = input.policy ?? thread.policy;
+    // A policy without a mode keeps the thread's.
+    const policy = input.policy === undefined ? thread.policy : keepingMode(input.policy, thread.policy);
     this.#checkPolicy(policy);
     const model = this.#model(input.config, thread.model);
     if (input.policy !== undefined && (await this.#canonical(input.policy.cwd)) !== thread.cwd) {
@@ -269,7 +280,7 @@ export class CursorSession<Store> implements Session {
     }
     const reopen = policy.mode !== thread.policy.mode;
     if (reopen && (thread.active !== undefined || thread.compacting || thread.opening !== undefined)) {
-      throw callErrors.invalidState("turn_active", `Cursor sets an agent's tools when it opens the agent, so thread ${thread.thread.id} cannot change to ${policy.mode} while a run is going`);
+      throw callErrors.invalidState("turn_active", `Cursor sets an agent's tools when it opens the agent, so thread ${thread.thread.id} cannot change to ${policy.mode ?? "Cursor's own mode"} while a run is going`);
     }
     const servers = mergedServers(thread.launchServers, launch.servers);
     // The session's own launch instructions reached this thread when it was created or first resumed here.
@@ -294,6 +305,7 @@ export class CursorSession<Store> implements Session {
     }
     // Only a resume that succeeded changes the thread.
     thread.policy = policy;
+    this.#refreshMode(thread);
     thread.model = model;
     thread.launchServers = servers;
     thread.instructions.push(...added);
@@ -399,7 +411,7 @@ export class CursorSession<Store> implements Session {
     if (input.intent === "queue") return { status: "unsupported", capability: "turns.queue" };
     if (input.intent !== "start" && input.intent !== "steer") return { status: "unsupported", capability: `turns.${String(input.intent)}` };
     if (input.context?.synthetic !== undefined && input.context.synthetic.length > 0) return { status: "unsupported", capability: "context.syntheticContext" };
-    const policy = input.policy ?? thread.policy;
+    const policy = input.policy === undefined ? thread.policy : keepingMode(input.policy, thread.policy);
     if (policy.mode !== thread.policy.mode) return { status: "unsupported", capability: "sessions.switchRuntimeMode" };
     if (!SUPPORTED_INTERACTIONS.has(policy.interaction)) return { status: "unsupported", capability: "runtimePolicy.interactionModes" };
     const prompt = await this.#promptOf(input.content);
@@ -528,7 +540,7 @@ export class CursorSession<Store> implements Session {
   async #register(agent: CursorSdkAgent, cwd: string, policy: RuntimePolicy, model: string, servers: LaunchMcpServer[], instructions: string[], title: string | undefined): Promise<CursorThread> {
     const id = threadIdFor(agent.agentId);
     const thread: CursorThread = {
-      thread: { id, native: { id: agent.agentId, strength: "strong" }, cwd, status: "idle", handle: agent.agentId, identityVersion: IDENTITY_VERSION, ...(title === undefined ? {} : { title }) },
+      thread: { id, native: { id: agent.agentId, strength: "strong" }, cwd, status: "idle", handle: agent.agentId, identityVersion: IDENTITY_VERSION, ...(title === undefined ? {} : { title }), effectiveMode: effectiveModeOf(policy) },
       agentId: agent.agentId,
       cwd,
       policy,
@@ -712,8 +724,16 @@ export class CursorSession<Store> implements Session {
   // -------------------------------------------------------------------------
   // Helpers
 
+  /** Records the thread's mode after its policy changed, and tells the host when it did. */
+  #refreshMode(thread: CursorThread): void {
+    const effectiveMode = effectiveModeOf(thread.policy);
+    if (JSON.stringify(effectiveMode) === JSON.stringify(thread.thread.effectiveMode)) return;
+    thread.thread = { ...thread.thread, effectiveMode };
+    this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, effectiveMode } }, { threadId: thread.thread.id });
+  }
+
   #checkPolicy(policy: RuntimePolicy): void {
-    if (!SUPPORTED_MODES.has(policy.mode)) throw callErrors.unsupported(`runtimePolicy.modes.${policy.mode}`);
+    if (policy.mode !== undefined && !SUPPORTED_MODES.has(policy.mode)) throw callErrors.unsupported(`runtimePolicy.modes.${policy.mode}`);
     if (!SUPPORTED_INTERACTIONS.has(policy.interaction)) throw callErrors.unsupported("runtimePolicy.interactionModes");
   }
 

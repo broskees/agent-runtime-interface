@@ -1,7 +1,10 @@
 // `ari/drivers/grok`: xAI's Grok Build CLI as an ACP agent. Quirks it keeps:
 // - it launches `grok --permission-mode default agent stdio`, so a supervised
 //   thread never inherits an always-approve setting from the user's Grok
-//   config; `full_access` is answered at the client boundary by the ACP driver;
+//   config; `full_access` is answered at the client boundary by the ACP driver.
+//   The flag holds for the session's one Grok process, so a thread whose
+//   policy names no mode also runs in Grok's `default` mode, which asks before
+//   it acts, and reports `approval_required`;
 // - its probe runs `grok --version` with `GROK_DISABLE_AUTOUPDATER=1`, so a
 //   health check never starts the updater;
 // - it runs the `grok` the user installed and never updates it; a `grok`
@@ -28,6 +31,8 @@ export const grokDriver: Driver<GrokConfig> = createAcpDriver<GrokConfig>({
   launchIdentity: (config) => config.command,
   probeTarget: async ({ config }) => ({ kind: "command", command: config.command, versionArgs: ["--version"], env: { GROK_DISABLE_AUTOUPDATER: "1" } }),
   launch: async ({ config }) => ({ command: config.command, args: [...GROK_ACP_ARGS], env: {} }),
+  // GROK_ACP_ARGS start Grok in its default permission mode, which asks before it acts, whatever the user's config says.
+  harnessMode: () => ({ mode: "approval_required", interaction: "default" }),
 });
 
 export default grokDriver;

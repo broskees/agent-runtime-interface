@@ -1510,7 +1510,8 @@ class InteractionMode(OpenEnum):
 
 @dataclass(kw_only=True)
 class RuntimePolicy:
-    mode: RuntimeMode
+    mode: RuntimeMode | None = None
+    """Leave it out to keep the harness's own mode: the driver sends the harness no permission override, so it applies the user's own configuration for the workspace. The thread's `effectiveMode` then reports what the harness chose."""
     interaction: InteractionMode
     cwd: str
     additional_roots: list[str] | None = None
@@ -1521,7 +1522,7 @@ class RuntimePolicy:
     def from_json(cls, data: Any) -> RuntimePolicy:
         data = require_object(data, "RuntimePolicy")
         return cls(
-            mode=required(data, "mode", RuntimeMode.from_json),
+            mode=optional(data, "mode", RuntimeMode.from_json),
             interaction=required(data, "interaction", InteractionMode.from_json),
             cwd=required(data, "cwd", decode_str),
             additional_roots=optional(data, "additionalRoots", list_of(decode_str)),
@@ -1530,7 +1531,8 @@ class RuntimePolicy:
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
-        out["mode"] = encode(self.mode)
+        if self.mode is not None:
+            out["mode"] = encode(self.mode)
         out["interaction"] = encode(self.interaction)
         out["cwd"] = encode(self.cwd)
         if self.additional_roots is not None:
@@ -1538,6 +1540,38 @@ class RuntimePolicy:
         if not isinstance(self.native, Unset):
             out["native"] = encode(self.native)
         return out
+
+
+@dataclass(kw_only=True)
+class EffectiveMode:
+    """The mode a thread runs in, as far as the driver knows. `source` says who chose it: `host` when the host named `policy.mode`, `harness` when the host left it out and the harness applied its own. `mode` is the ARI mode the harness's setting maps to, or the vendor's own name when no ARI mode fits; `interaction` is the interaction mode. Each is absent while the driver does not know it: a driver never guesses either."""
+    mode: RuntimeMode | None = None
+    interaction: InteractionMode | None = None
+    source: EffectiveModeSource
+
+    @classmethod
+    def from_json(cls, data: Any) -> EffectiveMode:
+        data = require_object(data, "EffectiveMode")
+        return cls(
+            mode=optional(data, "mode", RuntimeMode.from_json),
+            interaction=optional(data, "interaction", InteractionMode.from_json),
+            source=required(data, "source", EffectiveModeSource.from_json),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.mode is not None:
+            out["mode"] = encode(self.mode)
+        if self.interaction is not None:
+            out["interaction"] = encode(self.interaction)
+        out["source"] = encode(self.source)
+        return out
+
+
+class EffectiveModeSource(OpenEnum):
+    """Open: a value this client does not know is kept as a member that is not recognized."""
+    HOST = "host"
+    HARNESS = "harness"
 
 
 @dataclass(kw_only=True)
@@ -9561,6 +9595,8 @@ class AppliedThread:
     created_at: str | None = None
     updated_at: str | None = None
     identity_version: int | None = None
+    effective_mode: EffectiveMode | None = None
+    """The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes."""
     applied_config: ConfigValues | None = None
 
     @classmethod
@@ -9579,6 +9615,7 @@ class AppliedThread:
             created_at=optional(data, "createdAt", decode_str),
             updated_at=optional(data, "updatedAt", decode_str),
             identity_version=optional(data, "identityVersion", decode_int),
+            effective_mode=optional(data, "effectiveMode", EffectiveMode.from_json),
             applied_config=optional(data, "appliedConfig", decode_config_values),
         )
 
@@ -9604,6 +9641,8 @@ class AppliedThread:
             out["updatedAt"] = encode(self.updated_at)
         if self.identity_version is not None:
             out["identityVersion"] = encode(self.identity_version)
+        if self.effective_mode is not None:
+            out["effectiveMode"] = encode(self.effective_mode)
         if self.applied_config is not None:
             out["appliedConfig"] = encode(self.applied_config)
         return out
@@ -10460,6 +10499,8 @@ class Thread:
     created_at: str | None = None
     updated_at: str | None = None
     identity_version: int | None = None
+    effective_mode: EffectiveMode | None = None
+    """The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes."""
 
     @classmethod
     def from_json(cls, data: Any) -> Thread:
@@ -10477,6 +10518,7 @@ class Thread:
             created_at=optional(data, "createdAt", decode_str),
             updated_at=optional(data, "updatedAt", decode_str),
             identity_version=optional(data, "identityVersion", decode_int),
+            effective_mode=optional(data, "effectiveMode", EffectiveMode.from_json),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -10501,6 +10543,8 @@ class Thread:
             out["updatedAt"] = encode(self.updated_at)
         if self.identity_version is not None:
             out["identityVersion"] = encode(self.identity_version)
+        if self.effective_mode is not None:
+            out["effectiveMode"] = encode(self.effective_mode)
         return out
 
 
@@ -10519,6 +10563,7 @@ class ThreadPatch:
     created_at: str | None | Unset = UNSET
     updated_at: str | None | Unset = UNSET
     identity_version: int | None | Unset = UNSET
+    effective_mode: EffectiveMode | None | Unset = UNSET
 
     @classmethod
     def from_json(cls, data: Any) -> ThreadPatch:
@@ -10536,6 +10581,7 @@ class ThreadPatch:
             created_at=present(data, "createdAt", nullable(decode_str)),
             updated_at=present(data, "updatedAt", nullable(decode_str)),
             identity_version=present(data, "identityVersion", nullable(decode_int)),
+            effective_mode=present(data, "effectiveMode", nullable(EffectiveMode.from_json)),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -10563,6 +10609,8 @@ class ThreadPatch:
             out["updatedAt"] = encode(self.updated_at)
         if not isinstance(self.identity_version, Unset):
             out["identityVersion"] = encode(self.identity_version)
+        if not isinstance(self.effective_mode, Unset):
+            out["effectiveMode"] = encode(self.effective_mode)
         return out
 
 

@@ -219,6 +219,12 @@ export class FakeClaudeWorld {
   readonly ambientAuth: FakeAmbientAuth;
   /** Mirror transcripts to the query's Claude config directory, as Claude Code writes them; only ever under the OS temp directory. */
   readonly writeTranscripts: boolean;
+  /**
+   * The mode the user's settings give a query started without `permissionMode`
+   * (`permissions.defaultMode`): the SDK's `Options.permissionMode` says Claude
+   * Code then starts as `claude -p` does, in that mode.
+   */
+  userPermissionMode: NonNullable<Options["permissionMode"]> = "default";
   readonly #turns = new Waiters<FakeTurn>();
   #ids = 0;
   #sessionIds = 0;
@@ -722,7 +728,7 @@ export class FakeQuery implements Query {
     this.world = world;
     this.options = params.options ?? {};
     this.cwd = this.options.cwd ?? process.cwd();
-    this.permissionMode = this.options.permissionMode ?? "default";
+    this.permissionMode = this.options.permissionMode ?? world.userPermissionMode;
     this.model = this.options.model ?? MODEL;
     this.effort = this.options.effort;
     world.queries.push(this);

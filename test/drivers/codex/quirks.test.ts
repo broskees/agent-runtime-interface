@@ -76,6 +76,99 @@ describe("a history resume", () => {
   });
 });
 
+/** Whether a request carries any of the approval settings a runtime mode sets. */
+function approvalSettingsIn(params: { [key: string]: unknown } | undefined): string[] {
+  return ["approvalPolicy", "approvalsReviewer", "sandbox", "sandboxPolicy", "permissions"].filter((key) => params !== undefined && Object.hasOwn(params, key));
+}
+
+async function completedTurn(current: CodexTestRig, opened: OpenedCodexSession, threadId: string, key: string, extra: { policy?: ReturnType<typeof policy> | { interaction: "default"; cwd: string } } = {}): Promise<void> {
+  const started = await opened.session.startTurn({ threadId, clientTurnKey: key, intent: "start", content: [{ type: "text", text: key }], ...extra });
+  assert.equal(started.status, "accepted");
+  const native = await current.nextTurn();
+  await native.complete();
+  await terminal(opened, (started as { turnId: string }).turnId);
+}
+
+describe("the runtime mode", () => {
+  test("a policy without a mode sends Codex no approval settings; the thread reports the settings Codex says it applied, as an ARI mode or in Codex's words", async () => {
+    rig = await codexRig();
+    const opened = await rig.open();
+    // The user's config.toml: on-request approvals in a read-only sandbox.
+    rig.world.userSettings = { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "read-only" };
+    const own = await opened.session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+    assert.deepEqual(approvalSettingsIn(rig.requests("thread/start").at(-1)), [], "the driver sent Codex approval settings the host did not choose");
+    assert.deepEqual(own.effectiveMode, { mode: "read_only", source: "harness" });
+    // A combination no ARI mode maps to keeps Codex's words.
+    rig.world.userSettings = { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "workspace-write" };
+    const unusual = await opened.session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+    assert.deepEqual(unusual.effectiveMode, { mode: "never/workspace-write", source: "harness" });
+    // A host's mode still reaches Codex, and the thread says the host chose it.
+    const hosted = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd, "full_access") });
+    assert.deepEqual(approvalSettingsIn(rig.requests("thread/start").at(-1)), ["approvalPolicy", "approvalsReviewer", "sandbox"]);
+    assert.deepEqual(hosted.effectiveMode, { mode: "full_access", interaction: "default", source: "host" });
+
+    // A turn whose policy names no mode sends no approval settings and changes no mode; one that names a mode does.
+    await completedTurn(rig, opened, own.id, "own-1", { policy: { interaction: "default", cwd: rig.cwd } });
+    assert.deepEqual(approvalSettingsIn(rig.requests("turn/start").at(-1)), []);
+    await completedTurn(rig, opened, own.id, "own-2", { policy: policy(rig.cwd, "auto") });
+    assert.deepEqual(approvalSettingsIn(rig.requests("turn/start").at(-1)), ["approvalPolicy", "approvalsReviewer", "sandboxPolicy"]);
+    const reports = opened.bodies("thread.upsert").filter((body) => body.thread.id === own.id && body.thread.effectiveMode !== undefined);
+    assert.deepEqual(reports.at(-1)?.thread.effectiveMode, { mode: "auto", interaction: "default", source: "host" });
+    strictGrammar(opened.events);
+  });
+
+  test("a resume without a policy records no mode: a fork of it and its reload after a release send Codex no approval settings", async () => {
+    rig = await codexRig();
+    const first = await rig.open();
+    const thread = await first.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd, "full_access") });
+    await completedTurn(rig, first, thread.id, "first");
+    await first.session.close();
+
+    const second = await rig.open();
+    const resumed = await second.session.resumeThread({ native: { handle: thread.handle! }, quiet: true });
+    assert.deepEqual(approvalSettingsIn(rig.requests("thread/resume").at(-1)), []);
+    const fork = await second.session.forkThread!({ threadId: resumed.id, at: { type: "latest" } });
+    assert.deepEqual(approvalSettingsIn(rig.requests("thread/fork").at(-1)), [], "the fork sent the approval settings of a mode nobody chose");
+    await second.session.release();
+    await completedTurn(rig, second, resumed.id, "after-release");
+    assert.deepEqual(approvalSettingsIn(rig.requests("thread/resume").at(-1)), [], "the reload sent the approval settings of a mode nobody chose");
+    assert.equal(rig.world.storedThread(thread.native.id!)!.settings.approvalPolicy, "never");
+    // Codex keeps the thread's saved settings, and says so.
+    assert.deepEqual(resumed.effectiveMode, { mode: "full_access", source: "harness" });
+    assert.deepEqual(fork.effectiveMode, { mode: "full_access", source: "harness" });
+  });
+
+  test("a resume of a loaded thread applies its policy and model through thread/settings/update, and refuses another launch or directory, naming it", async () => {
+    rig = await codexRig();
+    const opened = await rig.open();
+    const thread = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd) });
+    const updates = () => rig!.requests("thread/settings/update");
+
+    const resumed = await opened.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(rig.cwd, "full_access"), config: { model: "fake-small" } });
+    assert.deepEqual(updates(), [{ threadId: thread.native.id, approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "dangerFullAccess" }, model: "fake-small" }]);
+    assert.deepEqual(resumed.effectiveMode, { mode: "full_access", interaction: "default", source: "host" });
+    assert.deepEqual(resumed.appliedConfig, { model: "fake-small" });
+    assert.equal(rig.world.storedThread(thread.native.id!)!.settings.approvalPolicy, "never");
+    assert.equal(rig.requests("thread/resume").length, 0, "a loaded thread's thread/resume overrides are ignored, so the driver sends none");
+
+    // Codex takes MCP servers and developer instructions only when it loads a thread, so another launch is refused.
+    await assert.rejects(
+      opened.session.resumeThread({ native: { handle: thread.handle! }, launch: { mcpServers: [{ name: "docs", transport: "http", url: "http://127.0.0.1:9/mcp" }] } }),
+      (error: unknown) => isAriError(error, "invalid_state") && /MCP servers, dynamic tools and developer instructions only when it loads the thread/.test((error as Error).message),
+    );
+    await assert.rejects(
+      opened.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(rig.otherCwd, "full_access") }),
+      (error: unknown) => isAriError(error, "invalid_state") && /only by loading it again/.test((error as Error).message),
+    );
+    assert.equal(updates().length, 1, "a refused resume changed something");
+    // A policy without a mode sends nothing: the loaded thread keeps its mode.
+    const kept = await opened.session.resumeThread({ native: { handle: thread.handle! }, policy: { interaction: "default", cwd: rig.cwd } });
+    assert.equal(updates().length, 1);
+    assert.deepEqual(kept.effectiveMode, { mode: "full_access", interaction: "default", source: "host" });
+    strictGrammar(opened.events);
+  });
+});
+
 describe("codex quirks", () => {
   test("async questions are message-mode requests that survive their turn's end and a restart, until a user message answers them", async () => {
     rig = await codexRig();

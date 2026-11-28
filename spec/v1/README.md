@@ -60,6 +60,30 @@ would write now. Never edit generated files by hand.
   a patch.
 - Timestamps are ISO-8601 strings.
 
+## Runtime mode
+
+`RuntimePolicy.mode` is optional. A host that names a mode chooses it, and
+each driver maps it onto the harness's settings. A host that leaves `mode`
+out keeps the harness's own: the driver sends the harness no permission
+override, so the harness applies the user's configuration for that
+workspace. `interaction` and `cwd` are still required.
+
+Every thread a driver returns carries `effectiveMode`, the mode it runs in as
+far as the driver knows:
+
+- `source`: `host` when the host named `policy.mode`, `harness` when it left
+  the mode out.
+- `mode`: the ARI mode the harness's setting maps to, or the vendor's own
+  name when no ARI mode fits (for example Claude Code's `dontAsk`). Absent
+  while the driver does not know it; a driver never guesses it.
+- `interaction`: the interaction mode, when known.
+
+A driver sends `effectiveMode` again in a `thread.upsert` when it learns more
+(for example at the harness's first report) or the mode changes. A turn's
+policy, or a resume of a thread the session holds, that names no mode sends
+the harness nothing, and the thread keeps its mode. Each driver's page in
+`docs/drivers/` says what its harness reports.
+
 ## Event grammar
 
 Every session stream satisfies these rules. `ari/host`'s `EventGrammar` checks

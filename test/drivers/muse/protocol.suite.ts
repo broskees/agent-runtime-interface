@@ -690,6 +690,44 @@ describe("muse driver: Muse's protocol", () => {
     }
   });
 
+  test("a policy without a mode sends Muse no approval mode, permission profile or sandbox flag; the thread reports the approval mode Muse says it applied, in Muse's words", async () => {
+    const rig = await museRig();
+    try {
+      // The host configuration's own approval mode for a session started without one.
+      rig.world.defaultApprovalMode = "onRequest";
+      const opened = await rig.open();
+      const thread = await opened.session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+      const startParams = rig.requests("session/start").at(-1) as { [key: string]: unknown };
+      assert.equal(Object.hasOwn(startParams, "approvalMode"), false, "the driver sent an approval mode the host did not choose");
+      assert.equal(Object.hasOwn(startParams, "permissionProfile"), false, "the driver sent a permission profile the host did not choose");
+      assert.equal(rig.world.launches.at(-1)!.args.includes("--disable-sandbox"), false);
+      // Muse does not report the permission profile, which decides who answers, so its approval mode keeps Muse's name.
+      assert.deepEqual(thread.effectiveMode, { mode: "onRequest", source: "harness" });
+      // A turn whose policy names no mode changes nothing.
+      const turn = await start(rig, opened.session, thread, "Hello.", { policy: { interaction: "default", cwd: rig.cwd } });
+      assert.equal(turn.result.status, "accepted");
+      await turn.native.complete();
+      await terminal(opened, turnIdOf(turn.result));
+      assert.equal(rig.requests("session/setApprovalMode").length, 0);
+
+      // A resume of the stored session in another session without a mode keeps the approval mode Muse restored.
+      await opened.session.unloadThread!(thread.id);
+      const other = await rig.open();
+      const resumed = await other.session.resumeThread({ native: thread.native, policy: { interaction: "default", cwd: rig.cwd } });
+      const resume = rig.requests("session/resume").at(-1) as { [key: string]: unknown };
+      assert.equal(Object.hasOwn(resume, "permissionProfile"), false);
+      assert.equal(rig.requests("session/setApprovalMode").length, 0);
+      assert.deepEqual(resumed.effectiveMode, { mode: "onRequest", source: "harness" });
+
+      // A host's mode still reaches Muse, and the thread says the host chose it.
+      const hosted = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd, "full_access") });
+      assert.equal((rig.requests("session/start").at(-1) as { approvalMode?: string }).approvalMode, "allowAll");
+      assert.deepEqual(hosted.effectiveMode, { mode: "full_access", interaction: "default", source: "host" });
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
   test("a resume of a loaded thread applies a new model with session/setModel and refuses a runtime mode Muse cannot switch in a session", async () => {
     const rig = await museRig();
     try {

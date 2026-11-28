@@ -35,7 +35,11 @@
         "subagentId": { "type": "string", "description": "Set when this thread belongs to a provider-native subagent." },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" },
-        "identityVersion": { "type": "integer", "minimum": 0 }
+        "identityVersion": { "type": "integer", "minimum": 0 },
+        "effectiveMode": {
+          "$ref": "config.schema.json#/$defs/EffectiveMode",
+          "description": "The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes."
+        }
       },
       "required": ["id", "native", "cwd", "status"]
     },
@@ -54,7 +58,8 @@
         "subagentId": { "type": ["string", "null"] },
         "createdAt": { "type": ["string", "null"] },
         "updatedAt": { "type": ["string", "null"] },
-        "identityVersion": { "type": ["integer", "null"], "minimum": 0 }
+        "identityVersion": { "type": ["integer", "null"], "minimum": 0 },
+        "effectiveMode": { "anyOf": [{ "$ref": "config.schema.json#/$defs/EffectiveMode" }, { "type": "null" }] }
       },
       "required": ["id"]
     },

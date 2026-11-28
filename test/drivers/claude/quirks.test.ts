@@ -27,6 +27,8 @@ function requests(rig: ClaudeRig): Request[] {
   return [...latest.values()];
 }
 
+let keysUsed = 0;
+
 describe("claude driver quirks", () => {
   test("the SDK is loaded with a dynamic import() of the optional peer, never a static import", () => {
     const sources = fs.readdirSync(path.join(REPO_ROOT, "src", "drivers", "claude")).map((name) => fs.readFileSync(path.join(REPO_ROOT, "src", "drivers", "claude", name), "utf8"));
@@ -247,6 +249,101 @@ describe("claude driver quirks", () => {
       assert.deepEqual(read.appliedConfig, { model: "opus", effort: "high" });
       assert.deepEqual([query.model, query.effort], ["opus", "high"]);
       assert.equal(controls().length, 2);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a policy without a mode sends Claude Code no permissionMode; the thread reports the mode Claude Code says it started in, and each later report", async () => {
+    const rig = await openClaudeRig();
+    try {
+      // The user's settings start Claude Code in acceptEdits (permissions.defaultMode).
+      rig.world.userPermissionMode = "acceptEdits";
+      const modeReports = (threadId: string) =>
+        rig.log.filter((event) => event.body.type === "thread.upsert" && event.body.thread.id === threadId && event.body.thread.effectiveMode !== undefined).map((event) => (event.body.type === "thread.upsert" ? event.body.thread.effectiveMode : undefined));
+      const thread = await rig.session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+      const query = rig.world.queries.at(-1)!;
+      assert.equal(Object.hasOwn(query.options, "permissionMode"), false, "the driver sent Claude Code a permission mode the host did not choose");
+      // Claude Code reports its mode only in system/init, at the start of a turn: until then the driver does not know it.
+      assert.deepEqual(thread.effectiveMode, { source: "harness" });
+
+      const { turnId, native } = await rig.turn(thread.id, "Hello.");
+      await until(() => modeReports(thread.id).some((mode) => mode?.mode === "auto_accept_edits"), "the thread to report Claude Code's mode");
+      assert.deepEqual(modeReports(thread.id).at(-1), { mode: "auto_accept_edits", interaction: "default", source: "harness" });
+      // A status that carries the mode reports a change: plan is an interaction mode, dontAsk keeps Claude Code's name.
+      query.emit({ type: "system", subtype: "status", status: null, permissionMode: "plan", uuid: rig.world.uuid(), session_id: thread.handle! });
+      await until(() => modeReports(thread.id).at(-1)?.interaction === "plan", "the plan report");
+      assert.deepEqual(modeReports(thread.id).at(-1), { interaction: "plan", source: "harness" });
+      query.emit({ type: "system", subtype: "status", status: null, permissionMode: "dontAsk", uuid: rig.world.uuid(), session_id: thread.handle! });
+      await until(() => modeReports(thread.id).at(-1)?.mode === "dontAsk", "the dontAsk report");
+      assert.deepEqual(modeReports(thread.id).at(-1), { mode: "dontAsk", interaction: "default", source: "harness" });
+      await native.complete();
+      await rig.terminal(turnId);
+      assert.equal(rig.world.calls.filter((call) => call.kind === "setPermissionMode").length, 0);
+
+      // A turn whose policy names a mode switches the running query, and the host's mode is reported.
+      const named = await rig.turn(thread.id, "Now with full access.", { policy: rig.policy("full_access") });
+      assert.deepEqual(rig.world.calls.filter((call) => call.kind === "setPermissionMode").map((call) => (call.kind === "setPermissionMode" ? call.mode : undefined)), ["bypassPermissions"]);
+      assert.deepEqual(modeReports(thread.id).at(-1), { mode: "full_access", interaction: "default", source: "host" });
+      await named.native.complete();
+      await rig.terminal(named.turnId);
+      // A later turn whose policy names no mode sends none, and the query keeps the host's.
+      const unnamed = await rig.turn(thread.id, "Carry on.", { policy: { interaction: "default", cwd: rig.cwd } });
+      assert.equal(rig.world.calls.filter((call) => call.kind === "setPermissionMode").length, 1);
+      assert.deepEqual(modeReports(thread.id).at(-1), { mode: "full_access", interaction: "default", source: "host" });
+      await unnamed.native.complete();
+      await rig.terminal(unnamed.turnId);
+
+      // A host's mode still reaches Claude Code at start, and the thread says the host chose it.
+      const hosted = await rig.thread({ policy: rig.policy("auto_accept_edits") });
+      assert.equal(rig.world.queries.at(-1)!.options.permissionMode, "acceptEdits");
+      assert.deepEqual(hosted.effectiveMode, { mode: "auto_accept_edits", interaction: "default", source: "host" });
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a plan interaction without a mode starts Claude Code in plan mode; leaving it needs a named mode, because Claude Code takes none other", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.session.createThread({ cwd: rig.cwd, policy: { interaction: "plan", cwd: rig.cwd } });
+      assert.equal(rig.world.queries.at(-1)!.options.permissionMode, "plan");
+      assert.deepEqual(thread.effectiveMode, { interaction: "plan", source: "harness" });
+      const refused = await rig.session.startTurn({ threadId: thread.id, clientTurnKey: "leave-plan", intent: "start", content: [{ type: "text", text: "Do it." }], policy: { interaction: "default", cwd: rig.cwd } });
+      assert.deepEqual(refused, { status: "unsupported", capability: "runtimePolicy.switchInSession" });
+      assert.equal(rig.world.calls.filter((call) => call.kind === "setPermissionMode").length, 0);
+      const { turnId, native } = await rig.turn(thread.id, "Do it.", { policy: rig.policy("auto_accept_edits") });
+      assert.deepEqual(rig.world.calls.filter((call) => call.kind === "setPermissionMode").map((call) => (call.kind === "setPermissionMode" ? call.mode : undefined)), ["acceptEdits"]);
+      await native.complete();
+      await rig.terminal(turnId);
+    } finally {
+      await rig.cleanup();
+    }
+  });
+
+  test("a resume without a policy sends Claude Code no permission mode: the session starts in the user's own, not approval_required", async () => {
+    const rig = await openClaudeRig();
+    try {
+      const thread = await rig.thread();
+      await rig.simpleTurn(thread.id, "Hello.");
+      rig.world.userPermissionMode = "auto";
+      const other = await rig.openAnother();
+      const resumed = await other.session.resumeThread({ native: { handle: thread.handle! }, quiet: true });
+      const query = rig.world.queries.at(-1)!;
+      assert.equal(query.options.resume, thread.handle);
+      assert.equal(Object.hasOwn(query.options, "permissionMode"), false, `the resume sent permissionMode ${String(query.options.permissionMode)}`);
+      assert.deepEqual(resumed.effectiveMode, { source: "harness" });
+      keysUsed += 1;
+      const started = await other.session.startTurn({ threadId: resumed.id, clientTurnKey: `resume-${keysUsed}`, intent: "start", content: [{ type: "text", text: "Again." }] });
+      assert.equal(started.status, "accepted");
+      const native = await rig.world.nextTurn();
+      await until(
+        () => other.log.find((event) => event.body.type === "thread.upsert" && event.body.thread.effectiveMode?.mode === "auto"),
+        "the resumed thread to report Claude Code's own mode",
+      );
+      await native.complete();
+      // A later turn without a policy sends no mode either.
+      assert.equal(rig.world.calls.filter((call) => call.kind === "setPermissionMode").length, 0);
     } finally {
       await rig.cleanup();
     }

@@ -39,7 +39,7 @@ interface LoadedBridge {
   readonly mcp: Array<{ name: string; config: unknown }>;
 }
 
-async function load(mode: string | undefined): Promise<LoadedBridge> {
+async function load(mode: string | null | undefined): Promise<LoadedBridge> {
   if (mode === undefined) delete process.env[BRIDGE_SETTINGS_VARIABLE];
   else process.env[BRIDGE_SETTINGS_VARIABLE] = JSON.stringify({ mode });
   const handlers = new Map<string, Handler[]>();
@@ -134,7 +134,10 @@ test("under approval_required the bridge asks with a JSON title the driver reads
 });
 
 test("the runtime mode decides which tools ask, run or are blocked", async () => {
-  const cases: Array<[mode: string | undefined, tool: string, outcome: "ask" | "run" | "block"]> = [
+  const cases: Array<[mode: string | null | undefined, tool: string, outcome: "ask" | "run" | "block"]> = [
+    // null: the host left the mode to Pi, which asks before nothing, so the bridge gates nothing.
+    [null, "bash", "run"],
+    [null, "write", "run"],
     ["full_access", "bash", "run"],
     ["full_access", "write", "run"],
     ["read_only", "bash", "block"],

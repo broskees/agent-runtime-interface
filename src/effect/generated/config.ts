@@ -56,7 +56,8 @@ export const InteractionModeSchema: Effect.Schema.Codec<Wire.InteractionMode> = 
 
 export const RuntimePolicySchema: Effect.Schema.Codec<Wire.RuntimePolicy> = Schema.StructWithRest(
   Schema.Struct({
-    mode: Schema.suspend(() => RuntimeModeSchema),
+    /** Leave it out to keep the harness's own mode: the driver sends the harness no permission override, so it applies the user's own configuration for the workspace. The thread's `effectiveMode` then reports what the harness chose. */
+    mode: Schema.optional(Schema.suspend(() => RuntimeModeSchema)),
     interaction: Schema.suspend(() => InteractionModeSchema),
     cwd: Schema.String,
     additionalRoots: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
@@ -65,6 +66,16 @@ export const RuntimePolicySchema: Effect.Schema.Codec<Wire.RuntimePolicy> = Sche
   }),
   [kit.OtherFields],
 ).annotate({ identifier: "RuntimePolicy" });
+
+/** The mode a thread runs in, as far as the driver knows. `source` says who chose it: `host` when the host named `policy.mode`, `harness` when the host left it out and the harness applied its own. `mode` is the ARI mode the harness's setting maps to, or the vendor's own name when no ARI mode fits; `interaction` is the interaction mode. Each is absent while the driver does not know it: a driver never guesses either. */
+export const EffectiveModeSchema: Effect.Schema.Codec<Wire.EffectiveMode> = Schema.StructWithRest(
+  Schema.Struct({
+    mode: Schema.optional(Schema.suspend(() => RuntimeModeSchema)),
+    interaction: Schema.optional(Schema.suspend(() => InteractionModeSchema)),
+    source: Schema.Union([Schema.Literals(["host", "harness"]), Schema.String]),
+  }),
+  [kit.OtherFields],
+).annotate({ identifier: "EffectiveMode" });
 
 export const SlashCommandSchema: Effect.Schema.Codec<Wire.SlashCommand> = Schema.StructWithRest(
   Schema.Struct({

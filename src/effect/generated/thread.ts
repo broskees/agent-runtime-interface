@@ -6,6 +6,7 @@ import type * as Wire from "../../generated/thread.ts";
 import { Schema } from "../effect-modules.ts";
 import * as kit from "../schema-kit.ts";
 import { AnyValueSchema, NativeRefSchema, VersionSchema } from "./common.ts";
+import { EffectiveModeSchema } from "./config.ts";
 import { FailureSchema } from "./errors.ts";
 import { ItemSchema } from "./item.ts";
 import { PlanSchema } from "./plan.ts";
@@ -42,6 +43,8 @@ export const ThreadSchema: Effect.Schema.Codec<Wire.Thread> = Schema.StructWithR
     createdAt: Schema.optional(Schema.String),
     updatedAt: Schema.optional(Schema.String),
     identityVersion: Schema.optional(kit.Integer.check(Schema.isGreaterThanOrEqualTo(0))),
+    /** The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes. */
+    effectiveMode: Schema.optional(Schema.suspend(() => EffectiveModeSchema)),
   }),
   [kit.OtherFields],
 ).annotate({ identifier: "Thread" });
@@ -61,6 +64,7 @@ export const ThreadPatchSchema: Effect.Schema.Codec<Wire.ThreadPatch> = Schema.S
     createdAt: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
     updatedAt: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
     identityVersion: Schema.optional(Schema.Union([kit.Integer.check(Schema.isGreaterThanOrEqualTo(0)), Schema.Null])),
+    effectiveMode: Schema.optional(Schema.Union([Schema.suspend(() => EffectiveModeSchema), Schema.Null])),
   }),
   [kit.OtherFields],
 ).annotate({ identifier: "ThreadPatch" });

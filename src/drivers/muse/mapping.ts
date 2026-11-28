@@ -62,10 +62,14 @@ export function planIdFor(threadId: string): string {
 
 // Runtime policy.
 
-/** The two ARI runtime modes Muse has a native match for, as Muse's approval mode, permission profile and `muse serve` flags. */
+/**
+ * The two ARI runtime modes Muse has a native match for, as Muse's approval
+ * mode, permission profile and `muse serve` flags. A policy without a mode
+ * has none of them: Muse then applies the host configuration's own.
+ */
 export interface MusePolicy {
-  readonly approvalMode: MuseApprovalMode;
-  readonly permissionProfile: string;
+  readonly approvalMode?: MuseApprovalMode;
+  readonly permissionProfile?: string;
   readonly serveArgs: readonly string[];
 }
 
@@ -79,6 +83,7 @@ export const MUSE_SUPPORTED_MODES = ["approval_required", "full_access"] as cons
  * reviewer in front of the user's approvals.
  */
 export function musePolicy(policy: RuntimePolicy): MusePolicy | undefined {
+  if (policy.mode === undefined) return { serveArgs: [] };
   if (policy.mode === "approval_required") return { approvalMode: "promptUnmatched", permissionProfile: ":ask-me", serveArgs: [] };
   if (policy.mode === "full_access") return { approvalMode: "allowAll", permissionProfile: ":unrestricted", serveArgs: ["--disable-sandbox"] };
   return undefined;

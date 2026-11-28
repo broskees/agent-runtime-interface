@@ -354,7 +354,8 @@ class ReferenceSession implements Session {
     // A thread this session holds loaded needs nothing; an unloaded one loads its native session again below.
     if (knownState !== undefined && !knownState.unloaded) return knownState.thread;
     const agent = await this.#agent();
-    const policy = input.policy ?? knownState?.policy ?? { mode: "approval_required", interaction: "default", cwd: "" };
+    // Without a policy the thread keeps the one it had, or none: the agent's own mode applies.
+    const policy = input.policy ?? knownState?.policy ?? { interaction: "default", cwd: "" };
     try {
       const loaded = await agent.request<{ sessionId: string; cwd: string }>("session/load", { sessionId: nativeId });
       return this.#register(loaded.sessionId, loaded.cwd, { ...policy, cwd: policy.cwd === "" ? loaded.cwd : policy.cwd });
@@ -740,6 +741,8 @@ class ReferenceSession implements Session {
       identityVersion: IDENTITY_VERSION,
       ...(title === undefined ? {} : { title }),
       ...(forkedFrom === undefined ? {} : { forkedFrom }),
+      // The driver enforces a host's mode itself. Without one it answers no approval on its own, and the agent reports no mode of its own, so the mode is unknown.
+      effectiveMode: policy.mode === undefined ? { source: "harness" } : { mode: policy.mode, interaction: policy.interaction, source: "host" },
     };
     this.#threads.set(id, { thread, nativeId, policy, active: undefined, pendingStarts: [], queued: new Map(), unloaded: false });
     this.#threadsByNative.set(nativeId, id);

@@ -79,6 +79,10 @@
         "identityVersion": {
           "type": "integer",
           "minimum": 0
+        },
+        "effectiveMode": {
+          "$ref": "config.schema.json#/$defs/EffectiveMode",
+          "description": "The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes."
         }
       },
       "required": [
@@ -156,6 +160,16 @@
             "null"
           ],
           "minimum": 0
+        },
+        "effectiveMode": {
+          "anyOf": [
+            {
+              "$ref": "config.schema.json#/$defs/EffectiveMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

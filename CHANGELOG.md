@@ -51,11 +51,38 @@ driver's changelog lists what changed:
   environment, as `codex` and `muse` do; an earlier build looked the CLI up
   on the host's `PATH`.
 
+A host may leave the runtime mode to the harness. `RuntimePolicy.mode` is
+optional: without it a driver sends the harness no permission override, so
+the harness applies the user's own configuration for that workspace. Every
+thread reports `effectiveMode`: the mode it runs in (an ARI mode, or the
+vendor's own name when none fits), its interaction mode when known, and its
+`source`, `host` or `harness`. A driver that cannot learn the mode reports
+none. Each driver's changelog says what its harness reports:
+
+- `claude`: no `permissionMode`; Claude Code's `system/init` and
+  `system/status` report the mode. `codex`: no approval settings; every
+  start, resume and fork answer and `thread/settings/updated` report them.
+  `acp`: the agent's mode option or v1 mode id, as the agent names it;
+  `antigravity` and `kiro` map theirs; `grok` stays in Grok's `default` mode,
+  which its launch fixes. `muse`: Muse's approval mode, in its own words.
+  `cursor`: `full_access`, the options it gives a thread without a mode.
+  `opencode` and `pi`: unknown.
+- A turn's policy, or a resume of a thread the session holds, that names no
+  mode sends nothing, and the thread keeps its mode.
+- `codex` and `claude` no longer record `approval_required` for a resume
+  without a policy and send it again later; `codex` applies a loaded
+  thread's resume policy and model with `thread/settings/update`, and
+  refuses another launch or directory, naming it, where an earlier build
+  returned the thread unchanged.
+
 ### Contract (`ari`, `ari/json-schema/*`)
 
 - The ARI wire contract, version 1, as JSON Schema draft 2020-12 under
   `spec/v1/`, with `methods.json` listing every `ari/wire` method, and the
   shared experimental extension `ari.goal`.
+- `RuntimePolicy.mode` is optional; `EffectiveMode` (`mode`, `interaction`,
+  `source`) is new, carried by `Thread.effectiveMode` and
+  `ThreadPatch.effectiveMode`. The Go, Python and Rust clients follow.
 - Generated TypeScript types and zero-dependency validators implementing
   Standard Schema v1 and Standard JSON Schema v1. Unknown enum values and `x:`
   extension variants validate and come back unchanged.
@@ -82,6 +109,10 @@ driver's changelog lists what changed:
   `envPolicy` and honours `inheritEnv: false`. Scenario 10 checks that
   inherited credentials reach the agent while the host strips nothing, and
   that none does once the host's `envPolicy.stripAmbient` names them.
+  Scenario 2 runs on a thread whose policy names no mode, and every thread
+  the kit creates must report `effectiveMode` with the right `source`.
+- The capability guard asks for no `runtimePolicy.modes.<mode>` when a
+  policy names no mode, and counts a turn that names none as no switch.
 - `ari/node`: process spawning with environment rules and process-group
   cleanup, file-backed secrets, instance paths, coordination leases,
   diagnostics and sign-in callbacks.

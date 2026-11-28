@@ -223,6 +223,25 @@ test("a resume of a thread the session holds applies its config, restarts pi on 
   await assert.rejects(first.session.resumeThread({ native: { handle: thread.handle! }, policy: policy(opened.cwd, "full_access") }), (error: unknown) => isAriError(error, "unsupported"));
 });
 
+test("a policy without a mode gives the bridge no mode, so it gates no tool and Pi runs as the user set it up; the thread reports its mode as unknown", async () => {
+  const opened = await rig();
+  const first = await opened.open();
+  const thread = await first.session.createThread({ cwd: opened.cwd, policy: { interaction: "default", cwd: opened.cwd } });
+  const runtime = opened.host.spawns.filter((spawn) => spawn.purpose === "runtime").at(-1)!;
+  assert.equal(runtime.environment["ARI_PI_BRIDGE"], JSON.stringify({ mode: null }));
+  assert.equal(opened.harness.invocations.at(-1)?.bridge?.mode, null, "the bridge read a mode the host did not choose");
+  // Pi has no mode of its own, and an extension of the user's may gate its tools: the driver cannot know.
+  assert.deepEqual(thread.effectiveMode, { source: "harness" });
+  // A turn whose policy names no mode runs on the same pi.
+  const started = await first.session.startTurn({ threadId: thread.id, clientTurnKey: "own-mode", intent: "start", content: [{ type: "text", text: "Go." }], policy: { interaction: "default", cwd: opened.cwd } });
+  assert.equal(started.status, "accepted");
+  await (await opened.nextTurn()).complete();
+  // A host's mode still reaches the bridge, and the thread says the host chose it.
+  const hosted = await first.session.createThread({ cwd: opened.cwd, policy: policy(opened.cwd, "auto_accept_edits") });
+  assert.equal(opened.harness.invocations.at(-1)?.bridge?.mode, "auto_accept_edits");
+  assert.deepEqual(hosted.effectiveMode, { mode: "auto_accept_edits", interaction: "default", source: "host" });
+});
+
 test("a fork into another directory runs Pi's CLI there, and a fork from a turn keeps the history before it", async () => {
   const opened = await rig();
   const session = await opened.open();

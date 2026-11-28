@@ -21,3 +21,7 @@
   version found, its path, the minimum and the update step, `grok update`.
   Above the tested range a `grok` still runs, with an `untested_version`
   advisory.
+- A thread whose policy names no mode still runs in Grok's `default`
+  permission mode, which `--permission-mode default` fixes for the session's
+  one process; it reports `approval_required`. The user's own Grok
+  permission mode never applies.

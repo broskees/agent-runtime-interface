@@ -26,6 +26,18 @@ section).
 
 ## Quirks
 
+- **`agy`'s own mode.** A policy without `mode` leaves `agy`'s mode alone.
+  `agy` reports it as the value of its `mode` option, whose four values the
+  recordings in `test/drivers/antigravity/recordings/` show with `agy`'s own
+  descriptions. The thread's `effectiveMode` maps them: `default` ("Ask
+  before edits and commands, per your permission settings") to
+  `approval_required`, `accept-edits` ("Approve file edits in the workspace
+  without asking") to `auto_accept_edits`, `auto` ("Approve edits and safe
+  commands; ask before irreversible actions") to `auto`, and `plan` ("Plan
+  carefully before executing a task") to the `plan` interaction. Another id
+  keeps `agy`'s name. The driver never sets `agy`'s mode for a host's mode:
+  it enforces `full_access` at the client boundary, as the [ACP base
+  driver](acp.md#the-mode-the-agent-reports) does.
 - **The user's own profile, by default.** With `profile: "user"` the driver
   adds nothing to `agy acp`, so `agy` finds everything where it always does:
   `--gemini-dir` defaults to `.gemini` in the home directory and

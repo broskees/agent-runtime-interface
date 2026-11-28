@@ -24,6 +24,7 @@ import { ACP_TESTED_PROTOCOL_RANGE, ACP_TESTED_PROTOCOL_VERSIONS, ACP_TESTED_SCH
 import type { AcpBaseConfig } from "../../meta/acp.ts";
 import type { AcpLaunch } from "./connection.ts";
 import { AcpSession } from "./session.ts";
+import type { AcpAgentMode, AcpHarnessMode } from "./session.ts";
 import { ACP_IDENTITY_VERSION } from "./capabilities.ts";
 
 /** What a flavor sees of one instance. */
@@ -76,6 +77,12 @@ export interface AcpFlavor<Config extends AcpBaseConfig> {
   adjustCapabilities?(capabilities: Capabilities, config: Config): Capabilities;
   /** Config values the agent should get for a runtime policy, for agents that enforce a mode through a config option. */
   policyConfig?(policy: RuntimePolicy, config: Config): ConfigValues;
+  /**
+   * The mode a thread whose policy names none runs in, from what the agent
+   * reports, for a flavor whose agent's modes evidence lets it map. Without
+   * it the thread reports the agent's own mode id (`agentModeId`).
+   */
+  harnessMode?(agent: AcpAgentMode, config: Config): AcpHarnessMode;
   /** Adds or replaces session members the flavor handles differently. */
   decorateSession?(session: AcpSession, context: AcpFlavorContext<Config>): Session;
   /** Adds instance members the flavor has, such as `subProviders`. */
@@ -268,6 +275,7 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
     const config = this.#context.config;
     const adjust = this.#flavor.adjustCapabilities?.bind(this.#flavor);
     const policyConfig = this.#flavor.policyConfig?.bind(this.#flavor);
+    const harnessMode = this.#flavor.harnessMode?.bind(this.#flavor);
     const session = new AcpSession(
       this.#context.host as HostServices<unknown>,
       {
@@ -288,6 +296,7 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
         },
         ...(adjust === undefined ? {} : { adjustCapabilities: (capabilities: Capabilities) => adjust(capabilities, config) }),
         ...(policyConfig === undefined ? {} : { policyConfig: (policy: RuntimePolicy) => policyConfig(policy, config) }),
+        ...(harnessMode === undefined ? {} : { harnessMode: (agent: AcpAgentMode) => harnessMode(agent, config) }),
       },
       input,
       id,

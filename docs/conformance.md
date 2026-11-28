@@ -451,10 +451,16 @@ the poison's whole lifetime.
 
 ## The scenarios
 
+Every scenario creates its threads through the kit, which checks each thread
+`createThread` returns: with a policy that names a mode, `effectiveMode` must
+say that mode with `source: "host"`; with one that names none, it must say
+`source: "harness"`, with the harness's mode or, while the driver does not
+know it, none.
+
 | # | Key | The kit checks | The harness provides | Not applicable when |
 |---|---|---|---|---|
 | 1 | `grammar` | Every session stream of the run, read from `seq` 1, keeps the `ari/host` EventGrammar in strict mode. Its own stream adds a rich turn (text, a tool, an approval if available) and a stopped turn. | - | never |
-| 2 | `turn-completed` | The turn stays open after its assistant message ends; after the provider completes it, `turn.terminal` is `completed` and `reusable`, the turn's assistant text is what the agent said, no item is left open, and the thread takes the next turn. | `say`, `complete` | never |
+| 2 | `turn-completed` | On a thread whose policy names no mode (the harness keeps its own): the thread reports `effectiveMode` with `source: "harness"`, and so does every `thread.upsert` that reports it; the turn stays open after its assistant message ends; after the provider completes it, `turn.terminal` is `completed` and `reusable`, the turn's assistant text is what the agent said, no item is left open, and the thread takes the next turn. | `say`, `complete` | never |
 | 3 | `turn-interrupted` | `interruptTurn` reaches the agent; `turn.terminal` is `interrupted`; nothing is left open; a thread the driver calls `reusable` takes the next turn. | `stopRequested`, `finishCancelled` | never |
 | 4 | `turn-failed` | A provider error ends `failed` with failure class `provider_error`, and a thread the driver calls `reusable` takes the next turn; a usage limit ends `failed` with class `usage_limit` and the provider's `resetAt`. | `fail` | check `turn-failed.usage_limit` |
 | 5 | `process-exit` | The agent's process dying mid-turn ends the turn `failed` with a valid failure; a thread the driver calls `reusable` takes the next turn. | `exitProcess` | never |
@@ -706,8 +712,8 @@ that excludes that turn.
 | # | Variants | The bugs |
 |---|---|---|
 | 1 | 1 | a delta before its item opens |
-| 2 | 3 | completion reported as interrupt; the turn settled when its message ends; a completed turn kept active, so the "reusable" thread refuses the next turn |
-| 3 | 2 | Stop that never reaches the agent; an interrupted turn kept active |
+| 2 | 5 | completion reported as interrupt; the turn settled when its message ends; a completed turn kept active, so the "reusable" thread refuses the next turn; `approval_required` written over a policy without a mode and reported as the host's; a later `thread.upsert` that reports the host as the source |
+| 3 | 3 | Stop that never reaches the agent; an interrupted turn kept active; no `effectiveMode` on a thread whose mode the host chose |
 | 4 | 2 | a usage limit classified as a provider error; a failed turn kept active |
 | 5 | 1 | a turn left open when the process dies |
 | 6 | 3 | a 30-second quiet timer re-armed per event; a turn settled by a tool result; one 30-second timer made when the session opens and `refresh()`ed per event |

@@ -92,7 +92,8 @@ loads it into every Pi process with `--extension`. Its source is
    Read-only tools (`read`, `grep`, `find`, `ls`) always run. `full_access`
    runs everything; `read_only` blocks the rest; `auto_accept_edits` runs
    `edit` and `write` and asks for the rest; `approval_required` asks for the
-   rest. It asks with `ctx.ui.select`, which RPC mode sends as an
+   rest. A policy without a mode gives the bridge `mode: null`, and it gates
+   nothing: Pi runs as the user set it up, its own extensions included. It asks with `ctx.ui.select`, which RPC mode sends as an
    `extension_ui_request`. The dialog's title is a JSON descriptor
    (`{ "ari": "approval", kind, tool, input, options }`), and each option
    string is a native option id: `allow-once` (accept, scope `once`),
@@ -121,6 +122,13 @@ loads it into every Pi process with `--extension`. Its source is
      only file write, and it imports only `node:fs` for it.
 4. **Appends held instructions** to that one run's system prompt in
    `before_agent_start`.
+
+Pi has no runtime mode of its own and asks before nothing, and an extension
+of the user's may gate its tools, so the driver cannot learn the mode a
+thread without a host's mode runs in: its `effectiveMode` is
+`{ source: "harness" }`, with no mode. A host's mode is reported with
+`source: "host"`. A turn's or a held thread's resume policy that names no
+mode keeps the thread's mode.
 
 It never adds instruction text of its own. Its runtime mode arrives in the
 `ARI_PI_BRIDGE` environment variable, which it deletes once read.

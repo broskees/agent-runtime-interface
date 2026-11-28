@@ -461,6 +461,44 @@ describe("MCP isolation on a shared server", () => {
   });
 });
 
+describe("a policy without a mode", () => {
+  /** The session rules a runtime mode writes: OpenCode's shell permission, edits, other directories, or all of them. */
+  const modeRuleActions = new Set(["bash", "shell", "edit", "external_directory", "*"]);
+
+  for (const generation of [1, 2] as const) {
+    test(`${generation}.x: writes no mode rules, so OpenCode's own rules decide, and the thread reports its mode as unknown`, async () => {
+      const rig = await rigFor(generation);
+      const opened = await rig.open();
+      const own = await opened.session.createThread({ cwd: rig.cwd, policy: { interaction: "default", cwd: rig.cwd } });
+      const session = rig.world.sessions.get(own.native.id!)!;
+      assert.deepEqual(session.rules.filter((rule) => modeRuleActions.has(rule.action)), [], "the driver wrote mode rules the host did not choose");
+      // OpenCode reports no mode, and its own rules map to none the driver could name.
+      assert.deepEqual(own.effectiveMode, { source: "harness" });
+      const before = JSON.stringify(session.rules);
+      const started = await opened.session.startTurn({ threadId: own.id, clientTurnKey: "own-1", intent: "start", content: [{ type: "text", text: "Go." }], policy: { interaction: "default", cwd: rig.cwd } });
+      assert.equal(started.status, "accepted");
+      const native = await rig.nextTurn();
+      await native.complete();
+      assert.equal(JSON.stringify(rig.world.sessions.get(own.native.id!)!.rules), before, "a turn that names no mode changed the rules");
+
+      // A host's mode still becomes rules, and the thread says the host chose it.
+      const hosted = await opened.session.createThread({ cwd: rig.cwd, policy: policy(rig.cwd, "full_access") });
+      assert.deepEqual(hosted.effectiveMode, { mode: "full_access", interaction: "default", source: "host" });
+      assert.ok(rig.world.sessions.get(hosted.native.id!)!.rules.some((rule) => rule.action === "*" && rule.effect === "allow"));
+      if (generation === 2) {
+        // 2.x changes a live session's rules, so a turn that names a mode switches it, and the thread reports the host's.
+        await runTurn(rig, opened, own.id, "Not yet.");
+        const switched = await opened.session.startTurn({ threadId: own.id, clientTurnKey: "own-2", intent: "start", content: [{ type: "text", text: "Now." }], policy: policy(rig.cwd, "auto_accept_edits") });
+        assert.equal(switched.status, "accepted");
+        const reports = opened.events.flatMap((event) => (event.body.type === "thread.upsert" && event.body.thread.id === own.id && event.body.thread.effectiveMode !== undefined ? [event.body.thread.effectiveMode] : []));
+        assert.deepEqual(reports.at(-1), { mode: "auto_accept_edits", interaction: "default", source: "host" });
+        assert.ok(rig.world.sessions.get(own.native.id!)!.rules.some((rule) => rule.action === "edit" && rule.effect === "allow"));
+        await (await rig.nextTurn()).complete();
+      }
+    });
+  }
+});
+
 describe("a resume without a policy keeps the session's saved rules", () => {
   test("2.x: a cold resume without a policy invents no mode: the saved rules stay as they were, and only the denies of other threads' entries are added", async () => {
     const rig = await rigFor(2);

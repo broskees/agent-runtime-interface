@@ -7,7 +7,7 @@ import { Schema } from "../effect-modules.ts";
 import * as kit from "../schema-kit.ts";
 import { McpTransportSchema } from "./capabilities.ts";
 import { AnyValueSchema, ConfigValuesSchema, ContentBlockSchema, HistoricalMessageSchema, JsonSchemaSchema, NativeRefSchema } from "./common.ts";
-import { RuntimePolicySchema } from "./config.ts";
+import { EffectiveModeSchema, RuntimePolicySchema } from "./config.ts";
 import { AnswerSchema, ApprovalScopeSchema } from "./request.ts";
 import { ForkOriginSchema, ForkPointSchema, RollbackTargetSchema, ThreadStatusSchema } from "./thread.ts";
 
@@ -130,6 +130,8 @@ export const AppliedThreadSchema: Effect.Schema.Codec<Wire.AppliedThread> = Sche
     createdAt: Schema.optional(Schema.String),
     updatedAt: Schema.optional(Schema.String),
     identityVersion: Schema.optional(kit.Integer.check(Schema.isGreaterThanOrEqualTo(0))),
+    /** The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes. */
+    effectiveMode: Schema.optional(Schema.suspend(() => EffectiveModeSchema)),
     appliedConfig: Schema.optional(Schema.suspend(() => ConfigValuesSchema)),
   }),
   [kit.OtherFields],

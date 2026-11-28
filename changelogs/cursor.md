@@ -55,3 +55,6 @@ First release of the Cursor driver, tested against `@cursor/sdk` 1.4.2
   the SDK's stored login, each checked with `Cursor.me()`. A host whose
   `envPolicy.stripAmbient` names `CURSOR_API_KEY` keeps it from Cursor.
   `CURSOR_CREDENTIAL_VARIABLES` is gone. 30-second runtime auth poison.
+- A policy without a mode opens the agent with the options of
+  `full_access` (no tool allowlist), Cursor's default, and the thread reports
+  `full_access` with `source: "harness"`.

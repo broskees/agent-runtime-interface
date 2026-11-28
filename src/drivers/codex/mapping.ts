@@ -5,7 +5,7 @@
 import { deriveId } from "../../driver-kit/ids.ts";
 import { truncateUtf8 } from "../../driver-kit/truncate.ts";
 import type { ContentBlock, NativeRef } from "../../generated/common.ts";
-import type { RuntimePolicy } from "../../generated/config.ts";
+import type { EffectiveMode, RuntimeMode, RuntimePolicy } from "../../generated/config.ts";
 import type { Failure } from "../../generated/errors.ts";
 import type { FileChange, Item, ItemStatus } from "../../generated/item.ts";
 import type { ApprovalDecision, ApprovalScope, RequestOption } from "../../generated/request.ts";
@@ -80,7 +80,8 @@ export function isoFromMillis(millis: number | null | undefined): string | undef
 // Runtime policy.
 
 export interface CodexPolicy {
-  readonly approvalPolicy: AskForApproval;
+  /** Undefined when the policy names no mode (and `native` none): the driver then sends none, and Codex keeps its own. */
+  readonly approvalPolicy?: AskForApproval;
   /** Undefined when a named `permissions` profile takes its place: Codex refuses both on one request. */
   readonly sandbox?: SandboxMode;
   /** Undefined when a named `permissions` profile takes its place: Codex refuses both on one request. */
@@ -88,10 +89,18 @@ export interface CodexPolicy {
   /** A named permissions profile, from `policy.native.permissions`. */
   readonly permissions?: string | null;
   /**
-   * Always named: Codex keeps a thread's reviewer when a resume, a fork or a
-   * turn leaves it out (app-server thread_processor.rs:4782–4791, 5788–5794),
-   * so only an explicit reviewer moves a thread into or out of `auto`.
+   * Named with every mode: Codex keeps a thread's reviewer when a resume, a
+   * fork or a turn leaves it out (app-server thread_processor.rs:4782–4791,
+   * 5788–5794), so only an explicit reviewer moves a thread into or out of
+   * `auto`. Undefined, like the rest, when the policy names no mode.
    */
+  readonly approvalsReviewer?: ApprovalsReviewer;
+}
+
+/** The approval settings Codex reports for a thread: `thread/start`, `thread/resume` and `thread/fork` answers, and `thread/settings/updated`. */
+export interface CodexApprovalSettings {
+  readonly approvalPolicy: AskForApproval;
+  readonly sandbox: SandboxPolicy;
   readonly approvalsReviewer: ApprovalsReviewer;
 }
 
@@ -110,6 +119,10 @@ export function codexPolicy(policy: RuntimePolicy): CodexPolicy {
   const workspaceWrite: SandboxPolicy = { type: "workspaceWrite", ...(writableRoots.length === 0 ? {} : { writableRoots: [...writableRoots] }) };
   let mapped: CodexPolicy;
   switch (policy.mode) {
+    case undefined:
+      // No mode: no approval settings, so Codex applies the user's config (approval_policy, sandbox_mode, approvals_reviewer).
+      mapped = {};
+      break;
     case "read_only":
       mapped = { approvalPolicy: "on-request", sandbox: "read-only", sandboxPolicy: { type: "readOnly" }, approvalsReviewer: "user" };
       break;
@@ -132,13 +145,49 @@ export function codexPolicy(policy: RuntimePolicy): CodexPolicy {
   const profile = typeof overrides.permissions === "string";
   const sandbox = overrides.sandbox ?? (profile ? undefined : mapped.sandbox);
   const sandboxPolicy = overrides.sandboxPolicy ?? (profile ? undefined : mapped.sandboxPolicy);
+  const approvalPolicy = overrides.approvalPolicy ?? mapped.approvalPolicy;
+  const approvalsReviewer = overrides.approvalsReviewer ?? mapped.approvalsReviewer;
   return {
-    approvalPolicy: overrides.approvalPolicy ?? mapped.approvalPolicy,
+    ...(approvalPolicy === undefined ? {} : { approvalPolicy }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
-    approvalsReviewer: overrides.approvalsReviewer ?? mapped.approvalsReviewer,
+    ...(approvalsReviewer === undefined ? {} : { approvalsReviewer }),
     ...(overrides.permissions === undefined ? {} : { permissions: overrides.permissions }),
   };
+}
+
+/** Codex's own words for a sandbox policy, as `sandbox_mode` in its config names them. */
+const SANDBOX_WORDS: { readonly [type: string]: string } = { readOnly: "read-only", workspaceWrite: "workspace-write", dangerFullAccess: "danger-full-access", externalSandbox: "external-sandbox" };
+
+/**
+ * Codex's approval settings in ARI terms: the inverse of `codexPolicy`. The
+ * five combinations it sends map back to their modes (`guardian_subagent` is
+ * Codex's legacy name for `auto_review`). Any other combination has no ARI
+ * mode and keeps Codex's words, `<approval policy>/<sandbox>`, with
+ * `/<reviewer>` when the reviewer is not the user, for example
+ * `never/workspace-write` or `granular/read-only`.
+ */
+export function codexMode(settings: CodexApprovalSettings): RuntimeMode {
+  const approval = typeof settings.approvalPolicy === "string" ? settings.approvalPolicy : "granular";
+  const sandbox = SANDBOX_WORDS[settings.sandbox.type] ?? settings.sandbox.type;
+  const reviewer = settings.approvalsReviewer === "guardian_subagent" ? "auto_review" : settings.approvalsReviewer;
+  const key = `${approval}/${sandbox}/${reviewer}`;
+  if (key === "untrusted/workspace-write/user") return "approval_required";
+  if (key === "on-request/read-only/user") return "read_only";
+  if (key === "on-request/workspace-write/user") return "auto_accept_edits";
+  if (key === "on-request/workspace-write/auto_review") return "auto";
+  if (key === "never/danger-full-access/user") return "full_access";
+  return reviewer === "user" ? `${approval}/${sandbox}` : key;
+}
+
+/**
+ * The mode a thread runs in: what Codex last reported of its approval
+ * settings, else, before any report, the host's policy. Codex reports no
+ * interaction mode, so only a host's policy gives one.
+ */
+export function codexEffectiveMode(policy: RuntimePolicy, reported: CodexApprovalSettings | undefined): EffectiveMode {
+  if (policy.mode === undefined) return reported === undefined ? { source: "harness" } : { mode: codexMode(reported), source: "harness" };
+  return { mode: reported === undefined ? policy.mode : codexMode(reported), interaction: policy.interaction, source: "host" };
 }
 
 // Content.

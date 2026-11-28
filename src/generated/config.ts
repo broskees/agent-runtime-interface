@@ -39,12 +39,20 @@ export type RuntimeMode = "read_only" | "approval_required" | "auto_accept_edits
 export type InteractionMode = "default" | "plan" | (string & {});
 
 export type RuntimePolicy = {
-  mode: RuntimeMode;
+  /** Leave it out to keep the harness's own mode: the driver sends the harness no permission override, so it applies the user's own configuration for the workspace. The thread's `effectiveMode` then reports what the harness chose. */
+  mode?: RuntimeMode;
   interaction: InteractionMode;
   cwd: string;
   additionalRoots?: string[];
   /** Opaque provider-native policy passed through unchanged. */
   native?: AnyValue;
+};
+
+/** The mode a thread runs in, as far as the driver knows. `source` says who chose it: `host` when the host named `policy.mode`, `harness` when the host left it out and the harness applied its own. `mode` is the ARI mode the harness's setting maps to, or the vendor's own name when no ARI mode fits; `interaction` is the interaction mode. Each is absent while the driver does not know it: a driver never guesses either. */
+export type EffectiveMode = {
+  mode?: RuntimeMode;
+  interaction?: InteractionMode;
+  source: "host" | "harness" | (string & {});
 };
 
 export type SlashCommand = {
@@ -81,7 +89,7 @@ export const configDocument: SchemaDocument = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ari.invalid/spec/v1/config.schema.json",
   "title": "ARI config options and runtime policy",
-  "description": "Config options are modelled on ACP's session config options. Runtime policy carries one of five runtime modes and one of two interaction modes.",
+  "description": "Config options are modelled on ACP's session config options. Runtime policy carries one of five runtime modes, or none to keep the harness's own, and one of two interaction modes.",
   "$defs": {
     "ConfigOptionCategory": {
       "anyOf": [
@@ -247,7 +255,8 @@ export const configDocument: SchemaDocument = {
       "type": "object",
       "properties": {
         "mode": {
-          "$ref": "#/$defs/RuntimeMode"
+          "$ref": "#/$defs/RuntimeMode",
+          "description": "Leave it out to keep the harness's own mode: the driver sends the harness no permission override, so it applies the user's own configuration for the workspace. The thread's `effectiveMode` then reports what the harness chose."
         },
         "interaction": {
           "$ref": "#/$defs/InteractionMode"
@@ -267,9 +276,36 @@ export const configDocument: SchemaDocument = {
         }
       },
       "required": [
-        "mode",
         "interaction",
         "cwd"
+      ]
+    },
+    "EffectiveMode": {
+      "description": "The mode a thread runs in, as far as the driver knows. `source` says who chose it: `host` when the host named `policy.mode`, `harness` when the host left it out and the harness applied its own. `mode` is the ARI mode the harness's setting maps to, or the vendor's own name when no ARI mode fits; `interaction` is the interaction mode. Each is absent while the driver does not know it: a driver never guesses either.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/RuntimeMode"
+        },
+        "interaction": {
+          "$ref": "#/$defs/InteractionMode"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "enum": [
+                "host",
+                "harness"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "source"
       ]
     },
     "SlashCommand": {
@@ -391,6 +427,7 @@ export const ConfigOptionSchema: Validator<ConfigOption> = /* @__PURE__ */ creat
 export const RuntimeModeSchema: Validator<RuntimeMode> = /* @__PURE__ */ createValidator<RuntimeMode>("RuntimeMode", "https://ari.invalid/spec/v1/config.schema.json", documents);
 export const InteractionModeSchema: Validator<InteractionMode> = /* @__PURE__ */ createValidator<InteractionMode>("InteractionMode", "https://ari.invalid/spec/v1/config.schema.json", documents);
 export const RuntimePolicySchema: Validator<RuntimePolicy> = /* @__PURE__ */ createValidator<RuntimePolicy>("RuntimePolicy", "https://ari.invalid/spec/v1/config.schema.json", documents);
+export const EffectiveModeSchema: Validator<EffectiveMode> = /* @__PURE__ */ createValidator<EffectiveMode>("EffectiveMode", "https://ari.invalid/spec/v1/config.schema.json", documents);
 export const SlashCommandSchema: Validator<SlashCommand> = /* @__PURE__ */ createValidator<SlashCommand>("SlashCommand", "https://ari.invalid/spec/v1/config.schema.json", documents);
 export const SkillSchema: Validator<Skill> = /* @__PURE__ */ createValidator<Skill>("Skill", "https://ari.invalid/spec/v1/config.schema.json", documents);
 export const ConfigChangePlanSchema: Validator<ConfigChangePlan> = /* @__PURE__ */ createValidator<ConfigChangePlan>("ConfigChangePlan", "https://ari.invalid/spec/v1/config.schema.json", documents);

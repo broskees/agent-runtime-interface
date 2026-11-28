@@ -16,6 +16,13 @@ holds its label, icon, config schema and form hints.
   always-approve setting. Under `full_access` the ACP driver answers each
   permission request itself with the narrowest accepting option
   (`client_boundary`).
+- The flag holds for the session's one Grok process, which every thread of
+  the session shares, so the driver cannot leave one thread to the user's
+  configured permission mode. A thread whose policy names no mode runs in
+  Grok's `default` mode too, and the driver answers none of its requests
+  itself: its `effectiveMode` is `approval_required` with `source:
+  "harness"`, from the launch, not from a report of Grok's. The user's own
+  Grok permission mode never applies.
 - `probe()` runs `grok --version` with `GROK_DISABLE_AUTOUPDATER=1`, so a
   health check never starts Grok's updater; sessions keep the user's update
   setting.

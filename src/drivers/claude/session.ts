@@ -29,6 +29,7 @@ import { callErrors } from "../../errors.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import { EventSequencer } from "../../driver-kit/sequencer.ts";
 import { truncateUtf8 } from "../../driver-kit/truncate.ts";
+import { keepingMode } from "../../driver-kit/policy.ts";
 import type { BackgroundTaskSummary, TaskInfo } from "../../generated/background.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ContentBlock } from "../../generated/common.ts";
@@ -75,6 +76,7 @@ import {
   asRecord,
   asString,
   claudeMcpConfig,
+  effectiveModeFor,
   failureFromResult,
   isAbortedResult,
   isAuthFailure,
@@ -107,6 +109,7 @@ import type {
   ClaudeHookSettings,
   ClaudeImageMediaType,
   ClaudeInitMessage,
+  ClaudeStatusMessage,
   ClaudeMcpServerConfig,
   ClaudeMessage,
   ClaudePermissionResult,
@@ -273,6 +276,10 @@ interface ClaudeThread {
   launch: LaunchContext;
   systemContext: string | undefined;
   policy: RuntimePolicy;
+  /** The permission mode Claude Code last reported for the running query (`system/init`, `system/status`), or last took through `setPermissionMode`. */
+  reportedMode: string | undefined;
+  /** The thread's first `thread.upsert` went out, so a change of its mode can follow. */
+  announced: boolean;
   model: string | undefined;
   effort: ClaudeDriverConfig["effort"];
   live: LiveQuery | undefined;
@@ -500,9 +507,10 @@ export class ClaudeSession implements Session {
         return this.#applied(known);
       }
       // The running query takes the rest through its control methods; the thread records each change once Claude Code took it.
+      const problem = this.#livePolicyProblem(known, input.policy);
+      if (problem !== undefined) throw callErrors.unsupported("runtimePolicy.switchInSession", problem);
       await this.#applyLiveConfig(known, live, input.config);
-      if (input.policy !== undefined && permissionModeFor(input.policy) !== permissionModeFor(known.policy)) await live.query.setPermissionMode(permissionModeFor(input.policy));
-      if (input.policy !== undefined) known.policy = input.policy;
+      await this.#applyLivePolicy(known, live, input.policy);
       await this.#giveMcpServers(known, live);
       return this.#applied(known);
     }
@@ -513,7 +521,8 @@ export class ClaudeSession implements Session {
     if (nativeId === null || info === undefined) return this.#replacement(input, nativeId, "missing");
     const cwd = info.cwd ?? requested;
     if (cwd === undefined) throw callErrors.validation([{ message: "Claude does not record this session's directory; pass policy.cwd", path: ["policy", "cwd"] }]);
-    const policy = input.policy ?? { mode: "approval_required", interaction: "default", cwd };
+    // No policy names no mode: Claude Code starts in the user's own (permissions.defaultMode).
+    const policy: RuntimePolicy = input.policy ?? { interaction: "default", cwd };
     const thread = this.#newThread({
       nativeId,
       cwd,
@@ -565,7 +574,7 @@ export class ClaudeSession implements Session {
       throw callErrors.invalidState("not_resumable", `Claude Code keeps no transcript for thread ${thread.thread.id}, so a new query could not carry its conversation`);
     }
     thread.launch = launch;
-    if (input.policy !== undefined) thread.policy = input.policy;
+    if (input.policy !== undefined) thread.policy = keepingMode(input.policy, thread.policy);
     this.#applyConfig(thread, input.config);
     this.#closeQuery(live, "relaunch");
     await this.#whenEnded(live);
@@ -618,6 +627,7 @@ export class ClaudeSession implements Session {
         identityVersion: CLAUDE_IDENTITY_VERSION,
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.forkedFrom === undefined ? {} : { forkedFrom: input.forkedFrom, parentThreadId: input.forkedFrom.threadId }),
+        effectiveMode: effectiveModeFor(input.policy, undefined),
       },
       nativeId: input.nativeId,
       cwd: input.cwd,
@@ -625,6 +635,8 @@ export class ClaudeSession implements Session {
       launch: this.#mergeLaunch(input.launch),
       systemContext: input.systemContext,
       policy: input.policy,
+      reportedMode: undefined,
+      announced: false,
       model: this.#context.config.model,
       effort: this.#context.config.effort,
       live: undefined,
@@ -645,7 +657,37 @@ export class ClaudeSession implements Session {
 
   /** The thread's first event, once its query runs (or, for a history read, once it is known). */
   #announce(thread: ClaudeThread): void {
+    thread.announced = true;
     this.#emit({ type: "thread.upsert", thread: { ...thread.thread } }, { threadId: thread.thread.id });
+  }
+
+  /** Records the thread's mode from its policy and what Claude Code reported, and tells the host when it changed. */
+  #refreshMode(thread: ClaudeThread): void {
+    const effectiveMode = effectiveModeFor(thread.policy, thread.reportedMode);
+    if (JSON.stringify(effectiveMode) === JSON.stringify(thread.thread.effectiveMode)) return;
+    thread.thread = { ...thread.thread, effectiveMode };
+    if (thread.announced) this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, effectiveMode } }, { threadId: thread.thread.id });
+  }
+
+  /** Why a running query cannot take `next`, if it cannot: Claude Code leaves plan mode only for a mode the driver names. */
+  #livePolicyProblem(thread: ClaudeThread, next: RuntimePolicy | undefined): string | undefined {
+    if (next === undefined) return undefined;
+    const wanted = permissionModeFor(keepingMode(next, thread.policy));
+    if (wanted !== undefined || permissionModeFor(thread.policy) === undefined) return undefined;
+    return `Claude Code leaves plan mode only for a permission mode the driver names, and thread ${thread.thread.id} runs the harness's own: name policy.mode`;
+  }
+
+  /** Sends a running query the permission mode `next` asks for when it differs, and records the policy once Claude Code took it. */
+  async #applyLivePolicy(thread: ClaudeThread, live: LiveQuery, next: RuntimePolicy | undefined): Promise<void> {
+    if (next === undefined) return;
+    const policy = keepingMode(next, thread.policy);
+    const wanted = permissionModeFor(policy);
+    if (wanted !== undefined && wanted !== permissionModeFor(thread.policy)) {
+      await live.query.setPermissionMode(wanted);
+      thread.reportedMode = wanted;
+    }
+    thread.policy = policy;
+    this.#refreshMode(thread);
   }
 
   /** Forgets a thread whose query never started; it was never announced. */
@@ -706,6 +748,7 @@ export class ClaudeSession implements Session {
 
   async #queryOptions(thread: ClaudeThread, mode: StartMode, abort: AbortController, append: string | undefined): Promise<ClaudeQueryOptions> {
     const config = this.#context.config;
+    const permissionMode = permissionModeFor(thread.policy);
     const identity: Partial<ClaudeQueryOptions> =
       mode.kind === "new"
         ? { sessionId: thread.nativeId }
@@ -718,8 +761,9 @@ export class ClaudeSession implements Session {
       ...(thread.policy.additionalRoots === undefined || thread.policy.additionalRoots.length === 0 ? {} : { additionalDirectories: [...thread.policy.additionalRoots] }),
       ...(thread.model === undefined ? {} : { model: thread.model }),
       ...(thread.effort === undefined ? {} : { effort: thread.effort }),
-      permissionMode: permissionModeFor(thread.policy),
-      // Lets the host switch a live thread to full access later; the mode itself comes from the host's policy.
+      // No mode in the policy sends none: Claude Code then starts in the mode the user's settings give it.
+      ...(permissionMode === undefined ? {} : { permissionMode }),
+      // Lets the host switch a live thread to full access later; the mode itself comes from the host's policy or the user's settings.
       allowDangerouslySkipPermissions: true,
       canUseTool: (toolName, input, options) => this.#canUseTool(thread, toolName, input, options),
       // Claude Code's own prompt. `snapshot: false` keeps the host's text out of the transcript and lets a resume carry a new one.
@@ -737,6 +781,9 @@ export class ClaudeSession implements Session {
   }
 
   async #startQuery(thread: ClaudeThread, mode: StartMode): Promise<LiveQuery> {
+    // A new query starts in the mode its options give it (or the user's settings do); Claude Code reports it at the next turn.
+    thread.reportedMode = undefined;
+    this.#refreshMode(thread);
     const abort = new AbortController();
     const append = this.#appendFor(thread, thread.launch);
     const options = await this.#queryOptions(thread, mode, abort, append);
@@ -897,10 +944,20 @@ export class ClaudeSession implements Session {
       case "init": {
         const init = message as ClaudeInitMessage;
         if (thread.turn !== undefined) thread.turn.model = init.model;
+        thread.reportedMode = init.permissionMode;
+        this.#refreshMode(thread);
         if (thread.commands === undefined || thread.commands.join("\n") !== init.slash_commands.join("\n")) {
           thread.commands = [...init.slash_commands];
           this.#emit({ type: "commands.updated", commands: init.slash_commands.map((name) => ({ name })) }, { threadId: thread.thread.id });
         }
+        return;
+      }
+      case "status": {
+        // A status that carries the permission mode is Claude Code's own report of it, for example after it left plan mode.
+        const status = message as ClaudeStatusMessage;
+        if (status.permissionMode === undefined) return;
+        thread.reportedMode = status.permissionMode;
+        this.#refreshMode(thread);
         return;
       }
       case "commands_changed": {
@@ -1370,6 +1427,7 @@ export class ClaudeSession implements Session {
       return { status: "accepted", turnId: id, accepted: "queued", providerMessageId: uuid };
     }
     if (active !== undefined) throw callErrors.invalidState("previous_turn_active", `Turn ${active.id} is still running on thread ${thread.thread.id}`);
+    if (this.#livePolicyProblem(thread, input.policy) !== undefined) return { status: "unsupported", capability: "runtimePolicy.switchInSession" };
     const live = await this.#ensureQuery(thread);
     await this.#applyTurnSettings(thread, live, input);
     const content = await this.#content(input.content, input.context);
@@ -1418,10 +1476,7 @@ export class ClaudeSession implements Session {
   /** Per-turn model, effort and policy go through the query's control methods before the prompt. */
   async #applyTurnSettings(thread: ClaudeThread, live: LiveQuery, input: StartTurnInput): Promise<void> {
     await this.#applyLiveConfig(thread, live, input.config);
-    if (input.policy !== undefined && permissionModeFor(input.policy) !== permissionModeFor(thread.policy)) {
-      await live.query.setPermissionMode(permissionModeFor(input.policy));
-    }
-    if (input.policy !== undefined) thread.policy = input.policy;
+    await this.#applyLivePolicy(thread, live, input.policy);
   }
 
   #plainText(content: readonly ContentBlock[]): string {

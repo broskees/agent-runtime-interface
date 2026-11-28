@@ -15,6 +15,7 @@ import { sessionDocument } from "./session.ts";
 import { subagentDocument } from "./subagent.ts";
 import { usageDocument } from "./usage.ts";
 import type { AnyValue, NativeRef, Version } from "./common.ts";
+import type { EffectiveMode } from "./config.ts";
 import type { Failure } from "./errors.ts";
 import type { Item } from "./item.ts";
 import type { Plan } from "./plan.ts";
@@ -47,6 +48,8 @@ export type Thread = {
   createdAt?: string;
   updatedAt?: string;
   identityVersion?: number;
+  /** The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes. */
+  effectiveMode?: EffectiveMode;
 };
 
 /** Patch form of Thread. Only `id` is required; the upsert that opens a thread carries every field Thread requires. */
@@ -63,6 +66,7 @@ export type ThreadPatch = {
   createdAt?: string | null;
   updatedAt?: string | null;
   identityVersion?: number | null;
+  effectiveMode?: EffectiveMode | null;
 };
 
 /** `user`: started by a host request. `provider_initiated`: the provider started it on its own, for example the next turn of a goal run. */
@@ -229,6 +233,10 @@ export const threadDocument: SchemaDocument = {
         "identityVersion": {
           "type": "integer",
           "minimum": 0
+        },
+        "effectiveMode": {
+          "$ref": "config.schema.json#/$defs/EffectiveMode",
+          "description": "The mode the thread runs in. A driver sets it on every thread it returns, and sends it again in a `thread.upsert` when it learns more or the mode changes."
         }
       },
       "required": [
@@ -306,6 +314,16 @@ export const threadDocument: SchemaDocument = {
             "null"
           ],
           "minimum": 0
+        },
+        "effectiveMode": {
+          "anyOf": [
+            {
+              "$ref": "config.schema.json#/$defs/EffectiveMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

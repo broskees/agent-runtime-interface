@@ -205,6 +205,43 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
     harness: () => brokenHarness("completed turn stays active", { session: (session) => keepsEndedTurnActive(session, "completed") }),
   },
   {
+    scenario: 2,
+    bug: "writes approval_required over a policy that leaves the mode to the harness, and reports it as the host's",
+    reason: /has effectiveMode .*"approval_required".*the host left policy\.mode out, so it must say source "harness"/,
+    harness: () =>
+      brokenSession("invents a mode", (session) => ({
+        createThread: async (input) => {
+          const thread = await session.createThread(input);
+          return input.policy.mode === undefined ? { ...thread, effectiveMode: { mode: "approval_required", interaction: "default", source: "host" } } : thread;
+        },
+      })),
+  },
+  {
+    scenario: 2,
+    bug: "later reports a thread the host gave no mode as running the host's mode",
+    reason: /thread\.upsert at seq \d+ reports effectiveMode .*the host left policy\.mode out, so its source is "harness"/,
+    harness: () =>
+      brokenHarness("reports a host source later", {
+        session: (session) =>
+          rewriteEvents(session, (event, pass) => {
+            const body = event.body;
+            pass(body.type === "thread.upsert" && body.thread.effectiveMode?.source === "harness" ? { ...body, thread: { ...body.thread, effectiveMode: { mode: "full_access", source: "host" } } } : body);
+          }).session,
+      }),
+  },
+  {
+    scenario: 3,
+    bug: "reports no effectiveMode on a thread whose mode the host chose",
+    reason: /has effectiveMode undefined; the host chose policy\.mode "approval_required", so it must say mode "approval_required" with source "host"/,
+    harness: () =>
+      brokenSession("reports no mode", (session) => ({
+        createThread: async (input) => {
+          const { effectiveMode: _dropped, ...thread } = await session.createThread(input);
+          return thread;
+        },
+      })),
+  },
+  {
     scenario: 3,
     bug: "reports an interrupted turn's thread as reusable but keeps the turn active, so the next prompt is refused",
     reason: /turn .* ended "interrupted" with threadDisposition "reusable", but the thread refused the next turn: invalid_state/,

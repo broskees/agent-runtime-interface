@@ -65,3 +65,6 @@
 - Subagents (child sessions) with their own threads, questions and forms as
   `user_input` requests, 1.x todo lists.
 - The `opencode.permissionRules` extension (`get`, `set`).
+- A policy without a mode writes no mode rules, so OpenCode's own rules
+  decide; a resume keeps the saved rules and a fork the rules OpenCode copied.
+  OpenCode reports no mode, so the thread's `effectiveMode` has none.

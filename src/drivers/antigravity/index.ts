@@ -43,6 +43,8 @@ import {
 import type { AntigravityConfig } from "../../meta/antigravity.ts";
 import type { Driver } from "../../runtime.ts";
 import { createAcpDriver } from "../acp/driver.ts";
+import { agentModeId } from "../acp/session.ts";
+import type { AcpAgentMode, AcpHarnessMode } from "../acp/session.ts";
 
 export type { AntigravityConfig } from "../../meta/antigravity.ts";
 export { ANTIGRAVITY_CLI_MANIFEST, ANTIGRAVITY_CONFIG_SCHEMA, ANTIGRAVITY_DEFAULT_CONFIG, ANTIGRAVITY_INSTALL_STEP, ANTIGRAVITY_PROFILES, ANTIGRAVITY_UPDATE_STEP } from "../../meta/antigravity.ts";
@@ -90,6 +92,28 @@ function refuseUnknownProfile(config: AntigravityConfig): void {
   );
 }
 
+/**
+ * Antigravity's modes in ARI terms, from the descriptions `agy` 1.5 gives its
+ * `mode` option (the committed recordings in test/drivers/antigravity/recordings/):
+ * `default` "Ask before edits and commands, per your permission settings",
+ * `accept-edits` "Approve file edits in the workspace without asking", `auto`
+ * "Approve edits and safe commands; ask before irreversible actions" and
+ * `plan` "Plan carefully before executing a task". Any other id keeps its name.
+ */
+export const ANTIGRAVITY_MODES: { readonly [modeId: string]: AcpHarnessMode } = {
+  default: { mode: "approval_required", interaction: "default" },
+  "accept-edits": { mode: "auto_accept_edits", interaction: "default" },
+  auto: { mode: "auto", interaction: "default" },
+  plan: { interaction: "plan" },
+};
+
+/** The mode an Antigravity thread runs when its policy names none: `agy`'s own, as it reports it. */
+export function antigravityHarnessMode(agent: AcpAgentMode): AcpHarnessMode {
+  const id = agentModeId(agent);
+  if (id === undefined) return {};
+  return Object.hasOwn(ANTIGRAVITY_MODES, id) ? ANTIGRAVITY_MODES[id]! : { mode: id };
+}
+
 /** An Antigravity driver. */
 export function createAntigravityDriver(): Driver<AntigravityConfig> {
   const driver = createAcpDriver<AntigravityConfig>({
@@ -111,6 +135,8 @@ export function createAntigravityDriver(): Driver<AntigravityConfig> {
       const args = ["acp", "--gemini-dir", profile, "--app-data-dir", "antigravity-acp"];
       return { command: context.config.command, args, env: { ...ANTIGRAVITY_INSTANCE_PROFILE_ENVIRONMENT } };
     },
+
+    harnessMode: (agent) => antigravityHarnessMode(agent),
 
     adjustCapabilities: (capabilities) => ({
       ...capabilities,

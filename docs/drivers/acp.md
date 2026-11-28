@@ -159,7 +159,8 @@ const instance = await acpDriver.create(host, {
 - **Extension `acp`.** Vendor `_meta` objects (on `initialize`, `session/new`,
   prompt results, updates, tool calls, permission requests and their options)
   reach the host as `x:acp.meta` events; session updates the driver does not
-  map (for example v1 `current_mode_update`) arrive as `x:acp.update` events.
+  map arrive as `x:acp.update` events, and so does v1 `current_mode_update`,
+  which also updates the thread's `effectiveMode`.
   `session.ext("acp", "_method", params)` sends an ACP extension request.
   Schemas: `spec/v1/extensions/acp.schema.json`.
 
@@ -227,6 +228,25 @@ Runtime modes: `approval_required` and `full_access` are supported, both
 `client_boundary`; the others are declared off. `requests.allowCustomAnswer`
 is false, `responseModes` is `live`. Diffs are emitted and can be turned off.
 
+### The mode the agent reports
+
+ACP has no runtime mode of ARI's: the driver enforces a host's mode only in
+how it answers permission requests (`full_access` answers each itself with
+the narrowest accepting option). A policy without `mode` enforces nothing:
+every permission request goes to the host, and the agent applies its own
+mode. The agent reports that mode as the current value of the select option
+it offers in the `mode` category (config options supersede modes), else as
+v1 `modes.currentModeId` in the response that opened the session
+(`session/new`, `session/resume`, `session/load`, `session/fork`), updated
+by each `config_option_update` and `current_mode_update`. ARI knows no
+meaning for an agent's mode ids, so the thread's `effectiveMode` reports the
+agent's id as given (`{ mode: "<id>", source: "harness" }`), or no mode when
+the agent offers neither; a flavor maps the ids it has evidence for
+([antigravity](antigravity.md), [kiro](kiro.md), [grok](grok.md)). A host's
+mode is reported with `source: "host"`. A turn's or a held thread's resume
+policy that names no mode keeps the thread's mode. A
+`current_mode_update` still reaches the host as `x:acp.update` too.
+
 ## Optional members (42)
 
 | Members | Outcome |
@@ -273,9 +293,10 @@ range. `test/drivers/acp/driver-rules.ts` checks both for all five drivers.
 
 ## Not done
 
-- ACP authentication (`authenticate`, `auth/login`), elicitation, subagents,
-  session list/delete and v1 session modes are not mapped; v1
-  `current_mode_update` arrives as `x:acp.update`.
+- ACP authentication (`authenticate`, `auth/login`), elicitation, subagents
+  and session list/delete are not mapped. The driver reads v1 session modes
+  for the thread's `effectiveMode` but never sets one
+  (`session/set_mode`).
 - A v1 agent that can neither resume nor load sessions cannot resume:
   `resumeThread` refuses with `unsupported` (`acp.session/resume`).
 - A v2 tool call's `kind` and `status` reset by `null` are not applied: an

@@ -58,3 +58,8 @@ First version of the Muse Code driver.
   `META_API_KEY` included, minus only the host's `envPolicy.stripAmbient`; a
   managed key wins over it. `MUSE_CREDENTIAL_VARIABLES` and the CLI
   manifest's `envScrubPrefixes` are gone.
+- A policy without a mode sends no `approvalMode`, `permissionProfile` or
+  `--disable-sandbox`, and a resume calls no `session/setApprovalMode`. The
+  thread's `effectiveMode` is the approval mode Muse reports, in Muse's own
+  words: Muse does not report the permission profile that decides who
+  answers, so ARI maps none of them.

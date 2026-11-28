@@ -26,9 +26,10 @@
 import { callErrors, toCallError } from "../../errors.ts";
 import { EventSequencer } from "../../driver-kit/sequencer.ts";
 import { truncateUtf8 } from "../../driver-kit/truncate.ts";
+import { keepingMode } from "../../driver-kit/policy.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ConfigValues, ContentBlock } from "../../generated/common.ts";
-import type { ConfigChangePlan, RuntimeMode, RuntimePolicy } from "../../generated/config.ts";
+import type { ConfigChangePlan, EffectiveMode, RuntimeMode, RuntimePolicy } from "../../generated/config.ts";
 import type { AriEvent, AriEventBody } from "../../generated/events.ts";
 import type { McpServerConfig } from "../../generated/session.ts";
 import type { OpenSessionInput } from "../../generated/instance.ts";
@@ -58,7 +59,7 @@ import { failureOf, itemIdFor, permissionOptions, providerTurnIdFor, requestIdFo
 import type { McpEntry, NativeError, NativeEvent, NativeMessage, NativeQuestion, NativeRule, NativeToolState } from "./native.ts";
 import type { Detected, Link, ServerPool } from "./pool.ts";
 import { mcpConfigKey } from "./pool.ts";
-import { childRules, grantCouldReachMcpResources, isolationRules, lastMatchingEffect, sessionRules } from "./rules.ts";
+import { childRules, grantCouldReachMcpResources, isolationRules, lastMatchingEffect, modeRules, sessionRules } from "./rules.ts";
 
 /** What the instance gives each session. */
 export interface OpencodeSessionContext {
@@ -72,6 +73,16 @@ export interface OpencodeSessionContext {
 }
 
 const SUPPORTED_MODES: ReadonlySet<string> = new Set<RuntimeMode>(["read_only", "approval_required", "auto_accept_edits", "full_access"]);
+
+/**
+ * A thread's mode: the host's, which the driver writes as rules, or, when the
+ * policy names none, unknown. OpenCode reports no mode of its own: its own
+ * rules (the user's config and the agent's) decide each permission, and they
+ * map to no ARI mode the driver could name without guessing.
+ */
+function effectiveModeOf(policy: RuntimePolicy | undefined): EffectiveMode {
+  return policy?.mode === undefined ? { source: "harness" } : { mode: policy.mode, interaction: policy.interaction, source: "host" };
+}
 const SUPPORTED_OPTIONS = new Set(["model", "agent"]);
 
 interface Envelope {
@@ -281,8 +292,8 @@ export class OpencodeSession implements Session {
       if (found !== undefined) {
         const cwd = found.directory || directory || "";
         await this.#watch(link, cwd);
-        // Without a policy the session keeps the rules it was saved with; the driver adds only the denies of other threads' entries.
-        const savedRules = policy === undefined && (known === undefined || known.history) ? await link.runtime.getRules(found.id, cwd) : undefined;
+        // Without a mode the session keeps the rules it was saved with; the driver adds only the denies of other threads' entries.
+        const savedRules = policy?.mode === undefined && (known === undefined || known.history) ? await link.runtime.getRules(found.id, cwd) : undefined;
         const thread = this.#register(found.id, cwd, policy, launch, link, {}, undefined);
         if (savedRules !== undefined) thread.savedRules = savedRules;
         if (known !== undefined) thread.hostRules = known.hostRules;
@@ -331,7 +342,8 @@ export class OpencodeSession implements Session {
    * turn, as a fresh resume would; its MCP entries follow the new launch.
    */
   async #resumeHeld(known: OcThread, input: ResumeThreadInput): Promise<AppliedThread> {
-    const policy = input.policy === undefined ? undefined : { ...input.policy, cwd: known.directory };
+    // A policy without a mode changes no rules: the thread keeps the mode it runs.
+    const policy = input.policy === undefined ? undefined : keepingMode({ ...input.policy, cwd: known.directory }, known.policy);
     if (policy !== undefined) {
       this.#checkMode(policy);
       if (policy.mode !== known.policy?.mode && !this.#capabilities.runtimePolicy.switchInSession) throw callErrors.unsupported("runtimePolicy.switchInSession");
@@ -341,7 +353,7 @@ export class OpencodeSession implements Session {
     known.launch = this.#resumedLaunch(input, known);
     const link = await this.#linkOf(known);
     if (policy !== undefined && policy.mode !== known.policy?.mode) {
-      known.policy = policy;
+      this.#setPolicy(known, policy);
       await this.#applyRules(known, this.#context.pool.othersOn(link.endpoint, known.thread.id));
     }
     if (input.launch !== undefined) await this.#giveMcpServers(known);
@@ -386,8 +398,8 @@ export class OpencodeSession implements Session {
     await this.#watch(forkLink, source.directory);
     const thread = this.#register(forked.id, forked.directory || source.directory, policy, launch, forkLink, { forkedFrom: { threadId: source.thread.id, ...(input.at.type === "turn" ? { turnId: input.at.turnId } : {}) } }, undefined);
     thread.hostRules = [...source.hostRules];
-    // A fork of a thread without a policy keeps the source's saved rules, as its session does.
-    if (policy === undefined) thread.savedRules = source.savedRules;
+    // A fork without a mode keeps the rules OpenCode copied from the source session: its saved ones, or its mode's.
+    if (policy?.mode === undefined) thread.savedRules = source.policy?.mode === undefined ? source.savedRules : modeRules(source.policy.mode, forkLink.runtime.generation);
     await this.#applyRules(thread, this.#context.pool.othersOn(forkLink.endpoint, thread.thread.id));
     await this.#giveMcpServers(thread);
     return thread.thread;
@@ -480,9 +492,11 @@ export class OpencodeSession implements Session {
     if (input.intent === "steer" && !this.#capabilities.turns.steer) return { status: "unsupported", capability: "turns.steer" };
     if (input.intent !== "start" && input.intent !== "steer") return { status: "unsupported", capability: `turns.${input.intent}` };
     if (input.context?.synthetic !== undefined && input.context.synthetic.length > 0) return { status: "unsupported", capability: "context.syntheticContext" };
-    if (input.policy !== undefined && input.policy.mode !== thread.policy?.mode) {
+    // A turn's policy without a mode keeps the thread's.
+    const turnPolicy = input.policy === undefined ? undefined : keepingMode(input.policy, thread.policy);
+    if (turnPolicy?.mode !== undefined && turnPolicy.mode !== thread.policy?.mode) {
       if (!this.#capabilities.runtimePolicy.switchInSession) return { status: "unsupported", capability: "runtimePolicy.switchInSession" };
-      if (!SUPPORTED_MODES.has(input.policy.mode)) return { status: "unsupported", capability: `runtimePolicy.modes.${input.policy.mode}` };
+      if (!SUPPORTED_MODES.has(turnPolicy.mode)) return { status: "unsupported", capability: `runtimePolicy.modes.${turnPolicy.mode}` };
     }
     const prompt = await this.#promptContent(input.content);
     if (input.intent === "steer") return this.#steer(thread, input, prompt);
@@ -490,8 +504,8 @@ export class OpencodeSession implements Session {
     if (thread.active !== undefined || thread.compacting !== undefined) throw callErrors.invalidState("previous_turn_active", `Thread ${thread.thread.id} already runs a turn`);
     this.#applyConfig(thread, input.config);
     const link = await this.#linkOf(thread);
-    if (input.policy !== undefined && input.policy.mode !== thread.policy?.mode) {
-      thread.policy = input.policy;
+    if (turnPolicy?.mode !== undefined && turnPolicy.mode !== thread.policy?.mode) {
+      this.#setPolicy(thread, turnPolicy);
       await this.#applyRules(thread, this.#context.pool.othersOn(link.endpoint, thread.thread.id));
     }
     if (thread.pendingPrompt !== undefined) throw callErrors.invalidState("previous_turn_active", `Thread ${thread.thread.id} is starting a turn`);
@@ -844,6 +858,7 @@ export class OpencodeSession implements Session {
       identityVersion: IDENTITY_VERSION,
       ...(parent === undefined ? {} : { parentThreadId: parent.threadId, subagentId: parent.subagentId }),
       ...extra,
+      effectiveMode: effectiveModeOf(policy),
     };
     const thread: OcThread = existing ?? {
       thread: snapshot,
@@ -893,7 +908,7 @@ export class OpencodeSession implements Session {
     const link = thread.link;
     if (link === undefined) return;
     const generation = link.runtime.generation;
-    if (thread.policy !== undefined) await link.runtime.setRules(thread.sessionId, thread.directory, sessionRules(thread.policy.mode, generation, thread.hostRules, others));
+    if (thread.policy?.mode !== undefined) await link.runtime.setRules(thread.sessionId, thread.directory, sessionRules(thread.policy.mode, generation, thread.hostRules, others));
     else {
       const own = this.#context.pool.entriesOf(link.endpoint, thread.thread.id).keys();
       const written = new Set([...isolationRules(others, generation), ...isolationRules(own, generation)].map((rule) => JSON.stringify([rule.action, rule.resource, rule.effect])));
@@ -1016,8 +1031,17 @@ export class OpencodeSession implements Session {
     return { ...known.launch, model: typeof model === "string" ? model : known.launch.model, agent: typeof agent === "string" ? agent : known.launch.agent };
   }
 
+  /** Records a running thread's new policy, and tells the host its mode changed. */
+  #setPolicy(thread: OcThread, policy: RuntimePolicy): void {
+    thread.policy = policy;
+    const effectiveMode = effectiveModeOf(policy);
+    if (JSON.stringify(effectiveMode) === JSON.stringify(thread.thread.effectiveMode)) return;
+    thread.thread = { ...thread.thread, effectiveMode };
+    this.#emit({ type: "thread.upsert", thread: { id: thread.thread.id, effectiveMode } }, { threadId: thread.thread.id });
+  }
+
   #checkMode(policy: RuntimePolicy): void {
-    if (!SUPPORTED_MODES.has(policy.mode)) throw callErrors.unsupported(`runtimePolicy.modes.${policy.mode}`);
+    if (policy.mode !== undefined && !SUPPORTED_MODES.has(policy.mode)) throw callErrors.unsupported(`runtimePolicy.modes.${policy.mode}`);
     if (policy.interaction !== "default") throw callErrors.unsupported("runtimePolicy.interactionModes");
   }
 

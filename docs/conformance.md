@@ -406,9 +406,9 @@ records every host-service call. The kit makes one per instance from your
 - `spawns` holds every spawn with the environment the child got.
 - **The environment rule.** A spawned child gets `ambientEnvironment` minus
   each `envPolicy.stripAmbient` entry (a name, or a prefix ending in `*`),
-  plus the request's own `env`. Without an explicit `envPolicy`, the host
-  strips the prefixes your driver's CLI manifest declares
-  (`cliManifest.envScrubPrefixes`), as a host that honours the manifest does.
+  plus the request's own `env`; with `inheritEnv: false`, the request's `env`
+  alone. Without an explicit `envPolicy`, the host strips nothing, as the
+  Node host does by default.
 - Secrets refuse a namespace or key that is empty or contains `..` or `/`,
   and return copies of the stored bytes.
 - Coordination leases are exclusive until released or until `ttlMs` passes
@@ -462,7 +462,7 @@ the poison's whole lifetime.
 | 7 | `steer-after-end` | A steer after the turn ended returns `prompt_required`. So does a steer that arrives after the provider ended the turn but before the driver heard (`completeHeld`): the driver steers, the provider refuses, and the host must still get `prompt_required`. The provider never sees either as a turn. | `complete`, `completeHeld` | `turns.steer` off; check `steer-after-end.race` |
 | 8 | `duplicate-always-options` | An approval with two `accept_always` options and a decline is an approval kind (not `user_input`), with no questions, keeping each native option id and an accepting or declining decision; answering with the second `accept_always` option sends that native option, not the first one with the same decision. | `requestApproval` | `approvals.command` and `approvals.fileChange` off, `requests.responseModes` without `live`, or no supervised runtime mode |
 | 9 | `session-replaced` | Resuming an available session keeps its thread, replaces nothing, and the thread runs a turn whose prompt reaches the native session that still holds the earlier history. Resuming a locked session, then a missing one, falls back to a fresh session, emits `session.replaced` with `contextLost: true`, and the replacement thread runs a turn that reaches its own native session. | `lockSession`, `inspectSession` | checks `session-replaced.locked`, `session-replaced.native-history` |
-| 10 | `auth-states` | A stored unchecked credential is `configured` and Send works, even with the ambient account signed out; an unanswerable check is `unavailable` and Send works; an undecidable one is `unknown`; `reportRuntimeFailure` poisons only its own scope (`runtime_poison`, `unauthenticated`, the scope of the instance that failed, a short `poisonExpiresAt`, the other instance unchanged); `auth.state()` reports `unauthenticated` with `runtime_poison` right after the failure and still one second before `poisonExpiresAt`; after it, the instance reports its verdict from before the failure and Send works; inherited credentials never reach the agent. | `ambientAuth` arrangements, `managedProfile` secrets, `inheritedCredentials` | `Instance.auth` left out; checks `auth-states.configured`, `.unavailable`, `.unknown`, `.poison`, `.inherited-credentials` |
+| 10 | `auth-states` | A stored unchecked credential is `configured` and Send works, even with the ambient account signed out; an unanswerable check is `unavailable` and Send works; an undecidable one is `unknown`; `reportRuntimeFailure` poisons only its own scope (`runtime_poison`, `unauthenticated`, the scope of the instance that failed, a short `poisonExpiresAt`, the other instance unchanged); `auth.state()` reports `unauthenticated` with `runtime_poison` right after the failure and still one second before `poisonExpiresAt`; after it, the instance reports its verdict from before the failure and Send works; inherited credentials pass through: with them in the ambient environment, the instance's `environment` and the process environment, and a host policy that strips nothing, every runtime spawn and native environment holds each one; with the host's `envPolicy.stripAmbient` naming them, none reaches any spawn, argument or native environment. | `ambientAuth` arrangements, `managedProfile` secrets, `inheritedCredentials` | `Instance.auth` left out; checks `auth-states.configured`, `.unavailable`, `.unknown`, `.poison`, `.inherited-credentials` |
 | 11 | `symlinked-workspace` | A thread created in the real path reports that path as its cwd, and its tool paths lie inside it. A thread created through the symbolic link has the same id and cwd, and every event the same ids and paths. | `workspace().symlinkedCwd` | `symlinked-workspace` |
 | 12 | `side-effect-free-probe` | `probe()` and `probe({ deep: true })` return valid results that report the agent `installed`, call no `secrets.set`, `secrets.delete`, `callbacks.register`, `coordination.acquire` or `hostTools.*`, spawn only the probe executables, and create, change or remove no file under the instance's paths at any moment while they run. | `watchInstanceFiles`, `probeExecutables` | check `side-effect-free-probe.files` |
 | 13 | `replay-from-seq` | `events({ fromSeq: 1 })` and `events({ fromSeq: middle })` replay exactly the live events (same `seq`, same ids, same bodies), and the replayed stream goes on live identically. | `say`, `runTool`, `complete` | never |
@@ -693,7 +693,7 @@ Both implement every optional puppet member (`completeHeld`,
 
 ## How the kit proves itself
 
-`test/conformance/broken-drivers.ts` holds 66 deliberately broken variants of
+`test/conformance/broken-drivers.ts` holds 67 deliberately broken variants of
 the reference driver. Each wraps the honest driver and adds one bug the way a
 production driver has broken; `test/conformance/broken.test.ts` asserts each
 fails its scenario for that reason, and that the honest driver passes the same
@@ -714,7 +714,7 @@ that excludes that turn.
 | 7 | 2 | a late steer that starts a turn; the provider's "no active turn" refusal surfaced as an error unless the driver already heard the turn end |
 | 8 | 2 | duplicate `always` options turned into a question; the reply sent as the first option with the chosen decision |
 | 9 | 4 | a silent session swap; a placeholder thread no native session backs as the fallback; a remembered thread returned on resume without loading its native session; a resume onto a fresh native session under the old thread's id |
-| 10 | 6 | a configured credential treated as signed out; inherited credentials passed to the agent; the poison reported under the ambient scope; a poisoned instance kept signed out after expiry; a poisoned instance reported `configured` while the poison is active; a poison lifted after one second of an advertised thirty |
+| 10 | 7 | a configured credential treated as signed out; credentials the host's policy strips passed to the agent; an inherited credential the host does not strip kept from the agent; the poison reported under the ambient scope; a poisoned instance kept signed out after expiry; a poisoned instance reported `configured` while the poison is active; a poison lifted after one second of an advertised thirty |
 | 11 | 2 | the workspace path reported as given; the requested directory ignored |
 | 12 | 4 | a probe that writes secrets and takes a lease; one that opens a native session; one that writes a scratch file under `tmpDir` and deletes it before returning (run with the child-process harness, on real files); one that reports "not installed" without looking |
 | 13 | 1 | a replay that renumbers `seq` |

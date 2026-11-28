@@ -15,3 +15,5 @@
   version found, its path, the minimum and the update step, `fx upgrade`.
   Above the tested range an `fx` still runs, with an `untested_version`
   advisory.
+- `fx` gets the host's environment and the instance's `environment`,
+  credentials included, minus only the host's `envPolicy.stripAmbient`.

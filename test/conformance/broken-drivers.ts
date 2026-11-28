@@ -576,14 +576,28 @@ export const BROKEN_VARIANTS: ReadonlyArray<{
   },
   {
     scenario: 10,
-    bug: "passes credentials from the instance's inherited environment to the agent",
-    reason: /inherited credentials reached reference-agent: REFERENCE_AGENT_API_KEY/,
+    bug: "passes credentials the host's envPolicy strips to the agent",
+    reason: /credentials the host strips reached reference-agent: REFERENCE_AGENT_API_KEY/,
     harness: () =>
-      brokenHarness("inherited credentials leak", {
+      brokenHarness("stripped credentials leak", {
         instance: (instance, host, input) => {
-          // The broken driver copies the environment it was created with into every spawn.
+          // The broken driver copies the environment it was created with into every spawn, ignoring the host's policy.
           const spawn = host.process.spawn.bind(host.process);
           (host.process as { spawn: typeof spawn }).spawn = (request) => spawn({ ...request, env: { ...input.environment, ...request.env } });
+          return instance;
+        },
+      }),
+  },
+  {
+    scenario: 10,
+    bug: "strips an inherited credential the host does not strip",
+    reason: /credentials the host does not strip were kept from reference-agent: REFERENCE_AGENT_API_KEY/,
+    harness: () =>
+      brokenHarness("inherited credentials dropped", {
+        instance: (instance, host) => {
+          // The broken driver starts its agent with an empty environment, so nothing inherited reaches it.
+          const spawn = host.process.spawn.bind(host.process);
+          (host.process as { spawn: typeof spawn }).spawn = (request) => spawn({ ...request, inheritEnv: false });
           return instance;
         },
       }),

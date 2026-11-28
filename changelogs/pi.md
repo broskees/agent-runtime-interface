@@ -42,4 +42,8 @@ First version of the Pi driver, tested against `@earendil-works/pi-coding-agent`
   names.
 - Sign-in: a stored API key (`configured`), or Pi's own `pi auth check`
   for the ambient account; runtime auth poison per scope.
+- Every `pi` process, the version and sign-in checks included, gets the
+  instance's environment, credential variables included, minus only the
+  host's `envPolicy.stripAmbient`. `PI_CREDENTIAL_VARIABLES` and the CLI
+  manifest's `envScrubPrefixes` are gone.
 - `ari/meta/pi`: label, icon, config schema and form hints.

@@ -11,6 +11,13 @@ vendor CLI, an agent or an SDK package; the user or the host installs every
 one of them, and a driver whose CLI or SDK is missing reports
 `driver_unavailable` naming what to install.
 
+ARI passes the environment through. A host that wants a variable kept from
+agents lists it in `envPolicy.stripAmbient`. No driver strips, refuses or
+replaces a credential variable on its own; an instance's own stored
+credential still wins over an inherited one. Every driver that starts
+processes passes the instance's `environment` on to them, minus only what the
+host's policy names; the ACP drivers passed none of it before.
+
 ### Contract (`ari`, `ari/json-schema/*`)
 
 - The ARI wire contract, version 1, as JSON Schema draft 2020-12 under
@@ -33,10 +40,15 @@ one of them, and a driver whose CLI or SDK is missing reports
 - `ari/driver-kit`: the event sequencer, deterministic ID derivation, an
   NDJSON framer, a JSON-RPC 2.0 peer and UTF-8 truncation.
 - `ari/cli-manifests`: CLI launch manifests and launch building for fresh,
-  resume and fork launches.
+  resume and fork launches. A launch keeps the environment the host gives
+  it. `CliLaunchManifest` has no `envScrubPrefixes`, and `scrubEnv` is gone:
+  an earlier build let a manifest strip variables, which no driver does now.
 - `ari/conformance`: 15 conformance scenarios, a recording fake host, a
   `node:test` adapter (which also runs under `bun test`), virtual time and an
-  in-memory reference driver.
+  in-memory reference driver. The fake host strips nothing without an
+  `envPolicy` and honours `inheritEnv: false`. Scenario 10 checks that
+  inherited credentials reach the agent while the host strips nothing, and
+  that none does once the host's `envPolicy.stripAmbient` names them.
 - `ari/node`: process spawning with environment rules and process-group
   cleanup, file-backed secrets, instance paths, coordination leases,
   diagnostics and sign-in callbacks.

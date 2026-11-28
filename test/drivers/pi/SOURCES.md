@@ -28,7 +28,6 @@ version.
 | https://pi.dev/docs/latest/cli (`docs/cli.md`) | `--version`, `--session`, `--fork`, `--session-dir`, `--no-session`, `--model`, `--thinking`, `--api-key` (only with `--model`), `--append-system-prompt`, `--extension`, `pi auth check --json --no-refresh` |
 | https://pi.dev/docs/latest/mcp (`docs/mcp.md`) | MCP server config (stdio and streamable HTTP, no SSE), `exposure: "direct"`, `pi.registerMcpServer` from extensions, `mcp.json` taking precedence |
 | https://pi.dev/docs/latest/extensions (`docs/extensions.md`) | Extension events (`session_start`, `tool_call`, `before_agent_start`), `registerCommand`, `ctx.ui.select`, `ctx.navigateTree`, `ctx.sessionManager` (`getSessionFile`, `getHeader`), the `permission-gate.ts` and `subagent/` examples |
-| https://pi.dev/docs/latest/providers (`docs/providers.md`) | Provider credential variables (`PI_CREDENTIAL_VARIABLES`) |
 | https://pi.dev/docs/latest/security (`docs/security.md`) | Pi asks no approval before tool calls |
 
 ## Source files read for behaviour the docs leave open

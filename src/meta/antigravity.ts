@@ -26,28 +26,6 @@ export const ANTIGRAVITY_INSTALL_STEP =
  */
 export const ANTIGRAVITY_UPDATE_STEP = "Update the Antigravity CLI with `agy update`.";
 
-/**
- * Ambient Google credentials and Antigravity settings that must never reach
- * the agent: each instance signs in through its own profile directory. A host
- * strips them with `process.envPolicy.stripAmbient`; the CLI manifest's
- * `envScrubPrefixes` cover them all, and the driver refuses to start a session
- * when the host's policy leaves one of them in.
- */
-export const ANTIGRAVITY_STRIPPED_VARIABLES: readonly string[] = [
-  "GEMINI_API_KEY",
-  "GOOGLE_API_KEY",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-  "GOOGLE_CLOUD_PROJECT",
-  "GOOGLE_CLOUD_LOCATION",
-  "GOOGLE_CLOUD_QUOTA_PROJECT",
-  "GOOGLE_GENAI_USE_VERTEXAI",
-  "GCLOUD_PROJECT",
-  "CLOUDSDK_CORE_PROJECT",
-  "AGY_ACP_CCPA_PROJECT",
-  "AGY_ACP_ENABLE_OAUTH",
-  "GEMINI_HOME",
-];
-
 /** An orbit around a point, drawn for this package. */
 export const ANTIGRAVITY_ICON: Icon = {
   type: "svg",
@@ -68,10 +46,9 @@ export const ANTIGRAVITY_CONFIG_SCHEMA: JsonSchema = {
 
 export const ANTIGRAVITY_DEFAULT_CONFIG: AntigravityConfig = { command: "agy", ...ACP_BASE_DEFAULTS };
 
-/** The interactive Antigravity CLI, for a host's terminal fallback, with ambient Google credentials scrubbed. */
+/** The interactive Antigravity CLI, for a host's terminal fallback. */
 export const ANTIGRAVITY_CLI_MANIFEST: CliLaunchManifest = {
   binary: "agy",
-  envScrubPrefixes: ["GEMINI_", "GOOGLE_", "GCLOUD_", "CLOUDSDK_", "AGY_"],
   args: { fresh: [] },
 };
 

@@ -13,3 +13,5 @@
   starts, naming the version found, its path, the minimum and the update step,
   `kiro-cli update`. Above the tested range a `kiro-cli` still runs, with an
   `untested_version` advisory.
+- `kiro-cli` gets the host's environment and the instance's `environment`,
+  credentials included, minus only the host's `envPolicy.stripAmbient`.

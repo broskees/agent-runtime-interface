@@ -31,8 +31,6 @@ export type CliMcpInjection = {
 /** A declarative launch descriptor for hosts that offer a native terminal fallback. */
 export type CliLaunchManifest = {
   binary: string;
-  /** Environment variables whose names start with one of these prefixes are removed before launch. */
-  envScrubPrefixes?: string[];
   args: CliLaunchArgs;
   mcpInjection?: CliMcpInjection;
 };
@@ -149,13 +147,6 @@ export const driverDocument: SchemaDocument = {
       "properties": {
         "binary": {
           "type": "string"
-        },
-        "envScrubPrefixes": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "Environment variables whose names start with one of these prefixes are removed before launch."
         },
         "args": {
           "$ref": "#/$defs/CliLaunchArgs"

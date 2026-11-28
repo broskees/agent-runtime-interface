@@ -7,6 +7,14 @@
 > registry-based `acp-registry` driver), that part was dropped: the user or
 > the host installs every CLI, agent and SDK. See `CHANGELOG.md`.
 
+> **Note (2026-11-27):** ARI passes the environment through. Where this
+> proposal says drivers drop inherited credentials, strip ambient Google
+> credentials or declare `envScrubPrefixes`, that part was dropped: no driver
+> strips, refuses or replaces a variable on its own, and a host that wants a
+> variable kept from agents lists it in `envPolicy.stripAmbient`. An
+> instance's own stored credential still wins over an inherited one. See
+> `CHANGELOG.md`.
+
 *Proposal originally drafted October 28, 2026; revised November 23, 2026 to incorporate findings from the 14-orchestrator architecture audit (`doc-c03cbe6c`). "ARI" (Agent Runtime Interface) is a working name. ARI is designed to ship as **one standalone npm package with zero runtime dependencies that imports nothing from T3**. T3 Code (audited at commit `be6ff17`, [T3 Tools Inc., 2026a](https://github.com/pingdotgg/t3code/tree/be6ff17f5171c8a55969ec74af46ff1d86666c3a); updated to 11 built-in drivers on `main` as of November 23, 2026, [T3 Tools Inc., 2026f](https://raw.githubusercontent.com/pingdotgg/t3code/main/apps/server/src/provider/builtInDrivers.ts)) is the reference adopter, not a dependency. Packaging is covered in §17–§19, and the mapping from T3's concepts is in Appendix A (§22).*
 
 ---
@@ -46,7 +54,7 @@
 | `ari/effect` | Effect bindings: services, streams, tagged errors, generated Effect schemas | Optional peer: `effect` 4.x |
 | `ari/drivers/<name>` | First-party drivers: Codex, Claude, Cursor, OpenCode, Pi, Muse, and ACP with Grok, fx, Kiro, Registry and Antigravity | Optional peer: that vendor's SDK, if it has one |
 | `ari/meta/<name>` | Browser-safe driver metadata: label, icon, config schema and form hints | None |
-| `ari/cli-manifests` | Optional zero-dep declarative CLI launch manifests (`binary`, `envScrubPrefixes`, fresh/resume/fork args, MCP injection) for hosts that offer a native terminal fallback | None |
+| `ari/cli-manifests` | Optional zero-dep declarative CLI launch manifests (`binary`, fresh/resume/fork args, MCP injection) for hosts that offer a native terminal fallback | None |
 | `ari/json-schema/*.json` | The wire contract as JSON Schema (draft 2020-12), plus a method table (`methods.json`), for Rust/Go/Python code generation | — |
 
 **What makes it standalone:**
@@ -139,7 +147,7 @@ These are the places where a naive abstraction would quietly break. The last col
 | **Muse** | Talks over its own JSON-RPC protocol (`session/start`, `turn/steer`, `approval/decide`, `userInput/answer`); T3 declares no fork or rollback (per T3 adapter). | Core turn, steer and request mapping |
 | **ACP agents** | v1 vs v2 differ. In v2 the prompt response only means "accepted" and completion arrives in `state_update`; updates are upserts; client filesystem, terminal and modes APIs are gone ([Agent Client Protocol, n.d.-b](https://agentclientprotocol.com/protocol/v2/migration.md)). Fork is an RFD that may reject a different working directory ([Agent Client Protocol, n.d.-c](https://agentclientprotocol.com/rfds/session-fork.md)). | Version-aware ACP adapter; fork constraints in capabilities |
 | **ACP agents** | fx is reported to offer several model-category config options (provider, then model), and Antigravity permission prompts are reported to reject custom answers. *(Both from a research sub-agent citing T3 issues; not re-verified.)* | `ConfigOption.dependsOn`; `allowCustomAnswer: false`; reply by option ID |
-| **Antigravity** | Can checkpoint the workspace but can't roll back its conversation, so revert is rejected before touching files. Each instance gets its own account profile with file-based credentials, and ambient Google credentials are stripped. The installer leases versions to running processes ([T3 Tools Inc., 2026c](https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/docs/internals/providers.md)). | Checkpoint capabilities; `process.envPolicy`; per-instance paths; maintenance leases |
+| **Antigravity** | Can checkpoint the workspace but can't roll back its conversation, so revert is rejected before touching files. Each instance gets its own account profile with file-based credentials; ambient Google credentials pass through unless the host's `envPolicy` strips them. The installer leases versions to running processes ([T3 Tools Inc., 2026c](https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/docs/internals/providers.md)). | Checkpoint capabilities; `process.envPolicy`; per-instance paths; maintenance leases |
 | **All** | Setup must never happen as a side effect of a health check: opening a session can start MCP servers, run hooks or launch a sign-in browser ([T3 Tools Inc., 2026c](https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/docs/internals/providers.md)). | `probe()` must have no side effects, and conformance tests check it |
 
 ---
@@ -501,7 +509,7 @@ interface Driver<C> {
   metadata: { displayName: string; icon?: Icon; docsUrl?: string;
               multipleInstances: boolean; hasDefaultInstance: boolean };
   configSchema: JSONSchema; defaultConfig(): C;
-  cliManifest?: CliLaunchManifest;      // optional zero-dep descriptor for host terminal fallback (binary, args, envScrub)
+  cliManifest?: CliLaunchManifest;      // optional zero-dep descriptor for host terminal fallback (binary, args)
   create(host: HostServices, i: { instanceId: string; config: C; displayName?: string;
                                   environment: Record<string, string> }): Promise<Instance>;
 }
@@ -574,7 +582,7 @@ interface Instance {
 ```
 
 **Notes:**
-- **Five auth states, runtime auth poison, and separate enablement.** Adopting `Traycer`'s v2.0 auth model ([Traycer, 2026c](https://raw.githubusercontent.com/traycerai/traycer/main/protocol/provider-auth.md)), a stored unvalidated API key is `configured` (not `authenticated`), a failed or timed-out probe is `unavailable` (never `unauthenticated`), and only `unauthenticated` blocks Send. Passive credential presence never authorizes first-launch enablement. When a live turn or catalog call fails with an auth error, the session reports it via `reportRuntimeFailure`, setting a short-TTL runtime auth poison (e.g., 30 seconds) scoped independently to the managed profile or ambient account. Inherited credentials the instance didn't configure are still dropped ([T3 Tools Inc., 2026d](https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/docs/internals/adding-a-provider.md)).
+- **Five auth states, runtime auth poison, and separate enablement.** Adopting `Traycer`'s v2.0 auth model ([Traycer, 2026c](https://raw.githubusercontent.com/traycerai/traycer/main/protocol/provider-auth.md)), a stored unvalidated API key is `configured` (not `authenticated`), a failed or timed-out probe is `unavailable` (never `unauthenticated`), and only `unauthenticated` blocks Send. Passive credential presence never authorizes first-launch enablement. When a live turn or catalog call fails with an auth error, the session reports it via `reportRuntimeFailure`, setting a short-TTL runtime auth poison (e.g., 30 seconds) scoped independently to the managed profile or ambient account. Inherited credentials reach the agent unless the host's `envPolicy.stripAmbient` names them; this replaces an earlier rule, taken from T3 Code's provider guide ([T3 Tools Inc., 2026d](https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/docs/internals/adding-a-provider.md)), that drivers drop them.
 - **`textGeneration.guarantees` exists because telling a model not to use tools isn't a sandbox.** Antigravity's helpers deny tool requests, but native hooks and MCP configuration can still run before the prompt ([T3 Tools Inc., 2026c](https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/docs/internals/providers.md)).
 - **Account pools, rate-limit recovery, and reset credits belong to the host.** Drivers classify terminal refusals and expose `bindingKey`, `accountKey`, multi-window `LimitStatus` buckets (`5h`, `daily`, `weekly`, `credits`), and optional `auth.transferSession` for cross-account continuation ([Synara, 2026c](https://raw.githubusercontent.com/Emanuele-web04/synara/main/packages/contracts/src/usageLimit.ts); [MonoCode, 2026a](https://github.com/hardbeat920/monocode); [bb, 2026i](https://raw.githubusercontent.com/get-bb/bb/main/plugins/environment-git-worktree/package.json)). The host owns retry timing, model fallback routing, account pooling, and per-account credit serialization (replacing T3's in-app `ResetCreditCoordinator`).
 
@@ -589,7 +597,7 @@ A driver gets these services from whatever host runs it. ARI defines every servi
 | `paths` | Per-instance `stateDir`, `cacheDir`, `tmpDir` | `ProviderHost.paths` (minus host-wide directories) |
 | `config` | The instance's **own** decoded config + changes | `ProviderHost.settings` (all of `ServerSettings`) ([T3 Tools Inc., 2026a](https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/packages/provider-core/src/server/ProviderHost.ts)) |
 | `secrets` | `get/set/delete(namespace, key)` → bytes; binding owner `provider\|host` | `ProviderHost.credentials` with its hard-coded `owner: "t3"`; `ServerSecretStore` (Codex) |
-| `process` | `spawn`, `resolveExecutable`, `envPolicy.stripAmbient[]` (in-process uses host `process`; over `ari/wire`, drivers spawn locally by default using `envPolicy` from `initialize`, with opt-in `host.process` delegation for remote/sandboxed hosts such as SSH, Modal, or Firecracker) | `HostProcess`; Antigravity's credential stripping |
+| `process` | `spawn`, `resolveExecutable`, `envPolicy.stripAmbient[]` (in-process uses host `process`; over `ari/wire`, drivers spawn locally by default using `envPolicy` from `initialize`, with opt-in `host.process` delegation for remote/sandboxed hosts such as SSH, Modal, or Firecracker) | `HostProcess`; the host's own environment policy |
 | `attachments` | `resolve(ref)` → `{path, mime, size}` or `null` (when `null`, bytes cannot be had and the driver explicitly informs the agent, [Paradev, 2026b](https://raw.githubusercontent.com/ParadevAI/Paradev/main/packages/chat-runtime/src/harness/types.ts)); `extractText?`. A path in a prompt grants nothing; adapters keep sandbox rules ([T3 Tools Inc., 2026c](https://github.com/pingdotgg/t3code/blob/be6ff17f5171c8a55969ec74af46ff1d86666c3a/docs/internals/providers.md)) | `resolveAttachmentPath`; `attachmentStore` (imported by the Codex, Claude and Antigravity code) |
 | `callbacks` | `register(flowId)` → `{url}`. The host routes the inbound callback to `instance.auth.complete`, so no handler function crosses the wire | `CodexAuthCallbackPage`, Antigravity callback forwarding |
 | `hostTools` | `mcpServerFor(threadId, {transport})` → `{ name, config, alwaysLoad? }` supporting stdio and loopback HTTP (`127.0.0.1` + bearer token, [Diri, 2026d](https://diri.sh/docs/mcp/)), plus optional direct `callDynamicTool?(call)` (`item/tool/call`, [bb, 2026g](https://raw.githubusercontent.com/get-bb/bb/main/packages/provider-bridge-protocol/src/bridge-requests.ts)). The host picks all names; drivers never hard-code host tool names | `McpProviderSessions`; T3's orchestrator MCP and preview/device tools |
@@ -623,7 +631,7 @@ A driver passes when replay fixtures demonstrate each capability it claims. Ever
 - **steering turn-end race** returning `prompt_required` instead of spawning an untracked turn ([Paseo, 2026b](https://raw.githubusercontent.com/getpaseo/paseo/main/packages/server/src/server/agent/agent-sdk-types.ts))
 - **duplicate `allow_always` options** (Codex exec approvals) classified as approvals, not questions ([Zeron, 2026c](https://raw.githubusercontent.com/zeronsh/zeron/main/docs/research/acp.md))
 - **`session.replaced` fallback** with `contextLost: true` when a native session is locked or missing ([bb, 2026e](https://raw.githubusercontent.com/get-bb/bb/main/packages/provider-bridge-protocol/src/notifications.ts))
-- **5-state auth & runtime auth poison** (`configured` and `unavailable` never blocking Send; runtime 401 poisoning only its own scope; unknown sign-in reported as unknown; inherited credentials dropped) ([Traycer, 2026c](https://raw.githubusercontent.com/traycerai/traycer/main/protocol/provider-auth.md))
+- **5-state auth & runtime auth poison** (`configured` and `unavailable` never blocking Send; runtime 401 poisoning only its own scope; unknown sign-in reported as unknown; inherited credentials passed through unless the host strips them) ([Traycer, 2026c](https://raw.githubusercontent.com/traycerai/traycer/main/protocol/provider-auth.md))
 - a symlinked workspace (macOS `/tmp`)
 - probes with no side effects
 - reconnecting with `fromSeq` and getting identical IDs back

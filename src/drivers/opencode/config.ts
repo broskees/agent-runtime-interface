@@ -56,7 +56,8 @@ export const SERVER_PASSWORD_SECRET = { namespace: "opencode", key: "server-pass
 /**
  * The server-password variables OpenCode reads (1.x `OPENCODE_SERVER_PASSWORD`,
  * 2.x `OPENCODE_PASSWORD`, which overrides it). The driver gives every server
- * it starts its own password, so inherited values are removed.
+ * it starts its own password, so the instance's values are not passed to the
+ * servers it starts. A terminal launch from the CLI manifest keeps them.
  */
 export const OPENCODE_PASSWORD_VARIABLES = ["OPENCODE_SERVER_PASSWORD", "OPENCODE_PASSWORD"] as const;
 
@@ -87,7 +88,6 @@ export function defaultOpencodeConfig(): OpencodeConfig {
  */
 export const OPENCODE_CLI_MANIFEST: CliLaunchManifest = {
   binary: "opencode",
-  envScrubPrefixes: [...OPENCODE_PASSWORD_VARIABLES],
   args: {
     fresh: [],
     resume: ["--session", "{sessionId}"],

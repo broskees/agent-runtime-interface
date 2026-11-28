@@ -55,6 +55,7 @@ import {
 } from "../../meta/claude.ts";
 import type { ClaudeDriverConfig } from "../../meta/claude.ts";
 import type { HostServices, Instance, Session } from "../../runtime.ts";
+import { withoutHostStripped } from "../../driver-kit/env-policy.ts";
 import { ARI_VERSION } from "../../version.ts";
 import { limitStatusFrom, limitWindowFrom, strongRef } from "./mapping.ts";
 import type { ClaudeLimitWindowState } from "./mapping.ts";
@@ -66,8 +67,6 @@ export const CLAUDE_SECRET_NAMESPACE = "claude";
 export const CLAUDE_API_KEY_SECRET = "api-key";
 /** How long a runtime auth failure poisons its scope. */
 export const CLAUDE_POISON_MS = 30_000;
-/** Ambient variables that carry Anthropic credentials. They never reach Claude Code: an instance uses only what it configured. */
-export const CLAUDE_CREDENTIAL_VARIABLES = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
 
 export const CLAUDE_AUTH_METHODS: readonly AuthMethod[] = [
   { id: "api-key", kind: "api_key", label: "Anthropic API key", fields: [{ id: "apiKey", label: "API key", secret: true, required: true }] },
@@ -201,11 +200,6 @@ async function readAll(stream: AsyncIterable<Uint8Array>): Promise<string> {
   return text + decoder.decode();
 }
 
-/** True when `name` matches an `envPolicy.stripAmbient` entry: an exact name, or a prefix ending in `*`. */
-function stripped(name: string, patterns: readonly string[]): boolean {
-  return patterns.some((pattern) => (pattern.endsWith("*") ? name.startsWith(pattern.slice(0, -1)) : name === pattern));
-}
-
 /** One prompt, then the end of input: what a one-shot query reads. */
 async function* onePrompt(text: string): AsyncGenerator<ClaudeUserMessage> {
   yield { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null };
@@ -335,7 +329,7 @@ export class ClaudeInstance implements Instance {
       );
     let printed: { stdout: string; stderr: string; code: number | null; signal: string | null };
     try {
-      const child = await this.#host.process.spawn({ command: path, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: this.#forwardedEnvironment() });
+      const child = await this.#host.process.spawn({ command: path, args: ["--version"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: await this.#claudeCodeEnvironment(), inheritEnv: false });
       const [stdout, stderr] = await Promise.all([readAll(child.stdout), readAll(child.stderr)]);
       const exit = await child.exited;
       printed = { stdout, stderr, code: exit.code, signal: exit.signal };
@@ -424,22 +418,23 @@ export class ClaudeInstance implements Instance {
     return stored === null ? undefined : new TextDecoder().decode(stored);
   }
 
-  /** The instance's own environment without credentials it did not configure or the host strips. */
-  #forwardedEnvironment(): { [name: string]: string } {
-    const patterns = this.#host.process.envPolicy.stripAmbient;
-    const forwarded: { [name: string]: string } = {};
-    for (const [name, value] of Object.entries(this.#environment)) {
-      if ((CLAUDE_CREDENTIAL_VARIABLES as readonly string[]).includes(name) || stripped(name, patterns)) continue;
-      forwarded[name] = value;
-    }
-    return forwarded;
-  }
-
-  /** What a query's Claude Code process gets: `env` replaces its whole environment. */
-  async #queryEnvironment(): Promise<{ [name: string]: string }> {
+  /**
+   * The whole environment of every Claude Code process: each query's (the
+   * SDK's `env` replaces the process's environment) and each check's
+   * (`--version`, `auth status`, spawned with `inheritEnv: false`). It is the
+   * instance's environment as given, credentials included, minus only what
+   * the host's `envPolicy.stripAmbient` names, plus the instance's own API
+   * key, which wins over an inherited one. Claude Code uses
+   * `ANTHROPIC_AUTH_TOKEN` before `ANTHROPIC_API_KEY` (code.claude.com/docs/en/authentication,
+   * "Authentication precedence"), so with its own key the instance leaves an
+   * inherited `ANTHROPIC_AUTH_TOKEN` out.
+   */
+  async #claudeCodeEnvironment(): Promise<{ [name: string]: string }> {
     const apiKey = await this.#apiKey();
+    const given = withoutHostStripped(this.#environment, this.#host.process.envPolicy.stripAmbient);
+    if (apiKey !== undefined) delete given["ANTHROPIC_AUTH_TOKEN"];
     return {
-      ...this.#forwardedEnvironment(),
+      ...given,
       ...(apiKey === undefined ? {} : { ANTHROPIC_API_KEY: apiKey }),
       // A refused resume (a session another process holds) comes back as a result naming the reason.
       CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1",
@@ -460,7 +455,7 @@ export class ClaudeInstance implements Instance {
     }
     let check: { code: number | null; stdout: string };
     try {
-      const child = await this.#host.process.spawn({ command: executable, args: ["auth", "status", "--json"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: this.#forwardedEnvironment() });
+      const child = await this.#host.process.spawn({ command: executable, args: ["auth", "status", "--json"], purpose: "probe", stdin: "ignore", timeoutMs: 10_000, env: await this.#claudeCodeEnvironment(), inheritEnv: false });
       const [stdout] = await Promise.all([readAll(child.stdout), readAll(child.stderr)]);
       const exit = await child.exited;
       check = { code: exit.code, stdout };
@@ -602,7 +597,7 @@ export class ClaudeInstance implements Instance {
   /** Options for a query that must not act: no settings files, no MCP servers, no tools, nothing persisted. */
   async #isolatedOptions(claudeCode: ClaudeCode): Promise<ClaudeQueryOptions> {
     return {
-      env: await this.#queryEnvironment(),
+      env: await this.#claudeCodeEnvironment(),
       settingSources: [],
       strictMcpConfig: true,
       mcpServers: {},
@@ -742,7 +737,7 @@ export class ClaudeInstance implements Instance {
         executablePath: claudeCode.path,
         sessionId: sessionIdFor(this.id, ordinal),
         newUuid,
-        environment: () => this.#queryEnvironment(),
+        environment: () => this.#claudeCodeEnvironment(),
         rateLimited: (info) => this.#rateLimited(info),
         authFailed: async () => {
           await this.#poisonCurrentScope();

@@ -1,11 +1,13 @@
-// Five-state sign-in, and the driver's part of dropping inherited
-// credentials. Cursor's SDK resolves an API key as the `apiKey` option, then
-// CURSOR_API_KEY in the process environment, then its stored login; the fake
-// records which key each call resolved to, the SDK's way. The driver passes
-// `apiKey` on every SDK call, so a CURSOR_API_KEY the host process (or the
-// instance's environment) inherited never signs Cursor in. What the agent's
-// own shell tools see is the host's process environment, which a driver
-// running inside that process cannot change (docs/drivers/cursor.md, Limits).
+// Five-state sign-in, and inherited credentials. Cursor's SDK resolves an API
+// key as the `apiKey` option, then CURSOR_API_KEY in the process environment,
+// then its stored login; the fake records which key each call resolved to,
+// the SDK's way. The driver passes `apiKey` on every SDK call, in the same
+// order with the instance's own key first: its stored key, else an inherited
+// CURSOR_API_KEY (the instance's environment, else the process's), else the
+// stored login. A host whose envPolicy.stripAmbient names CURSOR_API_KEY keeps
+// it from Cursor. What the agent's own shell tools see is the host's process
+// environment, which a driver running inside that process cannot change
+// (docs/drivers/cursor.md, Limits).
 
 import "./setup-env.ts";
 import assert from "node:assert/strict";
@@ -52,7 +54,7 @@ async function exercise(rig: CursorTestRig): Promise<void> {
   await rig.terminal(events, again.turnId);
 }
 
-test("an inherited CURSOR_API_KEY never signs Cursor in: every SDK call gets the instance's own key", async () => {
+test("the instance's own key wins over an inherited CURSOR_API_KEY: every SDK call gets the instance's own key", async () => {
   await withInheritedKey(async () => {
     const rig = await openCursorRig({ managedProfile: true, environment: { CURSOR_API_KEY: INHERITED, PATH: "/usr/bin" } });
     rigs.push(rig);
@@ -63,9 +65,39 @@ test("an inherited CURSOR_API_KEY never signs Cursor in: every SDK call gets the
   });
 });
 
-test("an inherited CURSOR_API_KEY never signs Cursor in: the ambient account uses the SDK's stored login", async () => {
+test("an inherited CURSOR_API_KEY signs Cursor in ahead of the stored login, from the process's environment or the instance's", async () => {
   await withInheritedKey(async () => {
-    const rig = await openCursorRig({ environment: { CURSOR_API_KEY: INHERITED } });
+    const rig = await openCursorRig();
+    rigs.push(rig);
+    rig.world.acceptKey(INHERITED);
+    await exercise(rig);
+    const calls = new Set(rig.world.keysUsed.map((use) => use.call));
+    for (const call of ["Cursor.me", "Agent.create", "Agent.resume", "agent.send", "Cursor.models.list"]) assert.ok(calls.has(call), `${call} was exercised`);
+    for (const use of rig.world.keysUsed) assert.equal(use.apiKey, INHERITED, `${use.call} resolved to ${String(use.apiKey)}`);
+    const state = await rig.instance.auth!.state();
+    assert.deepEqual([state.status, state.evidence, state.scope], ["authenticated", "active", "ambient"]);
+  });
+  // Only in the instance's environment: the process's has none.
+  assert.equal(process.env["CURSOR_API_KEY"], undefined);
+  const rig = await openCursorRig({ environment: { CURSOR_API_KEY: INHERITED } });
+  rigs.push(rig);
+  rig.world.acceptKey(INHERITED);
+  await exercise(rig);
+  for (const use of rig.world.keysUsed) assert.equal(use.apiKey, INHERITED, `${use.call} resolved to ${String(use.apiKey)}`);
+});
+
+test("a refused inherited CURSOR_API_KEY is unauthenticated, and Send is blocked", async () => {
+  const rig = await openCursorRig({ environment: { CURSOR_API_KEY: INHERITED } });
+  rigs.push(rig);
+  const state = await rig.instance.auth!.state();
+  assert.deepEqual([state.status, state.evidence, state.scope], ["unauthenticated", "active", "ambient"]);
+  assert.match(state.actionRequired?.reason ?? "", /refused the CURSOR_API_KEY in the environment/);
+  await assert.rejects(rig.instance.openSession({}), (error: unknown) => isAriError(error, "auth_required"));
+});
+
+test("a host whose envPolicy strips CURSOR_API_KEY keeps it from Cursor: the ambient account is the SDK's stored login", async () => {
+  await withInheritedKey(async () => {
+    const rig = await openCursorRig({ environment: { CURSOR_API_KEY: INHERITED }, host: { envPolicy: { stripAmbient: ["CURSOR_*"] } } });
     rigs.push(rig);
     await exercise(rig);
     assert.ok(rig.world.keysUsed.some((use) => use.call === "Cursor.me"));
@@ -73,9 +105,9 @@ test("an inherited CURSOR_API_KEY never signs Cursor in: the ambient account use
   });
 });
 
-test("with no stored key and no SDK login, Send is blocked before any SDK call could fall back to CURSOR_API_KEY", async () => {
+test("with no stored key, no SDK login and the host stripping CURSOR_API_KEY, Send is blocked before any SDK call could fall back to it", async () => {
   await withInheritedKey(async () => {
-    const rig = await openCursorRig({ signedIn: false });
+    const rig = await openCursorRig({ signedIn: false, host: { envPolicy: { stripAmbient: ["CURSOR_API_KEY"] } } });
     rigs.push(rig);
     const state = await rig.instance.auth!.state();
     assert.deepEqual({ status: state.status, evidence: state.evidence, scope: state.scope }, { status: "unauthenticated", evidence: "passive", scope: "ambient" });

@@ -219,21 +219,23 @@ loading the driver or the SDK.
 
 The SDK resolves an API key as: the `apiKey` option, then `CURSOR_API_KEY` in
 the process environment, then the login `Cursor.auth.login()` stored
-(`~/.cursor/sdk/auth.json`). The driver always passes `apiKey` itself, so the
-SDK never authenticates with a `CURSOR_API_KEY` the host process inherited:
+(`~/.cursor/sdk/auth.json`). The driver passes `apiKey` itself, in the same
+order with the instance's own key first:
 
 - **Method `api-key`.** The host stores a Cursor user or service-account key
   (`auth.respond`); it is `configured` (passive, scope `managed_profile`) and
   used first.
-- **The ambient account** is the SDK's stored sign-in, read with the SDK's
-  `FileCredentialStore`. None, or an expired one, is `unauthenticated`;
-  otherwise `Cursor.me()` checks the key: accepted is `authenticated`, refused
-  (`AuthenticationError`) `unauthenticated`, a network failure (`NetworkError`)
-  `unavailable`, anything else `unknown`.
+- **The ambient account** is an inherited `CURSOR_API_KEY` (the instance's
+  `environment`'s, else this process's), else the SDK's stored sign-in, read
+  with the SDK's `FileCredentialStore`. A host whose `envPolicy.stripAmbient`
+  names `CURSOR_API_KEY` keeps it from Cursor; then only the stored sign-in
+  counts. No sign-in, or an expired one, is `unauthenticated`; otherwise
+  `Cursor.me()` checks the key: accepted is `authenticated`, refused
+  (`AuthenticationError`) `unauthenticated`, a network failure
+  (`NetworkError`) `unavailable`, anything else `unknown`.
 - A runtime auth failure (`reportRuntimeFailure`) poisons its scope for 30
   seconds. `auth.complete` rejects `unsupported`: no Cursor sign-in returns
-  through a callback URL. A `CURSOR_API_KEY` in the instance's `environment` is
-  ignored.
+  through a callback URL.
 
 ## Probes and status
 
@@ -367,7 +369,7 @@ out.
 
 ## Limits
 
-- **Inherited credentials reach Cursor's tools.** The SDK runs inside the
+- **Cursor's tools get the host process's environment.** The SDK runs inside the
   host's process, and its local executor spawns the shell tool, its command
   runner and its git and hg helpers with the host's `process.env`
   (`{ ...process.env, ... }` in `977.js`). The SDK's only override,
@@ -375,9 +377,9 @@ out.
   executor alone: the streaming and background shells are built on the same
   core executor and are always registered, and no option sets the native
   environment. So the driver cannot apply the host's `envPolicy` inside
-  Cursor. A host that must keep credentials from the agent starts the process
-  that runs this driver without them. The driver keeps inherited credentials
-  from signing in to Cursor, by always passing `apiKey`.
+  Cursor's tools. A host that must keep a variable from the agent starts the
+  process that runs this driver without it. The driver applies the policy to
+  the one variable it reads itself, `CURSOR_API_KEY`.
 - Cursor writes its transcripts and MCP descriptors under its data directory
   (see "Where Cursor writes them"); only `CURSOR_DATA_DIR` moves it.
 - No snapshots, so a host that reloads a thread keeps its own history.
@@ -395,8 +397,8 @@ which imports each `*.suite.ts` file of `test/drivers/cursor/`:
   and 15 do not apply (no approvals); the harness gives reasons for three
   checks: a locked session (no store state makes a resume fail; a run left
   active is expired, or the turn refused while the instance runs the agent),
-  a usage limit's reset time (Cursor reports none) and inherited credentials
-  in the agent's tools (see "Limits").
+  a usage limit's reset time (Cursor reports none) and inherited credentials,
+  which the kit cannot observe in the agent's tools (see "Limits").
 - `fake-sdk.ts`: the fake. It creates and resumes agents with the real SDK,
   offline, in the real `JsonlLocalAgentStore`, and takes each run as the real
   SDK's storage preflight decides (`getRunForSend`, `local.force` included),

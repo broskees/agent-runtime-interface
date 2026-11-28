@@ -60,9 +60,11 @@ Who runs which server, and the session model the capabilities declare:
 
 Every server the driver starts runs `opencode serve --hostname 127.0.0.1
 --port 0` through `host.process.spawn`, with its own random password: 1.x
-reads `OPENCODE_SERVER_PASSWORD`, 2.x `OPENCODE_PASSWORD`. Inherited values of
-both are removed from the instance's environment, and the CLI manifest scrubs
-them. Both generations accept only HTTP Basic auth with the user `opencode`.
+reads `OPENCODE_SERVER_PASSWORD`, 2.x `OPENCODE_PASSWORD`. Those two are the
+only variables of the instance's `environment` a server the driver starts
+does not get, because the driver sets its own password there. The CLI
+manifest's terminal launch keeps them. Both generations accept only HTTP Basic
+auth with the user `opencode`.
 
 2.x serves its own OpenAPI document at `GET /openapi.json`; `GET /doc` (the
 1.x path) returns 2.x's web app. The vendored 2.1.2 document

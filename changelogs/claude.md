@@ -57,6 +57,12 @@ First version of `ari/drivers/claude` and `ari/meta/claude`.
   driver unavailable, naming it.
 - Ambient sign-in from `claude auth status --json`, or an API key the
   instance stores; 30-second runtime auth poison per scope.
+- Claude Code gets the instance's environment, credentials included, minus
+  only the host's `envPolicy.stripAmbient`. The instance's own key replaces
+  `ANTHROPIC_API_KEY` and leaves out `ANTHROPIC_AUTH_TOKEN`, which Claude Code
+  would use first. `claude --version` and `claude auth status` run in that same
+  environment, never the host process's. `CLAUDE_CREDENTIAL_VARIABLES` and the
+  CLI manifest's `envScrubPrefixes` are gone.
 - Catalog from `supportedModels()`, limits from rate limit events, text
   generation without tools, native sessions through `listSessions`,
   `archiveSession` and `deleteSession`.

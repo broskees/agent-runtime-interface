@@ -36,7 +36,7 @@ import { createFakeHost } from "../../../src/conformance/fake-host.ts";
 import type { DiagnosticEntry } from "../../../src/generated/host.ts";
 import type { ConfigOption } from "../../../src/generated/config.ts";
 import type { StartTurnInput, StartTurnResult } from "../../../src/generated/session.ts";
-import { ANTIGRAVITY_CLI_MANIFEST, ANTIGRAVITY_DEFAULT_CONFIG, createAntigravityDriver } from "../../../src/drivers/antigravity/index.ts";
+import { ANTIGRAVITY_DEFAULT_CONFIG, createAntigravityDriver } from "../../../src/drivers/antigravity/index.ts";
 import type { AntigravityConfig } from "../../../src/drivers/antigravity/index.ts";
 import type { HostServices, Session } from "../../../src/runtime.ts";
 import { runScenario } from "../scenarios.ts";
@@ -99,8 +99,12 @@ export function antigravityRecorderConfig(): AntigravityConfig {
   return { ...ANTIGRAVITY_DEFAULT_CONFIG };
 }
 
-/** The environment rule of the recorder's host: it strips every ambient variable the CLI manifest names by prefix, as a manifest-honouring host does. */
-export const ANTIGRAVITY_RECORDER_ENV_POLICY = { stripAmbient: ANTIGRAVITY_CLI_MANIFEST.envScrubPrefixes!.map((prefix) => `${prefix}*`) };
+/**
+ * The environment rule of the recorder's host, its own choice: it keeps the
+ * recording user's Google and Antigravity variables from `agy`, which signs in
+ * through the recording's own profile.
+ */
+export const ANTIGRAVITY_RECORDER_ENV_POLICY = { stripAmbient: ["GEMINI_*", "GOOGLE_*", "GCLOUD_*", "CLOUDSDK_*", "AGY_*"] };
 
 /** The model is missing from what the agent offers, or the agent offers none: the recorder stops before the first prompt. */
 export class AntigravityModelChoiceError extends Error {

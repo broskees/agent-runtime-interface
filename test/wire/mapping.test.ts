@@ -147,7 +147,7 @@ describe("instance members over ari/wire", () => {
       assert.equal(driver.kind, "recording");
       assert.equal(driver.metadata.displayName, "Recording");
       assert.deepEqual(driver.configSchema, { type: "object", properties: { level: { type: "integer" } } });
-      assert.deepEqual(driver.cliManifest, { binary: "recording-agent", envScrubPrefixes: ["RECORDING_"], args: { fresh: [] } });
+      assert.deepEqual(driver.cliManifest, { binary: "recording-agent", args: { fresh: [] }, mcpInjection: { mode: "env", env: "RECORDING_MCP" } });
       const config = driver.defaultConfig() as { level: number };
       assert.deepEqual(config, { level: 7 });
       config.level = 99;

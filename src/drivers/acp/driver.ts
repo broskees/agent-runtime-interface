@@ -2,11 +2,15 @@
 // says how to launch its agent, how to read its version, and which few
 // capabilities or members differ; everything ACP is shared here. A flavor
 // that runs a vendor's CLI runs the one the user installed, and refuses one
-// older than its tested range (`testedRange`).
+// older than its tested range (`testedRange`). Every process the driver
+// starts, the version command included, gets the instance's `environment`
+// as given, credentials included, minus only what the host's
+// `envPolicy.stripAmbient` names, under the flavor's own variables.
 
 import * as fs from "node:fs/promises";
 import { AriError, callErrors } from "../../errors.ts";
 import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
+import { withoutHostStripped } from "../../driver-kit/env-policy.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { Capabilities } from "../../generated/capabilities.ts";
 import type { ConfigValues, JsonSchema } from "../../generated/common.ts";
@@ -65,7 +69,7 @@ export interface AcpFlavor<Config extends AcpBaseConfig> {
   launchIdentity(config: Config): string;
   /** What `probe()` looks at. It must not install, write or start anything but the version command. */
   probeTarget(context: AcpFlavorContext<Config>): Promise<AcpProbeTarget>;
-  /** Checks run before a session starts, for example the host's environment rules. */
+  /** Checks run before a session starts, before anything is spawned. */
   beforeSession?(context: AcpFlavorContext<Config>): Promise<void>;
   /** The command for one agent process of a session. */
   launch(context: AcpFlavorContext<Config>, input: OpenSessionInput): Promise<AcpLaunch>;
@@ -211,6 +215,11 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
     return this.#probeCommand(target, checkedAt);
   }
 
+  /** The instance's environment as given, credentials included, minus only what the host's `envPolicy.stripAmbient` names. */
+  #forwardedEnvironment(): { [name: string]: string } {
+    return withoutHostStripped(this.#context.environment, this.#context.host.process.envPolicy.stripAmbient);
+  }
+
   /** Finds the executable and runs its version command; a version below the flavor's tested range is `driver_unavailable`. */
   async #probeCommand(target: Extract<AcpProbeTarget, { kind: "command" }>, checkedAt: string): Promise<ProbeResult> {
     const path = await this.#context.host.process.resolveExecutable(target.command);
@@ -219,7 +228,7 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
     }
     let run: { code: number | null; output: string };
     try {
-      run = await runProbe(this.#context.host as HostServices<unknown>, target.command, target.versionArgs, target.env);
+      run = await runProbe(this.#context.host as HostServices<unknown>, target.command, target.versionArgs, { ...this.#forwardedEnvironment(), ...(target.env ?? {}) });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, installed: true, error: callErrors.protocol("version_check_failed", `${target.command} did not report its version: ${message}`).callError, checkedAt };
@@ -265,7 +274,10 @@ class AcpInstance<Config extends AcpBaseConfig> implements Instance {
         maxProtocolVersion: config.maxProtocolVersion,
         forkAcrossDirectories: config.forkAcrossDirectories,
         configDependencies: config.configDependencies,
-        launch: () => this.#flavor.launch(this.#context, input),
+        launch: async () => {
+          const launch = await this.#flavor.launch(this.#context, input);
+          return { ...launch, env: { ...this.#forwardedEnvironment(), ...launch.env } };
+        },
         canonicalPath: canonicalDirectory,
         onProtocolAnswer: (protocolVersion) => {
           this.#answeredProtocol = protocolVersion;

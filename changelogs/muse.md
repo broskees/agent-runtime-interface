@@ -44,3 +44,7 @@ First version of the Muse Code driver.
 - Accounts: a managed Meta API key passed as `META_API_KEY`, or the user's own
   `muse login` (state `unknown`: MSP has no sign-in check); a runtime auth
   poison per scope.
+- Every `muse` process gets the instance's environment, an inherited
+  `META_API_KEY` included, minus only the host's `envPolicy.stripAmbient`; a
+  managed key wins over it. `MUSE_CREDENTIAL_VARIABLES` and the CLI
+  manifest's `envScrubPrefixes` are gone.

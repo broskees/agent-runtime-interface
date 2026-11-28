@@ -1158,11 +1158,9 @@ func (v CliMcpInjectionMode) Recognized() bool {
 
 // A declarative launch descriptor for hosts that offer a native terminal fallback.
 type CliLaunchManifest struct {
-	Binary string `json:"binary"`
-	// Environment variables whose names start with one of these prefixes are removed before launch.
-	EnvScrubPrefixes []string         `json:"envScrubPrefixes,omitzero"`
-	Args             CliLaunchArgs    `json:"args"`
-	McpInjection     *CliMcpInjection `json:"mcpInjection,omitzero"`
+	Binary       string           `json:"binary"`
+	Args         CliLaunchArgs    `json:"args"`
+	McpInjection *CliMcpInjection `json:"mcpInjection,omitzero"`
 }
 
 type CreateInstanceInput struct {

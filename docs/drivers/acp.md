@@ -34,7 +34,7 @@ const instance = await acpDriver.create(host, {
 |---|---|---|
 | `command` | `""` | The agent executable, found on PATH unless it is a path. Until it is set, `status()` reports `setup_required`. |
 | `args` | `[]` | Arguments that start the agent in ACP mode. |
-| `env` | `{}` | Extra environment variables for the agent. Not for credentials: config is not secret. |
+| `env` | `{}` | Extra environment variables for the agent, set over the instance's `environment`. Not for credentials: config is not secret. |
 | `versionArgs` | `["--version"]` | What `probe()` runs to read the agent's version. |
 | `maxProtocolVersion` | `1` | The newest ACP version to request. ACP v2 is in Preview and ACP's migration guide suggests clients request it opt-in, so the default asks for v1; set `2` to ask for v2 (a v1 agent still answers with v1). |
 | `forkAcrossDirectories` | `false` | Whether `forkThread` may move a fork into another directory. |
@@ -42,6 +42,11 @@ const instance = await acpDriver.create(host, {
 
 ## How ACP maps onto ARI
 
+- **Environment.** Every agent process and version command gets the host's
+  environment and the instance's `environment`, credentials included, minus
+  only what the host's `envPolicy.stripAmbient` names, with the flavor's own
+  variables (`env` here) over them. The same holds for every flavor: `grok`,
+  `kiro`, `fx` and `antigravity`.
 - **Versions.** `initialize` asks for `maxProtocolVersion`; the agent answers
   with the version it speaks, and the connection uses that version's frames
   from then on. The driver's ACP clients are typed by tables generated from

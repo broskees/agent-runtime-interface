@@ -1,5 +1,6 @@
 // Antigravity's quirks: a profile directory per instance, ambient Google
-// credentials stripped through the host's environment policy, fixed-choice
+// credentials passed through unless the host's environment policy strips them
+// (a policy that strips nothing starts a session), fixed-choice
 // permission prompts, a rollback refused before anything is touched, and the
 // user's own `agy`: the driver runs the one its `command` names and never
 // installs one, so a config that still names a setting of the managed install
@@ -15,7 +16,6 @@ import {
   ANTIGRAVITY_CONFIG_SCHEMA,
   ANTIGRAVITY_DEFAULT_CONFIG,
   ANTIGRAVITY_REMOVED_SETTINGS,
-  ANTIGRAVITY_STRIPPED_VARIABLES,
   antigravityDriver,
 } from "../../../src/drivers/antigravity/index.ts";
 import type { AntigravityConfig } from "../../../src/drivers/antigravity/index.ts";
@@ -46,7 +46,7 @@ const GOOGLE_AMBIENT = {
   GEMINI_HOME: "/home/someone/.gemini",
 };
 
-test("each instance gets its own profile directory, and ambient Google credentials never reach the agent", async () => {
+test("each instance gets its own profile directory, and the agent gets the ambient environment as it is, Google credentials included", async () => {
   const instances = await Promise.all(
     ["agy-one", "agy-two"].map((instanceId) =>
       openRig({ name: "antigravity", driver: antigravityDriver, config: { ...ANTIGRAVITY_DEFAULT_CONFIG }, executable: "agy", protocol: 1, agentArgs: AGY_VERSION, instanceId, fakeHost: { ambientEnvironment: GOOGLE_AMBIENT } }),
@@ -66,10 +66,9 @@ test("each instance gets its own profile directory, and ambient Google credentia
       assert.equal(runtime.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
       // agy 1.5.x reads neither; the driver sets only what it reads.
       assert.equal(runtime.environment["AGY_ACP_FORCE_FILE_STORAGE"], undefined);
-      assert.equal(runtime.environment["GEMINI_HOME"], undefined, "the inherited GEMINI_HOME was stripped, and the driver sets none");
       assert.equal((fs.statSync(profile).mode & 0o777).toString(8), "700");
-      for (const name of ANTIGRAVITY_STRIPPED_VARIABLES) assert.equal(runtime.environment[name], undefined, `${name} was stripped`);
-      assert.equal(runtime.environment["PATH"], "/usr/bin");
+      // The host strips nothing, so every inherited variable reaches agy unchanged; the driver sets no GEMINI_HOME of its own.
+      for (const [name, value] of Object.entries(GOOGLE_AMBIENT)) assert.equal(runtime.environment[name], value, `${name} passed through`);
     }
     assert.notEqual(profiles[0], profiles[1]);
   } finally {
@@ -150,21 +149,37 @@ test("two instances on a desktop whose keyring holds a Google sign-in each keep 
   }
 });
 
-test("a host whose environment policy would let Google credentials through gets no session", async () => {
-  const rig = await openRig({
-    name: "antigravity",
-    driver: antigravityDriver,
-    config: { ...ANTIGRAVITY_DEFAULT_CONFIG },
-    executable: "agy",
-    protocol: 1,
-    agentArgs: AGY_VERSION,
-    fakeHost: { ambientEnvironment: GOOGLE_AMBIENT, envPolicy: { stripAmbient: ["GOOGLE_API_KEY", "GEMINI_*"] } },
-  });
-  try {
-    await assert.rejects(rig.instance.openSession({}), (error) => isAriError(error, "invalid_state") && /GOOGLE_APPLICATION_CREDENTIALS/.test(error.message) && !/GEMINI_API_KEY/.test(error.message));
-    assert.equal(rig.host.spawns.length, 0);
-  } finally {
-    await rig.cleanup();
+test("a host policy that strips nothing starts a session, and the variables a host policy names never reach agy", async () => {
+  // The instance's own environment holds credentials too (fake values), and they pass through the same way.
+  const instanceEnvironment = { GEMINI_CLI_IDE_TOKEN: "instance-token", GOOGLE_GENAI_API_KEY: "instance-genai" };
+  const given = { ...GOOGLE_AMBIENT, ...instanceEnvironment };
+  for (const stripAmbient of [[], ["GOOGLE_API_KEY", "GEMINI_*"]]) {
+    const rig = await openRig({
+      name: "antigravity",
+      driver: antigravityDriver,
+      config: { ...ANTIGRAVITY_DEFAULT_CONFIG },
+      executable: "agy",
+      protocol: 1,
+      agentArgs: AGY_VERSION,
+      environment: instanceEnvironment,
+      fakeHost: { ambientEnvironment: GOOGLE_AMBIENT, envPolicy: { stripAmbient } },
+    });
+    try {
+      await rig.open();
+      const spawns = rig.host.spawns;
+      const runtime = spawns.find((spawn) => spawn.purpose === "runtime")!;
+      assert.ok(runtime !== undefined, `a session started under stripAmbient ${JSON.stringify(stripAmbient)}`);
+      const named = (name: string): boolean => stripAmbient.some((entry) => (entry.endsWith("*") ? name.startsWith(entry.slice(0, -1)) : name === entry));
+      assert.ok(spawns.some((spawn) => spawn.purpose === "probe"), "the version command ran");
+      for (const [name, value] of Object.entries(given)) {
+        for (const spawn of spawns) {
+          if (named(name)) assert.equal(spawn.environment[name], undefined, `the host stripped ${name} from ${spawn.args?.join(" ")}`);
+          else assert.equal(spawn.environment[name], value, `${name} reached ${spawn.args?.join(" ")}`);
+        }
+      }
+    } finally {
+      await rig.cleanup();
+    }
   }
 });
 

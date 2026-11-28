@@ -1,16 +1,15 @@
 // ari/cli-manifests builds argv and env for fresh, resume and fork launches
-// from a manifest, scrubs env vars by prefix, injects MCP servers, and
-// rejects a manifest missing `binary`.
+// from a manifest, passes the host's environment through (credentials
+// included), injects MCP servers, and rejects a manifest missing `binary`.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { isAriError } from "../src/index.ts";
-import { CliLaunchManifestSchema, buildCliLaunch, mcpServersJson, scrubEnv, validateCliManifest } from "../src/cli-manifests/index.ts";
+import { CliLaunchManifestSchema, buildCliLaunch, mcpServersJson, validateCliManifest } from "../src/cli-manifests/index.ts";
 import type { CliLaunchManifest } from "../src/cli-manifests/index.ts";
 
 const MANIFEST: CliLaunchManifest = {
   binary: "agent",
-  envScrubPrefixes: ["ANTHROPIC_", "GOOGLE_APPLICATION_"],
   args: {
     fresh: ["--cwd", "{cwd}"],
     resume: ["--resume", "{sessionId}"],
@@ -30,12 +29,19 @@ const ENV = {
 };
 
 describe("CLI manifests", () => {
-  test("a fresh launch fills {cwd} and scrubs the env by prefix", () => {
+  test("a fresh launch fills {cwd} and passes the env through, credentials included, leaving out only unset variables", () => {
     const launch = buildCliLaunch(MANIFEST, { kind: "fresh", cwd: "/work", env: ENV });
     assert.deepEqual(launch, {
       command: "agent",
       args: ["--cwd", "/work"],
-      env: { PATH: "/usr/bin", HOME: "/home/user", MY_ANTHROPIC_NOTE: "kept: the prefix must match the start" },
+      env: {
+        PATH: "/usr/bin",
+        HOME: "/home/user",
+        ANTHROPIC_API_KEY: "secret",
+        ANTHROPIC_BASE_URL: "https://example.invalid",
+        GOOGLE_APPLICATION_CREDENTIALS: "/creds.json",
+        MY_ANTHROPIC_NOTE: "kept: the prefix must match the start",
+      },
       cwd: "/work",
       files: [],
     });
@@ -45,7 +51,7 @@ describe("CLI manifests", () => {
     const launch = buildCliLaunch(MANIFEST, { kind: "resume", cwd: "/work", sessionId: "native-42", env: ENV });
     assert.deepEqual(launch.args, ["--resume", "native-42"]);
     assert.equal(launch.command, "agent");
-    assert.equal(launch.env.ANTHROPIC_API_KEY, undefined);
+    assert.equal(launch.env.ANTHROPIC_API_KEY, "secret");
   });
 
   test("a fork launch fills {sessionId} and keeps its own flags", () => {
@@ -70,11 +76,11 @@ describe("CLI manifests", () => {
     assert.deepEqual(nested.args, ["--resume", "id-{cwd}", "/work/{sessionId}"]);
   });
 
-  test("explicit env additions are applied after scrubbing", () => {
-    const launch = buildCliLaunch(MANIFEST, { kind: "fresh", cwd: "/work", env: ENV, extraEnv: { ANTHROPIC_MODEL: "chosen-by-host" } });
+  test("explicit env additions are applied over the env", () => {
+    const launch = buildCliLaunch(MANIFEST, { kind: "fresh", cwd: "/work", env: ENV, extraEnv: { ANTHROPIC_MODEL: "chosen-by-host", ANTHROPIC_API_KEY: "the host's own" } });
     assert.equal(launch.env.ANTHROPIC_MODEL, "chosen-by-host");
-    assert.equal(launch.env.ANTHROPIC_API_KEY, undefined);
-    assert.deepEqual(scrubEnv({ A_1: "x", B_1: "y" }, ["A_"]), { B_1: "y" });
+    assert.equal(launch.env.ANTHROPIC_API_KEY, "the host's own");
+    assert.equal(launch.env.GOOGLE_APPLICATION_CREDENTIALS, "/creds.json");
   });
 
   test("a manifest missing binary is rejected with a validation error naming binary", () => {

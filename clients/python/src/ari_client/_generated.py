@@ -1815,8 +1815,6 @@ class CliMcpInjectionMode(OpenEnum):
 class CliLaunchManifest:
     """A declarative launch descriptor for hosts that offer a native terminal fallback."""
     binary: str
-    env_scrub_prefixes: list[str] | None = None
-    """Environment variables whose names start with one of these prefixes are removed before launch."""
     args: CliLaunchArgs
     mcp_injection: CliMcpInjection | None = None
 
@@ -1825,7 +1823,6 @@ class CliLaunchManifest:
         data = require_object(data, "CliLaunchManifest")
         return cls(
             binary=required(data, "binary", decode_str),
-            env_scrub_prefixes=optional(data, "envScrubPrefixes", list_of(decode_str)),
             args=required(data, "args", CliLaunchArgs.from_json),
             mcp_injection=optional(data, "mcpInjection", CliMcpInjection.from_json),
         )
@@ -1833,8 +1830,6 @@ class CliLaunchManifest:
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
         out["binary"] = encode(self.binary)
-        if self.env_scrub_prefixes is not None:
-            out["envScrubPrefixes"] = encode(self.env_scrub_prefixes)
         out["args"] = encode(self.args)
         if self.mcp_injection is not None:
             out["mcpInjection"] = encode(self.mcp_injection)

@@ -5,9 +5,9 @@
 //   in that profile's file storage, never in the OS keyring's one entry that
 //   every `agy` on the machine shares, so instances never share a Google
 //   sign-in (see ANTIGRAVITY_LAUNCH_ENVIRONMENT);
-// - ambient Google credentials are stripped through the host's
-//   `process.envPolicy`; the driver refuses to start a session when the
-//   host's policy would let one through (see ANTIGRAVITY_STRIPPED_VARIABLES);
+// - `agy` gets the environment the host gives it, Google credentials
+//   included; a host that wants one kept from the agent lists it in its
+//   `process.envPolicy.stripAmbient`;
 // - permission prompts take fixed choices only (`allowCustomAnswer: false`);
 // - the agent can checkpoint the workspace but cannot roll back its
 //   conversation, so `rollbackThread` rejects with `unsupported` before it
@@ -29,7 +29,6 @@ import {
   ANTIGRAVITY_CONFIG_SCHEMA,
   ANTIGRAVITY_DEFAULT_CONFIG,
   ANTIGRAVITY_INSTALL_STEP,
-  ANTIGRAVITY_STRIPPED_VARIABLES,
   ANTIGRAVITY_UPDATE_STEP,
   meta,
 } from "../../meta/antigravity.ts";
@@ -38,7 +37,7 @@ import type { Driver } from "../../runtime.ts";
 import { createAcpDriver } from "../acp/driver.ts";
 
 export type { AntigravityConfig } from "../../meta/antigravity.ts";
-export { ANTIGRAVITY_CLI_MANIFEST, ANTIGRAVITY_CONFIG_SCHEMA, ANTIGRAVITY_DEFAULT_CONFIG, ANTIGRAVITY_INSTALL_STEP, ANTIGRAVITY_STRIPPED_VARIABLES, ANTIGRAVITY_UPDATE_STEP } from "../../meta/antigravity.ts";
+export { ANTIGRAVITY_CLI_MANIFEST, ANTIGRAVITY_CONFIG_SCHEMA, ANTIGRAVITY_DEFAULT_CONFIG, ANTIGRAVITY_INSTALL_STEP, ANTIGRAVITY_UPDATE_STEP } from "../../meta/antigravity.ts";
 
 /** The settings of the managed install ARI no longer offers. A config that names one is refused. */
 export const ANTIGRAVITY_REMOVED_SETTINGS: readonly string[] = ["installation", "releaseManifestUrl", "version"];
@@ -60,12 +59,6 @@ export function antigravityProfile(host: HostServices<unknown>): string {
  * - `AGY_CLI_DISABLE_AUTO_UPDATE`: the switch of the CLI's self-updater.
  */
 const ANTIGRAVITY_LAUNCH_ENVIRONMENT: { readonly [name: string]: string } = { AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1", AGY_CLI_DISABLE_AUTO_UPDATE: "true" };
-
-/** The required variables the host's environment policy would let through. */
-export function unstrippedVariables(stripAmbient: readonly string[]): string[] {
-  const covered = (name: string): boolean => stripAmbient.some((entry) => (entry.endsWith("*") ? name.startsWith(entry.slice(0, -1)) : entry === name));
-  return ANTIGRAVITY_STRIPPED_VARIABLES.filter((name) => !covered(name));
-}
 
 /** Refuses a config that still names a managed-install setting: ARI runs the user's own `agy` and never installs one. */
 function refuseManagedInstallSettings(config: AntigravityConfig): void {
@@ -89,14 +82,6 @@ export function createAntigravityDriver(): Driver<AntigravityConfig> {
     launchIdentity: (config) => config.command,
 
     probeTarget: async (context) => ({ kind: "command", command: context.config.command, versionArgs: ["--version"], env: { AGY_CLI_DISABLE_AUTO_UPDATE: "true" } }),
-
-    async beforeSession(context) {
-      // The host strips ambient Google credentials; a session never starts when its policy would let one through.
-      const missing = unstrippedVariables(context.host.process.envPolicy.stripAmbient);
-      if (missing.length > 0) {
-        throw callErrors.invalidState("env_policy_incomplete", `The host's process.envPolicy must strip ${missing.join(", ")} for Antigravity (the CLI manifest's envScrubPrefixes cover them all)`);
-      }
-    },
 
     async launch(context) {
       const profile = antigravityProfile(context.host as HostServices<unknown>);

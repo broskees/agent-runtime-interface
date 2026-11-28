@@ -43,11 +43,11 @@ describe("ari/meta/codex", () => {
     assert.deepEqual(graph.external, []);
   });
 
-  test("the CLI manifest is valid for ari/cli-manifests and builds fresh, resume and fork launches without inherited credentials", () => {
+  test("the CLI manifest is valid for ari/cli-manifests and builds fresh, resume and fork launches that keep the environment, credentials included", () => {
     assert.equal(codexDriver.cliManifest, CODEX_CLI_MANIFEST);
     assert.deepEqual(validateCliManifest(CODEX_CLI_MANIFEST), CODEX_CLI_MANIFEST);
     const env = { PATH: "/usr/bin", OPENAI_API_KEY: "sk-inherited", CODEX_API_KEY: "inherited", CODEX_HOME: "/home/me/.codex" };
-    assert.deepEqual(buildCliLaunch(CODEX_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env }), { command: "codex", args: [], env: { PATH: "/usr/bin", CODEX_HOME: "/home/me/.codex" }, cwd: "/w", files: [] });
+    assert.deepEqual(buildCliLaunch(CODEX_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env }), { command: "codex", args: [], env, cwd: "/w", files: [] });
     assert.deepEqual(buildCliLaunch(CODEX_CLI_MANIFEST, { kind: "resume", cwd: "/w", sessionId: "019a", env }).args, ["resume", "019a"]);
     assert.deepEqual(buildCliLaunch(CODEX_CLI_MANIFEST, { kind: "fork", cwd: "/w", sessionId: "019a", env }).args, ["fork", "019a"]);
     assert.throws(() => buildCliLaunch(CODEX_CLI_MANIFEST, { kind: "fresh", cwd: "/w", env, mcpServers: [{ name: "x", transport: "stdio", command: "x" }] }), (error) => isAriError(error, "unsupported"));

@@ -20,7 +20,7 @@ import * as path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { isAriError } from "../../src/index.ts";
-import { ANTIGRAVITY_CLI_MANIFEST, ANTIGRAVITY_DEFAULT_CONFIG, ANTIGRAVITY_UPDATE_STEP } from "../../src/meta/antigravity.ts";
+import { ANTIGRAVITY_DEFAULT_CONFIG, ANTIGRAVITY_UPDATE_STEP } from "../../src/meta/antigravity.ts";
 import { CODEX_MINIMUM_VERSION, CODEX_TESTED_VERSIONS, CODEX_UPDATE_STEP } from "../../src/meta/codex.ts";
 import { meta as antigravityMeta } from "../../src/meta/antigravity.ts";
 import { createCoordination, createNodeHostServices } from "../../src/node/index.ts";
@@ -117,9 +117,8 @@ async function withInstance(
     coordination: createCoordination(),
     writeDiagnostic: () => undefined,
   });
-  // A host that builds its environment policy from the CLI manifest, as Antigravity's driver requires.
-  const stripAmbient = driver === "antigravity" ? (ANTIGRAVITY_CLI_MANIFEST.envScrubPrefixes ?? []).map((prefix) => `${prefix}*`) : [];
-  const connection = await startAriDriver({ driver, command: [ARI_DRIVER], env: cli.env, cwd: cli.project, envPolicy: { stripAmbient }, delegateProcesses: options.delegateProcesses ?? false });
+  // A host that strips nothing: every driver, Antigravity's included, starts under that policy.
+  const connection = await startAriDriver({ driver, command: [ARI_DRIVER], env: cli.env, cwd: cli.project, envPolicy: { stripAmbient: [] }, delegateProcesses: options.delegateProcesses ?? false });
   try {
     const instance = await connection.driver.create(host, { instanceId: `${driver}-user-cli`, config, environment: options.environment ?? {} });
     try {

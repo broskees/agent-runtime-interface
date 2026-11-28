@@ -21,6 +21,10 @@
   `process_per_instance` (2.x, one per instance) and `external` with
   `externallyOwned: true` for a configured `serverUrl`, which the driver never
   stops.
+- Every server the driver starts gets the instance's environment except the
+  server-password variables, which the driver sets itself. The CLI manifest's
+  terminal launch keeps the environment as it is: its `envScrubPrefixes` of
+  an earlier build are gone.
 - Runtime modes as native OpenCode session permission rules; each thread's
   host MCP entry under the host's name, and deny rules for every other
   thread's entry on a shared server, its tools and its resources alike, kept

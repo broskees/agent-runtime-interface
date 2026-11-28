@@ -95,11 +95,11 @@ export interface OpencodeScenarioResult {
 }
 
 /** A host with no tool server for threads: the recorded session gets no MCP server at all. */
-function recorderHost(layout: OpencodeLayout, password: string, envScrubPrefixes: readonly string[]): HostServices<OpencodeConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[] } {
+function recorderHost(layout: OpencodeLayout, password: string): HostServices<OpencodeConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[] } {
   const base = path.join(layout.root, "instances", OPENCODE_RECORDER_INSTANCE_ID);
   const paths = { stateDir: path.join(base, "state"), cacheDir: path.join(base, "cache"), tmpDir: path.join(base, "tmp") };
   for (const directory of Object.values(paths)) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const host = createFakeHost<OpencodeConfig>({ paths, envScrubPrefixes, secrets: [{ ...SERVER_PASSWORD_SECRET, value: password }] });
+  const host = createFakeHost<OpencodeConfig>({ paths, secrets: [{ ...SERVER_PASSWORD_SECRET, value: password }] });
   return {
     ...host,
     hostTools: {
@@ -114,7 +114,7 @@ function recorderHost(layout: OpencodeLayout, password: string, envScrubPrefixes
 /** Plays `scenario` through a fresh driver against the server behind `transport`. */
 export async function runOpencodeScenario(input: OpencodeScenarioInput): Promise<OpencodeScenarioResult> {
   const driver = createOpencodeDriver();
-  const host = recorderHost(input.layout, input.password, driver.cliManifest?.envScrubPrefixes ?? []);
+  const host = recorderHost(input.layout, input.password);
   const instance = await driver.create(host, { instanceId: OPENCODE_RECORDER_INSTANCE_ID, config: opencodeRecorderConfig(input.transport.url, input.model), environment: {} });
   try {
     const run = await runScenario(input.scenario, {

@@ -58,61 +58,6 @@ export function defaultPiConfig(): PiConfig {
 }
 
 /**
- * Credential variables Pi reads from its environment (Pi docs, providers.md).
- * Hosts strip them from the environment a Pi process inherits, so only
- * credentials the instance configured reach Pi; the user's own sign-in in
- * `~/.pi/agent/auth.json` is untouched. They are exact names, used as
- * prefixes by `ari/cli-manifests`.
- */
-export const PI_CREDENTIAL_VARIABLES = [
-  "AI_GATEWAY_API_KEY",
-  "ANT_LING_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_OAUTH_TOKEN",
-  "AWS_ACCESS_KEY_ID",
-  "AWS_BEARER_TOKEN_BEDROCK",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_SESSION_TOKEN",
-  "AZURE_OPENAI_API_KEY",
-  "BASETEN_API_KEY",
-  "CEREBRAS_API_KEY",
-  "CLOUDFLARE_API_KEY",
-  "COPILOT_GITHUB_TOKEN",
-  "DEEPSEEK_API_KEY",
-  "FIREWORKS_API_KEY",
-  "GEMINI_API_KEY",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-  "GOOGLE_CLOUD_API_KEY",
-  "GROQ_API_KEY",
-  "HF_TOKEN",
-  "KIMI_API_KEY",
-  "META_API_KEY",
-  "MINIMAX_API_KEY",
-  "MINIMAX_CN_API_KEY",
-  "MISTRAL_API_KEY",
-  "MOONSHOT_API_KEY",
-  "NVIDIA_API_KEY",
-  "OPENAI_API_KEY",
-  "OPENCODE_API_KEY",
-  "OPENROUTER_API_KEY",
-  "QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY",
-  "QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY",
-  "QWEN_TOKEN_PLAN_TEAM_API_KEY",
-  "QWEN_TOKEN_PLAN_TEAM_CN_API_KEY",
-  "RADIUS_API_KEY",
-  "TOGETHER_API_KEY",
-  "TYPESAFE_API_KEY",
-  "XAI_API_KEY",
-  "XIAOMI_API_KEY",
-  "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
-  "XIAOMI_TOKEN_PLAN_CN_API_KEY",
-  "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
-  "ZAI_API_KEY",
-  "ZAI_CODING_CN_API_KEY",
-] as const;
-
-/**
  * How a host runs the user's own `pi` in a terminal (Pi docs, cli.md):
  * `--session` resumes a session file or id in its working directory, and
  * `--fork` copies one into the current directory. Host MCP servers have no
@@ -121,7 +66,6 @@ export const PI_CREDENTIAL_VARIABLES = [
  */
 export const PI_CLI_MANIFEST: CliLaunchManifest = {
   binary: "pi",
-  envScrubPrefixes: [...PI_CREDENTIAL_VARIABLES],
   args: {
     fresh: [],
     resume: ["--session", "{sessionId}"],

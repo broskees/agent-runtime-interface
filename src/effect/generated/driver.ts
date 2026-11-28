@@ -42,8 +42,6 @@ export const CliMcpInjectionSchema: Effect.Schema.Codec<Wire.CliMcpInjection> = 
 export const CliLaunchManifestSchema: Effect.Schema.Codec<Wire.CliLaunchManifest> = Schema.StructWithRest(
   Schema.Struct({
     binary: Schema.String,
-    /** Environment variables whose names start with one of these prefixes are removed before launch. */
-    envScrubPrefixes: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
     args: Schema.suspend(() => CliLaunchArgsSchema),
     mcpInjection: Schema.optional(Schema.suspend(() => CliMcpInjectionSchema)),
   }),

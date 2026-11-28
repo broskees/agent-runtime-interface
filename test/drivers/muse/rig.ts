@@ -72,7 +72,6 @@ export async function museRig(
   const host = createFakeHost<MuseDriverConfig>({
     config,
     paths,
-    envScrubPrefixes: driver.cliManifest?.envScrubPrefixes ?? [],
     ambientEnvironment: { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), XDG_DATA_HOME: path.join(home, ".local", "share"), XDG_STATE_HOME: path.join(home, ".local", "state"), PATH: "/usr/bin" },
     spawn: async (request) => world.spawn(request),
     resolveExecutable: async (name) => (options.missingBinary !== true && path.basename(name) === "muse" ? "/usr/local/bin/muse" : null),

@@ -114,14 +114,13 @@ export interface ClaudeScenarioResult {
  * path's `--version` with `claudeCode.version`. Only a genuine SDK query
  * invokes the runtime spawn. Probes other than `--version` stay simulated.
  */
-function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrubPrefixes: readonly string[], claudeCode: ClaudeCodeOnPath): HostServices<ClaudeDriverConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[]; dispose(): Promise<void> } {
+function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, claudeCode: ClaudeCodeOnPath): HostServices<ClaudeDriverConfig> & { readonly diagnosticEntries: readonly DiagnosticEntry[]; dispose(): Promise<void> } {
   const base = path.join(layout.root, "instances", CLAUDE_RECORDER_INSTANCE_ID);
   const paths = { stateDir: path.join(base, "state"), cacheDir: path.join(base, "cache"), tmpDir: path.join(base, "tmp") };
   for (const directory of Object.values(paths)) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const processes = createProcessService({ envPolicy: { stripAmbient: [...envScrubPrefixes] }, baseEnv: {} });
+  const processes = createProcessService({ envPolicy: { stripAmbient: [] }, baseEnv: {} });
   const host = createFakeHost<ClaudeDriverConfig>({
     paths,
-    envScrubPrefixes,
     resolveExecutable: async (name) => (name === "claude" ? claudeCode.path : null),
     spawn: async (request) => {
       if (request.purpose === "runtime" && claudeCode.path !== CLAUDE_STAND_IN_PATH) return processes.spawn(request);
@@ -150,7 +149,7 @@ function recorderHost(layout: ClaudeLayout, apiKey: string | undefined, envScrub
 /** Plays `scenario` through a fresh driver over `runtime`. */
 export async function runClaudeScenario(input: ClaudeScenarioInput): Promise<ClaudeScenarioResult> {
   const driver = createClaudeDriver({ loadSdk: async () => input.runtime, newUuid: fixedUuids() });
-  const host = recorderHost(input.layout, input.apiKey, driver.cliManifest?.envScrubPrefixes ?? [], input.claudeCode);
+  const host = recorderHost(input.layout, input.apiKey, input.claudeCode);
   const instance = await driver.create(host, {
     instanceId: CLAUDE_RECORDER_INSTANCE_ID,
     config: claudeRecorderConfig(input.model),

@@ -50,6 +50,8 @@ First release of the Cursor driver, tested against `@cursor/sdk` 1.4.2
 - Cursor's tools inherit the host process's environment, which the SDK gives
   no way to change; `envPolicy` does not reach them (see the driver's docs,
   "Limits").
-- Sign-in: a stored API key (`configured`), else the SDK's stored login,
-  checked with `Cursor.me()`; `apiKey` is always passed, so an inherited
-  `CURSOR_API_KEY` never signs in. 30-second runtime auth poison.
+- Sign-in: a stored API key (`configured`), else an inherited
+  `CURSOR_API_KEY` (the instance's `environment`, else the process's), else
+  the SDK's stored login, each checked with `Cursor.me()`. A host whose
+  `envPolicy.stripAmbient` names `CURSOR_API_KEY` keeps it from Cursor.
+  `CURSOR_CREDENTIAL_VARIABLES` is gone. 30-second runtime auth poison.

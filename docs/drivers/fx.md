@@ -7,7 +7,9 @@ label, icon, config schema and form hints.
 ## Launch
 
 `fx acp`, the fx executable in ACP mode on stdio. Every fx instance on a
-machine shares the machine's fx login.
+machine shares the machine's fx login. `fx` gets the host's environment and
+the instance's `environment`, credentials included, minus only what the
+host's `envPolicy.stripAmbient` names (see the [ACP base driver](acp.md)).
 
 ## Quirk: the model depends on the provider
 

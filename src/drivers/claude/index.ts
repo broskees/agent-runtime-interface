@@ -23,7 +23,7 @@ import { CLAUDE_CONFIG_SCHEMA, CLAUDE_DRIVER_KIND, CLAUDE_METADATA, CLAUDE_TESTE
 import type { ClaudeDriverConfig } from "../../meta/claude.ts";
 import type { Driver } from "../../runtime.ts";
 import { ARI_VERSION } from "../../version.ts";
-import { CLAUDE_API_KEY_SECRET, CLAUDE_CREDENTIAL_VARIABLES, CLAUDE_SECRET_NAMESPACE, ClaudeInstance } from "./instance.ts";
+import { CLAUDE_API_KEY_SECRET, CLAUDE_SECRET_NAMESPACE, ClaudeInstance } from "./instance.ts";
 import type { ClaudeDriverOptions } from "./instance.ts";
 import { loadClaudeSdk } from "./sdk.ts";
 
@@ -34,7 +34,6 @@ export { CLAUDE_CAPABILITIES, CLAUDE_EXTENSIONS } from "./capabilities.ts";
 export {
   CLAUDE_API_KEY_SECRET,
   CLAUDE_AUTH_METHODS,
-  CLAUDE_CREDENTIAL_VARIABLES,
   CLAUDE_POISON_MS,
   CLAUDE_SECRET_NAMESPACE,
   satisfiesVersionRange,
@@ -60,11 +59,10 @@ export { CLAUDE_TESTED_VERSIONS };
 /**
  * How a host runs Claude Code itself in a terminal: `claude`, `claude
  * --resume <id>`, `claude --resume <id> --fork-session`, with MCP servers as
- * `--mcp-config <json>`. Ambient Anthropic credentials are scrubbed.
+ * `--mcp-config <json>`. The launch gets the environment the host gives it.
  */
 export const CLAUDE_CLI_MANIFEST: CliLaunchManifest = {
   binary: "claude",
-  envScrubPrefixes: [...CLAUDE_CREDENTIAL_VARIABLES],
   args: { fresh: [], resume: ["--resume", "{sessionId}"], fork: ["--resume", "{sessionId}", "--fork-session"] },
   mcpInjection: { mode: "inline_json", flag: "--mcp-config" },
 };

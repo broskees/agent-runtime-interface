@@ -45,11 +45,6 @@
       "type": "object",
       "properties": {
         "binary": { "type": "string" },
-        "envScrubPrefixes": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Environment variables whose names start with one of these prefixes are removed before launch."
-        },
         "args": { "$ref": "#/$defs/CliLaunchArgs" },
         "mcpInjection": { "$ref": "#/$defs/CliMcpInjection" }
       },

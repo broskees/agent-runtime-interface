@@ -169,7 +169,7 @@ export function createRecordingDriver(options: { readonly full: boolean; readonl
     metadata: { displayName: "Recording", multipleInstances: true, hasDefaultInstance: false },
     configSchema: { type: "object", properties: { level: { type: "integer" } } },
     defaultConfig: () => ({ level: 7 }),
-    cliManifest: { binary: "recording-agent", envScrubPrefixes: ["RECORDING_"], args: { fresh: [] } },
+    cliManifest: { binary: "recording-agent", args: { fresh: [] }, mcpInjection: { mode: "env", env: "RECORDING_MCP" } },
     async create(host, input) {
       hosts.set(input.instanceId, host);
       if (input.config !== undefined && (input.config as { failCreate?: boolean }).failCreate === true) throw callErrors.invalidState("create_refused", "refused on purpose");

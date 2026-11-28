@@ -4,7 +4,6 @@
 //   config; `full_access` is answered at the client boundary by the ACP driver;
 // - its probe runs `grok --version` with `GROK_DISABLE_AUTOUPDATER=1`, so a
 //   health check never starts the updater;
-// - inherited `XAI_` variables are scrubbed (see the CLI manifest);
 // - it runs the `grok` the user installed and never updates it; a `grok`
 //   older than 1.0.70 is refused, naming `grok update`.
 

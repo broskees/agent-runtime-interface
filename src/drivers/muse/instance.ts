@@ -2,8 +2,9 @@
 // user's own Muse sign-in (`muse login`, ambient) or a managed Meta API key
 // this instance keeps in the host's secrets and gives every `muse serve` as
 // `META_API_KEY` (the variable Muse reads its key from, per the public
-// provider-muse adapter docs/drivers/muse.md cites). An inherited
-// `META_API_KEY` never reaches Muse.
+// provider-muse adapter docs/drivers/muse.md cites). The managed key wins
+// over a `META_API_KEY` in the instance's environment; without one, an
+// inherited `META_API_KEY` reaches Muse unless the host strips it.
 //
 // MSP has no sign-in check (no account method in its stable surface), so the
 // ambient account's state is `unknown`; an auth failure shows on the first
@@ -17,6 +18,7 @@
 
 import { AriError, callErrors, toCallError } from "../../errors.ts";
 import { CliTooOldError } from "../../driver-kit/cli-too-old.ts";
+import { withoutHostStripped } from "../../driver-kit/env-policy.ts";
 import { deriveId } from "../../driver-kit/ids.ts";
 import type { AuthFlow, AuthMethod, AuthState, InstanceStatus, ModelCatalog, ModelInfo, OpenSessionInput, ProbeResult, UpdateAdvisory } from "../../generated/instance.ts";
 import type { LimitStatus } from "../../generated/usage.ts";
@@ -33,8 +35,6 @@ export const MUSE_SECRET_NAMESPACE = "muse";
 export const MUSE_API_KEY_SECRET = "api-key";
 /** How long a runtime auth failure poisons its scope. */
 export const MUSE_POISON_MS = 30_000;
-/** Ambient variables that carry Meta credentials. They never reach Muse: an instance uses only what it configured. */
-export const MUSE_CREDENTIAL_VARIABLES = ["META_API_KEY"] as const;
 
 export const MUSE_AUTH_METHODS: readonly AuthMethod[] = [
   { id: "api-key", kind: "api_key", label: "Meta API key", fields: [{ id: "apiKey", label: "API key", secret: true, required: true }] },
@@ -230,14 +230,9 @@ export class MuseInstance implements Instance {
     return callErrors.driverUnavailable({ binary: this.#config.binaryPath, installHint: MUSE_CLI_INSTALL_HINT }, `Muse Code (${this.#config.binaryPath}) is not installed. ${MUSE_CLI_INSTALL_HINT}`);
   }
 
-  /** The instance's own environment, without Meta credentials it did not configure. */
+  /** The instance's own environment as given, credentials included, minus only what the host's `envPolicy.stripAmbient` names. */
   #forwardedEnvironment(): { [name: string]: string } {
-    const forwarded: { [name: string]: string } = {};
-    for (const [name, value] of Object.entries(this.#environment)) {
-      if ((MUSE_CREDENTIAL_VARIABLES as readonly string[]).some((variable) => name.toUpperCase().startsWith(variable))) continue;
-      forwarded[name] = value;
-    }
-    return forwarded;
+    return withoutHostStripped(this.#environment, this.#host.process.envPolicy.stripAmbient);
   }
 
   async #managedKey(): Promise<string | undefined> {

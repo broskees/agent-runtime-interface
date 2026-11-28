@@ -56,6 +56,8 @@ export async function openRig<Config>(
   options: AcpHarnessOptions<Config> & {
     readonly fakeHost?: Partial<FakeHostOptions<Config>>;
     readonly instanceId?: string;
+    /** `CreateInstanceRequest.environment`; empty when left out. */
+    readonly environment?: { readonly [name: string]: string };
     /** Wraps each process the harness spawns for the driver, for tests that change how it behaves. */
     readonly wrapProcess?: (process: SpawnedProcess) => SpawnedProcess;
   },
@@ -68,14 +70,13 @@ export async function openRig<Config>(
   const host = createFakeHost<Config>({
     label: instanceId,
     config: options.config,
-    envScrubPrefixes: options.driver.cliManifest?.envScrubPrefixes ?? [],
     ...hostOptions,
     ...(options.wrapProcess === undefined || hostOptions.spawn === undefined
       ? {}
       : { spawn: async (request: FakeSpawnRequest) => options.wrapProcess!(await hostOptions.spawn!(request)) }),
     ...(options.fakeHost ?? {}),
   });
-  const instance = await options.driver.create(host, { instanceId, config: options.config, environment: {} });
+  const instance = await options.driver.create(host, { instanceId, config: options.config, environment: { ...(options.environment ?? {}) } });
   const sessions: Session[] = [];
   return {
     harness,

@@ -1045,9 +1045,6 @@ crate::open_enum! {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CliLaunchManifest {
     pub binary: String,
-    /// Environment variables whose names start with one of these prefixes are removed before launch.
-    #[serde(rename = "envScrubPrefixes", default, skip_serializing_if = "Option::is_none")]
-    pub env_scrub_prefixes: Option<Vec<String>>,
     pub args: CliLaunchArgs,
     #[serde(rename = "mcpInjection", default, skip_serializing_if = "Option::is_none")]
     pub mcp_injection: Option<CliMcpInjection>,

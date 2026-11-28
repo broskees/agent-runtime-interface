@@ -1,6 +1,6 @@
 // The antigravity driver passes the conformance suite against the SDK-based
-// fake ACP agent standing in for `agy acp`. The fake host strips what the
-// driver's CLI manifest names, which covers every ambient Google credential.
+// fake ACP agent standing in for `agy acp`. The fake host strips nothing, as
+// the Node host does by default, and every session starts under that policy.
 
 import { ANTIGRAVITY_DEFAULT_CONFIG, antigravityDriver } from "../../../src/drivers/antigravity/index.ts";
 import { acpConformance } from "../acp/conformance-suite.ts";
